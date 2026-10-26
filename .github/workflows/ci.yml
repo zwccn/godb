@@ -20,5 +20,9 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./... -count=1
+      # race 检测需要 cgo，本机（Windows）没有 gcc 跑不了，只能在 CI 上补。
+      # 并发正确性（表锁、组提交、死锁检测）靠这一步兜底。
+      - name: Test (race)
+        run: go test ./... -count=1 -race
       - name: Benchmark smoke
         run: go test ./db -run XXX -bench BenchmarkSelectTableLock -benchtime=50x

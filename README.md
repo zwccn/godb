@@ -35,6 +35,8 @@ go build -o godb.exe .
 | `-lock-retry` | `20ms` | 等待时的轮询间隔（带 ±50% 抖动） |
 | `-deadlock-detect` | `true` | 等待成环时让最年轻的事务提前放弃 |
 | `-deadlock-after` | `500ms` | 等待多久后开始做死锁检测 |
+| `-slow` | `0` | 把耗时超过该值的语句记进日志（如 `-slow 200ms`；0 表示不记录） |
+| `-version` | — | 打印版本、汇报的 PG 版本与 Go 版本后退出 |
 
 ## 功能
 
@@ -93,6 +95,30 @@ Web 控制台左侧的表树支持右键菜单，照着 Navicat 的习惯做的�
 - 已有列的 `NOT NULL` / `DEFAULT` / `UNIQUE` 改不了（引擎没有 `ALTER COLUMN SET ...`）。
 - 主键不能给已有表后加，也不能取消；新建表时可以设，且只支持单列主键。
 - 事务未结束时禁止 DDL（`DDL 不能在事务里执行`），设计器保存前会先拦一下。
+
+## 控制台的其他能力
+
+| 能力 | 说明 |
+|---|---|
+| 结果导出 | 每个结果块右上角有 `CSV` / `JSON` 按钮，直接下载（CSV 带 BOM，Excel 打开中文不乱码） |
+| 结果分页 | 每页 50/100/200/500 行可切，翻页只重渲染、不重新查库；不再是「超过 300 行就截断」 |
+| SQL 历史 | 编辑器右上「历史」，最近 30 条存 `localStorage`，点一条回填编辑器 |
+| `SHOW` / `SET` | 和 PG 协议走同一条执行路径（`sql.Show` + `exec.ShowResult`），网页里也能 `SHOW server_version` |
+| 表树 | 默认只到表级，点 `▶` 展开字段；展开状态在刷新后保持 |
+
+> `SHOW` 只覆盖客户端常问的那几个参数（`server_version`、`encoding`、`search_path`、
+> `block_size`…），不认识的返回空串而不是报错——客户端只是拿它做探测。
+> `SET` 一律确认，godb 不保存任何会话参数的状态。
+
+## 构建与发布
+
+```bash
+# 本机（注意 GOARCH：这台机器默认是 386，且上级目录有 svn，要关掉 VCS 探测）
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -ldflags "-s -w" -o godb.exe .
+```
+
+打 `v*` 标签会触发 `release` workflow：交叉编译 windows / linux / darwin（amd64 + arm64）六个单文件，
+附上 `SHA256SUMS.txt` 挂到对应的 GitHub Release。
 
 ## 并发控制（表级两阶段封锁）
 
@@ -479,7 +505,8 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - `db/persistence_test.go`：增量 checkpoint（没改的表文件 mtime 不变）、按需加载（启动 0 张、查一张变 1 张）、旧 `snapshot.json` 自动迁移、快照与 WAL 重叠时不重复应用、catalog 与快照列数不一致时能打开、二进制 WAL 往返、旧版 JSON WAL 兼容、尾部截断帧容错、`CHECKPOINT` 语句、组提交 fsync 合并、`ADD COLUMN` 不重写快照。
 - `db/`：CRUD 与约束、NULL 三值逻辑、排序分页、分组聚合、四种 JOIN、DISTINCT、表达式与函数、事务提交回滚、中毒事务、WAL 崩溃恢复、ALTER 四种动作、错误路径；并发部分覆盖读读并行、跨表写并行、读写互斥、写挡读、保守预扫描消除升级、死锁检测、未提交不可见、20 次并发自增不丢更新。
 
-> `-race` 需要 cgo（`gcc`），本机未安装 C 编译器，因此并发正确性靠上述压力用例保证。
+> `-race` 需要 cgo（`gcc`），本机未安装 C 编译器，因此本地跑不了；CI 里额外跑一遍
+> `go test ./... -race` 覆盖并发正确性。
 
 ## 已知限制
 

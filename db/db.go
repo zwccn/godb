@@ -1,0 +1,339 @@
+// Package db 把各层装配起来，对外暴露“执行一段 SQL”的能力。
+package db
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"godb/catalog"
+	"godb/exec"
+	"godb/hrtime"
+	"godb/lock"
+	"godb/sql"
+	"godb/storage"
+	"godb/txn"
+)
+
+// Options 是数据库的并发控制配置。
+type Options struct {
+	Isolation txn.Isolation
+	Lock      lock.Options
+}
+
+// ErrAborted 表示事务已中止。
+var ErrAborted = errors.New("current transaction is aborted, commands ignored until end of transaction block")
+
+// DB 是一个数据库实例。
+type DB struct {
+	dir    string
+	Cat    *catalog.Catalog
+	Store  *storage.Store
+	Engine *exec.Engine
+	Mgr    *txn.Manager
+	Locks  *lock.Manager
+	Iso    txn.Isolation
+
+	// ClockGranNs 是本机时钟步进（纳秒），用于前端判断“耗时小于时钟精度”。
+	ClockGranNs int64
+
+	lockOpts lock.Options
+
+	mu       sync.Mutex
+	sessions map[string]*txn.Session
+}
+
+// ColumnInfo 是前端展示用的列信息。
+type ColumnInfo struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	NotNull    bool   `json:"notNull"`
+	PrimaryKey bool   `json:"primaryKey"`
+	Unique     bool   `json:"unique"`
+	Serial     bool   `json:"serial"`
+	Default    string `json:"default,omitempty"`
+}
+
+// TableInfo 是前端展示用的表信息。
+type TableInfo struct {
+	Name    string       `json:"name"`
+	Rows    int          `json:"rows"`
+	Columns []ColumnInfo `json:"columns"`
+}
+
+// Open 打开（或初始化）数据目录。
+func Open(dir string, o Options) (*DB, error) {
+	cat, err := catalog.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	st, err := storage.Open(dir, cat)
+	if err != nil {
+		return nil, err
+	}
+	if o.Lock.Timeout <= 0 {
+		o.Lock = lock.DefaultOptions()
+	}
+	d := &DB{
+		dir:      dir,
+		Cat:      cat,
+		Store:    st,
+		Mgr:      txn.NewManager(),
+		Locks:    lock.New(),
+		Iso:      o.Isolation,
+		lockOpts: o.Lock,
+		sessions: map[string]*txn.Session{},
+	}
+	d.Engine = &exec.Engine{Dir: dir, Cat: cat, Store: st}
+	d.ClockGranNs = int64(hrtime.Granularity())
+	go d.sweepSessions()
+	return d, nil
+}
+
+// Close 落盘并关闭。
+func (d *DB) Close() error {
+	d.Store.SchemaMu.Lock()
+	defer d.Store.SchemaMu.Unlock()
+	if err := d.Store.Checkpoint(); err != nil {
+		return err
+	}
+	return d.Store.Close()
+}
+
+// Dir 返回数据目录。
+func (d *DB) Dir() string { return d.dir }
+
+// Session 取出（或创建）一个会话。
+func (d *DB) Session(id string) *txn.Session {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s, ok := d.sessions[id]
+	if !ok {
+		s = txn.NewSession(id, d.Store, d.Mgr, d.Locks, d.Iso, d.lockOpts)
+		d.sessions[id] = s
+	}
+	return s
+}
+
+// Exec 执行一段 SQL（可含多条语句），返回每条语句的结果。
+// 出错时返回已成功语句的结果 + 错误。
+func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
+	stmts, err := sql.Parse(text)
+	if err != nil {
+		return nil, err
+	}
+	// 预扫描整批语句的表意图：显式事务一开就把锁全部拿到（保守 2PL）。
+	// 这样既不会中途升级 S→X，也不会出现「事务之间交叉加锁」的死锁。
+	pre := map[string]lock.Mode{}
+	for _, st := range stmts {
+		in, err := exec.TableIntents(st)
+		if err != nil {
+			return nil, err
+		}
+		exec.MergeIntents(pre, in)
+	}
+
+	sess.Lock()
+	defer sess.Unlock()
+	sess.ResetLastWait()
+
+	var out []*exec.Result
+	for _, st := range stmts {
+		res, err := d.execOne(sess, st, pre)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, res)
+	}
+	return out, nil
+}
+
+func (d *DB) execOne(sess *txn.Session, st sql.Statement, pre map[string]lock.Mode) (*exec.Result, error) {
+	start := hrtime.Now()
+	res, err := d.execOneInner(sess, st, pre)
+	if res != nil {
+		res.TookNs = hrtime.Since(start)
+	}
+	return res, err
+}
+
+func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lock.Mode) (*exec.Result, error) {
+	if ts, ok := st.(*sql.TxStmt); ok {
+		return d.execTxControl(sess, ts, pre)
+	}
+
+	if sess.InTx() && sess.Aborted() {
+		return nil, ErrAborted
+	}
+	if sess.InTx() && isDDL(st) {
+		return nil, fmt.Errorf("cannot run DDL inside a transaction block (this implementation limitation)")
+	}
+
+	intents, err := exec.TableIntents(st)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1) 先拿表锁（可能长时间等待，此时不持 schema 锁，避免 DDL 被连带阻塞）
+	stmt, err := sess.BeginStatement(intents)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2) 再执行（DDL 独占 schema，普通语句持读锁）
+	ddl := isDDL(st)
+	if ddl {
+		d.Store.SchemaMu.Lock()
+	} else {
+		d.Store.SchemaMu.RLock()
+	}
+	res, execErr := d.Engine.ExecStmt(stmt.Tx(), st)
+	if ddl {
+		d.Store.SchemaMu.Unlock()
+	} else {
+		d.Store.SchemaMu.RUnlock()
+	}
+
+	// 3) 收尾：语句级回滚 + 自动提交
+	if err := stmt.End(execErr); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (d *DB) execTxControl(sess *txn.Session, ts *sql.TxStmt, pre map[string]lock.Mode) (*exec.Result, error) {
+	switch ts.Kind {
+	case "begin":
+		if err := sess.Begin(pre); err != nil {
+			return nil, err
+		}
+		return &exec.Result{Command: "BEGIN", Tag: "BEGIN"}, nil
+
+	case "commit":
+		if !sess.InTx() {
+			return &exec.Result{Command: "COMMIT", Tag: "COMMIT", Message: "no transaction in progress"}, nil
+		}
+		// PG 语义：事务已中毒时 COMMIT 等价于 ROLLBACK
+		if sess.Aborted() {
+			_ = sess.Rollback()
+			return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK", Message: "事务已中止，已回滚"}, nil
+		}
+		d.Store.SchemaMu.RLock()
+		err := sess.Commit()
+		d.Store.SchemaMu.RUnlock()
+		if err != nil {
+			return nil, err
+		}
+		return &exec.Result{Command: "COMMIT", Tag: "COMMIT"}, nil
+
+	case "rollback":
+		if !sess.InTx() {
+			return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK", Message: "no transaction in progress"}, nil
+		}
+		if err := sess.Rollback(); err != nil {
+			return nil, err
+		}
+		return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK"}, nil
+	}
+	return nil, fmt.Errorf("unsupported transaction command")
+}
+
+func isDDL(st sql.Statement) bool {
+	switch st.(type) {
+	case *sql.CreateTable, *sql.DropTable, *sql.AlterTable:
+		return true
+	}
+	return false
+}
+
+// TxState 是会话的事务状态（给前端显示用）。
+type TxState struct {
+	Active  bool     `json:"active"`
+	Aborted bool     `json:"aborted"`
+	Changes int      `json:"changes"`
+	Held    []string `json:"held,omitempty"`
+	WaitNs  int64    `json:"waitNs,omitempty"`
+}
+
+// TxState 读取会话当前事务状态。
+func (d *DB) TxState(s *txn.Session) TxState {
+	s.Lock()
+	defer s.Unlock()
+	st := TxState{Active: s.InTx(), Aborted: s.Aborted()}
+	if tx := s.Current(); tx != nil {
+		st.Changes = tx.Changes()
+	}
+	for name, mode := range s.HeldLocks() {
+		st.Held = append(st.Held, name+":"+mode.String())
+	}
+	if w := s.LastWaitNs(); w > 0 {
+		st.WaitNs = w
+	}
+	return st
+}
+
+// Tables 返回所有表结构与行数。
+func (d *DB) Tables() []TableInfo {
+	d.Store.SchemaMu.RLock()
+	defer d.Store.SchemaMu.RUnlock()
+	out := make([]TableInfo, 0, len(d.Cat.Tables))
+	for _, t := range d.Cat.Tables {
+		ti := TableInfo{Name: t.Name, Rows: d.Store.RowCount(t.Name)}
+		for _, c := range t.Columns {
+			ti.Columns = append(ti.Columns, ColumnInfo{
+				Name:       c.Name,
+				Type:       c.Type().String(),
+				NotNull:    c.NotNull,
+				PrimaryKey: c.PrimaryKey,
+				Unique:     c.Unique,
+				Serial:     c.Serial,
+				Default:    c.Default,
+			})
+		}
+		out = append(out, ti)
+	}
+	return out
+}
+
+// LockSnapshot 返回当前锁状态。
+func (d *DB) LockSnapshot() lock.Snapshot {
+	return d.Locks.Snapshot()
+}
+
+// DropAll 删除所有表（用于重置演示库）。
+func (d *DB) DropAll() error {
+	d.Store.SchemaMu.Lock()
+	defer d.Store.SchemaMu.Unlock()
+	names := d.Cat.Names()
+	for _, n := range names {
+		if err := d.Cat.Drop(n); err != nil {
+			return err
+		}
+		d.Store.DropTable(n)
+	}
+	if err := d.Cat.Save(d.dir); err != nil {
+		return err
+	}
+	return d.Store.Checkpoint()
+}
+
+// sweepSessions 定期回收长期空闲且持有事务的会话，防止锁被永久占用。
+// 前端在事务打开期间会定时发心跳请求（刷新活动时间），因此只有真正被遗弃的事务会被回收。
+func (d *DB) sweepSessions() {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		d.mu.Lock()
+		list := make([]*txn.Session, 0, len(d.sessions))
+		for _, s := range d.sessions {
+			list = append(list, s)
+		}
+		d.mu.Unlock()
+		for _, s := range list {
+			if s.InTx() && s.Idle() > 3*time.Minute {
+				s.ForceRollback()
+			}
+		}
+	}
+}

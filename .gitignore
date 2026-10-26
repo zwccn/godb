@@ -1,0 +1,16 @@
+# 编译产物
+godb.exe
+godb
+*.exe
+*.exe~
+*.test
+*.out
+
+# 运行时数据（WAL / 快照 / 表结构），首次启动会自动生成
+godb-data/
+
+# 日志与临时文件
+*.log
+tmp-*
+.DS_Store
+Thumbs.db

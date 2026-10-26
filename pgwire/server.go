@@ -17,6 +17,7 @@ import (
 	"godb/db"
 	"godb/exec"
 	"godb/sql"
+	"godb/syscat"
 	"godb/txn"
 	"godb/types"
 )
@@ -27,8 +28,8 @@ const (
 	// 老客户端（Navicat 12 是 2017 年的，只认到 PG 10）看到 13.0 会挑不到它认识的
 	// 类型表/元数据路径，设计表里所有列类型都退化成 (Type) 对象类型。
 	// 报 10.0 和实际暴露的目录形状是一致的，对 modern 客户端也没有影响。
-	pgServerVersion = "10.0"
-	godbVersion     = "0.1.0"
+	pgServerVersion = syscat.ServerVersion
+	godbVersion     = syscat.GodbVersion
 
 	protoVersion3 = 196608
 	codeSSL       = 80877103
@@ -374,11 +375,8 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 		return
 	}
 	c.srv.logQuery(text)
-	if msgs, ok := c.compat(text); ok {
-		msgs = append(msgs, encodeReadyForQuery(c.txStatus()))
-		_ = c.write(msgs...)
-		return
-	}
+	// SET / SHOW 由 SQL 层处理（见 exec.ShowResult），这里不再拦一道，
+	// 免得网页控制台和 PG 协议两条路径的行为分叉。
 	results, err := c.srv.DB.Exec(c.sess, text)
 	var out [][]byte
 	for _, r := range results {
@@ -562,10 +560,6 @@ func (c *conn) handleExecute(payload []byte) {
 	}
 	if strings.TrimSpace(p.sql) == "" {
 		_ = c.write(encodeEmptyQuery())
-		return
-	}
-	if msgs, ok := c.compat(p.sql); ok {
-		_ = c.write(msgs...)
 		return
 	}
 	results, err := c.srv.DB.Exec(c.sess, p.sql)

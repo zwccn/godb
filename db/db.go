@@ -71,6 +71,12 @@ type DB struct {
 	// ClockGranNs 是本机时钟步进（纳秒），用于前端判断“耗时小于时钟精度”。
 	ClockGranNs int64
 
+	// SlowThreshold 大于 0 时，整批语句耗时超过它就调用 SlowLog。
+	// 慢日志是诊断开关，只在命令行开，不进配置文件。
+	SlowThreshold time.Duration
+	// SlowLog 收到慢语句的原文与耗时；nil 表示不记录。
+	SlowLog func(sqlText string, took time.Duration, stmts int)
+
 	lockOpts lock.Options
 
 	mu       sync.Mutex
@@ -153,6 +159,7 @@ func (d *DB) Session(id string) *txn.Session {
 // Exec 执行一段 SQL（可含多条语句），返回每条语句的结果。
 // 出错时返回已成功语句的结果 + 错误。
 func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
+	start := hrtime.Now()
 	stmts, err := sql.Parse(text)
 	if err != nil {
 		return nil, err
@@ -180,7 +187,22 @@ func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
 		}
 		out = append(out, res)
 	}
+	d.noteSlow(text, start, len(stmts))
 	return out, nil
+}
+
+// noteSlow 在整批语句耗时超过阈值时回调慢日志。
+// 按「一次 Exec」而不是按单条语句计时：定位问题时看到的是一整条请求，
+// 而且语句耗时各自记过（Result.TookNs），这里关心的是端到端。
+func (d *DB) noteSlow(text string, start hrtime.Stamp, stmts int) {
+	if d.SlowThreshold <= 0 || d.SlowLog == nil {
+		return
+	}
+	took := time.Duration(hrtime.Since(start))
+	if took < d.SlowThreshold {
+		return
+	}
+	d.SlowLog(text, took, stmts)
 }
 
 func (d *DB) execOne(sess *txn.Session, st sql.Statement, pre map[string]lock.Mode) (*exec.Result, error) {
@@ -199,6 +221,15 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 
 	if _, ok := st.(*sql.Checkpoint); ok {
 		return d.execCheckpoint(sess)
+	}
+
+	// SHOW / SET 是会话参数，不碰表、不需要锁，也不受中毒事务影响
+	// （真 PG 里 SET 在 aborted 事务里也能执行）。
+	if sh, ok := st.(*sql.Show); ok {
+		return exec.ShowResult(sh.Name), nil
+	}
+	if _, ok := st.(*sql.SetStmt); ok {
+		return exec.SetResult(), nil
 	}
 
 	if sess.InTx() && sess.Aborted() {

@@ -7,6 +7,7 @@ import (
 
 	"godb/exec"
 	"godb/lock"
+	"godb/syscat"
 )
 
 // testOptions 用较短的锁超时，让并发用例跑得快。
@@ -78,6 +79,31 @@ func assertRows(t *testing.T, res []*exec.Result, want []string) {
 			t.Fatalf("row %d = %q, want %q", i, fmtRow(got[i]), want[i])
 		}
 	}
+}
+
+// SHOW / SET 必须走 SQL 层，网页控制台和 PG 协议两条入口才能行为一致。
+// 之前只有 PG 层的 compat 拦了一道，网页里敲 SHOW 直接语法错。
+func TestShowAndSet(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	assertRows(t, run(t, d, s, `SHOW server_version`), []string{syscat.ServerVersion})
+	assertRows(t, run(t, d, s, `show server_version;`), []string{syscat.ServerVersion})
+	assertRows(t, run(t, d, s, `SHOW standard_conforming_strings`), []string{"on"})
+	// 不认识的参数回空串，别报错（客户端只拿它做探测）
+	assertRows(t, run(t, d, s, `SHOW some_unknown_param`), []string{""})
+
+	res := run(t, d, s, `SET client_encoding = 'UTF8'`)
+	if res[0].Command != "SET" {
+		t.Fatalf("SET 的 command = %q", res[0].Command)
+	}
+	// set_config / current_setting 也是客户端常用探针，版本号要和别处一致
+	assertRows(t, run(t, d, s, `SELECT current_setting('server_version')`), []string{syscat.ServerVersion})
+
+	// SET 在事务里、甚至在中毒事务里都要能执行（真 PG 如此）
+	run(t, d, s, `BEGIN`)
+	run(t, d, s, `SET search_path TO public`)
+	run(t, d, s, `ROLLBACK`)
 }
 
 func TestBasicCRUD(t *testing.T) {

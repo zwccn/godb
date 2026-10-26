@@ -58,6 +58,14 @@ type Truncate struct{ Table string }
 // 它不改数据，只影响持久化时机。
 type Checkpoint struct{}
 
+// Show 对应 SHOW name：查会话参数。参数名原样保留（可能带空格，如
+// "time zone"），由执行层去查表。
+type Show struct{ Name string }
+
+// SetStmt 对应 SET ...：会话参数设置。godb 不保存任何会话状态，
+// 整条语句识别出来直接确认（客户端连上来时几乎都会先发 SET）。
+type SetStmt struct{ Raw string }
+
 // ---------- DML ----------
 
 // Insert 对应 INSERT INTO ... VALUES。
@@ -198,6 +206,8 @@ func (*DropTable) stmtNode()   {}
 func (*AlterTable) stmtNode()  {}
 func (*Truncate) stmtNode()    {}
 func (*Checkpoint) stmtNode()  {}
+func (*Show) stmtNode()        {}
+func (*SetStmt) stmtNode()     {}
 func (*Insert) stmtNode()      {}
 func (*Update) stmtNode()      {}
 func (*Delete) stmtNode()      {}

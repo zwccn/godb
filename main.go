@@ -9,6 +9,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"godb/lock"
 	"godb/netsrv"
 	"godb/storage"
+	"godb/syscat"
 	"godb/txn"
 	"godb/web"
 )
@@ -32,7 +36,14 @@ func main() {
 	lockRetry := flag.Duration("lock-retry", 20*time.Millisecond, "等待表锁的轮询间隔")
 	deadlockDetect := flag.Bool("deadlock-detect", true, "等待成环时让最年轻的事务提前放弃")
 	deadlockAfter := flag.Duration("deadlock-after", 500*time.Millisecond, "等待多久后开始做死锁检测")
+	slow := flag.Duration("slow", 0, "把耗时超过该值的语句记进日志（如 200ms；0 表示不记录）")
+	showVersion := flag.Bool("version", false, "打印版本信息后退出")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionInfo())
+		return
+	}
 
 	isolation, err := txn.ParseIsolation(*iso)
 	if err != nil {
@@ -66,6 +77,15 @@ func main() {
 	}
 	conf := cfg.Get()
 	d.Store.SetCheckpointPolicy(storagePolicy(conf.Storage))
+
+	// 慢语句日志：诊断开关，走命令行，不进配置文件。
+	if *slow > 0 {
+		d.SlowThreshold = *slow
+		d.SlowLog = func(text string, took time.Duration, stmts int) {
+			log.Printf("慢语句 %s（%d 条）：%s",
+				took.Truncate(time.Millisecond), stmts, oneLine(text, 400))
+		}
+	}
 
 	// 打开 PG 查询日志（诊断开关，留在命令行）
 	var pgLogFile *os.File
@@ -182,4 +202,30 @@ func describePolicy(s config.Storage) string {
 		return "仅手动 CHECKPOINT（自动落盘已全部关闭）"
 	}
 	return out + "（任一满足即落盘）"
+}
+
+// versionInfo 是 -version 的输出。git 提交靠 Go 编进二进制的 VCS 信息，
+// 本机因为上级目录有 svn 是用 -buildvcs=false 编的，所以可能读不到。
+func versionInfo() string {
+	out := fmt.Sprintf("godb %s\n%s\n%s", syscat.GodbVersion, syscat.ServerVersionLine, runtime.Version())
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				out += "\ncommit " + s.Value
+			case "vcs.time":
+				out += "\nbuilt  " + s.Value
+			}
+		}
+	}
+	return out
+}
+
+// oneLine 把多行 SQL 压成一行，便于日志里看。
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
 }

@@ -286,13 +286,14 @@ func evalCompat(name string, vals []types.Value) (types.Value, bool, error) {
 	return types.Null, false, nil
 }
 
-// settingValue 回应 current_setting(name)，覆盖客户端常问的几个参数。
+// settingValue 回应 current_setting(name) 和 SHOW name，覆盖客户端常问的参数。
+// 版本号等全局常量只从 syscat 取，避免两边写死不一致（之前这里还留着一份 13.0）。
 func settingValue(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "server_version":
-		return "13.0"
+		return syscat.ServerVersion
 	case "server_version_num":
-		return "130000"
+		return syscat.ServerVersionNum
 	case "server_encoding", "client_encoding":
 		return "UTF8"
 	case "search_path":
@@ -309,8 +310,41 @@ func settingValue(name string) string {
 		return syscat.OwnerName
 	case "max_connections":
 		return "100"
+	case "block_size", "wal_block_size":
+		return "8192"
+	case "segment_size":
+		return "131072"
+	case "max_identifier_length":
+		return "63"
+	case "max_index_keys", "max_function_args":
+		if strings.EqualFold(name, "max_function_args") {
+			return "100"
+		}
+		return "32"
 	}
 	return ""
+}
+
+// ShowResult 回应 SHOW name：一行一列，列名就是参数名。
+//
+// 放在这里而不是各客户端接入层，是因为网页控制台和 PG 协议走的是同一条
+// 执行路径 —— 之前只有 PG 层能 `SHOW`，网页里敲 `SHOW server_version` 会
+// 直接报语法错。不认识的参数回空串（真 PG 会报 42704，但客户端只是拿它做
+// 探测，回空串更宽容）。
+func ShowResult(name string) *Result {
+	col := strings.TrimSpace(name)
+	return &Result{
+		Command:  "SHOW",
+		Tag:      "SHOW",
+		Columns:  []Column{{Name: col, Type: "text"}},
+		Rows:     [][]interface{}{{settingValue(col)}},
+		RowCount: 1,
+	}
+}
+
+// SetResult 是 SET 的确认结果（godb 不保存会话参数）。
+func SetResult() *Result {
+	return &Result{Command: "SET", Tag: "SET"}
 }
 
 // formatType 把 atttypid + atttypmod 还原成客户端看到的类型写法。

@@ -221,6 +221,25 @@ func (p *parser) parseStatement() (Statement, error) {
 			return nil, err
 		}
 		return &Explain{Stmt: st}, nil
+	case "SHOW":
+		p.pos++
+		// 参数名原样收下：可能是保留字或带空格（SHOW time zone、SHOW ALL）。
+		var parts []string
+		for p.peek().Kind != EOF && !p.peek().IsPunct(";") {
+			parts = append(parts, p.advance().Text)
+		}
+		if len(parts) == 0 {
+			return nil, p.errAt(p.peek(), "SHOW needs a parameter name")
+		}
+		return &Show{Name: strings.Join(parts, " ")}, nil
+	case "SET":
+		p.pos++
+		// SET 只是会话参数，引擎不保存状态：整条吃掉，执行层回一个确认。
+		var parts []string
+		for p.peek().Kind != EOF && !p.peek().IsPunct(";") {
+			parts = append(parts, p.advance().Text)
+		}
+		return &SetStmt{Raw: "SET " + strings.Join(parts, " ")}, nil
 	}
 	return nil, p.errAt(t, "syntax error at or near %q", t.String())
 }

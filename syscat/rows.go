@@ -779,10 +779,43 @@ func identityOf(col *catalog.Column) string {
 }
 
 // infoDataType 把内部类型映射成 information_schema.data_type 的写法。
+// infoDataType 返回 information_schema.columns.data_type。
+//
+// 必须优先看列自己记录的类型名（t.Name），不能只按 Kind 猜：内部的整数
+// 统一是 int64，但用户建表写的是 int4，客户端「设计表」看到 bigint 会显示错，
+// 改表时还可能把类型改成 bigint。
 func infoDataType(t types.Type) string {
+	switch strings.ToLower(t.Name) {
+	case "smallint", "int2":
+		return "smallint"
+	case "integer", "int", "int4", "serial", "serial4":
+		return "integer"
+	case "bigint", "int8", "bigserial", "serial8":
+		return "bigint"
+	case "real", "float4":
+		return "real"
+	case "double precision", "float8", "double":
+		return "double precision"
+	case "numeric", "decimal":
+		return "numeric"
+	case "boolean", "bool":
+		return "boolean"
+	case "date":
+		return "date"
+	case "timestamp", "timestamp without time zone":
+		return "timestamp without time zone"
+	case "timestamptz", "timestamp with time zone":
+		return "timestamp with time zone"
+	case "char", "character", "bpchar":
+		return "character"
+	}
+	if l := strings.ToLower(t.Name); strings.HasPrefix(l, "varchar") || strings.HasPrefix(l, "character varying") {
+		return "character varying"
+	}
+	// 兜底：只有拿不到具体名字时才按 Kind 猜
 	switch t.Kind {
 	case types.KInt:
-		return "bigint"
+		return "integer"
 	case types.KFloat:
 		return "double precision"
 	case types.KBool:
@@ -795,18 +828,43 @@ func infoDataType(t types.Type) string {
 
 // udtName 映射成 information_schema.udt_name（PG 内部类型名）。
 func udtName(t types.Type) string {
+	switch strings.ToLower(t.Name) {
+	case "smallint", "int2":
+		return "int2"
+	case "integer", "int", "int4", "serial", "serial4":
+		return "int4"
+	case "bigint", "int8", "bigserial", "serial8":
+		return "int8"
+	case "real", "float4":
+		return "float4"
+	case "double precision", "float8", "double":
+		return "float8"
+	case "numeric", "decimal":
+		return "numeric"
+	case "boolean", "bool":
+		return "bool"
+	case "date":
+		return "date"
+	case "timestamp", "timestamp without time zone":
+		return "timestamp"
+	case "timestamptz", "timestamp with time zone":
+		return "timestamptz"
+	case "char", "character", "bpchar":
+		return "bpchar"
+	}
+	l := strings.ToLower(t.Name)
+	if strings.HasPrefix(l, "varchar") || strings.HasPrefix(l, "character varying") {
+		return "varchar"
+	}
 	switch t.Kind {
 	case types.KInt:
-		return "int8"
+		return "int4"
 	case types.KFloat:
 		return "float8"
 	case types.KBool:
 		return "bool"
 	case types.KTime:
 		return "timestamp"
-	}
-	if l := strings.ToLower(t.String()); strings.HasPrefix(l, "varchar") {
-		return "varchar"
 	}
 	return "text"
 }

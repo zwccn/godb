@@ -142,6 +142,10 @@ var specs = []tableSpec{
 		c("connoinherit", tBool), c("conkey", tInt2Arr), c("confkey", tInt2Arr),
 		c("conpfeqop", tOidArr), c("conppeqop", tOidArr), c("conffeqop", tOidArr),
 		c("conexclop", tOidArr), c("conbin", tNodeTree),
+		// consrc 在 PG 12 已经被 conbin + pg_get_constraintdef 取代，
+		// 但 Navicat 的「设计表」仍在 SELECT 它，缺列会整条查询失败。
+		// 保留并恒为 NULL。
+		c("consrc", tText),
 	}},
 	{"pg_catalog", "pg_attrdef", []colSpec{
 		c("oid", tOid), c("adrelid", tOid), c("adnum", tInt2), c("adbin", tText),

@@ -147,6 +147,15 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		return ie, nil
 
 	case *sql.ColumnRef:
+		// 系统列：PostgreSQL 里每张表都隐含 tableoid / ctid / xmin 等，
+		// 但它们不出现在 SELECT * 里，也不在 pg_attribute 的 attnum>0 中。
+		// 客户端会拿它们做 join 条件（如 dep.classid = ci.tableoid），
+		// 所以这里按需返回一个常量，而不是往每张表加伪列。
+		if v, ok := systemColumnValue(n.Name); ok {
+			if _, _, rerr := c.sc.Resolve(n.Table, n.Name); rerr != nil {
+				return &constEval{v: v, t: systemColumnType(n.Name)}, nil
+			}
+		}
 		idx, t, err := c.sc.Resolve(n.Table, n.Name)
 		if err != nil {
 			// 子查询里可能引用外层查询的列（相关子查询）
@@ -1186,3 +1195,31 @@ func (e *subqueryEval) Eval(row types.Row) (types.Value, error) {
 }
 
 func (e *subqueryEval) Type() types.Type { return e.typ }
+
+// systemColumnValue 返回 PostgreSQL 系统列的常量值。
+//
+// 我们有这些列名（否则客户端的 join 条件直接报 column does not exist），
+// 但没有真正实现它们的语义：tableoid 恒为 0（我们不用 pg_depend 追踪依赖），
+// ctid 恒为空，事务相关的三个恒为 0。对客户端的用途（判空、做 join 键）够用。
+func systemColumnValue(name string) (types.Value, bool) {
+	switch strings.ToLower(name) {
+	case "tableoid":
+		return types.Int(0), true
+	case "ctid":
+		return types.Text("(0,1)"), true
+	case "xmin", "xmax", "cmin", "cmax":
+		return types.Int(0), true
+	}
+	return types.Null, false
+}
+
+// systemColumnType 给系统列一个合适的类型名，客户端读 RowDescription 时看到的是 oid/tid/xid。
+func systemColumnType(name string) types.Type {
+	switch strings.ToLower(name) {
+	case "tableoid":
+		return types.Type{Kind: types.KInt, Name: "oid"}
+	case "ctid":
+		return types.Type{Kind: types.KText, Name: "tid"}
+	}
+	return types.Type{Kind: types.KInt, Name: "xid"}
+}

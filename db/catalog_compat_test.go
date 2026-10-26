@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // Navicat 的「设计表」会 SELECT pg_constraint.consrc（PG 12 已移除的列）
 // 以及 information_schema.columns 的类型名。缺列或类型名错都会让它打不开表。
@@ -52,6 +55,37 @@ func TestCatalogColumnsForTableDesigner(t *testing.T) {
 		}[name]
 		if r[1].(string) != want.dataType || r[2].(string) != want.udt {
 			t.Fatalf("%s: 得到 %v/%v，期望 %v/%v", name, r[1], r[2], want.dataType, want.udt)
+		}
+	}
+}
+
+// 系统列（tableoid / ctid / xmin…）在 PostgreSQL 里每张表都隐含存在，
+// 客户端会用它们做 join 条件。它们不在列定义里，也不能出现在 SELECT * 中。
+func TestSystemColumns(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE sysc (id INTEGER PRIMARY KEY)`)
+
+	// 显式引用不报错
+	res := run(t, d, s, `SELECT c.relname, c.tableoid FROM pg_catalog.pg_class c LIMIT 3`)
+	if len(res[0].Rows) == 0 {
+		t.Fatal("应该有行")
+	}
+	if got := fmt.Sprint(res[0].Rows[0][1]); got != "0" {
+		t.Fatalf("tableoid 应恒为 0，实际 %s", got)
+	}
+
+	// 客户端索引页的 join：dep.classid = ci.tableoid
+	run(t, d, s, `
+		SELECT count(*) FROM pg_catalog.pg_index i
+		LEFT JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
+		LEFT JOIN pg_catalog.pg_depend dep ON dep.classid = ci.tableoid AND dep.objid = ci.oid`)
+
+	// SELECT * 里不应该多出系统列
+	res = run(t, d, s, `SELECT * FROM pg_catalog.pg_namespace LIMIT 1`)
+	for _, c := range res[0].Columns {
+		if c.Name == "tableoid" || c.Name == "ctid" {
+			t.Fatalf("SELECT * 不应该包含系统列 %s", c.Name)
 		}
 	}
 }

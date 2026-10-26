@@ -1027,3 +1027,84 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: #2b83d6; }
   border-color: #7a2a31;
   color: #ff9ba3;
 }
+
+/* ---------- 结果分页 / 导出 ---------- */
+.modal-card.mid { width: 620px; }
+
+.result-actions { display: flex; align-items: center; gap: 4px; margin-right: 6px; }
+.exp-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.exp-btn:hover { color: var(--text); border-color: #35424f; background: var(--bg-3); }
+
+.grid-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-1);
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.grid-foot .spacer { flex: 1 1 auto; }
+.grid-range { font-family: var(--mono); }
+.pg-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.pg-btn:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.pg-btn:disabled { opacity: .38; cursor: not-allowed; }
+.pg-size {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 2px 4px;
+}
+
+/* ---------- SQL 历史 ---------- */
+.history-body { padding: 8px 12px 14px; }
+.hist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.hist-item:hover { background: var(--bg-3); border-color: #35424f; }
+.hist-when { flex: 0 0 auto; color: var(--text-3); font-size: 10.5px; }
+.hist-sql {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 3.6em;
+  overflow: hidden;
+}
+.hist-empty { color: var(--text-3); font-size: 12px; padding: 10px 2px; }

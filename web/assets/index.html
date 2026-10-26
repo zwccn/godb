@@ -60,6 +60,7 @@
       <div class="editor-bar">
         <div class="editor-label">SQL 编辑器</div>
         <div class="editor-actions">
+          <button id="btnHistory" class="btn btn-ghost btn-sm" title="最近执行过的 SQL">历史</button>
           <button id="btnExplain" class="btn btn-ghost btn-sm" title="加 EXPLAIN 前缀执行">执行计划</button>
           <button id="btnClear" class="btn btn-ghost btn-sm">清空</button>
           <button id="btnRun" class="btn btn-primary btn-sm">执行 <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
@@ -193,6 +194,24 @@
       <div class="foot-actions">
         <button id="btnPromptCancel" class="btn btn-sm">取消</button>
         <button id="btnPromptOk" class="btn btn-primary btn-sm">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SQL 历史 -->
+<div id="historyModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="SQL 历史">
+  <div class="modal-card mid">
+    <div class="modal-head">
+      <span>SQL 历史</span>
+      <button id="btnHistoryClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div id="historyBody" class="modal-body history-body"></div>
+    <div class="modal-foot">
+      <span id="historyHint" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="btnHistoryClear" class="btn btn-sm">清空历史</button>
+        <button id="btnHistoryCancel" class="btn btn-sm">关闭</button>
       </div>
     </div>
   </div>

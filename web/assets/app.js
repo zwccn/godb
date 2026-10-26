@@ -15,6 +15,13 @@ let txActive = false;
 // 展开状态自己记着，否则每次刷新/轮询都会把用户展开的字段收回去。
 const expandedTables = new Set();
 
+// 最近一次查询的完整响应与结果数组：翻页、改每页行数时重渲染用，
+// 不重新查库（结果已经在浏览器里了）。
+let lastData = null;
+let lastResults = [];
+// 每个结果块的翻页状态，key 是它在 results 里的下标。
+const pageState = new Map();
+
 const EXAMPLES = {
   select: `SELECT * FROM employees ORDER BY id LIMIT 100;`,
   group: `SELECT d.name        AS 部门,
@@ -137,6 +144,7 @@ async function run(prefix) {
     data.roundTripMs = performance.now() - t0;
     renderResults(data);
     updateTx(data.tx);
+    pushHistory(sql);
     // DDL 之后刷新表结构
     const ddl = /(create|drop|alter)\s+table/i.test(sql);
     if (ddl || (data.error && /table/i.test(data.error.message))) {
@@ -164,6 +172,8 @@ function setRunning(on) {
 
 function renderResults(data) {
   resultsEl.innerHTML = '';
+  lastData = data;
+  lastResults = (data.results || []).slice();
   if (data.clockGranNs) clockGranNs = data.clockGranNs;
   const waitNs = data.tx && data.tx.waitNs ? data.tx.waitNs : 0;
   if (waitNs > 0) {
@@ -172,9 +182,7 @@ function renderResults(data) {
     resultsEl.appendChild(note);
   }
   const list = data.results || [];
-  for (const r of list) {
-    resultsEl.appendChild(resultCard(r));
-  }
+  list.forEach((r, i) => resultsEl.appendChild(resultCard(r, i)));
   if (list.length > 1) {
     resultsEl.appendChild(el('div', 'batch-note',
       `共 ${list.length} 条语句 · 服务端合计 ${fmtTook(data.elapsedNs)}`));
@@ -191,7 +199,7 @@ function renderResults(data) {
   }
 }
 
-function resultCard(r) {
+function resultCard(r, idx) {
   const card = el('div', 'result-card');
   const head = el('div', 'result-head');
   head.appendChild(el('span', 'result-tag', r.tag || r.command || 'OK'));
@@ -207,6 +215,18 @@ function resultCard(r) {
   }
   head.appendChild(metaEl);
   head.appendChild(el('span', 'spacer'));
+
+  // 导出按钮：只有真的返回了行才有意义
+  if (r.rows && r.rows.length) {
+    const acts = el('div', 'result-actions');
+    acts.appendChild(exportBtn('CSV', () => {
+      downloadText('query-' + stamp() + '.csv', '\ufeff' + csvOf(r), 'text/csv');
+    }));
+    acts.appendChild(exportBtn('JSON', () => {
+      downloadText('query-' + stamp() + '.json', jsonOf(r), 'application/json');
+    }));
+    head.appendChild(acts);
+  }
 
   if (r.plan && r.plan.length && r.command !== 'EXPLAIN') {
     const btn = el('button', 'plan-btn', '执行计划');
@@ -227,49 +247,151 @@ function resultCard(r) {
   }
 
   if (r.rows && r.rows.length) {
-    const wrap = el('div', 'grid-wrap');
-    const table = el('table', 'grid');
-    const thead = el('thead');
-    const tr = el('tr');
-    for (const c of r.columns || []) {
-      const th = el('th');
-      th.appendChild(el('span', 'cname', c.name));
-      if (c.type) th.appendChild(el('span', 'ctype', c.type));
-      tr.appendChild(th);
-    }
-    thead.appendChild(tr);
-    table.appendChild(thead);
-
-    const tbody = el('tbody');
-    const max = Math.min(r.rows.length, 300);
-    for (let i = 0; i < max; i++) {
-      const row = r.rows[i];
-      const tr2 = el('tr');
-      for (const v of row) {
-        let td;
-        if (v === null || v === undefined) {
-          td = el('td', 'null', 'NULL');
-        } else if (typeof v === 'number') {
-          td = el('td', 'num', String(v));
-        } else if (typeof v === 'boolean') {
-          td = el('td', 'bool', v ? 'true' : 'false');
-        } else {
-          td = el('td', '', String(v));
-        }
-        tr2.appendChild(td);
-      }
-      tbody.appendChild(tr2);
-    }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    card.appendChild(wrap);
-    if (r.rows.length > max) {
-      card.appendChild(el('div', 'more-rows', `还有 ${r.rows.length - max} 行未显示（前端最多渲染 300 行）`));
-    }
+    card.appendChild(gridBlock(r, idx));
   } else if (r.columns && r.columns.length && !r.message) {
     card.appendChild(el('div', 'msg', '（0 行）'));
   }
   return card;
+}
+
+// gridBlock 渲染结果表格 + 分页条。分页状态按「第几个结果」记在 pageState 里，
+// 翻页时整体重渲染（结果集已经在内存里，不重新查库）。
+function gridBlock(r, idx) {
+  const box = document.createDocumentFragment();
+  const total = r.rows.length;
+  let st = pageState.get(idx);
+  if (!st) {
+    st = { page: 0, size: 100 };
+    pageState.set(idx, st);
+  }
+  const pages = Math.max(1, Math.ceil(total / st.size));
+  if (st.page > pages - 1) st.page = pages - 1;
+  const from = st.page * st.size;
+  const to = Math.min(from + st.size, total);
+
+  const wrap = el('div', 'grid-wrap');
+  const table = el('table', 'grid');
+  const thead = el('thead');
+  const tr = el('tr');
+  for (const c of r.columns || []) {
+    const th = el('th');
+    th.appendChild(el('span', 'cname', c.name));
+    if (c.type) th.appendChild(el('span', 'ctype', c.type));
+    tr.appendChild(th);
+  }
+  thead.appendChild(tr);
+  table.appendChild(thead);
+
+  const tbody = el('tbody');
+  for (let i = from; i < to; i++) {
+    const row = r.rows[i];
+    const tr2 = el('tr');
+    for (const v of row) {
+      let td;
+      if (v === null || v === undefined) {
+        td = el('td', 'null', 'NULL');
+      } else if (typeof v === 'number') {
+        td = el('td', 'num', String(v));
+      } else if (typeof v === 'boolean') {
+        td = el('td', 'bool', v ? 'true' : 'false');
+      } else {
+        td = el('td', '', String(v));
+      }
+      tr2.appendChild(td);
+    }
+    tbody.appendChild(tr2);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  box.appendChild(wrap);
+
+  const foot = el('div', 'grid-foot');
+  foot.appendChild(el('span', 'grid-range', `第 ${from + 1}–${to} 行 / 共 ${total} 行`));
+  foot.appendChild(el('span', 'spacer'));
+
+  if (total > 50) {
+    const sizeSel = document.createElement('select');
+    sizeSel.className = 'pg-size';
+    for (const n of [50, 100, 200, 500]) {
+      const o = document.createElement('option');
+      o.value = String(n);
+      o.textContent = n + ' 行/页';
+      sizeSel.appendChild(o);
+    }
+    sizeSel.value = String(st.size);
+    sizeSel.addEventListener('change', () => {
+      st.size = parseInt(sizeSel.value, 10) || 100;
+      st.page = 0;
+      renderResults(lastData);
+    });
+    foot.appendChild(sizeSel);
+    foot.appendChild(el('span', 'grid-range', `${st.page + 1}/${pages} 页`));
+
+    const prev = el('button', 'pg-btn', '‹ 上一页');
+    prev.disabled = st.page <= 0;
+    prev.addEventListener('click', () => {
+      if (st.page > 0) { st.page--; renderResults(lastData); }
+    });
+    foot.appendChild(prev);
+
+    const next = el('button', 'pg-btn', '下一页 ›');
+    next.disabled = st.page >= pages - 1;
+    next.addEventListener('click', () => {
+      if (st.page < pages - 1) { st.page++; renderResults(lastData); }
+    });
+    foot.appendChild(next);
+  }
+
+  box.appendChild(foot);
+  return box;
+}
+
+function exportBtn(label, run) {
+  const b = el('button', 'exp-btn', label);
+  b.title = '导出为 ' + label;
+  b.addEventListener('click', run);
+  return b;
+}
+
+function stamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function downloadText(name, text, mime) {
+  const blob = new Blob([text], { type: mime + ';charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function csvOf(r) {
+  const cols = (r.columns || []).map(c => c.name);
+  const lines = [cols.map(csvCell).join(',')];
+  for (const row of r.rows) lines.push(row.map(csvCell).join(','));
+  return lines.join('\r\n');
+}
+
+function jsonOf(r) {
+  const cols = (r.columns || []).map(c => c.name);
+  const arr = r.rows.map(row => {
+    const o = {};
+    cols.forEach((c, i) => { o[c] = row[i] === undefined ? null : row[i]; });
+    return o;
+  });
+  return JSON.stringify(arr, null, 2);
 }
 
 function errorCard(err) {
@@ -1452,4 +1574,88 @@ document.addEventListener('keydown', ev => {
   const m = ctxMenuEl();
   if (m && !m.classList.contains('hidden')) hideCtxMenu();
   if (designer && !designerModalEl().classList.contains('hidden')) closeDesigner();
+});
+
+/* ---------------- SQL 历史（localStorage，最近 30 条） ---------------- */
+
+const HISTORY_KEY = 'godb.history';
+const HISTORY_MAX = 30;
+
+function loadHistory() {
+  try {
+    const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    return Array.isArray(list) ? list.filter(x => x && typeof x.sql === 'string') : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function pushHistory(sql) {
+  const text = String(sql || '').trim();
+  if (!text) return;
+  const list = loadHistory();
+  // 连着执行同一条不重复记
+  if (list.length && list[0].sql === text) return;
+  list.unshift({ sql: text, at: Date.now() });
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX)));
+  } catch (e) {
+    /* 存储满了就算了，历史不是关键功能 */
+  }
+}
+
+function fmtWhen(ms) {
+  const d = new Date(ms || Date.now());
+  const p = n => String(n).padStart(2, '0');
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+function openHistory() {
+  const modal = document.getElementById('historyModal');
+  const body = document.getElementById('historyBody');
+  const hint = document.getElementById('historyHint');
+  const list = loadHistory();
+  body.innerHTML = '';
+  hint.textContent = list.length ? `共 ${list.length} 条（本机浏览器保存）` : '';
+  if (!list.length) {
+    body.appendChild(el('div', 'hist-empty', '还没有执行过 SQL。'));
+  }
+  for (const item of list) {
+    const b = el('button', 'hist-item');
+    b.appendChild(el('span', 'hist-when', fmtWhen(item.at)));
+    b.appendChild(el('span', 'hist-sql', item.sql));
+    b.title = '点击填入编辑器';
+    b.addEventListener('click', () => {
+      editor.value = item.sql;
+      autoSize();
+      editor.focus();
+      closeHistory();
+    });
+    body.appendChild(b);
+  }
+  modal.classList.remove('hidden');
+}
+
+function closeHistory() {
+  document.getElementById('historyModal').classList.add('hidden');
+}
+
+document.getElementById('btnHistory').addEventListener('click', openHistory);
+document.getElementById('btnHistoryClose').addEventListener('click', closeHistory);
+document.getElementById('btnHistoryCancel').addEventListener('click', closeHistory);
+document.getElementById('btnHistoryClear').addEventListener('click', () => {
+  if (!confirm('清空本机保存的 SQL 历史？')) return;
+  localStorage.removeItem(HISTORY_KEY);
+  openHistory();
+});
+document.getElementById('historyModal').addEventListener('click', ev => {
+  if (ev.target.id === 'historyModal') closeHistory();
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  const m = document.getElementById('historyModal');
+  if (m && !m.classList.contains('hidden')) closeHistory();
 });

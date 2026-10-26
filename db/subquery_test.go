@@ -86,3 +86,38 @@ func TestCatalogQueryWithSubquery(t *testing.T) {
 		}
 	}
 }
+
+// 标量子查询每处理一行外层数据都要重新 Open 子计划。虚拟表（系统目录）
+// 的 Close 曾经只清空行却没复位 built，导致「第一行有值、之后全是 NULL」——
+// 客户端用 conrelid = (SELECT oid FROM pg_class WHERE …) 就永远查不到约束。
+func TestScalarSubqueryRepeatsOnCatalog(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE dcc (id INTEGER PRIMARY KEY)`)
+
+	res := run(t, d, s, `
+		SELECT c.relname, (SELECT count(*) FROM pg_catalog.pg_namespace) AS n
+		FROM pg_catalog.pg_class c ORDER BY c.relname LIMIT 8`)
+	if len(res[0].Rows) < 3 {
+		t.Fatalf("行数太少: %d", len(res[0].Rows))
+	}
+	for i, r := range res[0].Rows {
+		if r[1] == nil {
+			t.Fatalf("第 %d 行的子查询返回 NULL（应该每行都有值）", i+1)
+		}
+		if v := fmt.Sprint(r[1]); v == "0" {
+			t.Fatalf("第 %d 行的子查询返回 0，命名空间不该是空的", i+1)
+		}
+	}
+
+	// 用子查询做等值比较：只应命中 dcc 的主键
+	res = run(t, d, s, `
+		SELECT c.conname, c.contype FROM pg_catalog.pg_constraint c
+		WHERE c.conrelid = (SELECT oid FROM pg_catalog.pg_class WHERE relname = 'dcc')`)
+	if len(res[0].Rows) != 1 {
+		t.Fatalf("应命中 1 个约束，实际 %d", len(res[0].Rows))
+	}
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "dcc_pkey" {
+		t.Fatalf("约束名 = %s，期望 dcc_pkey", got)
+	}
+}

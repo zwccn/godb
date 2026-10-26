@@ -47,7 +47,14 @@ func (o *virtualOp) Next() (types.Row, bool, error) {
 	return r, true, nil
 }
 
-func (o *virtualOp) Close() error { o.rows = nil; return nil }
+// Close 必须把 built 一起复位：否则下一次 Open 会以为行还在，
+// 但 rows 已经被清空 —— 表现为「同一个子查询第一次有值、之后全是 NULL」
+// （标量子查询每处理一行外层数据都要重新 Open 一次，正好踩中）。
+func (o *virtualOp) Close() error {
+	o.rows = nil
+	o.built = false
+	return nil
+}
 func (o *virtualOp) Explain() string {
 	return fmt.Sprintf("SystemScan(%s, %d rows)", o.name, len(o.rows))
 }

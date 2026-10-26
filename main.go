@@ -13,6 +13,7 @@ import (
 
 	"godb/db"
 	"godb/lock"
+	"godb/pgwire"
 	"godb/txn"
 	"godb/web"
 )
@@ -21,6 +22,7 @@ func main() {
 	addr := flag.String("http", "127.0.0.1:8080", "HTTP 监听地址")
 	dir := flag.String("data", "godb-data", "数据目录")
 	noSample := flag.Bool("no-sample", false, "首次启动时不载入示例数据")
+	pgAddr := flag.String("pg", "127.0.0.1:6432", "PostgreSQL 协议监听地址（留空则不启用）")
 	iso := flag.String("isolation", "table", "并发控制模式：table（表级 S/X 锁）或 serial（全局串行）")
 	lockTimeout := flag.Duration("lock-timeout", 3*time.Second, "等待表锁的最长时间")
 	lockRetry := flag.Duration("lock-retry", 20*time.Millisecond, "等待表锁的轮询间隔")
@@ -59,6 +61,15 @@ func main() {
 		}
 	}
 
+	if *pgAddr != "" {
+		pg := &pgwire.Server{DB: d, Addr: *pgAddr}
+		go func() {
+			if err := pg.ListenAndServe(); err != nil {
+				log.Printf("PostgreSQL 协议监听失败: %v", err)
+			}
+		}()
+	}
+
 	srv := web.New(d)
 	httpSrv := &http.Server{
 		Addr:              *addr,
@@ -70,6 +81,9 @@ func main() {
 	log.Printf("并发控制: %s（锁超时 %s / 轮询 %s / 死锁检测 %v）",
 		isolation, *lockTimeout, *lockRetry, *deadlockDetect)
 	log.Printf("控制台: http://%s", *addr)
+	if *pgAddr != "" {
+		log.Printf("PG 协议: %s（trust 认证，任意用户名）", *pgAddr)
+	}
 	log.Printf("数据目录: %s", *dir)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP 服务异常: %v\n", err)

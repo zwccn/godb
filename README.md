@@ -24,6 +24,7 @@ go build -o godb.exe .
 | `-http` | `127.0.0.1:8080` | 监听地址 |
 | `-data` | `godb-data` | 数据目录（catalog / 快照 / WAL 都在里面） |
 | `-no-sample` | `false` | 首次启动不灌示例数据 |
+| `-pg` | `127.0.0.1:6432` | PostgreSQL 协议监听地址，留空则不启用 |
 | `-isolation` | `table` | `table`＝表级 S/X 锁；`serial`＝全局串行（旧行为，用于对照） |
 | `-lock-timeout` | `3s` | 等待表锁的最长时间，超时自动放弃并回滚整个事务 |
 | `-lock-retry` | `20ms` | 等待时的轮询间隔（带 ±50% 抖动） |
@@ -44,6 +45,7 @@ go build -o godb.exe .
 | 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
+| 接入 | 内嵌 Web 控制台（HTTP/JSON）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：子查询、CTE、窗口函数、`UNION`、外键、`CHECK`、`FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引、`RETURNING`、`INSERT ... SELECT`。
 
@@ -106,6 +108,36 @@ go build -o godb.exe .
 改成「语句内用局部哈希集合 + 只扫描本语句之前插入的行」后是 O(n)。
 
 结论：加锁本身的开销可以忽略（每条语句 0.2µs 量级，而一条查询是几百 µs），真正的瓶颈一直是 WAL fsync 和「物化整表再算」的扫描方式。写并发的进一步提升要靠 group commit（多个事务的日志合并一次 fsync），与锁无关。
+
+## 用 PostgreSQL 客户端连接
+
+除了自带的 Web 控制台，godb 还实现了 **PostgreSQL 前端/后端协议 v3**，可以直接用 PG 客户端连：
+
+```bash
+# psql
+psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
+```
+
+| 客户端 | 连接参数 |
+|---|---|
+| psql / pgcli | `-h 127.0.0.1 -p 6432 -U 任意用户名 -d godb` |
+| Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名随意，**密码留空** |
+
+协议实现范围：
+
+| 能力 | 状态 |
+|---|---|
+| 启动握手、`SSLRequest`（回 `N` 回落明文）、trust 认证（无密码） | ✅ |
+| 简单查询 `Q`（支持多语句，逐条返回结果集） | ✅ |
+| 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数 | ✅ |
+| `RowDescription` 带 PG 类型 OID（int4/int8/text/bool/float8/numeric/timestamp…） | ✅ |
+| 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |
+| 事务状态 `ReadyForQuery` 的 `I`/`T`/`E` | ✅ |
+| `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
+| 密码认证（md5 / SCRAM） | ❌ |
+| `pg_catalog` / `information_schema` 系统目录 | ❌ 所以 `psql \dt`、`\d` 会报错，SQL 正常 |
+
+> 注意端口：默认用 `6432`，因为本机 `5432` 往往已经被真正的 PostgreSQL 占用。
 
 ## 耗时显示
 

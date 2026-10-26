@@ -152,9 +152,25 @@ func (e *Engine) buildColumns(defs []*sql.ColumnDef) ([]*catalog.Column, error) 
 	return cols, nil
 }
 
-func (e *Engine) persistSchema() error {
+// persistSchema 保存表结构到 catalog.json。
+//
+// 只有"磁盘上的旧行无法按新结构解释"的 DDL 才需要立刻重写全量快照：
+//
+//	CREATE / DROP TABLE  安全——快照里多出来的表在加载时会被跳过
+//	ADD COLUMN           安全——旧行少一列，加载时补 NULL，正好等于"新列默认 NULL"
+//	RENAME COLUMN        安全——行是按下标存的，改名不影响
+//	DROP COLUMN          不安全——列从中间被挖掉，旧行按下标解释会错位
+//	RENAME TABLE         不安全——快照按表名存
+//	ALTER TYPE           不安全——快照里是旧类型的值
+//
+// 不安全的动作仍然做一次全量 checkpoint；安全的动作只写 catalog.json，
+// 数据交给后续的自动 checkpoint（每 128 次提交）或显式 CHECKPOINT。
+func (e *Engine) persistSchema(needsSnapshot bool) error {
 	if err := e.Cat.Save(e.Dir); err != nil {
 		return err
+	}
+	if !needsSnapshot {
+		return nil
 	}
 	return e.Store.Checkpoint()
 }
@@ -175,7 +191,7 @@ func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
 		return nil, err
 	}
 	e.Store.AddTable(t.Name)
-	if err := e.persistSchema(); err != nil {
+	if err := e.persistSchema(false); err != nil {
 		return nil, err
 	}
 	return &Result{Command: "CREATE TABLE", Tag: "CREATE TABLE"}, nil
@@ -194,7 +210,7 @@ func (e *Engine) execDropTable(s *sql.DropTable) (*Result, error) {
 		}
 		e.Store.DropTable(name)
 	}
-	if err := e.persistSchema(); err != nil {
+	if err := e.persistSchema(false); err != nil {
 		return nil, err
 	}
 	return &Result{Command: "DROP TABLE", Tag: "DROP TABLE"}, nil
@@ -328,7 +344,9 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 	default:
 		return nil, fmt.Errorf("unsupported ALTER TABLE action")
 	}
-	if err := e.persistSchema(); err != nil {
+	// DROP COLUMN / RENAME TABLE / ALTER TYPE 必须重写快照，见 persistSchema 的说明
+	needsSnapshot := act.Kind == "drop_column" || act.Kind == "rename_table" || act.Kind == "alter_type"
+	if err := e.persistSchema(needsSnapshot); err != nil {
 		return nil, err
 	}
 	return &Result{Command: "ALTER TABLE", Tag: "ALTER TABLE"}, nil

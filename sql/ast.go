@@ -54,6 +54,10 @@ type AlterAction struct {
 // Truncate 对应 TRUNCATE TABLE。
 type Truncate struct{ Table string }
 
+// Checkpoint 对应 CHECKPOINT / FLUSH：把内存数据与日志强制刷到磁盘。
+// 它不改数据，只影响持久化时机。
+type Checkpoint struct{}
+
 // ---------- DML ----------
 
 // Insert 对应 INSERT INTO ... VALUES。
@@ -157,6 +161,7 @@ func (*CreateTable) stmtNode() {}
 func (*DropTable) stmtNode()   {}
 func (*AlterTable) stmtNode()  {}
 func (*Truncate) stmtNode()    {}
+func (*Checkpoint) stmtNode()  {}
 func (*Insert) stmtNode()      {}
 func (*Update) stmtNode()      {}
 func (*Delete) stmtNode()      {}

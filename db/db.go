@@ -22,6 +22,37 @@ type Options struct {
 	Lock      lock.Options
 }
 
+// execCheckpoint 处理 CHECKPOINT / FLUSH 语句：把 WAL 刷盘并写一份全量快照。
+func (d *DB) execCheckpoint(sess *txn.Session) (*exec.Result, error) {
+	if sess.InTx() {
+		return nil, fmt.Errorf("CHECKPOINT cannot run inside a transaction block")
+	}
+	before := d.Store.Info()
+	start := hrtime.Now()
+	if err := d.Store.Flush(); err != nil {
+		return nil, err
+	}
+	took := hrtime.Since(start)
+	after := d.Store.Info()
+	res := &exec.Result{
+		Command:  "CHECKPOINT",
+		Tag:      "CHECKPOINT",
+		Columns:  []exec.Column{{Name: "item", Type: "text"}, {Name: "value", Type: "text"}},
+		TookNs:   took,
+		RowCount: 4,
+	}
+	res.Rows = [][]interface{}{
+		{"snapshot_generation", fmt.Sprintf("%d", after.Generation)},
+		{"next_wal_generation", fmt.Sprintf("%d", after.NextGeneration)},
+		{"rows", fmt.Sprintf("%d", after.Rows)},
+		{"snapshot_bytes", fmt.Sprintf("%d", after.Bytes)},
+		{"wal_bytes_before", fmt.Sprintf("%d", before.WALBytes)},
+		{"wal_fsyncs", fmt.Sprintf("%d", after.WALSyncs)},
+	}
+	res.RowCount = len(res.Rows)
+	return res, nil
+}
+
 // ErrAborted 表示事务已中止。
 var ErrAborted = errors.New("current transaction is aborted, commands ignored until end of transaction block")
 
@@ -95,7 +126,8 @@ func Open(dir string, o Options) (*DB, error) {
 func (d *DB) Close() error {
 	d.Store.SchemaMu.Lock()
 	defer d.Store.SchemaMu.Unlock()
-	if err := d.Store.Checkpoint(); err != nil {
+	// 先等 WAL 落盘，再写快照：任何已确认的提交都不会丢
+	if err := d.Store.Flush(); err != nil {
 		return err
 	}
 	return d.Store.Close()
@@ -161,6 +193,10 @@ func (d *DB) execOne(sess *txn.Session, st sql.Statement, pre map[string]lock.Mo
 func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lock.Mode) (*exec.Result, error) {
 	if ts, ok := st.(*sql.TxStmt); ok {
 		return d.execTxControl(sess, ts, pre)
+	}
+
+	if _, ok := st.(*sql.Checkpoint); ok {
+		return d.execCheckpoint(sess)
 	}
 
 	if sess.InTx() && sess.Aborted() {

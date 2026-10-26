@@ -156,6 +156,9 @@ func (p *parser) parseStatement() (Statement, error) {
 	case "TRUNCATE":
 		p.pos++
 		return p.parseTruncate()
+	case "CHECKPOINT", "FLUSH":
+		p.pos++
+		return &Checkpoint{}, nil
 	case "INSERT":
 		p.pos++
 		return p.parseInsert()

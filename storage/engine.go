@@ -13,6 +13,10 @@ import (
 	"godb/types"
 )
 
+// checkpointEvery 是自动 checkpoint 的提交次数阈值。
+// 达到它就写一次全量快照并轮转 WAL，避免 WAL 无限增长。
+const checkpointEvery = 128
+
 // Ref 定位一行：New 表示事务内新插入的行，否则是已提交行在堆中的行号。
 type Ref struct {
 	New  bool
@@ -36,6 +40,13 @@ type Store struct {
 	wal     *Wal
 	commits int
 	txSeq   int64
+
+	// appliedGen 是"已经应用到内存的最高 WAL 代次"，snapshotGen 是磁盘快照
+	// 覆盖到的代次。重放时只应用代次更大的记录，避免和快照重复。
+	appliedGen  int64
+	snapshotGen int64
+	// Repaired 是启动时为对齐列结构而修复的单元格数（正常应为 0）。
+	Repaired int64
 }
 
 // Open 打开数据目录：加载快照 → 重放 WAL → 立刻 checkpoints 并截断 WAL。
@@ -54,14 +65,16 @@ func Open(dir string, cat *catalog.Catalog) (*Store, error) {
 		return nil, err
 	}
 	s.rebuildAll()
-	if err := s.Checkpoint(); err != nil {
-		return nil, err
-	}
-	w, err := OpenWAL(dir)
+	// 先打开旧 WAL（不清空），写完快照后再轮转：
+	// 这样即使 Open 之后立刻崩溃，旧记录仍在，重放不会丢数据。
+	w, err := openWAL(dir, s.appliedGen+1)
 	if err != nil {
 		return nil, err
 	}
 	s.wal = w
+	if err := s.Checkpoint(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -451,14 +464,30 @@ func (tx *Tx) Rollback() {
 	tx.n = 0
 }
 
-// Commit 写 WAL（fsync）后把写集应用到内存，最后按需 checkpoint。
-// 提交临界区用 CommitMu 串行化：不同表的事务可以并行执行，但提交必须排队。
+// Commit 提交事务：写 WAL → 应用写集 → （必要时 checkpoint）→ 等 fsync。
+//
+// 关键点：fsync **不在** CommitMu 里做。这样并发事务可以先把日志写进文件、
+// 释放锁，再由第一个等到的人做一次 fsync 覆盖所有人的记录（组提交）。
+// 语义上等价于 PostgreSQL 的 synchronous_commit=on：客户端收到成功时数据已落盘。
 func (tx *Tx) Commit() error {
 	if tx.n == 0 && len(tx.seq) == 0 {
 		return nil
 	}
 	tx.st.CommitMu.Lock()
-	defer tx.st.CommitMu.Unlock()
+	seq, err := tx.commitLocked()
+	tx.st.CommitMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if seq <= 0 || tx.st.wal == nil {
+		return nil
+	}
+	return tx.st.wal.SyncTo(seq)
+}
+
+// commitLocked 在持有 CommitMu 时完成"写日志 + 改内存"。
+// 返回本批记录的 WAL 序号（0 表示没有需要落盘的记录）。
+func (tx *Tx) commitLocked() (int64, error) {
 	names := make([]string, 0, len(tx.ov))
 	for k := range tx.ov {
 		names = append(names, k)
@@ -479,16 +508,16 @@ func (tx *Tx) Commit() error {
 		o := tx.ov[name]
 		td := tx.st.Table(name)
 		if td == nil {
-			return fmt.Errorf("relation %q does not exist", name)
+			return 0, fmt.Errorf("relation %q does not exist", name)
 		}
 		newRows := make([]types.Row, 0, len(td.Rows)+len(o.ins))
 		for i, row := range td.Rows {
 			if o.del[i] {
-				recs = append(recs, walRec{Tx: tx.ID, Op: "del", Table: td.Name, Old: encodeRow(row)})
+				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Old: row})
 				continue
 			}
 			if nr, ok := o.upd[i]; ok {
-				recs = append(recs, walRec{Tx: tx.ID, Op: "upd", Table: td.Name, Old: encodeRow(row), New: encodeRow(nr)})
+				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Old: row, New: nr})
 				newRows = append(newRows, nr)
 				continue
 			}
@@ -501,7 +530,7 @@ func (tx *Tx) Commit() error {
 			if nr, ok := o.insUpd[i]; ok {
 				row = nr
 			}
-			recs = append(recs, walRec{Tx: tx.ID, Op: "ins", Table: td.Name, New: encodeRow(row)})
+			recs = append(recs, walRec{Tx: tx.ID, Op: opIns, Table: td.Name, New: row})
 			newRows = append(newRows, row)
 		}
 		c := &change{table: name, rows: newRows}
@@ -511,11 +540,15 @@ func (tx *Tx) Commit() error {
 		changes = append(changes, c)
 	}
 
-	recs = append(recs, walRec{Tx: tx.ID, Op: "commit"})
-	if len(recs) > 1 {
-		if err := tx.st.wal.Append(recs); err != nil {
-			return fmt.Errorf("写 WAL 失败: %w", err)
+	recs = append(recs, walRec{Tx: tx.ID, Op: opCommit})
+	var seq int64
+	if len(recs) > 1 && tx.st.wal != nil {
+		s, err := tx.st.wal.Append(recs)
+		if err != nil {
+			return 0, err
 		}
+		seq = s
+		tx.st.appliedGen = tx.st.wal.Gen()
 	}
 
 	for _, c := range changes {
@@ -541,10 +574,14 @@ func (tx *Tx) Commit() error {
 	tx.n = 0
 
 	tx.st.commits++
-	if tx.st.commits >= 128 {
-		return tx.st.checkpointLocked()
+	if tx.st.commits >= checkpointEvery {
+		if err := tx.st.checkpointLocked(); err != nil {
+			return 0, err
+		}
+		// checkpoint 已经把数据写进快照，这批记录不需要再等 fsync
+		return 0, nil
 	}
-	return nil
+	return seq, nil
 }
 
 // ---------- 事务内语句回滚 ----------

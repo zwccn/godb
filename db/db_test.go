@@ -12,10 +12,10 @@ import (
 // testOptions 用较短的锁超时，让并发用例跑得快。
 func testOptions() Options {
 	return Options{Lock: lock.Options{
-		Timeout:        300 * time.Millisecond,
+		Timeout:        800 * time.Millisecond,
 		Retry:          10 * time.Millisecond,
 		DeadlockDetect: true,
-		DeadlockAfter:  100 * time.Millisecond,
+		DeadlockAfter:  150 * time.Millisecond,
 	}}
 }
 

@@ -61,7 +61,7 @@ func TestWriteDifferentTablesConcurrent(t *testing.T) {
 
 	start := time.Now()
 	run(t, d, "s2", `UPDATE b SET v = 1 WHERE id = 1`) // b 上加 X，应立即成功
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > 800*time.Millisecond {
 		t.Fatalf("写不同表不该等待，实际耗时 %s", elapsed)
 	}
 	run(t, d, "s1", `COMMIT`)

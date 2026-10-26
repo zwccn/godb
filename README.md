@@ -1,5 +1,8 @@
 # godb
 
+[![ci](https://github.com/zwccn/godb/actions/workflows/ci.yml/badge.svg)](https://github.com/zwccn/godb/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.20-00ADD8?logo=go)](https://go.dev/)
+
 用 Go 从零实现的教学级关系数据库：手写词法分析 → 递归下降语法分析 → 逻辑/物理计划 → 火山模型执行 → 内存行存 + WAL 持久化，并发控制采用**表级 S/X 两阶段封锁**，附带一个内嵌的 Web 控制台。
 
 ![控制台](docs/shot.png)

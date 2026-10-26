@@ -339,7 +339,15 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 			row[idx] = nv
 			td.Rows[i] = row
 		}
-		t.Columns[idx] = catalog.NewColumn(t.Columns[idx].Name, newType)
+		// 只换类型，别把约束丢了。之前这里用 NewColumn 重建列定义，
+		// NOT NULL / UNIQUE / DEFAULT / SERIAL 全被清掉，主键和索引因为
+		// 存在 catalog.Table 的索引里反而留了下来 —— 表设计器改个类型就会
+		// 悄悄丢掉 NOT NULL，属于静默的数据完整性损失。
+		col := t.Columns[idx]
+		col.TypeName = newType.String()
+		col.Kind = int(newType.Kind)
+		col.Len, col.Prec, col.Scale = newType.Len, newType.Prec, newType.Scale
+		t.Columns[idx] = col
 		t.Rebuild()
 	default:
 		return nil, fmt.Errorf("unsupported ALTER TABLE action")

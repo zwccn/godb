@@ -35,8 +35,9 @@ const OwnerName = "godb"
 // DatabaseName 是唯一的数据库名。
 const DatabaseName = "godb"
 
-// ServerVersionLine 是 version() 的返回值。
-const ServerVersionLine = "PostgreSQL 13.0 (godb 0.1.0) on x86_64-pc-windows, compiled by Go"
+// ServerVersionLine 是 version() 的返回值。版本号要和 pgwire 汇报的一致：
+// 目录表是 PG 10/11 之前的形状，报高了老客户端会挑不到认识的元数据路径。
+const ServerVersionLine = "PostgreSQL 10.0 (godb 0.1.0) on x86_64-pc-windows, compiled by Go"
 
 // colSpec 是虚拟表的一列。
 type colSpec struct{ name, typ string }

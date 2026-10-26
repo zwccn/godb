@@ -404,8 +404,8 @@ func TestCompatProbes(t *testing.T) {
 		sql  string
 		want string
 	}{
-		{"SELECT version()", "13.0"},
-		{"SHOW server_version", "13.0"},
+		{"SELECT version()", "10.0"},
+		{"SHOW server_version", "10.0"},
 		{"SELECT current_schema()", "public"},
 		{"SELECT pg_catalog.set_config('search_path', '', false)", ""},
 	}

@@ -22,7 +22,12 @@ import (
 )
 
 const (
-	pgServerVersion = "13.0"
+	// pgServerVersion 是汇报给客户端的版本号。故意报 10.0 而不是 13.0：
+	// 目录表本来就是按 PG 11 之前的形状做的（relhasoids、consrc、proisagg 都还在），
+	// 老客户端（Navicat 12 是 2017 年的，只认到 PG 10）看到 13.0 会挑不到它认识的
+	// 类型表/元数据路径，设计表里所有列类型都退化成 (Type) 对象类型。
+	// 报 10.0 和实际暴露的目录形状是一致的，对 modern 客户端也没有影响。
+	pgServerVersion = "10.0"
 	godbVersion     = "0.1.0"
 
 	protoVersion3 = 196608

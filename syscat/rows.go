@@ -193,12 +193,13 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"atttypid": iv(int(cm.atttypid)), "attstattarget": iv(-1),
 					"attlen": iv(int(cm.attlen)), "attnum": iv(num + 1),
 					"attndims": iv(0), "attcacheoff": iv(-1), "atttypmod": iv(typmodOf(col)),
-					"attbyval":   bv(cm.attlen > 0 && cm.attlen <= 8),
-					"attstorage": sv("x"), "attalign": sv("i"),
-					"attnotnull": bv(col.NotNull || col.PrimaryKey), "atthasdef": bv(hasDef),
+					"attbyval":      bv(byvalOf(col.Type().Name)),
+					"attstorage":    sv(storageOf(col.Type().Name)),
+					"attalign":      sv(alignOf(col.Type().Name)),
+					"attnotnull":    bv(col.NotNull || col.PrimaryKey), "atthasdef": bv(hasDef),
 					"atthasmissing": bv(false), "attidentity": sv(""), "attgenerated": sv(""),
 					"attisdropped": bv(false), "attislocal": bv(true), "attinhcount": iv(0),
-					"attcollation": iv(0),
+					"attcollation": iv(attCollationOf(col.Type().Name)),
 				}))
 			}
 		}
@@ -458,6 +459,10 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 		var out []types.Row
 		for _, tm := range m.userTables() {
 			for num, col := range tm.t.Columns {
+				collSchema, collName := types.Null, types.Null
+				if collatable(col.Type().Name) {
+					collSchema, collName = sv("pg_catalog"), sv("default")
+				}
 				out = append(out, mk(def, map[string]types.Value{
 					"table_catalog": sv(DatabaseName), "table_schema": sv("public"),
 					"table_name": sv(tm.t.Name), "column_name": sv(col.Name),
@@ -466,9 +471,14 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"is_nullable":              yesNo(!(col.NotNull || col.PrimaryKey)),
 					"data_type":                sv(infoDataType(col.Type())),
 					"character_maximum_length": lenOrNull(col),
-					"numeric_precision":        precOrNull(col),
-					"numeric_scale":            scaleOrNull(col),
+					"character_octet_length":   octetLenOrNull(col),
+					"numeric_precision":        numericPrecOrNull(col),
+					"numeric_precision_radix":  numericRadixOrNull(col),
+					"numeric_scale":            numericScaleOrNull(col),
 					"datetime_precision":       datetimePrecOrNull(col),
+					"collation_catalog":        types.Null,
+					"collation_schema":         collSchema,
+					"collation_name":           collName,
 					"udt_catalog":              sv(DatabaseName),
 					"udt_schema":               sv("pg_catalog"),
 					"udt_name":                 sv(udtName(col.Type())),
@@ -579,8 +589,6 @@ var builtinTypes = []typeDef{
 	{"macaddr", types.OIDMacaddr, "macaddr", "U", 0, 1040, "i", "p"},
 	{"inet", types.OIDInet, "inet", "I", 0, 1041, "i", "x"},
 	{"cidr", types.OIDCidr, "cidr", "I", 0, 651, "i", "x"},
-	{"bool_array", 1000, "_bool", "A", 16, 0, "i", "x"},
-	{"text_array", 1009, "_text", "A", 25, 0, "i", "x"},
 	{"bpchar", types.OIDBpchar, "bpchar", "S", 0, 1014, "i", "x"},
 	{"varchar", types.OIDVarchar, "varchar", "S", 0, 1015, "i", "x"},
 	{"date", types.OIDDate, "date", "D", 0, 1182, "i", "p"},
@@ -605,13 +613,16 @@ var builtinTypes = []typeDef{
 	{"tsquery", types.OIDTsquery, "tsquery", "U", 0, 3645, "i", "x"},
 }
 
+// typeRows 生成 pg_type。数组类型不单独列，按基类型的 typarray 全自动生成：
+// 名字是 "_"+基名（真 PG 的写法是 _int4 / _text，不是 int4_array），
+// 这样 typarray 指过去的 OID 一定存在，客户端反查数组元素类型才不会落空。
 func typeRows(def *catalog.Table) []types.Row {
-	out := make([]types.Row, 0, len(builtinTypes))
+	out := make([]types.Row, 0, len(builtinTypes)*2)
 	for _, td := range builtinTypes {
 		out = append(out, mk(def, map[string]types.Value{
 			"oid": iv(int(td.oid)), "typname": sv(td.name), "typnamespace": iv(NamespaceCatalog),
 			"typowner": iv(OwnerOID), "typlen": iv(int(types.TypeLenByName(td.typ))),
-			"typbyval": bv(types.TypeLenByName(td.typ) > 0 && types.TypeLenByName(td.typ) <= 8),
+			"typbyval": bv(byvalOf(td.typ)),
 			"typtype":  sv("b"), "typcategory": sv(td.categ),
 			"typispreferred": bv(td.name == "text" || td.name == "int4" || td.name == "float8"),
 			"typisdefined":   bv(true), "typdelim": sv(","), "typrelid": iv(0),
@@ -619,6 +630,22 @@ func typeRows(def *catalog.Table) []types.Row {
 			"typinput": sv(td.name + "in"), "typoutput": sv(td.name + "out"),
 			"typreceive": sv(td.name + "recv"), "typsend": sv(td.name + "send"),
 			"typalign": sv(td.align), "typstorage": sv(td.store),
+			"typnotnull": bv(false), "typbasetype": iv(0), "typtypmod": iv(-1),
+			"typndims": iv(0), "typcollation": iv(attCollationOf(td.typ)),
+		}))
+		if td.array == 0 {
+			continue
+		}
+		arr := "_" + td.typ
+		out = append(out, mk(def, map[string]types.Value{
+			"oid": iv(int(td.array)), "typname": sv(arr), "typnamespace": iv(NamespaceCatalog),
+			"typowner": iv(OwnerOID), "typlen": iv(-1),
+			"typbyval": bv(false), "typtype": sv("b"), "typcategory": sv("A"),
+			"typispreferred": bv(false), "typisdefined": bv(true), "typdelim": sv(","),
+			"typrelid": iv(0), "typelem": iv(int(td.oid)), "typarray": iv(0),
+			"typinput": sv("array_in"), "typoutput": sv("array_out"),
+			"typreceive": sv("array_recv"), "typsend": sv("array_send"),
+			"typalign": sv("i"), "typstorage": sv("x"),
 			"typnotnull": bv(false), "typbasetype": iv(0), "typtypmod": iv(-1),
 			"typndims": iv(0), "typcollation": iv(0),
 		}))
@@ -672,9 +699,15 @@ func settingRows(def *catalog.Table) []types.Row {
 		{"IntervalStyle", "postgres"}, {"lc_collate", "C"}, {"lc_ctype", "C"},
 		{"lc_monetary", "C"}, {"lc_numeric", "C"}, {"lc_time", "C"},
 		{"max_connections", "100"}, {"max_index_keys", "32"},
+		// Navicat 打开「设计表」时会问 block_size（用来算表和列的存储），
+		// 少了它客户端会拿不到块大小，做不了容量估算。
+		{"block_size", "8192"}, {"segment_size", "131072"},
+		{"wal_block_size", "8192"}, {"wal_segment_size", "16MB"},
+		{"max_function_args", "100"}, {"max_identifier_length", "63"},
+		{"max_index_keys", "32"}, {"data_checksums", "off"},
 		{"quote_all_identifiers", "off"}, {"search_path", `"$user", public`},
-		{"server_encoding", "UTF8"}, {"server_version", "13.0"},
-		{"server_version_num", "130000"}, {"session_authorization", OwnerName},
+		{"server_encoding", "UTF8"}, {"server_version", "10.0"},
+		{"server_version_num", "100000"}, {"session_authorization", OwnerName},
 		{"standard_conforming_strings", "on"}, {"TimeZone", "UTC"},
 		{"TimeZone_abbreviations", "Default"}, {"transaction_isolation", "serializable"},
 		{"is_superuser", "on"}, {"escape_string_warning", "on"},
@@ -751,25 +784,148 @@ func lenOrNull(col *catalog.Column) types.Value {
 	return types.Null
 }
 
-func precOrNull(col *catalog.Column) types.Value {
-	if col.Type().Kind == types.KFloat {
-		return iv(col.Type().Prec)
+// octetLenOrNull 返回 character_octet_length。PG 里 text / 不限定长度的
+// varchar 给的是 1073741824（1GB 上限），限定长度的给 len。
+func octetLenOrNull(col *catalog.Column) types.Value {
+	t := col.Type()
+	switch baseTypeName(t.Name) {
+	case "text", "character varying", "varchar", "name":
+		if t.Len > 0 {
+			return iv(t.Len)
+		}
+		return iv(1073741824)
+	case "character", "char", "bpchar":
+		if t.Len > 0 {
+			return iv(t.Len)
+		}
+		return iv(1)
 	}
 	return types.Null
 }
 
-func scaleOrNull(col *catalog.Column) types.Value {
-	if col.Type().Kind == types.KFloat {
-		return iv(col.Type().Scale)
+// numericPrecOrNull 返回 numeric_precision。必须和真 PG 一致：整数是位宽
+// （int2=16 / int4=32 / int8=64），float4=24、float8=53，numeric 用声明的精度。
+// 客户端（Navicat 的设计表）会拿这个值反推列类型，缺了会被当成未知类型。
+func numericPrecOrNull(col *catalog.Column) types.Value {
+	t := col.Type()
+	switch baseTypeName(t.Name) {
+	case "smallint", "int2":
+		return iv(16)
+	case "integer", "int", "int4", "serial", "serial4":
+		return iv(32)
+	case "bigint", "int8", "bigserial", "serial8":
+		return iv(64)
+	case "real", "float4":
+		return iv(24)
+	case "double precision", "float8", "double":
+		return iv(53)
+	case "numeric", "decimal":
+		if t.Prec > 0 {
+			return iv(t.Prec)
+		}
+	}
+	return types.Null
+}
+
+// numericScaleOrNull 返回 numeric_scale。整数固定 0，浮点是 NULL，numeric
+// 用声明的位数（没写修饰符时是 NULL）。
+func numericScaleOrNull(col *catalog.Column) types.Value {
+	t := col.Type()
+	switch baseTypeName(t.Name) {
+	case "smallint", "int2", "integer", "int", "int4", "serial", "serial4",
+		"bigint", "int8", "bigserial", "serial8":
+		return iv(0)
+	case "numeric", "decimal":
+		if t.Prec > 0 {
+			return iv(t.Scale)
+		}
+	}
+	return types.Null
+}
+
+// numericRadixOrNull 返回 numeric_precision_radix：整数/浮点按 2，numeric 按 10。
+func numericRadixOrNull(col *catalog.Column) types.Value {
+	switch baseTypeName(col.Type().Name) {
+	case "smallint", "int2", "integer", "int", "int4", "serial", "serial4",
+		"bigint", "int8", "bigserial", "serial8", "real", "float4",
+		"double precision", "float8", "double":
+		return iv(2)
+	case "numeric", "decimal":
+		return iv(10)
 	}
 	return types.Null
 }
 
 func datetimePrecOrNull(col *catalog.Column) types.Value {
-	if col.Type().Kind == types.KTime {
+	switch baseTypeName(col.Type().Name) {
+	case "timestamp", "timestamp without time zone", "timestamptz",
+		"timestamp with time zone", "time", "time without time zone",
+		"timetz", "time with time zone":
 		return iv(6)
 	}
 	return types.Null
+}
+
+// collatable 判断类型是否可排序（PG 里这些列的 attcollation 是 default 排序规则 100）。
+func collatable(name string) bool {
+	switch baseTypeName(name) {
+	case "text", "character varying", "varchar", "character", "char", "bpchar":
+		return true
+	}
+	return false
+}
+
+// attCollationOf 返回 pg_attribute.attcollation。文本类类型挂默认排序规则
+// （OID 100），其它是 0。真 PG 里 text 列的排序规则不是空，客户端的
+// 「设计表 → 排序规则」下拉就是从这里取的。
+func attCollationOf(name string) int {
+	if collatable(name) {
+		return 100
+	}
+	return 0
+}
+
+// storageOf 返回 attstorage：p=plain（定长按值），x=extended（可压缩可外存），
+// m=main（可压缩）。Navicat 等客户端会用它做列的存储估计。
+func storageOf(name string) string {
+	switch baseTypeName(name) {
+	case "numeric", "decimal":
+		return "m"
+	case "text", "character varying", "varchar", "json", "jsonb", "bytea",
+		"xml", "tsvector", "tsquery", "varbit", "bit":
+		return "x"
+	}
+	return "p"
+}
+
+// alignOf 返回 attalign：1 字节按 c，2 字节按 s，4 字节按 i，8 字节按 d。
+func alignOf(name string) string {
+	switch baseTypeName(name) {
+	case "boolean", "bool", "char", "character", "bpchar", "name", "uuid":
+		return "c"
+	case "smallint", "int2":
+		return "s"
+	case "integer", "int", "int4", "serial", "serial4", "real", "float4",
+		"numeric", "decimal", "date", "oid", "text", "character varying",
+		"varchar", "json", "jsonb", "bytea", "xml", "inet", "cidr",
+		"macaddr", "bit", "varbit":
+		return "i"
+	}
+	return "d"
+}
+
+// byvalOf 返回 attbyval：定长且长度 ≤ 8 的数值/日期类型按值传递，
+// timestamp / interval / text 这些虽也是 8 字节但按引用传。
+func byvalOf(name string) bool {
+	switch baseTypeName(name) {
+	case "boolean", "bool", "smallint", "int2", "integer", "int", "int4",
+		"serial", "serial4", "bigint", "int8", "bigserial", "serial8",
+		"real", "float4", "double precision", "float8", "double",
+		"date", "time", "time without time zone", "timetz",
+		"time with time zone", "oid":
+		return true
+	}
+	return false
 }
 
 func identityOf(col *catalog.Column) string {
@@ -779,6 +935,22 @@ func identityOf(col *catalog.Column) string {
 	return "NO"
 }
 
+// baseTypeName 去掉类型修饰符，只留基名：numeric(12,2) → numeric，
+// varchar(255) → varchar。
+//
+// 这一步不能省：catalog 里记的是用户写的完整写法（numeric(12,2)），而
+// information_schema 的 data_type / udt_name 要的是基名。带括号时下面的
+// switch 一个都匹配不上，numeric 列会被兜底成 double precision / float8，
+// 客户端「设计表」拿到的类型自相矛盾（atttypid 是 numeric，data_type 说
+// double precision），Navicat 就直接把列类型降级成 (Type) 对象类型。
+func baseTypeName(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if i := strings.IndexByte(s, '('); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
 // infoDataType 把内部类型映射成 information_schema.data_type 的写法。
 // infoDataType 返回 information_schema.columns.data_type。
 //
@@ -786,7 +958,7 @@ func identityOf(col *catalog.Column) string {
 // 统一是 int64，但用户建表写的是 int4，客户端「设计表」看到 bigint 会显示错，
 // 改表时还可能把类型改成 bigint。
 func infoDataType(t types.Type) string {
-	switch strings.ToLower(t.Name) {
+	switch baseTypeName(t.Name) {
 	case "smallint", "int2":
 		return "smallint"
 	case "integer", "int", "int4", "serial", "serial4":
@@ -807,11 +979,40 @@ func infoDataType(t types.Type) string {
 		return "timestamp without time zone"
 	case "timestamptz", "timestamp with time zone":
 		return "timestamp with time zone"
+	case "time", "time without time zone":
+		return "time without time zone"
+	case "timetz", "time with time zone":
+		return "time with time zone"
+	case "interval":
+		return "interval"
 	case "char", "character", "bpchar":
 		return "character"
-	}
-	if l := strings.ToLower(t.Name); strings.HasPrefix(l, "varchar") || strings.HasPrefix(l, "character varying") {
+	case "varchar", "character varying":
 		return "character varying"
+	case "json":
+		return "json"
+	case "jsonb":
+		return "jsonb"
+	case "uuid":
+		return "uuid"
+	case "bytea":
+		return "bytea"
+	case "money":
+		return "money"
+	case "inet":
+		return "inet"
+	case "cidr":
+		return "cidr"
+	case "macaddr":
+		return "macaddr"
+	case "xml":
+		return "xml"
+	case "point":
+		return "point"
+	case "bit":
+		return "bit"
+	case "varbit":
+		return "bit varying"
 	}
 	// 兜底：只有拿不到具体名字时才按 Kind 猜
 	switch t.Kind {
@@ -829,7 +1030,7 @@ func infoDataType(t types.Type) string {
 
 // udtName 映射成 information_schema.udt_name（PG 内部类型名）。
 func udtName(t types.Type) string {
-	switch strings.ToLower(t.Name) {
+	switch baseTypeName(t.Name) {
 	case "smallint", "int2":
 		return "int2"
 	case "integer", "int", "int4", "serial", "serial4":
@@ -850,12 +1051,40 @@ func udtName(t types.Type) string {
 		return "timestamp"
 	case "timestamptz", "timestamp with time zone":
 		return "timestamptz"
+	case "time", "time without time zone":
+		return "time"
+	case "timetz", "time with time zone":
+		return "timetz"
+	case "interval":
+		return "interval"
 	case "char", "character", "bpchar":
 		return "bpchar"
-	}
-	l := strings.ToLower(t.Name)
-	if strings.HasPrefix(l, "varchar") || strings.HasPrefix(l, "character varying") {
+	case "varchar", "character varying":
 		return "varchar"
+	case "json":
+		return "json"
+	case "jsonb":
+		return "jsonb"
+	case "uuid":
+		return "uuid"
+	case "bytea":
+		return "bytea"
+	case "money":
+		return "money"
+	case "inet":
+		return "inet"
+	case "cidr":
+		return "cidr"
+	case "macaddr":
+		return "macaddr"
+	case "xml":
+		return "xml"
+	case "point":
+		return "point"
+	case "bit":
+		return "bit"
+	case "varbit":
+		return "varbit"
 	}
 	switch t.Kind {
 	case types.KInt:

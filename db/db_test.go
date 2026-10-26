@@ -215,6 +215,32 @@ func TestAlter(t *testing.T) {
 	assertRows(t, run(t, d, s, `SELECT count(*) FROM b`), []string{"1"})
 }
 
+// ALTER COLUMN ... TYPE 只该换类型，NOT NULL / 默认值 / 主键这些约束要留着。
+// 之前实现用 catalog.NewColumn 重建列定义，把约束全清了（主键因为存在索引里
+// 反而还活着），表设计器改一次类型就会静默丢 NOT NULL。
+func TestAlterColumnTypeKeepsConstraints(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE kept (id INTEGER PRIMARY KEY, note VARCHAR(10) NOT NULL, n INTEGER DEFAULT 5)`)
+	run(t, d, s, `INSERT INTO kept VALUES (1, 'abc', 9)`)
+	run(t, d, s, `ALTER TABLE kept ALTER COLUMN note TYPE TEXT`)
+
+	assertRows(t, run(t, d, s, `
+		SELECT column_name, data_type, is_nullable
+		FROM information_schema.columns WHERE table_name = 'kept' ORDER BY ordinal_position`),
+		[]string{"id|integer|NO", "note|text|NO", "n|integer|YES"})
+
+	// 默认值仍在：插一行不给 n，应该是 5
+	run(t, d, s, `INSERT INTO kept (id, note) VALUES (2, 'xyz')`)
+	assertRows(t, run(t, d, s, `SELECT n FROM kept WHERE id = 2`), []string{"5"})
+
+	// NOT NULL 仍然生效
+	runErr(t, d, s, `INSERT INTO kept (id) VALUES (3)`)
+
+	// 主键仍然生效
+	runErr(t, d, s, `INSERT INTO kept (id, note) VALUES (1, 'dup')`)
+}
+
 func TestExpressions(t *testing.T) {
 	d := newTestDB(t)
 	s := "s"

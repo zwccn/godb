@@ -7,6 +7,14 @@ const txBar = document.getElementById('txBar');
 const txText = document.getElementById('txText');
 const txPill = document.getElementById('txPill');
 
+// 最近一次 /api/schema 的结果，右键菜单和表设计器都从这里取，避免每次再请求。
+let schemaCache = [];
+// 当前会话是否有未提交的事务（DDL 不能在事务里执行）。
+let txActive = false;
+// 展开了字段的表名。表树默认只显示到表级（和 Navicat 一样），
+// 展开状态自己记着，否则每次刷新/轮询都会把用户展开的字段收回去。
+const expandedTables = new Set();
+
 const EXAMPLES = {
   select: `SELECT * FROM employees ORDER BY id LIMIT 100;`,
   group: `SELECT d.name        AS 部门,
@@ -290,7 +298,8 @@ function errorCard(err) {
 async function loadSchema() {
   try {
     const data = await api('/api/schema');
-    renderSchema(data.tables || []);
+    schemaCache = data.tables || [];
+    renderSchema(schemaCache);
     updateTx(data.tx);
   } catch (e) {
     treeEl.innerHTML = '';
@@ -305,20 +314,24 @@ function renderSchema(tables) {
     return;
   }
   for (const t of tables) {
-    const node = el('div', 'table-node open');
+    const node = el('div', 'table-node' + (expandedTables.has(t.name) ? ' open' : ''));
     const row = el('div', 'table-row');
+    row.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 个字段（点 ▶ 展开字段，右键有表操作）`;
     const caret = el('span', 'caret', '▶');
     caret.addEventListener('click', ev => {
       ev.stopPropagation();
-      node.classList.toggle('open');
+      const open = node.classList.toggle('open');
+      if (open) expandedTables.add(t.name);
+      else expandedTables.delete(t.name);
     });
     row.appendChild(caret);
     row.appendChild(el('span', 'tname', t.name));
     row.appendChild(el('span', 'tcount', String(t.rows)));
-    row.addEventListener('click', () => {
-      editor.value = `SELECT * FROM ${t.name} LIMIT 100;`;
-      autoSize();
-      run();
+    row.addEventListener('click', () => openTable(t.name));
+    row.addEventListener('contextmenu', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      showCtxMenu(ev.clientX, ev.clientY, tableMenuItems(t));
     });
     node.appendChild(row);
 
@@ -331,7 +344,7 @@ function renderSchema(tables) {
       cr.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}${c.default ? ' DEFAULT ' + c.default : ''}`;
       cr.addEventListener('click', ev => {
         ev.stopPropagation();
-        editor.value = `SELECT ${c.name} FROM ${t.name} LIMIT 100;`;
+        editor.value = `SELECT ${qi(c.name)} FROM ${qi(t.name)} LIMIT 100;`;
         autoSize();
         run();
       });
@@ -430,6 +443,7 @@ let heartbeat = null;
 
 function updateTx(tx) {
   if (!tx) return;
+  txActive = !!tx.active;
   if (tx.active) {
     // 事务打开期间定时心跳，避免被服务端当作“遗弃事务”回收
     if (!heartbeat) {
@@ -800,3 +814,642 @@ document.addEventListener('keydown', e => {
   if (location.hash === '#locks') toggleLocks(true);
   if (location.hash === '#settings') openSettings();
 })();
+
+/* ---------------- 表管理：标识符 / 类型 / 提示 ---------------- */
+
+// PG 保留字里会被当成别名的那些，生成 SQL 时给它们加引号。
+const RESERVED_IDENT = new Set(`select from where group by having order limit offset as distinct all
+join inner outer left right full cross on using natural and or not null is in between like ilike
+case when then else end insert into values update set delete create table drop alter add column
+rename to truncate begin commit rollback primary key unique default check references foreign constraint
+user current_user order`.split(/\s+/).filter(Boolean));
+
+// 设计器下拉里的类型，按 PG 的写法。
+const TYPE_LIST = ['int2', 'int4', 'int8', 'serial', 'bigserial', 'numeric', 'float4', 'float8',
+  'varchar', 'char', 'text', 'boolean', 'date', 'time', 'timestamp', 'timestamptz',
+  'interval', 'json', 'jsonb', 'uuid', 'bytea'];
+
+// 用户建表时可能写全名/别名，统一收敛到 PG 内部名，方便回填下拉。
+const TYPE_ALIAS = {
+  smallint: 'int2', integer: 'int4', int: 'int4', int4: 'int4', serial4: 'serial',
+  bigint: 'int8', int8: 'int8', bigserial: 'bigserial', serial8: 'bigserial',
+  real: 'float4', 'double precision': 'float8', double: 'float8', float8: 'float8',
+  decimal: 'numeric', numeric: 'numeric', bool: 'boolean', boolean: 'boolean',
+  'character varying': 'varchar', varchar: 'varchar', character: 'char', char: 'char', bpchar: 'char',
+  text: 'text', date: 'date', time: 'time', 'time without time zone': 'time',
+  timetz: 'time', 'time with time zone': 'time',
+  timestamp: 'timestamp', 'timestamp without time zone': 'timestamp', datetime: 'timestamp',
+  timestamptz: 'timestamptz', 'timestamp with time zone': 'timestamptz',
+  interval: 'interval', json: 'json', jsonb: 'jsonb', uuid: 'uuid', bytea: 'bytea',
+};
+
+function qi(name) {
+  const s = String(name || '').trim();
+  if (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(s) && !RESERVED_IDENT.has(s.toLowerCase())) return s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
+// 把 "numeric(12,2)" / "varchar(255)" / "integer" 拆成基名 + 长度 + 小数位。
+function parseType(text) {
+  let raw = String(text || '').trim().toLowerCase();
+  let args = [];
+  const m = raw.match(/\(([^)]*)\)/);
+  if (m) {
+    args = m[1].split(',').map(x => parseInt(x.trim(), 10)).filter(n => !isNaN(n));
+    raw = raw.slice(0, m.index).trim();
+  }
+  const base = TYPE_ALIAS[raw] || (TYPE_LIST.includes(raw) ? raw : 'text');
+  let len = args[0] || 0;
+  let scale = base === 'numeric' ? (args[1] || 0) : 0;
+  return { base, len, scale };
+}
+
+// 反向：把设计器里的一行拼成 SQL 类型写法。
+function typeSql(r) {
+  if (r.type === 'varchar' || r.type === 'char') return r.len > 0 ? `${r.type}(${r.len})` : r.type;
+  if (r.type === 'numeric') return r.len > 0 ? `numeric(${r.len},${r.scale || 0})` : 'numeric';
+  return r.type;
+}
+
+let toastTimer = null;
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.className = 'toast' + (isErr ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = 'toast hidden'; }, isErr ? 7000 : 2600);
+}
+
+// DDL 不允许在显式事务里执行（引擎的硬性限制），先拦一下给个明确提示。
+function ensureNoTx() {
+  if (!txActive) return true;
+  toast('当前事务还没结束，DDL 不能在事务里执行，请先提交或回滚', true);
+  return false;
+}
+
+/* ---------------- 右键菜单 ---------------- */
+
+function ctxMenuEl() { return document.getElementById('ctxMenu'); }
+
+function hideCtxMenu() {
+  const m = ctxMenuEl();
+  if (!m) return;
+  m.classList.add('hidden');
+  m.innerHTML = '';
+}
+
+function showCtxMenu(x, y, items) {
+  const m = ctxMenuEl();
+  if (!m) return;
+  m.innerHTML = '';
+  for (const it of items) {
+    if (!it) continue;
+    if (it.sep) { m.appendChild(el('div', 'ctx-sep')); continue; }
+    const b = el('button', 'ctx-item' + (it.danger ? ' danger' : ''), it.label);
+    if (it.hint) b.appendChild(el('span', 'ctx-hint', it.hint));
+    if (it.disabled) {
+      b.disabled = true;
+    } else {
+      b.addEventListener('click', () => { hideCtxMenu(); it.run(); });
+    }
+    m.appendChild(b);
+  }
+  m.classList.remove('hidden');
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
+  // 贴边时往回收，别跑出视口
+  const r = m.getBoundingClientRect();
+  if (r.right > window.innerWidth - 6) m.style.left = Math.max(6, window.innerWidth - r.width - 6) + 'px';
+  if (r.bottom > window.innerHeight - 6) m.style.top = Math.max(6, window.innerHeight - r.height - 6) + 'px';
+}
+
+function tableMenuItems(t) {
+  return [
+    { label: '打开表', hint: 'SELECT *', run: () => openTable(t.name) },
+    { label: '设计表', hint: 'ALTER', run: () => openDesigner(t.name) },
+    { sep: true },
+    { label: '新建表…', run: () => openDesigner(null) },
+    { label: '重命名…', run: () => renameTable(t.name) },
+    { label: '复制表结构…', run: () => copyTableStructure(t) },
+    { sep: true },
+    { label: '清空数据', hint: 'TRUNCATE', danger: true, run: () => truncateTable(t) },
+    { label: '删除表', hint: 'DROP', danger: true, run: () => dropTable(t) },
+    { sep: true },
+    { label: '刷新列表', run: loadSchema },
+  ];
+}
+
+function blankMenuItems() {
+  return [
+    { label: '新建表…', run: () => openDesigner(null) },
+    { label: '刷新列表', run: loadSchema },
+  ];
+}
+
+/* ---------------- 表级动作 ---------------- */
+
+function openTable(name) {
+  editor.value = `SELECT * FROM ${qi(name)} LIMIT 100;`;
+  autoSize();
+  run();
+}
+
+async function runDdl(sql, okMsg) {
+  if (!ensureNoTx()) return false;
+  try {
+    const data = await api('/api/query', { sql });
+    updateTx(data.tx);
+    renderResults(data);
+    await loadSchema();
+    if (data.error) {
+      toast(data.error.message || '执行失败', true);
+      return false;
+    }
+    if (okMsg) toast(okMsg);
+    return true;
+  } catch (e) {
+    toast('执行失败：' + e.message, true);
+    return false;
+  }
+}
+
+// 通用输入弹窗：返回 Promise<string|null>
+function askText({ title, label, value, hint, okText }) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('promptModal');
+    const input = document.getElementById('promptInput');
+    const errEl = document.getElementById('promptHint');
+    document.getElementById('promptTitle').textContent = title || '输入';
+    document.getElementById('promptLabel').textContent = label || '名称';
+    document.getElementById('promptHintText').textContent = hint || '';
+    document.getElementById('btnPromptOk').textContent = okText || '确定';
+    input.value = value || '';
+    errEl.textContent = '';
+    errEl.className = 'modal-hint';
+    modal.classList.remove('hidden');
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+
+    const done = v => {
+      modal.classList.add('hidden');
+      document.getElementById('btnPromptOk').onclick = null;
+      document.getElementById('btnPromptCancel').onclick = null;
+      document.getElementById('btnPromptClose').onclick = null;
+      input.onkeydown = null;
+      resolve(v);
+    };
+    const submit = () => {
+      const v = input.value.trim();
+      if (!v) { errEl.textContent = '不能为空'; errEl.className = 'modal-hint err'; return; }
+      done(v);
+    };
+    document.getElementById('btnPromptOk').onclick = submit;
+    document.getElementById('btnPromptCancel').onclick = () => done(null);
+    document.getElementById('btnPromptClose').onclick = () => done(null);
+    input.onkeydown = ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); submit(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); done(null); }
+    };
+  });
+}
+
+async function renameTable(oldName) {
+  const name = await askText({
+    title: '重命名表', label: '新表名', value: oldName,
+    hint: '会执行 ALTER TABLE ... RENAME TO ...', okText: '重命名',
+  });
+  if (!name || name === oldName) return;
+  await runDdl(`ALTER TABLE ${qi(oldName)} RENAME TO ${qi(name)};`, `表已重命名为 ${name}`);
+}
+
+async function copyTableStructure(t) {
+  const name = await askText({
+    title: '复制表结构', label: '新表名', value: t.name + '_copy',
+    hint: '只复制结构（字段/类型/主键），不复制数据 —— 引擎不支持 INSERT ... SELECT',
+    okText: '创建',
+  });
+  if (!name) return;
+  const cols = t.columns.map(c => {
+    const p = parseType(c.type);
+    let s = '  ' + qi(c.name) + ' ' + typeSql({ type: p.base, len: p.len, scale: p.scale });
+    if (c.primaryKey) s += ' PRIMARY KEY';
+    else {
+      if (c.notNull) s += ' NOT NULL';
+      if (c.unique) s += ' UNIQUE';
+      if (c.default) s += ' DEFAULT ' + c.default;
+    }
+    return s;
+  });
+  const sql = `CREATE TABLE ${qi(name)} (\n${cols.join(',\n')}\n);`;
+  await runDdl(sql, `已复制表结构到 ${name}`);
+}
+
+async function truncateTable(t) {
+  if (!confirm(`确定清空表 ${t.name} 的所有数据吗？\n\n表结构会保留，操作不可撤销（${t.rows} 行）。`)) return;
+  await runDdl(`TRUNCATE TABLE ${qi(t.name)};`, `已清空 ${t.name}`);
+}
+
+async function dropTable(t) {
+  if (!confirm(`确定删除表 ${t.name} 吗？\n\n表结构和数据都会被删除，不可撤销。`)) return;
+  await runDdl(`DROP TABLE ${qi(t.name)};`, `已删除 ${t.name}`);
+}
+
+/* ---------------- 表设计器 ---------------- */
+
+let designer = null;
+
+function designerModalEl() { return document.getElementById('designerModal'); }
+
+function newDesignerRow() {
+  return { orig: null, name: '', type: 'int4', len: 0, scale: 0, notNull: false, pk: false, uniq: false, def: '' };
+}
+
+function openDesigner(name) {
+  const t = name ? schemaCache.find(x => x.name === name) : null;
+  if (name && !t) { toast('找不到表 ' + name, true); return; }
+  designer = { mode: t ? 'edit' : 'new', origName: t ? t.name : '', origCols: [], rows: [], sel: -1 };
+
+  if (t) {
+    designer.origCols = t.columns.map(c => ({
+      name: c.name, type: c.type, notNull: !!c.notNull, def: c.default || '',
+      pk: !!c.primaryKey, uniq: !!c.unique,
+    }));
+    designer.rows = t.columns.map(c => {
+      const p = parseType(c.type);
+      // serial 列在 catalog 里存的是 integer + Serial 标记，这里还原成 serial，
+      // 否则设计器会显示成 int4，改动别处保存时看不出它是自增列。
+      const base = c.serial ? 'serial' : p.base;
+      return {
+        orig: c.name, name: c.name, type: base, len: p.len, scale: p.scale,
+        notNull: !!c.notNull, pk: !!c.primaryKey, uniq: !!c.unique, def: c.default || '',
+        origType: typeSql({ type: base, len: p.len, scale: p.scale }),
+      };
+    });
+  } else {
+    designer.rows = [newDesignerRow()];
+  }
+
+  document.getElementById('designerTitle').textContent = t ? '表设计器 · ' + t.name : '新建表';
+  document.getElementById('designerTableName').value = t ? t.name : '';
+  document.getElementById('designerMeta').textContent = t
+    ? `${t.rows} 行 · ${t.columns.length} 列`
+    : '填写表名和字段，保存即执行 CREATE TABLE';
+  const hint = document.getElementById('designerHint');
+  hint.textContent = '';
+  hint.className = 'modal-hint';
+  designerModalEl().classList.remove('hidden');
+  setSqlPreviewOpen(false);
+  renderDesigner();
+  refreshDesignerSql();
+  setTimeout(() => {
+    const input = document.getElementById('designerTableName');
+    if (!t) input.focus();
+    else document.getElementById('designerRows').querySelector('input')?.focus();
+  }, 30);
+}
+
+function closeDesigner() {
+  designerModalEl().classList.add('hidden');
+  designer = null;
+}
+
+function numInputEl(value, onInput) {
+  const i = document.createElement('input');
+  i.type = 'number';
+  i.min = '0';
+  i.value = value ? String(value) : '';
+  i.addEventListener('input', () => {
+    const v = parseInt(i.value, 10);
+    onInput(isNaN(v) ? 0 : v);
+  });
+  return i;
+}
+
+function checkEl(checked, onChange) {
+  const c = document.createElement('input');
+  c.type = 'checkbox';
+  c.checked = !!checked;
+  c.addEventListener('change', () => onChange(c.checked));
+  return c;
+}
+
+function renderDesigner() {
+  const tb = document.getElementById('designerRows');
+  tb.innerHTML = '';
+  designer.rows.forEach((r, i) => {
+    const tr = el('tr');
+    if (i === designer.sel) tr.classList.add('sel');
+    tr.addEventListener('mousedown', () => {
+      designer.sel = i;
+      for (const node of tb.children) node.classList.remove('sel');
+      tr.classList.add('sel');
+    });
+    tr.appendChild(el('td', 'c-idx', String(i + 1)));
+
+    const tdName = el('td', 'c-name');
+    const nameIn = document.createElement('input');
+    nameIn.type = 'text';
+    nameIn.spellcheck = false;
+    nameIn.placeholder = '字段名';
+    nameIn.value = r.name;
+    nameIn.addEventListener('input', () => { r.name = nameIn.value; refreshDesignerSql(); });
+    tdName.appendChild(nameIn);
+    tr.appendChild(tdName);
+
+    const tdType = el('td', 'c-type');
+    const sel = document.createElement('select');
+    for (const ty of TYPE_LIST) {
+      const o = document.createElement('option');
+      o.value = ty;
+      o.textContent = ty;
+      sel.appendChild(o);
+    }
+    sel.value = r.type;
+    tdType.appendChild(sel);
+    tr.appendChild(tdType);
+
+    const tdLen = el('td', 'c-len');
+    const lenIn = numInputEl(r.len, v => { r.len = v; refreshDesignerSql(); });
+    tdLen.appendChild(lenIn);
+    tr.appendChild(tdLen);
+
+    const tdScale = el('td', 'c-len');
+    const scaleIn = numInputEl(r.scale, v => { r.scale = v; refreshDesignerSql(); });
+    tdScale.appendChild(scaleIn);
+    tr.appendChild(tdScale);
+
+    const syncLen = () => {
+      const needLen = r.type === 'varchar' || r.type === 'char' || r.type === 'numeric';
+      lenIn.disabled = !needLen;
+      scaleIn.disabled = r.type !== 'numeric';
+      lenIn.placeholder = needLen ? (r.type === 'numeric' ? '精度' : '长度') : '';
+    };
+    sel.addEventListener('change', () => { r.type = sel.value; syncLen(); refreshDesignerSql(); });
+    syncLen();
+
+    const tdNotNull = el('td', 'c-flag');
+    tdNotNull.appendChild(checkEl(r.notNull, v => { r.notNull = v; refreshDesignerSql(); }));
+    tr.appendChild(tdNotNull);
+
+    const tdPk = el('td', 'c-flag');
+    const pkIn = checkEl(r.pk, v => {
+      r.pk = v;
+      if (v) {
+        // 主键只留一个（引擎是单列主键）
+        designer.rows.forEach(o => { if (o !== r) o.pk = false; });
+        renderDesigner();
+      }
+      refreshDesignerSql();
+    });
+    tdPk.appendChild(pkIn);
+    tr.appendChild(tdPk);
+
+    const tdUniq = el('td', 'c-flag');
+    tdUniq.appendChild(checkEl(r.uniq, v => { r.uniq = v; refreshDesignerSql(); }));
+    tr.appendChild(tdUniq);
+
+    const tdDef = el('td', 'c-def');
+    const defIn = document.createElement('input');
+    defIn.type = 'text';
+    defIn.spellcheck = false;
+    defIn.placeholder = '如 now()';
+    defIn.value = r.def || '';
+    defIn.addEventListener('input', () => { r.def = defIn.value; refreshDesignerSql(); });
+    tdDef.appendChild(defIn);
+    tr.appendChild(tdDef);
+
+    const tdDel = el('td', 'c-del');
+    const del = el('button', 'row-del', '×');
+    del.title = '删除该字段';
+    del.addEventListener('click', ev => {
+      ev.stopPropagation();
+      designer.rows.splice(i, 1);
+      if (designer.sel >= designer.rows.length) designer.sel = designer.rows.length - 1;
+      renderDesigner();
+      refreshDesignerSql();
+    });
+    tdDel.appendChild(del);
+    tr.appendChild(tdDel);
+
+    tb.appendChild(tr);
+  });
+}
+
+// 按「原结构 vs 当前编辑」的差异生成语句。引擎的 ALTER 只支持
+// 加列/删列/改列名/改类型，NOT NULL 和默认值改不了，这里给注释提示。
+function buildDesignerSql() {
+  const nameInput = document.getElementById('designerTableName');
+  const name = (nameInput ? nameInput.value : '').trim();
+  if (!name) return { error: '表名不能为空', stmts: [], sql: '' };
+
+  const rows = designer.rows.filter(r => (r.name || '').trim());
+  if (!rows.length) return { error: '至少要有一个字段', stmts: [], sql: '' };
+
+  const seen = new Set();
+  for (const r of rows) {
+    const k = r.name.trim().toLowerCase();
+    if (seen.has(k)) return { error: '字段名重复：' + r.name.trim(), stmts: [], sql: '' };
+    seen.add(k);
+  }
+
+  const stmts = [];
+  const warns = [];
+
+  if (designer.mode === 'new') {
+    const lines = rows.map(r => {
+      let s = '  ' + qi(r.name.trim()) + ' ' + typeSql(r);
+      if (r.pk) s += ' PRIMARY KEY';
+      else {
+        if (r.notNull) s += ' NOT NULL';
+        if (r.uniq) s += ' UNIQUE';
+      }
+      if (r.def.trim()) s += ' DEFAULT ' + r.def.trim();
+      return s;
+    });
+    stmts.push(`CREATE TABLE ${qi(name)} (\n${lines.join(',\n')}\n);`);
+  } else {
+    const old = designer.origName;
+    if (name.toLowerCase() !== old.toLowerCase()) {
+      stmts.push(`ALTER TABLE ${qi(old)} RENAME TO ${qi(name)};`);
+    }
+    const tbl = qi(name);
+
+    // 1) 改列名（后面的语句都用新名字）
+    for (const r of rows) {
+      if (r.orig && r.orig.toLowerCase() !== r.name.trim().toLowerCase()) {
+        stmts.push(`ALTER TABLE ${tbl} RENAME COLUMN ${qi(r.orig)} TO ${qi(r.name.trim())};`);
+      }
+    }
+    // 2) 改类型
+    for (const r of rows) {
+      if (!r.orig) continue;
+      const now = typeSql(r);
+      if (r.origType && now !== r.origType) {
+        stmts.push(`ALTER TABLE ${tbl} ALTER COLUMN ${qi(r.name.trim())} TYPE ${now};`);
+      }
+    }
+    // 3) 加列
+    for (const r of rows) {
+      if (r.orig) continue;
+      let s = `ALTER TABLE ${tbl} ADD COLUMN ${qi(r.name.trim())} ${typeSql(r)}`;
+      if (r.notNull) s += ' NOT NULL';
+      if (r.uniq) s += ' UNIQUE';
+      if (r.def.trim()) s += ' DEFAULT ' + r.def.trim();
+      stmts.push(s + ';');
+    }
+    // 4) 删列（原来有、现在列表里没有）
+    const kept = new Set(rows.filter(r => r.orig).map(r => r.orig.toLowerCase()));
+    for (const o of designer.origCols) {
+      if (!kept.has(o.name.toLowerCase())) {
+        stmts.push(`ALTER TABLE ${tbl} DROP COLUMN ${qi(o.name)};`);
+      }
+    }
+    // 5) 不支持的改动，只在预览里提示
+    for (const r of rows) {
+      if (!r.orig) continue;
+      const o = designer.origCols.find(x => x.name === r.orig);
+      if (!o) continue;
+      if (!!o.notNull !== !!r.notNull) warns.push(`${r.name}: 引擎不支持修改已有列的 NOT NULL，已忽略`);
+      if ((o.def || '') !== (r.def || '').trim()) warns.push(`${r.name}: 引擎不支持修改已有列的默认值，已忽略`);
+      if (!!o.uniq !== !!r.uniq) warns.push(`${r.name}: 引擎不支持给已有列加/去 UNIQUE，已忽略`);
+      if (!!o.pk !== !!r.pk && !r.pk) warns.push(`${r.name}: 引擎不支持取消已有列的主键，已忽略`);
+      if (!!o.pk !== !!r.pk && r.pk) warns.push(`${r.name}: 引擎不支持给已有表新增主键，已忽略`);
+    }
+  }
+
+  let sql = stmts.join('\n');
+  if (warns.length) sql = warns.map(w => '-- ' + w).join('\n') + '\n' + sql;
+  return { stmts, warns, sql };
+}
+
+function refreshDesignerSql() {
+  if (!designer) return;
+  const pre = document.getElementById('designerSql');
+  const built = buildDesignerSql();
+  if (!pre.classList.contains('hidden')) {
+    pre.textContent = built.error ? '-- ' + built.error : (built.stmts.length ? built.sql : '-- 没有修改');
+  }
+  return built;
+}
+
+function setSqlPreviewOpen(open) {
+  const pre = document.getElementById('designerSql');
+  const btn = document.getElementById('btnSqlPreview');
+  pre.classList.toggle('hidden', !open);
+  btn.classList.toggle('on', open);
+  if (open) {
+    const built = buildDesignerSql();
+    pre.textContent = built.error ? '-- ' + built.error : (built.stmts.length ? built.sql : '-- 没有修改');
+  }
+}
+
+async function saveDesigner() {
+  if (!designer) return;
+  const hint = document.getElementById('designerHint');
+  const built = buildDesignerSql();
+  if (built.error) {
+    hint.textContent = built.error;
+    hint.className = 'modal-hint err';
+    return;
+  }
+  if (!built.stmts.length) {
+    hint.textContent = '没有需要保存的修改';
+    hint.className = 'modal-hint';
+    return;
+  }
+  if (!ensureNoTx()) return;
+  const btn = document.getElementById('btnDesignerSave');
+  const isNew = designer.mode === 'new';
+  btn.disabled = true;
+  hint.textContent = '执行中…';
+  hint.className = 'modal-hint';
+  try {
+    const data = await api('/api/query', { sql: built.sql });
+    updateTx(data.tx);
+    renderResults(data);
+    if (data.error) {
+      hint.textContent = data.error.message || '保存失败';
+      hint.className = 'modal-hint err';
+      await loadSchema();
+      return;
+    }
+    if (isNew) {
+      // 新建完直接展开，省得再点一次
+      const created = document.getElementById('designerTableName').value.trim();
+      if (created) expandedTables.add(created);
+    }
+    closeDesigner();
+    await loadSchema();
+    toast(isNew ? '表已创建' : '表结构已更新');
+  } catch (e) {
+    hint.textContent = '保存失败：' + e.message;
+    hint.className = 'modal-hint err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------------- 绑定 ---------------- */
+
+document.getElementById('btnNewTable').addEventListener('click', () => openDesigner(null));
+
+treeEl.addEventListener('contextmenu', ev => {
+  if (ev.target.closest('.table-row')) return; // 表节点自己处理
+  ev.preventDefault();
+  showCtxMenu(ev.clientX, ev.clientY, blankMenuItems());
+});
+
+document.addEventListener('mousedown', ev => {
+  const m = ctxMenuEl();
+  if (m && !m.classList.contains('hidden') && !ev.target.closest('.ctx-menu')) hideCtxMenu();
+});
+window.addEventListener('resize', hideCtxMenu);
+
+document.getElementById('btnDesignerClose').addEventListener('click', closeDesigner);
+document.getElementById('btnDesignerCancel').addEventListener('click', closeDesigner);
+document.getElementById('btnDesignerSave').addEventListener('click', saveDesigner);
+document.getElementById('btnSqlPreview').addEventListener('click', () => {
+  const pre = document.getElementById('designerSql');
+  setSqlPreviewOpen(pre.classList.contains('hidden'));
+});
+document.getElementById('btnAddCol').addEventListener('click', () => {
+  if (!designer) return;
+  designer.rows.push(newDesignerRow());
+  designer.sel = designer.rows.length - 1;
+  renderDesigner();
+  refreshDesignerSql();
+});
+document.getElementById('btnDelCol').addEventListener('click', () => {
+  if (!designer) return;
+  if (designer.sel < 0 || designer.sel >= designer.rows.length) {
+    toast('先在网格里点一行，再删除', true);
+    return;
+  }
+  designer.rows.splice(designer.sel, 1);
+  if (designer.sel >= designer.rows.length) designer.sel = designer.rows.length - 1;
+  renderDesigner();
+  refreshDesignerSql();
+});
+document.getElementById('btnSetPk').addEventListener('click', () => {
+  if (!designer) return;
+  const r = designer.rows[designer.sel];
+  if (!r) { toast('先选一行', true); return; }
+  const next = !r.pk;
+  designer.rows.forEach(o => { o.pk = false; });
+  r.pk = next;
+  renderDesigner();
+  refreshDesignerSql();
+});
+document.getElementById('designerTableName').addEventListener('input', refreshDesignerSql);
+
+designerModalEl().addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') closeDesigner();
+  if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); saveDesigner(); }
+});
+
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  const m = ctxMenuEl();
+  if (m && !m.classList.contains('hidden')) hideCtxMenu();
+  if (designer && !designerModalEl().classList.contains('hidden')) closeDesigner();
+});

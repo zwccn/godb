@@ -34,7 +34,10 @@
   <aside class="sidebar">
     <div class="sidebar-head">
       <span>表结构</span>
-      <button id="btnRefresh" class="icon-btn" title="刷新">⟳</button>
+      <span class="sidebar-head-actions">
+        <button id="btnNewTable" class="icon-btn" title="新建表">+</button>
+        <button id="btnRefresh" class="icon-btn" title="刷新">⟳</button>
+      </span>
     </div>
     <div id="schemaTree" class="tree">
       <div class="empty-hint">暂无表，试试「载入示例数据」</div>
@@ -116,6 +119,86 @@
     </div>
   </div>
 </div>
+
+<!-- 右键菜单 -->
+<div id="ctxMenu" class="ctx-menu hidden" role="menu"></div>
+
+<!-- 表设计器 -->
+<div id="designerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="表设计器">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <span id="designerTitle">表设计器</span>
+      <button id="btnDesignerClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="designer-bar">
+      <button id="btnAddCol" class="btn btn-ghost btn-sm">＋ 添加字段</button>
+      <button id="btnDelCol" class="btn btn-ghost btn-sm">－ 删除字段</button>
+      <button id="btnSetPk" class="btn btn-ghost btn-sm">设为主键</button>
+      <span class="spacer"></span>
+      <button id="btnSqlPreview" class="btn btn-ghost btn-sm">SQL 预览</button>
+    </div>
+    <div class="designer-name">
+      <label for="designerTableName">表名</label>
+      <input id="designerTableName" type="text" spellcheck="false" autocomplete="off">
+      <span id="designerMeta" class="designer-meta"></span>
+    </div>
+    <div class="designer-body">
+      <div id="designerGrid" class="dgrid-wrap">
+        <table class="dgrid">
+          <thead>
+            <tr>
+              <th class="c-idx">#</th>
+              <th class="c-name">名</th>
+              <th class="c-type">类型</th>
+              <th class="c-len">长度</th>
+              <th class="c-len">小数点</th>
+              <th class="c-flag">不是 null</th>
+              <th class="c-flag">主键</th>
+              <th class="c-flag">唯一</th>
+              <th class="c-def">默认值</th>
+              <th class="c-del"></th>
+            </tr>
+          </thead>
+          <tbody id="designerRows"></tbody>
+        </table>
+      </div>
+      <pre id="designerSql" class="sql-preview hidden"></pre>
+    </div>
+    <div class="modal-foot">
+      <span id="designerHint" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="btnDesignerCancel" class="btn btn-sm">取消</button>
+        <button id="btnDesignerSave" class="btn btn-primary btn-sm">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 通用输入弹窗（重命名 / 复制表结构） -->
+<div id="promptModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="输入">
+  <div class="modal-card narrow">
+    <div class="modal-head">
+      <span id="promptTitle">输入</span>
+      <button id="btnPromptClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="set-row">
+        <label id="promptLabel" for="promptInput">名称</label>
+        <input id="promptInput" type="text" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="set-hint" id="promptHintText"></div>
+    </div>
+    <div class="modal-foot">
+      <span id="promptHint" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="btnPromptCancel" class="btn btn-sm">取消</button>
+        <button id="btnPromptOk" class="btn btn-primary btn-sm">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
 
 <script src="/app.js"></script>
 </body>

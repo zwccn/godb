@@ -53,7 +53,7 @@ go build -o godb.exe .
 | 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
-| 接入 | 内嵌 Web 控制台（HTTP/JSON）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
+| 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：`IN`/`EXISTS` 子查询、CTE、窗口函数、外键、`CHECK`、
 `FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引、`RETURNING`、`INSERT ... SELECT`。
@@ -61,6 +61,38 @@ go build -o godb.exe .
 **支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。
 这不是为了 SQL 完整性，而是客户端刚需：Navicat 刷新对象树时会发
 `(SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid) > 0`，不支持就整个表列表刷不出来。
+
+## 表管理（右键菜单 + 表设计器）
+
+Web 控制台左侧的表树支持右键菜单，照着 Navicat 的习惯做的。菜单动作不新增后端接口，
+全部由前端生成 SQL 走 `/api/query` —— 报错就是真实的 SQL 报错，也算教学的一部分。
+
+| 菜单项 | 生成的语句 |
+|---|---|
+| 打开表 | `SELECT * FROM t LIMIT 100` |
+| 设计表 | 打开表设计器，保存时按差异生成下面几种 `ALTER` |
+| 新建表… | `CREATE TABLE`（表设计器，空表起步） |
+| 重命名… | `ALTER TABLE t RENAME TO t2` |
+| 复制表结构… | 用 `/api/schema` 反推 `CREATE TABLE`（**不复制数据**，引擎不支持 `INSERT ... SELECT`） |
+| 清空数据 | `TRUNCATE TABLE t` |
+| 删除表 | `DROP TABLE t` |
+| 刷新列表 | 重新拉 `/api/schema` |
+
+表树空白处右键只有「新建表 / 刷新列表」，侧栏标题旁的 `+` 也是新建表。
+
+### 表设计器
+
+表格化的列编辑器：名 / 类型 / 长度 / 小数点 / 不是 null / 主键 / 唯一 / 默认值，
+顶部有「添加字段、删除字段、设为主键」，右侧「SQL 预览」实时显示将要执行的语句（Ctrl+Enter 保存）。
+
+保存时按原结构与当前编辑的差异生成语句，顺序是：改表名 → 改列名 → 改类型 → 加列 → 删列。
+因为 `ALTER COLUMN TYPE` 认的是当前列名，所以改名必须排在改类型之前。
+
+**能力边界**（引擎限制，设计器里会以注释形式提示「已忽略」，不会静默丢改动）：
+
+- 已有列的 `NOT NULL` / `DEFAULT` / `UNIQUE` 改不了（引擎没有 `ALTER COLUMN SET ...`）。
+- 主键不能给已有表后加，也不能取消；新建表时可以设，且只支持单列主键。
+- 事务未结束时禁止 DDL（`DDL 不能在事务里执行`），设计器保存前会先拦一下。
 
 ## 并发控制（表级两阶段封锁）
 

@@ -136,6 +136,27 @@ func (p *parser) ident() (string, error) {
 	return "", p.errAt(t, "syntax error at or near %q", t.String())
 }
 
+// tableName 解析可选的 schema 限定表名（"public"."t" / public.t / t），
+// 返回表名本身。
+//
+// godb 只有 public 一个 schema，所以前缀被忽略；但客户端（Navicat、
+// pgAdmin、各类 ORM）几乎都会带上它，不认就会在建表时直接语法错误。
+func (p *parser) tableName() (string, error) {
+	first, err := p.ident()
+	if err != nil {
+		return "", err
+	}
+	if p.atPunct(".") {
+		p.pos++
+		second, err := p.ident()
+		if err != nil {
+			return "", err
+		}
+		return second, nil
+	}
+	return first, nil
+}
+
 func (p *parser) parseStatement() (Statement, error) {
 	t := p.peek()
 	if t.Kind != Word {
@@ -221,7 +242,7 @@ func (p *parser) parseCreate() (Statement, error) {
 		}
 		ct.IfNotExists = true
 	}
-	name, err := p.ident()
+	name, err := p.tableName()
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +473,7 @@ func (p *parser) parseDrop() (Statement, error) {
 		st.IfExists = true
 	}
 	for {
-		n, err := p.ident()
+		n, err := p.tableName()
 		if err != nil {
 			return nil, err
 		}
@@ -472,7 +493,7 @@ func (p *parser) parseAlter() (Statement, error) {
 	if err := p.expectKw("table"); err != nil {
 		return nil, err
 	}
-	name, err := p.ident()
+	name, err := p.tableName()
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +586,7 @@ func (p *parser) parseAlter() (Statement, error) {
 
 func (p *parser) parseTruncate() (Statement, error) {
 	p.acceptKw("table")
-	n, err := p.ident()
+	n, err := p.tableName()
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +603,7 @@ func (p *parser) parseInsert() (Statement, error) {
 	if err := p.expectKw("into"); err != nil {
 		return nil, err
 	}
-	name, err := p.ident()
+	name, err := p.tableName()
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +650,7 @@ func (p *parser) parseInsert() (Statement, error) {
 }
 
 func (p *parser) parseUpdate() (Statement, error) {
-	name, err := p.ident()
+	name, err := p.tableName()
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +695,7 @@ func (p *parser) parseDelete() (Statement, error) {
 	if err := p.expectKw("from"); err != nil {
 		return nil, err
 	}
-	name, err := p.ident()
+	name, err := p.tableName()
 	if err != nil {
 		return nil, err
 	}

@@ -301,3 +301,32 @@ func TestRightJoinAndOrder(t *testing.T) {
 	// DISTINCT
 	assertRows(t, run(t, d, s, `SELECT DISTINCT l_id FROM r WHERE l_id < 50`), []string{"1", "2"})
 }
+
+// 客户端（Navicat / pgAdmin / ORM）建表时几乎都会写 "public"."表名"，
+// 每个语句的表名位置都必须能吃下 schema 前缀，否则一建表就语法错误。
+func TestSchemaQualifiedTableNames(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	run(t, d, s, `CREATE TABLE "public"."Ud" (
+		"id" int4,
+		"name" varchar(255),
+		PRIMARY KEY ("id")
+	)`)
+
+	run(t, d, s, `INSERT INTO "public"."ud" VALUES (1, 'a'), (2, 'b')`)
+	assertRows(t, run(t, d, s, `SELECT id, name FROM public.ud ORDER BY id`), []string{"1|a", "2|b"})
+
+	run(t, d, s, `UPDATE public.ud SET name = 'B' WHERE id = 2`)
+	assertRows(t, run(t, d, s, `SELECT name FROM "public"."ud" WHERE id = 2`), []string{"B"})
+
+	run(t, d, s, `ALTER TABLE "public"."ud" ADD COLUMN note TEXT`)
+	run(t, d, s, `DELETE FROM public.ud WHERE id = 1`)
+	assertRows(t, run(t, d, s, `SELECT count(*), count(note) FROM public.ud`), []string{"1|0"})
+
+	run(t, d, s, `TRUNCATE TABLE "public"."ud"`)
+	assertRows(t, run(t, d, s, `SELECT count(*) FROM public.ud`), []string{"0"})
+
+	run(t, d, s, `DROP TABLE "public"."ud"`)
+	runErr(t, d, s, `SELECT * FROM public.ud`)
+}

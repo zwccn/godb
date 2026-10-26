@@ -264,7 +264,7 @@ func TestErrors(t *testing.T) {
 	run(t, d, "s", `CREATE TABLE e (id INTEGER)`)
 	runErr(t, d, "s", `CREATE TABLE e (id INTEGER)`)
 	runErr(t, d, "s", `SELECT nope FROM e`)
-	runErr(t, d, "s", `SELECT * FROM e WHERE (SELECT 1)`)
+	// 标量子查询现在是支持的（客户端刷对象树需要），见 subquery_test.go
 	runErr(t, d, "s", `INSERT INTO e (id) VALUES (1/0)`)
 	runErr(t, d, "s", `SELEC 1`)
 	runErr(t, d, "s", `CREATE TABLE e2 (a INTEGER, a TEXT)`)

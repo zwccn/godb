@@ -146,8 +146,19 @@ type Join struct {
 	On    Expr
 }
 
+// ParenJoin 是括号包裹的联接组：LEFT JOIN (a JOIN b ON ...) x ON ...
+//
+// 这是标准 SQL 的 "joined table"，不是子查询。括号里可以继续是联接链，
+// 括号外的别名会覆盖内部各表的限定符（所以外面用 x.col 引用内部列，
+// 而 a、b 这些内部别名在括号外不可见 —— 与 PostgreSQL 行为一致）。
+type ParenJoin struct {
+	Inner TableRef
+	Alias string
+}
+
 func (*BaseTable) tableRef() {}
 func (*Join) tableRef()      {}
+func (*ParenJoin) tableRef() {}
 
 // ---------- 事务 ----------
 
@@ -227,6 +238,18 @@ type In struct {
 	Not  bool
 }
 
+// Subquery 是括号里的 SELECT，只能出现在表达式位置（标量子查询）。
+//
+// 只支持「返回单列」的标量子查询，可以引用外层查询的列（相关子查询），
+// 例如客户端常见的：
+//
+//	(SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid) > 0
+//
+// 不支持 IN/EXISTS 形式与多列子查询。
+type Subquery struct {
+	Select *Select
+}
+
 // AnyOp 表示 x <op> ANY (arr) / x <op> ALL (arr)。
 // 系统目录查询里非常常见（如 relkind = ANY (ARRAY['r','p'])）。
 type AnyOp struct {
@@ -262,6 +285,7 @@ func (*Cast) exprNode()       {}
 func (*IsNull) exprNode()     {}
 func (*In) exprNode()         {}
 func (*AnyOp) exprNode()      {}
+func (*Subquery) exprNode()   {}
 func (*Between) exprNode()    {}
 func (*Like) exprNode()       {}
 func (*DefaultVal) exprNode() {}

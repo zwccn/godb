@@ -91,6 +91,9 @@ var specs = []tableSpec{
 		c("reloftype", tOid), c("relowner", tOid), c("relam", tOid), c("relfilenode", tOid),
 		c("reltablespace", tOid), c("relpages", tInt4), c("reltuples", tFloat4),
 		c("relallvisible", tInt4), c("reltoastrelid", tOid), c("relhasindex", tBool),
+		// relhasoids 在 PG 12 已经移除，但老客户端（Navicat、旧版 JDBC）
+		// 仍会 SELECT 它，缺列会直接报错，所以保留并恒为 false。
+		c("relhasoids", tBool),
 		c("relisshared", tBool), c("relpersistence", tChar), c("relkind", tChar),
 		c("relnatts", tInt2), c("relchecks", tInt2), c("relhasrules", tBool),
 		c("relhastriggers", tBool), c("relhassubclass", tBool), c("relrowsecurity", tBool),

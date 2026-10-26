@@ -72,6 +72,19 @@ type compileCtx struct {
 	aggs    map[string]int // 聚合表达式规范文本 → 输出列下标
 	groupN  int            // 组键数量（输出 schema 前缀长度）
 	scOut   Schema         // 聚合输出 schema
+
+	// planner 非 nil 时允许在表达式里编译子查询（标量子查询）。
+	planner *Planner
+	// outerScopes 是子查询能看到的层层外层作用域（由外到内），
+	// 用于解析相关子查询里对上层列的引用。
+	outerScopes []outerScope
+}
+
+// outerScope 是一层子查询可见的外层作用域。
+// row 指向 subqueryEval 里的当前外层行，每行执行前会被更新。
+type outerScope struct {
+	sc  Schema
+	row *types.Row
 }
 
 func (c *compileCtx) aggregateAt(e sql.Expr) (int, bool) {
@@ -116,9 +129,32 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 	case *sql.Literal:
 		return &constEval{v: n.Val, t: types.TypeOf(n.Val)}, nil
 
+	case *sql.Subquery:
+		if c.planner == nil {
+			return nil, fmt.Errorf("subqueries are not supported in this context")
+		}
+		ie := &subqueryEval{}
+		plan, err := c.planner.buildSubquery(n.Select, c.sc, &ie.outer)
+		if err != nil {
+			return nil, err
+		}
+		cols := plan.Schema()
+		if len(cols) != 1 {
+			return nil, fmt.Errorf("subquery must return only one column")
+		}
+		ie.plan = plan
+		ie.typ = cols[0].Type
+		return ie, nil
+
 	case *sql.ColumnRef:
 		idx, t, err := c.sc.Resolve(n.Table, n.Name)
 		if err != nil {
+			// 子查询里可能引用外层查询的列（相关子查询）
+			for i := len(c.outerScopes) - 1; i >= 0; i-- {
+				if oidx, ot, oerr := c.outerScopes[i].sc.Resolve(n.Table, n.Name); oerr == nil {
+					return &outerRef{idx: oidx, row: c.outerScopes[i].row, typ: ot}, nil
+				}
+			}
 			if c.postAgg {
 				return nil, fmt.Errorf("column %q must appear in the GROUP BY clause or be used in an aggregate function", n.Name)
 			}
@@ -1095,3 +1131,58 @@ func charEq(a, b rune, ignoreCase bool) bool {
 	}
 	return a == b
 }
+
+// ---------- 标量子查询 ----------
+
+// outerRef 求值子查询里对「外层查询某一列」的引用。
+// row 指向 subqueryEval.outer，后者在每行执行前被赋值。
+type outerRef struct {
+	idx int
+	row *types.Row
+	typ types.Type
+}
+
+func (e *outerRef) Eval(types.Row) (types.Value, error) {
+	if e.row == nil || *e.row == nil {
+		return types.Null, fmt.Errorf("outer reference used outside of a subquery")
+	}
+	r := *e.row
+	if e.idx >= len(r) {
+		return types.Null, fmt.Errorf("outer reference index out of range")
+	}
+	return r[e.idx], nil
+}
+
+func (e *outerRef) Type() types.Type { return e.typ }
+
+// subqueryEval 执行一个标量子查询：每来一行外层数据就重新跑一次子计划，
+// 取第一行第一列。没有行 → NULL，多行 → 报错（与 PostgreSQL 一致）。
+type subqueryEval struct {
+	plan  Operator
+	outer types.Row
+	typ   types.Type
+}
+
+func (e *subqueryEval) Eval(row types.Row) (types.Value, error) {
+	e.outer = row
+	if err := e.plan.Open(); err != nil {
+		return types.Null, err
+	}
+	defer e.plan.Close()
+
+	first, ok, err := e.plan.Next()
+	if err != nil {
+		return types.Null, err
+	}
+	if !ok {
+		return types.Null, nil
+	}
+	if _, more, err := e.plan.Next(); err != nil {
+		return types.Null, err
+	} else if more {
+		return types.Null, fmt.Errorf("more than one row returned by a subquery used as an expression")
+	}
+	return first[0], nil
+}
+
+func (e *subqueryEval) Type() types.Type { return e.typ }

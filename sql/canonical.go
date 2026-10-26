@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -62,6 +63,9 @@ func Walk(e Expr, visit func(Expr) bool) {
 	case *AnyOp:
 		Walk(n.X, visit)
 		Walk(n.Arr, visit)
+	case *Subquery:
+		// 子查询整体是一个叶子节点：不展开内部表达式（避免和外层
+		// GROUP BY 的规范化冲突），canon 用它的指针做稳定 key。
 	case *IsNull:
 		Walk(n.X, visit)
 	case *In:
@@ -170,6 +174,11 @@ func canon(b *strings.Builder, e Expr) {
 			b.WriteString(",")
 			canon(b, a)
 		}
+		b.WriteByte(')')
+	case *Subquery:
+		// 同一次解析出来的 AST 指针稳定，足够作为分组/去重的 key
+		b.WriteString("S(")
+		b.WriteString(fmt.Sprintf("%p", n))
 		b.WriteByte(')')
 	case *AnyOp:
 		b.WriteString("A(")

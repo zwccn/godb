@@ -391,7 +391,9 @@ func (p *parser) parseColumnDef() (*ColumnDef, error) {
 // parseTypeRef 解析类型名（可能带括号参数），返回 serial 标记。
 func (p *parser) parseTypeRef() (string, []int, bool, error) {
 	t := p.peek()
-	if t.Kind != Word {
+	// 类型名也允许带引号：客户端会写 'r'::"char"、"char"、"text" 之类
+	// （"char" 是 PG 里真实存在的单字节内部类型）。
+	if t.Kind != Word && t.Kind != QIdent {
 		return "", nil, false, p.errAt(t, "syntax error at or near %q", t.String())
 	}
 	p.pos++
@@ -882,11 +884,16 @@ func (p *parser) parseSelectItem() (*SelectItem, error) {
 // parseOptAlias 解析可选别名（[AS] name）。裸词别名不能是保留字。
 func (p *parser) parseOptAlias() (string, bool, error) {
 	if p.acceptKw("as") {
-		n, err := p.ident()
-		if err != nil {
-			return "", false, err
+		// AS 后面的别名允许是保留字：PostgreSQL 的 ColLabel 规则里别名可以
+		// 用任何关键字，客户端会写 `pg_get_expr(...) AS default`、
+		// `... AS user`、`... AS comment` 这类。裸别名（不带 AS）仍然
+		// 只接受非保留字，否则 `FROM t JOIN u` 会把 JOIN 当成别名。
+		t := p.peek()
+		if t.Kind == Word || t.Kind == QIdent {
+			p.pos++
+			return strings.ToLower(t.Text), true, nil
 		}
-		return n, true, nil
+		return "", false, p.errAt(t, "syntax error at or near %q", t.String())
 	}
 	t := p.peek()
 	if t.Kind == QIdent {
@@ -901,7 +908,7 @@ func (p *parser) parseOptAlias() (string, bool, error) {
 }
 
 func (p *parser) parseTableRef() (TableRef, error) {
-	base, err := p.parseBaseTable()
+	base, err := p.parseTablePrimary()
 	if err != nil {
 		return nil, err
 	}
@@ -942,7 +949,7 @@ func (p *parser) parseTableRef() (TableRef, error) {
 		if !explicit {
 			break
 		}
-		right, err := p.parseBaseTable()
+		right, err := p.parseTablePrimary()
 		if err != nil {
 			return nil, err
 		}
@@ -965,6 +972,30 @@ func (p *parser) parseTableRef() (TableRef, error) {
 	return ref, nil
 }
 
+// parseTablePrimary 解析 FROM 里的一项：裸表、schema.table，或括号联接组。
+func (p *parser) parseTablePrimary() (TableRef, error) {
+	if p.atPunct("(") {
+		p.pos++
+		if p.atKw("select") || p.atKw("with") || p.atKw("values") {
+			return nil, p.errAt(p.peek(), "subqueries are not supported")
+		}
+		inner, err := p.parseTableRef()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		alias, _, err := p.parseOptAlias()
+		if err != nil {
+			return nil, err
+		}
+		return &ParenJoin{Inner: inner, Alias: alias}, nil
+	}
+	return p.parseBaseTable()
+}
+
+// parseBaseTable 解析 [schema.]表名 [alias]。
 func (p *parser) parseBaseTable() (*BaseTable, error) {
 	name, err := p.ident()
 	if err != nil {

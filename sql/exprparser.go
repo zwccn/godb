@@ -269,7 +269,18 @@ func (p *parser) parsePrimaryBase() (Expr, error) {
 		if t.Text == "(" {
 			p.pos++
 			if p.atKw("select") {
-				return nil, p.errAt(p.peek(), "subqueries are not supported")
+				st, err := p.parseSelect()
+				if err != nil {
+					return nil, err
+				}
+				sel, ok := st.(*Select)
+				if !ok {
+					return nil, p.errAt(p.peek(), "expected SELECT")
+				}
+				if err := p.expectPunct(")"); err != nil {
+					return nil, err
+				}
+				return &Subquery{Select: sel}, nil
 			}
 			e, err := p.parseExpr()
 			if err != nil {

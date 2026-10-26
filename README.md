@@ -53,7 +53,12 @@ go build -o godb.exe .
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
-**明确不支持**（会报清晰的错误）：子查询、CTE、窗口函数、`UNION`、外键、`CHECK`、`FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引、`RETURNING`、`INSERT ... SELECT`。
+**明确不支持**（会报清晰的错误）：`IN`/`EXISTS` 子查询、`FROM` 子查询、CTE、窗口函数、`UNION`、外键、`CHECK`、
+`FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引、`RETURNING`、`INSERT ... SELECT`。
+
+**支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。
+这不是为了 SQL 完整性，而是客户端刚需：Navicat 刷新对象树时会发
+`(SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid) > 0`，不支持就整个表列表刷不出来。
 
 ## 并发控制（表级两阶段封锁）
 
@@ -227,7 +232,9 @@ psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
 | `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
 | 密码认证（md5 / SCRAM） | ❌ |
 | `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
-| 子查询 / CTE / 窗口函数 | ❌ 所以 `psql \d`（内部用了子查询和 `OPERATOR()`）仍不可用，`\dt` 可以 |
+| 标量子查询 `(SELECT ...)` | ✅ 含相关子查询；多行会报 `more than one row` |
+| `IN`/`EXISTS`/`FROM` 子查询、CTE、窗口函数 | ❌ |
+| 括号联接组 `LEFT JOIN (a JOIN b ON …) x ON …` | ✅ 客户端刷对象树必需 |
 
 > 注意端口：默认用 `6432`，因为本机 `5432` 往往已经被真正的 PostgreSQL 占用。
 
@@ -452,7 +459,8 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - 耗时精度受操作系统时钟限制：小于本机时钟步进（沙箱里约 0.2ms）的操作只能显示上界 `<0.20 ms`。
 - JOIN 会物化两侧数据；连接结果超过 200 万行会直接报错而不是把内存吃光。
 - 没有查询优化器（不做谓词下推、连接顺序重排），执行计划就是 SQL 的直译。
-- DDL 不能在事务块内执行；二级索引、多列主键、外键、子查询都在待办清单里。
+- DDL 不能在事务块内执行；二级索引、多列主键、外键、`IN`/`EXISTS` 子查询都在待办清单里。
+- 标识符统一转小写（`"Ud"` 与 `ud` 视为同一张表），不像 PostgreSQL 那样区分引号标识符的大小写。
 - 系统目录是"够客户端用"的子集：`pg_proc` 只列了少量函数、统计视图（`pg_stat_*`）大多是空壳，
   需要新表时补 `syscat/syscat.go` 的 `specs` 与 `syscat/rows.go` 的生成逻辑即可。
-- `psql \d <表名>` 仍不可用：它内部用了子查询和 `OPERATOR(pg_catalog.~)` 语法。`\dt` 可以。
+- `psql \d <表名>` 仍不可用：它内部用了 `OPERATOR(pg_catalog.~)` 语法。`\dt` 可以。

@@ -14,6 +14,9 @@ import (
 type Planner struct {
 	Tx  *storage.Tx
 	Cat *catalog.Catalog
+
+	// outerScopes 是编译子查询时压入的外层作用域（见 buildSubquery）。
+	outerScopes []outerScope
 }
 
 // BuildSelect 构建查询计划。
@@ -24,7 +27,7 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 	}
 
 	if s.Where != nil {
-		pred, err := Compile(s.Where, sc)
+		pred, err := p.compile(s.Where, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -83,6 +86,23 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		op := newScan(p.Tx, t, qual)
 		return op, op.Schema(), nil
 
+	case *sql.ParenJoin:
+		op, sc, err := p.buildTableRef(n.Inner)
+		if err != nil {
+			return nil, nil, err
+		}
+		if n.Alias == "" {
+			return op, sc, nil
+		}
+		// 别名覆盖内部所有列的限定符：外面写 x.col 就能取到内部任意列，
+		// 而内部别名（a、b）在括号外不再可见。
+		ns := make(Schema, len(sc))
+		copy(ns, sc)
+		for i := range ns {
+			ns[i].Qualifier = n.Alias
+		}
+		return &aliasOp{inner: op, sc: ns}, ns, nil
+
 	case *sql.Join:
 		lop, lsc, err := p.buildTableRef(n.Left)
 		if err != nil {
@@ -107,11 +127,11 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 					rl, rr, err2 := sideOf(b.R, lsc, rsc)
 					if err1 == nil && err2 == nil {
 						if ll && rr {
-							le, err := Compile(b.L, lsc)
+							le, err := p.compile(b.L, lsc)
 							if err != nil {
 								return nil, nil, err
 							}
-							re, err := Compile(b.R, rsc)
+							re, err := p.compile(b.R, rsc)
 							if err != nil {
 								return nil, nil, err
 							}
@@ -119,11 +139,11 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 							j.rightKeys = append(j.rightKeys, re)
 							matched = true
 						} else if rl && lr {
-							le, err := Compile(b.R, lsc)
+							le, err := p.compile(b.R, lsc)
 							if err != nil {
 								return nil, nil, err
 							}
-							re, err := Compile(b.L, rsc)
+							re, err := p.compile(b.L, rsc)
 							if err != nil {
 								return nil, nil, err
 							}
@@ -138,7 +158,7 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 				}
 			}
 			if len(residual) > 0 {
-				re, err := Compile(andAll(residual), sc)
+				re, err := p.compile(andAll(residual), sc)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -196,7 +216,7 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 	exprs := make([]Eval, len(items))
 	out := make(Schema, len(items))
 	for i, it := range items {
-		ev, err := Compile(it.Expr, sc)
+		ev, err := p.compile(it.Expr, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -232,7 +252,7 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 	groupEvals := make([]Eval, len(s.GroupBy))
 	groupTypes := make([]types.Type, len(s.GroupBy))
 	for i, ge := range s.GroupBy {
-		ev, err := Compile(ge, sc)
+		ev, err := p.compile(ge, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -240,7 +260,8 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 		groupTypes[i] = ev.Type()
 	}
 
-	col := &aggCollector{byKey: map[string]int{}, sc: sc}
+	col := &aggCollector{byKey: map[string]int{}, sc: sc,
+		ctx: &compileCtx{sc: sc, planner: p, outerScopes: p.outerScopes}}
 	for _, it := range items {
 		if err := col.collect(it.Expr); err != nil {
 			return nil, err
@@ -391,6 +412,8 @@ type aggCollector struct {
 	aggs  []*aggSpec
 	byKey map[string]int
 	sc    Schema
+	// ctx 用于把 planner / 外层作用域传给聚合参数的编译（子查询要用）。
+	ctx *compileCtx
 }
 
 func (c *aggCollector) collect(e sql.Expr) error {
@@ -407,7 +430,7 @@ func (c *aggCollector) collect(e sql.Expr) error {
 		if _, exists := c.byKey[key]; exists {
 			return false
 		}
-		spec, err := buildAggSpec(fc, c.sc)
+		spec, err := buildAggSpec(fc, c.sc, c.ctx)
 		if err != nil {
 			firstErr = err
 			return false
@@ -420,7 +443,7 @@ func (c *aggCollector) collect(e sql.Expr) error {
 	return firstErr
 }
 
-func buildAggSpec(fc *sql.FuncCall, sc Schema) (*aggSpec, error) {
+func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, error) {
 	name := strings.ToLower(fc.Name)
 	spec := &aggSpec{Fn: name, Distinct: fc.Distinct, Label: sql.String(fc)}
 	if fc.Star {
@@ -434,7 +457,9 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema) (*aggSpec, error) {
 	if len(fc.Args) != 1 {
 		return nil, fmt.Errorf("aggregate %s requires exactly one argument", name)
 	}
-	arg, err := Compile(fc.Args[0], sc)
+	sub := &compileCtx{sc: sc, postAgg: parent.postAgg, keys: parent.keys, aggs: parent.aggs,
+		groupN: parent.groupN, scOut: parent.scOut, planner: parent.planner, outerScopes: parent.outerScopes}
+	arg, err := compile(fc.Args[0], sub)
 	if err != nil {
 		return nil, err
 	}
@@ -454,4 +479,34 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema) (*aggSpec, error) {
 		spec.Type = arg.Type()
 	}
 	return spec, nil
+}
+
+// aliasOp 给整棵子树的列换一个限定符，用于括号联接组起别名。
+type aliasOp struct {
+	inner Operator
+	sc    Schema
+}
+
+func (o *aliasOp) Schema() Schema                 { return o.sc }
+func (o *aliasOp) Open() error                    { return o.inner.Open() }
+func (o *aliasOp) Next() (types.Row, bool, error) { return o.inner.Next() }
+func (o *aliasOp) Close() error                   { return o.inner.Close() }
+func (o *aliasOp) Describe() string               { return "Alias(" + o.sc[0].Qualifier + ")" }
+func (o *aliasOp) Children() []Operator           { return []Operator{o.inner} }
+
+// compile 编译表达式，并允许其中出现子查询（标量子查询）。
+func (p *Planner) compile(e sql.Expr, sc Schema) (Eval, error) {
+	return compile(e, &compileCtx{sc: sc, planner: p, outerScopes: p.outerScopes})
+}
+
+// buildSubquery 在「当前外层作用域」下构建子查询计划。
+//
+// outerRow 指向调用方 subqueryEval 里的当前行，编译出来的 outerRef
+// 会持有这个指针，从而支持相关子查询（例如 WHERE inhparent = c.oid）。
+func (p *Planner) buildSubquery(s *sql.Select, outer Schema, outerRow *types.Row) (Operator, error) {
+	p.outerScopes = append(p.outerScopes, outerScope{sc: outer, row: outerRow})
+	defer func() {
+		p.outerScopes = p.outerScopes[:len(p.outerScopes)-1]
+	}()
+	return p.BuildSelect(s)
 }

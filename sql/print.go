@@ -127,6 +127,10 @@ func writeExpr(b *strings.Builder, e Expr) {
 			writeExpr(b, a)
 		}
 		b.WriteString(")")
+	case *Subquery:
+		// 不做完整反解析：子查询只用于内部计划与错误信息，
+		// 完整 SQL 文本对客户端查询没有意义。
+		b.WriteString("(SELECT ...)")
 	case *AnyOp:
 		writeExpr(b, n.X)
 		b.WriteString(" " + n.Op + " ")

@@ -64,6 +64,15 @@ func encodeAuthenticationOK() []byte {
 	return w.message(msgAuthentication)
 }
 
+// encodeAuthenticationCleartextPassword 要求客户端提交明文密码（AuthenticationCleartextPassword）。
+// 我们没有 TLS，所以只支持这一种认证方式；客户端拿到的密码会在服务端
+// 与 PBKDF2 哈希比对，不会落盘也不写日志。
+func encodeAuthenticationCleartextPassword() []byte {
+	w := &writer{}
+	w.int32(3) // AuthenticationCleartextPassword
+	return w.message(msgAuthentication)
+}
+
 func encodeParameterStatus(key, value string) []byte {
 	w := &writer{}
 	w.str(key)

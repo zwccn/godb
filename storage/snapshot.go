@@ -168,7 +168,13 @@ func (s *Store) migrateLegacySnapshot() error {
 func (s *Store) Checkpoint() error {
 	s.CommitMu.Lock()
 	defer s.CommitMu.Unlock()
-	return s.checkpointLocked()
+	if err := s.checkpointLocked(); err != nil {
+		return err
+	}
+	// 手动 CHECKPOINT / 退出时的 Flush 也算一次落盘：更新统计并清零计数，
+	// 否则后台定时器还会因为「计数没清」再补写一次快照。
+	s.noteCheckpointLocked()
+	return nil
 }
 
 // Flush 强制落盘：先把 WAL 里未 fsync 的记录刷下去，再做一次 checkpoint。
@@ -185,7 +191,13 @@ func (s *Store) Flush() error {
 			return err
 		}
 	}
-	return s.checkpointLocked()
+	if err := s.checkpointLocked(); err != nil {
+		return err
+	}
+	// Flush（手动 CHECKPOINT / 进程退出）同样算一次落盘：更新统计并清零
+	// 提交计数，否则后台定时器会因为「计数没清」再补写一次快照。
+	s.noteCheckpointLocked()
+	return nil
 }
 
 // checkpointLocked 在已持有 CommitMu 时执行 checkpoint。

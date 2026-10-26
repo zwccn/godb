@@ -13,10 +13,6 @@ import (
 	"godb/types"
 )
 
-// checkpointEvery 是自动 checkpoint 的提交次数阈值。
-// 达到它就写一次全量快照并轮转 WAL，避免 WAL 无限增长。
-const checkpointEvery = 128
-
 // Ref 定位一行：New 表示事务内新插入的行，否则是已提交行在堆中的行号。
 type Ref struct {
 	New  bool
@@ -59,6 +55,17 @@ type Store struct {
 	snapshotGen int64
 	// Repaired 是启动时为对齐列结构而修复的单元格数（正常应为 0）。
 	Repaired int64
+
+	// 落盘策略与统计（可在运行中热改，见 policy.go）。
+	cpCommits  atomic.Int64
+	cpSeconds  atomic.Int64
+	cpWALBytes atomic.Int64
+	cpLastNs   atomic.Int64
+	cpSince    atomic.Int64
+	cpRuns     atomic.Int64
+	cpStop     chan struct{}
+	cpOnce     sync.Once
+	cpWG       sync.WaitGroup
 }
 
 // Open 打开数据目录：加载快照 → 重放 WAL → 立刻 checkpoints 并截断 WAL。
@@ -96,11 +103,17 @@ func Open(dir string, cat *catalog.Catalog) (*Store, error) {
 	if err := s.Checkpoint(); err != nil {
 		return nil, err
 	}
+	// 落盘策略在 main 里按配置文件覆盖；这里先装出厂默认，
+	// 并启动「每隔 N 秒」的后台定时器。
+	s.SetCheckpointPolicy(DefaultPolicy())
+	s.resetCheckpointClock()
+	s.StartAutoCheckpoint()
 	return s, nil
 }
 
-// Close 关闭 WAL（写快照由 Checkpoint 负责）。
+// Close 停掉后台落盘定时器并关闭 WAL（写快照由 Checkpoint 负责）。
 func (s *Store) Close() error {
+	s.StopAutoCheckpoint()
 	if s.wal != nil {
 		return s.wal.Close()
 	}
@@ -730,10 +743,12 @@ func (tx *Tx) commitLocked() (int64, error) {
 	tx.n = 0
 
 	tx.st.commits++
-	if tx.st.commits >= checkpointEvery {
+	tx.st.cpSince.Add(1)
+	if tx.st.needCheckpointLocked() {
 		if err := tx.st.checkpointLocked(); err != nil {
 			return 0, err
 		}
+		tx.st.noteCheckpointLocked()
 		// checkpoint 已经把数据写进快照，这批记录不需要再等 fsync
 		return 0, nil
 	}

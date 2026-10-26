@@ -24,6 +24,7 @@
   <div class="top-actions">
     <span id="txPill" class="pill pill-idle">空闲</span>
     <button id="btnLocks" class="btn btn-ghost">锁状态<span id="lockBadge" class="badge hidden">0</span></button>
+    <button id="btnSettings" class="btn btn-ghost">设置</button>
     <button id="btnSample" class="btn">载入示例数据</button>
     <button id="btnReset" class="btn btn-ghost">清空数据库</button>
   </div>
@@ -87,7 +88,7 @@
       <div class="welcome">
         <div class="welcome-title">准备就绪</div>
         <p>左侧是表结构，点击表名可快速查询。支持多语句（用 <code>;</code> 分隔），结果会逐条显示在这里。</p>
-        <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>snapshot.json</code> 快照、<code>wal.log</code> 提交日志。</p>
+        <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>tables/*.snp</code> 每表一个数据文件、<code>wal.log</code> 提交日志。落盘节奏与端口在右上角「设置」里改。</p>
       </div>
     </div>
   </section>
@@ -101,6 +102,20 @@
   <div id="lockBody" class="drawer-body"></div>
   <div class="drawer-foot"><span id="lockMeta">—</span></div>
 </aside>
+
+<div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="设置">
+  <div class="modal-card">
+    <div class="modal-head">
+      <span>设置</span>
+      <button id="btnSettingsClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div id="settingsBody" class="modal-body"></div>
+    <div class="modal-foot">
+      <span id="settingsHint" class="modal-hint"></span>
+      <button id="btnSettingsSave" class="btn btn-primary btn-sm">保存并应用</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

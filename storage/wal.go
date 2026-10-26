@@ -53,13 +53,14 @@ type Wal struct {
 	f    *os.File
 	gen  int64
 
-	mu      sync.Mutex
-	cond    *sync.Cond
-	written int64 // 已写入文件的最高序号
-	synced  int64 // 已 fsync 的最高序号
-	syncing bool  // 是否已有 leader 在做 fsync
-	syncErr error
-	closed  bool
+	mu        sync.Mutex
+	cond      *sync.Cond
+	written   int64 // 已写入文件的最高序号
+	liveBytes int64 // 当前 WAL 文件的字节数（轮转后重置）
+	synced    int64 // 已 fsync 的最高序号
+	syncing   bool  // 是否已有 leader 在做 fsync
+	syncErr   error
+	closed    bool
 
 	// 统计
 	Frames   int64
@@ -95,7 +96,7 @@ func openWAL(dir string, gen int64) (*Wal, error) {
 			return nil, err
 		}
 	}
-	w := &Wal{path: path, f: f, gen: gen}
+	w := &Wal{path: path, f: f, gen: gen, liveBytes: st.Size()}
 	w.cond = sync.NewCond(&w.mu)
 	return w, nil
 }
@@ -125,6 +126,7 @@ func (w *Wal) Append(recs []walRec) (int64, error) {
 	w.written++
 	w.Frames += int64(len(recs))
 	w.Bytes += int64(len(buf))
+	w.liveBytes += int64(len(buf))
 	return w.written, nil
 }
 
@@ -225,6 +227,7 @@ func (w *Wal) Rotate(nextGen int64) error {
 	}
 	w.f = f
 	w.gen = nextGen
+	w.liveBytes = int64(len(walMagic))
 	w.synced = w.written // 旧记录已被快照覆盖，不需要再等 fsync
 	w.cond.Broadcast()
 	w.mu.Unlock()
@@ -249,6 +252,14 @@ func (w *Wal) Close() error {
 }
 
 // Stats 返回 WAL 统计。
+// LiveBytes 返回当前 WAL 文件的大小（轮转后归零），
+// 用于「WAL 涨到多少 MB 就落盘」这条策略。
+func (w *Wal) LiveBytes() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.liveBytes
+}
+
 func (w *Wal) Stats() (frames, bytes, syncs int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -38,6 +39,18 @@ type Server struct {
 	// QueryLog 非 nil 时，把客户端发来的每条 SQL 追加写进去，
 	// 用来排查“某个客户端发了我没实现的语句”这类问题。
 	QueryLog io.Writer
+
+	// AuthRequired 返回当前是否要求密码认证。nil 或返回 false 表示 trust
+	// （不校验密码）。用函数而不是布尔值，是为了让设置页改完立即生效，
+	// 不需要重建 Server。
+	AuthRequired func() bool
+	// AuthVerify 校验用户名与密码。返回 false 会回 28P01 并断开连接。
+	AuthVerify func(user, password string) bool
+}
+
+// authEnabled 判断当前连接是否需要密码认证。
+func (s *Server) authEnabled() bool {
+	return s.AuthRequired != nil && s.AuthRequired()
 }
 
 // logQuery 记录一条来自客户端的 SQL。
@@ -70,6 +83,10 @@ func (s *Server) Serve(ln net.Listener) error {
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
+			// listener 被主动关闭（热切换端口 / 进程退出）属于正常结束
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			return err
 		}
 		go s.handle(nc)
@@ -192,7 +209,14 @@ func (c *conn) startup() error {
 		c.user = "godb"
 	}
 
-	// trust 认证：直接放行
+	// 认证：需要密码时走 AuthenticationCleartextPassword，否则 trust 直接放行
+	if c.srv.authEnabled() {
+		if err := c.authenticate(); err != nil {
+			c.srv.logf("PG 认证失败（用户 %q，来自 %s）: %v", c.user, c.nc.RemoteAddr(), err)
+			return err
+		}
+	}
+
 	var out [][]byte
 	out = append(out, encodeAuthenticationOK())
 	params := [][2]string{
@@ -214,6 +238,40 @@ func (c *conn) startup() error {
 	out = append(out, encodeBackendKeyData(1, 0))
 	out = append(out, encodeReadyForQuery('I'))
 	return c.write(out...)
+}
+
+// authenticate 走一次「明文密码」认证。
+//
+// PostgreSQL 的流程是：服务端发 AuthenticationCleartextPassword（R=3），
+// 客户端回 PasswordMessage（'p'），服务端再发 AuthenticationOk。
+// 密码错误时直接回 FATAL 28P01 并断开 —— 不做重试，客户端会自己重连。
+func (c *conn) authenticate() error {
+	if err := c.write(encodeAuthenticationCleartextPassword()); err != nil {
+		return err
+	}
+	typ, body, err := c.readMsg()
+	if err != nil {
+		return err
+	}
+	if typ != 'p' {
+		c.write(encodeError("FATAL", "08P01", "expected password message"))
+		return fmt.Errorf("expected password message, got %q", typ)
+	}
+	pw := string(trimZero(body))
+	if c.srv.AuthVerify == nil || !c.srv.AuthVerify(c.user, pw) {
+		c.write(encodeError("FATAL", "28P01",
+			fmt.Sprintf(`password authentication failed for user %q`, c.user)))
+		return fmt.Errorf("password authentication failed")
+	}
+	return nil
+}
+
+// trimZero 去掉消息尾部的 0（PasswordMessage 是 null-terminated 字符串）。
+func trimZero(b []byte) []byte {
+	for len(b) > 0 && b[len(b)-1] == 0 {
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 func indexByte(b []byte, v byte) int {

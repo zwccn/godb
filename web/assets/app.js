@@ -539,6 +539,250 @@ editor.addEventListener('input', () => {
   localStorage.setItem('godb.sql', editor.value);
 });
 
+
+/* ---------------- 设置（落盘节奏 / 端口 / 密码） ---------------- */
+
+const settingsModal = document.getElementById('settingsModal');
+const settingsBody = document.getElementById('settingsBody');
+const settingsHint = document.getElementById('settingsHint');
+let settingsData = null;
+
+function setHint(msg, kind) {
+  settingsHint.textContent = msg || '';
+  settingsHint.className = 'modal-hint' + (kind ? ' ' + kind : '');
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+async function openSettings() {
+  settingsModal.classList.remove('hidden');
+  settingsBody.innerHTML = '';
+  setHint('加载中…', '');
+  try {
+    const d = await api('/api/config');
+    if (d.error) {
+      settingsBody.appendChild(el('div', 'set-warn', d.error));
+      setHint('');
+      return;
+    }
+    settingsData = d;
+    renderSettings();
+    setHint('');
+  } catch (e) {
+    settingsBody.appendChild(el('div', 'set-warn', '读取配置失败：' + e.message));
+  }
+}
+
+function closeSettings() {
+  settingsModal.classList.add('hidden');
+}
+
+function setRow(labelText, input, unit) {
+  const row = el('div', 'set-row');
+  const lab = el('label', '', labelText);
+  if (input.id) lab.htmlFor = input.id;
+  row.appendChild(lab);
+  row.appendChild(input);
+  if (unit) row.appendChild(el('span', 'unit', unit));
+  return row;
+}
+
+function numInput(id, val, min, max) {
+  const i = document.createElement('input');
+  i.type = 'number';
+  i.id = id;
+  i.value = String(val);
+  if (min !== undefined) i.min = String(min);
+  if (max !== undefined) i.max = String(max);
+  return i;
+}
+
+function textInput(id, val, placeholder, type) {
+  const i = document.createElement('input');
+  i.type = type || 'text';
+  i.id = id;
+  i.value = val || '';
+  if (placeholder) i.placeholder = placeholder;
+  return i;
+}
+
+function checkInput(id, checked) {
+  const i = document.createElement('input');
+  i.type = 'checkbox';
+  i.id = id;
+  i.checked = !!checked;
+  return i;
+}
+
+function renderSettings() {
+  const d = settingsData;
+  settingsBody.innerHTML = '';
+  const rt = d.runtime || {};
+
+  if (!rt.canEdit) {
+    settingsBody.appendChild(el('div', 'set-readonly',
+      '当前连接来自 ' + (rt.clientIp || '远程序') + '，只能查看。配置的写操作只接受本机（127.0.0.1）请求。'));
+  }
+
+  /* ---- 落盘 ---- */
+  settingsBody.appendChild(el('div', 'set-sec', '落盘节奏（checkpoint）'));
+  settingsBody.appendChild(setRow('每多少次提交', numInput('setCpCommits', d.storage.checkpointCommits, 0, 1000000), '次'));
+  settingsBody.appendChild(setRow('每隔多少秒', numInput('setCpSeconds', d.storage.checkpointSeconds, 0, 86400), '秒'));
+  settingsBody.appendChild(setRow('WAL 超过', numInput('setCpWALMB', d.storage.checkpointWalMB, 0, 65536), 'MB'));
+  settingsBody.appendChild(el('div', 'set-hint',
+    '三条任一满足就落盘（写快照 + 轮转 WAL），填 0 表示关闭该条。提交时的 fsync 始终同步执行，不受这里影响。'));
+
+  const cp = rt.checkpoint || {};
+  const stats = el('div', 'set-stats');
+  const stat = (k, v) => {
+    const s = el('span', '', k + ' ');
+    s.appendChild(el('b', '', v));
+    stats.appendChild(s);
+  };
+  stat('累计落盘', (cp.runs || 0) + ' 次');
+  stat('上次落盘', cp.lastAt ? (cp.secondsAgo || 0) + ' 秒前' : '尚未');
+  stat('之后已提交', (cp.commitsSince || 0) + ' 次');
+  stat('当前 WAL', fmtBytes(cp.walBytes || 0));
+  stat('数据文件', fmtBytes(rt.dataBytes || 0));
+  stat('表 / 行数', (rt.tables || 0) + ' / ' + (rt.rows || 0));
+  settingsBody.appendChild(stats);
+
+  if ((d.warnings || []).length) {
+    d.warnings.forEach(w => settingsBody.appendChild(el('div', 'set-warn', w)));
+  }
+
+  /* ---- 网络 ---- */
+  settingsBody.appendChild(el('div', 'set-sec', '网络（改完立即生效）'));
+  settingsBody.appendChild(setRow('控制台端口', numInput('setHTTPPort', d.network.httpPort, 1, 65535)));
+  const httpRemote = checkInput('setHTTPRemote', d.network.httpRemote);
+  const httpRemoteRow = el('div', 'set-row');
+  httpRemoteRow.appendChild(el('label', '', ''));
+  httpRemoteRow.appendChild(httpRemote);
+  httpRemoteRow.appendChild(el('span', 'unit', '允许远程访问控制台'));
+  settingsBody.appendChild(httpRemoteRow);
+  settingsBody.appendChild(el('div', 'set-hint',
+    '当前监听：' + (rt.httpAddr || '—') + '（' + (d.network.httpRemote ? '同网段可访问' : '仅本机') + '）' +
+    '　关闭远程时只绑定 127.0.0.1。'));
+
+  const pgEnabled = checkInput('setPGEnabled', d.network.pgEnabled);
+  const pgRow = el('div', 'set-row');
+  pgRow.appendChild(el('label', '', ''));
+  pgRow.appendChild(pgEnabled);
+  pgRow.appendChild(el('span', 'unit', '启用 PostgreSQL 协议端口'));
+  settingsBody.appendChild(pgRow);
+
+  const pgPort = numInput('setPGPort', d.network.pgPort, 1, 65535);
+  pgPort.disabled = !d.network.pgEnabled;
+  settingsBody.appendChild(setRow('PG 端口', pgPort));
+
+  const pgRemote = checkInput('setPGRemote', d.network.pgRemote);
+  const pgRemoteRow = el('div', 'set-row');
+  pgRemoteRow.appendChild(el('label', '', ''));
+  pgRemoteRow.appendChild(pgRemote);
+  pgRemoteRow.appendChild(el('span', 'unit', '允许远程连接 PG'));
+  settingsBody.appendChild(pgRemoteRow);
+
+  settingsBody.appendChild(el('div', 'set-hint',
+    '当前监听：' + (rt.pgAddr || '未启用') +
+    '　改端口会断开现有客户端，重连即可。改控制台端口后需要用新端口重新打开页面。'));
+
+  pgEnabled.addEventListener('change', () => {
+    pgPort.disabled = !pgEnabled.checked;
+  });
+
+  /* ---- 安全 ---- */
+  settingsBody.appendChild(el('div', 'set-sec', '安全（PostgreSQL 协议密码）'));
+  const requirePw = checkInput('setRequirePw', d.auth.requirePassword);
+  const pwRow = el('div', 'set-row');
+  pwRow.appendChild(el('label', '', ''));
+  pwRow.appendChild(requirePw);
+  pwRow.appendChild(el('span', 'unit', '连接 PG 时必须输入密码'));
+  settingsBody.appendChild(pwRow);
+
+  const userInput = textInput('setAuthUser', d.auth.user, 'godb');
+  const pwInput = textInput('setAuthPassword', '', d.auth.hasPassword ? '已设置，留空则不修改' : '设置密码', 'password');
+  settingsBody.appendChild(setRow('用户名', userInput));
+  settingsBody.appendChild(setRow('密码', pwInput));
+  settingsBody.appendChild(el('div', 'set-hint',
+    '密码以 PBKDF2-SHA256 哈希保存在配置文件里，接口不会回显。' +
+    (d.auth.hasPassword ? ' 已有密码；留空表示保持不变。' : '')));
+
+  settingsBody.appendChild(el('div', 'set-warn',
+    '网页控制台本身不登录：能访问控制台的人可以执行任意 SQL。配置的修改只接受本机请求，' +
+    '所以远程只能查看。PG 协议是明文传输（没有 TLS），跨公网请自行套隧道。'));
+
+  const pathEl = el('div', 'set-path', '配置文件：' + (d.path || '—') + '　客户端：' + (rt.clientIp || '—'));
+  settingsBody.appendChild(pathEl);
+
+  const saveBtn = document.getElementById('btnSettingsSave');
+  saveBtn.disabled = !rt.canEdit;
+}
+
+async function saveSettings() {
+  if (!settingsData || !settingsData.runtime.canEdit) return;
+  const val = id => {
+    const n = document.getElementById(id);
+    const v = parseInt(n.value, 10);
+    return isNaN(v) ? 0 : v;
+  };
+  const beforeAddr = settingsData.runtime.httpAddr;
+  const body = {
+    storage: {
+      checkpointCommits: val('setCpCommits'),
+      checkpointSeconds: val('setCpSeconds'),
+      checkpointWalMB: val('setCpWALMB'),
+    },
+    network: {
+      httpPort: val('setHTTPPort'),
+      httpRemote: document.getElementById('setHTTPRemote').checked,
+      pgEnabled: document.getElementById('setPGEnabled').checked,
+      pgPort: val('setPGPort'),
+      pgRemote: document.getElementById('setPGRemote').checked,
+    },
+    auth: {
+      requirePassword: document.getElementById('setRequirePw').checked,
+      user: document.getElementById('setAuthUser').value.trim(),
+      password: document.getElementById('setAuthPassword').value,
+      clearPassword: false,
+    },
+  };
+  setHint('保存中…', '');
+  try {
+    const res = await api('/api/config', body);
+    if (res.error) {
+      setHint(res.error, 'err');
+      return;
+    }
+    settingsData = res;
+    renderSettings();
+    const afterAddr = res.runtime.httpAddr;
+    if (beforeAddr && afterAddr && beforeAddr !== afterAddr) {
+      setHint('已保存。控制台换到了 ' + afterAddr + '，请用新地址打开页面。', 'ok');
+    } else {
+      setHint('已保存并生效。', 'ok');
+    }
+    loadSchema();
+  } catch (e) {
+    setHint('保存失败：' + e.message, 'err');
+  }
+}
+
+document.getElementById('btnSettings').addEventListener('click', openSettings);
+document.getElementById('btnSettingsClose').addEventListener('click', closeSettings);
+document.getElementById('btnSettingsSave').addEventListener('click', saveSettings);
+settingsModal.addEventListener('click', e => {
+  if (e.target === settingsModal) closeSettings();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !settingsModal.classList.contains('hidden')) closeSettings();
+});
+
 /* ---------------- 启动 ---------------- */
 
 (function init() {
@@ -552,6 +796,7 @@ editor.addEventListener('input', () => {
   loadSchema();
   loadLocks();
   setInterval(loadLocks, 3000);
-  // 支持 #locks 直接打开锁面板
+  // 支持 #locks / #settings 直接打开对应面板
   if (location.hash === '#locks') toggleLocks(true);
+  if (location.hash === '#settings') openSettings();
 })();

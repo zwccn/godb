@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"strings"
 
+	"godb/config"
 	"godb/db"
 	"godb/exec"
 	"godb/hrtime"
 	"godb/lock"
+	"godb/netsrv"
 	"godb/sql"
 	"godb/txn"
 )
@@ -19,10 +21,25 @@ import (
 // Server 提供 HTTP API 与内嵌前端。
 type Server struct {
 	DB *db.DB
+
+	// Config 与 Net 只在「带配置文件启动」时非 nil；
+	// 单元测试里直接 New(d) 即可，设置页会返回 501。
+	Config *config.Store
+	Net    *netsrv.Manager
+
+	// lastRollbackErr 记录配置回滚失败（正常情况下永远是空）。
+	lastRollbackErr string
 }
 
 // New 创建服务器。
 func New(d *db.DB) *Server { return &Server{DB: d} }
+
+// WithConfig 挂上配置存储与监听管理器，启用设置页。
+func (s *Server) WithConfig(cfg *config.Store, net *netsrv.Manager) *Server {
+	s.Config = cfg
+	s.Net = net
+	return s
+}
 
 type apiError struct {
 	Message    string `json:"message"`
@@ -58,6 +75,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/sample", s.handleSample)
 	mux.HandleFunc("/api/locks", s.handleLocks)
+	mux.HandleFunc("/api/config", s.handleConfig)
 	return mux
 }
 

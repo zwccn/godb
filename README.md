@@ -17,14 +17,18 @@ go build -o godb.exe .
 ./godb.exe                     # 默认监听 127.0.0.1:8080，数据落在 ./godb-data
 ```
 
-浏览器打开 <http://127.0.0.1:8080>。首次启动会自动建两张示例表（`departments` / `employees`）并灌入数据。右上角「锁状态」可打开锁面板（也支持 `#locks` 直链）。
+浏览器打开 <http://127.0.0.1:8080>。首次启动会自动建两张示例表（`departments` / `employees`）并灌入数据。右上角「锁状态」可打开锁面板（`#locks` 直链），「设置」可打开配置页（`#settings` 直链）。
+
+> **端口、远程访问、密码、落盘节奏都在「设置」里改**，不再靠命令行。
+> 下面两个 `-http` / `-pg` 只在这个数据目录**第一次**生成 `config.json` 时作为初始值，
+> 之后一律以配置文件为准（启动日志会明确提示哪条被忽略了）。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `-http` | `127.0.0.1:8080` | 监听地址 |
-| `-data` | `godb-data` | 数据目录（catalog / 快照 / WAL 都在里面） |
+| `-http` | `127.0.0.1:8080` | 初始 HTTP 监听地址（仅首次生成配置时使用） |
+| `-data` | `godb-data` | 数据目录（catalog / 快照 / WAL / config 都在里面） |
 | `-no-sample` | `false` | 首次启动不灌示例数据 |
-| `-pg` | `127.0.0.1:6432` | PostgreSQL 协议监听地址，留空则不启用 |
+| `-pg` | `127.0.0.1:6432` | 初始 PG 协议监听地址（仅首次生成配置时使用，留空表示不启用） |
 | `-pg-log` | 空 | 把 PG 客户端发来的每条 SQL 追加写到指定文件，排查兼容性问题用 |
 | `-isolation` | `table` | `table`＝表级 S/X 锁；`serial`＝全局串行（旧行为，用于对照） |
 | `-lock-timeout` | `3s` | 等待表锁的最长时间，超时自动放弃并回滚整个事务 |
@@ -137,6 +141,64 @@ go build -o godb.exe .
 | `ALTER TABLE ADD COLUMN` | 92 ms（含全量快照） | **20 ms**（不重写快照） |
 | 全量 checkpoint | 66 ms | **46 ms** |
 | 冷启动（加载 5 万行） | 212 ms | **132 ms** |
+
+## 设置页（落盘节奏 / 端口 / 密码）
+
+控制台右上角「设置」打开，或直接访问 `/#settings`。配置**唯一来源**是数据目录下的
+`config.json`（原子写：tmp + fsync + rename），改完立即生效，不需要重启。
+
+### 落盘节奏
+
+`checkpoint` 的三条触发条件，**任一满足**就写快照 + 轮转 WAL：
+
+| 配置项 | 默认 | 含义 |
+|---|---|---|
+| `storage.checkpointCommits` | `128` | 每多少次提交 |
+| `storage.checkpointSeconds` | `60` | 每隔多少秒（有改动才真写） |
+| `storage.checkpointWalMB` | `64` | WAL 涨到多少 MB |
+
+填 `0` 表示关闭该条；三条全填 `0` 就只剩手动 `CHECKPOINT` 和正常退出会落盘（页面会警告）。
+
+**提交时的 `fsync` 不在这里配**：它始终同步执行（组提交只是把并发事务的 fsync 合并），
+关掉就等于放弃「COMMIT 成功即持久」。设置页只调「多久把内存整理成快照、把 WAL 收回空文件」。
+
+页面还会显示累计落盘次数、上次落盘距今多久、之后已提交多少、当前 WAL 大小，方便判断配置是否符合预期。
+
+### 网络
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `network.httpPort` | `8080` | 控制台端口 |
+| `network.httpRemote` | `false` | `false` 只绑 `127.0.0.1`；`true` 绑 `0.0.0.0` |
+| `network.pgEnabled` | `true` | 是否启用 PostgreSQL 协议 |
+| `network.pgPort` | `6432` | PG 协议端口 |
+| `network.pgRemote` | `false` | 同上 |
+
+改端口 / 开关远程是**热切换**：关掉旧 listener、绑新地址，进程不退出、数据不重新加载，
+绑失败（端口被占）会自动回滚旧地址并在页面上报错。正在执行的请求不受影响，但
+**控制台端口变了之后需要用新端口重新打开页面**（页面会提示新地址）。
+
+> 开了远程访问后如果还是连不上，多半是 Windows 防火墙没放行，例如：
+> `netsh advfirewall firewall add rule name="godb 8080" dir=in action=allow protocol=TCP localport=8080`
+
+### 密码
+
+只保护 **PostgreSQL 协议**：启用后客户端必须输入用户名 + 密码，服务端发
+`AuthenticationCleartextPassword`，密码以 **PBKDF2-HMAC-SHA256（12 万次迭代）** 哈希存在
+`config.json` 里，接口永远不会回显密码或哈希，只能重设。密码错误返回 `28P01` 并断开。
+
+```bash
+PGPASSWORD=你的密码 psql -h 127.0.0.1 -p 6432 -U godb -d godb
+```
+
+Navicat / pgAdmin 里把「密码」填上即可（用户名要与设置页填的一致）。
+
+两个必须知道的边界：
+
+1. **网页控制台不登录**。能打开控制台的人可以执行任意 SQL，所以不要把控制台暴露到不可信网络。
+2. **配置的写操作只接受本机请求**（`127.0.0.1` / `::1`）。开了远程访问之后，远程能看设置页
+   但改不了——否则任何人都能把 PG 密码关掉。
+3. PG 协议**没有 TLS**，密码是明文传输（协议本身的 cleartext 认证）。跨公网请套 SSH 隧道或 VPN。
 
 ## 用 PostgreSQL 客户端连接
 

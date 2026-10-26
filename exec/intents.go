@@ -5,6 +5,7 @@ import (
 
 	"godb/lock"
 	"godb/sql"
+	"godb/syscat"
 )
 
 // TableIntents 静态分析一条语句会访问哪些表、各需要什么锁。
@@ -51,6 +52,10 @@ func MergeIntents(dst, src map[string]lock.Mode) {
 func collectRef(ref sql.TableRef, mode lock.Mode, out map[string]lock.Mode) {
 	switch r := ref.(type) {
 	case *sql.BaseTable:
+		// 系统目录是只读虚拟表，不参与加锁
+		if syscat.IsSystem(r.Schema, r.Table) {
+			return
+		}
 		addIntent(out, r.Table, mode)
 	case *sql.Join:
 		collectRef(r.Left, mode, out)

@@ -70,6 +70,10 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 	case *sql.BaseTable:
 		t, ok := p.Cat.Get(n.Table)
 		if !ok {
+			// 不是业务表就看看是不是系统目录（pg_catalog / information_schema）
+			if op, sc, vok := p.virtualTable(n.Schema, n.Table, n.Alias); vok {
+				return op, sc, nil
+			}
 			return nil, nil, fmt.Errorf("relation %q does not exist", n.Table)
 		}
 		qual := n.Alias

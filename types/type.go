@@ -57,7 +57,25 @@ func ParseType(name string, args []int) (Type, error) {
 		t = Type{Kind: KTime, Name: "date"}
 	case "timestamp", "timestamp without time zone", "timestamptz", "timestamp with time zone", "datetime":
 		t = Type{Kind: KTime, Name: "timestamp"}
+	case "time", "timetz", "time without time zone", "time with time zone", "interval":
+		t = Type{Kind: KText, Name: n}
+	case "oid", "xid", "cid", "tid", "regproc", "regprocedure", "regoper", "regoperator":
+		t = Type{Kind: KInt, Name: n}
+	case "regclass", "regtype", "regnamespace", "regrole", "regconfig", "regdictionary":
+		// 归为文本：值就是对象名，比较时按字符串走
+		t = Type{Kind: KText, Name: n}
+	case "name", "bytea", "uuid", "json", "jsonb", "xml", "inet", "cidr", "macaddr",
+		"macaddr8", "money", "point", "line", "lseg", "box", "path", "polygon", "circle",
+		"tsvector", "tsquery", "pg_node_tree", "pg_lsn", "int2vector", "oidvector", "aclitem",
+		"record", "anyarray", "anyelement", "anyenum", "void", "unknown", "cstring":
+		t = Type{Kind: KText, Name: n}
 	default:
+		// 数组类型（text[]、oid[]、_text 等）与其它未列出的类型统一按文本处理，
+		// 这样客户端发来的 pg_catalog 查询不会因为类型名不认识而直接报错。
+		if strings.HasSuffix(n, "[]") || strings.HasPrefix(n, "_") {
+			t = Type{Kind: KText, Name: n}
+			break
+		}
 		return Type{}, fmt.Errorf("type %q does not exist", name)
 	}
 

@@ -23,6 +23,7 @@ func main() {
 	dir := flag.String("data", "godb-data", "数据目录")
 	noSample := flag.Bool("no-sample", false, "首次启动时不载入示例数据")
 	pgAddr := flag.String("pg", "127.0.0.1:6432", "PostgreSQL 协议监听地址（留空则不启用）")
+	pgLog := flag.String("pg-log", "", "把 PG 客户端发来的每条 SQL 追加写到该文件（排查兼容性问题用）")
 	iso := flag.String("isolation", "table", "并发控制模式：table（表级 S/X 锁）或 serial（全局串行）")
 	lockTimeout := flag.Duration("lock-timeout", 3*time.Second, "等待表锁的最长时间")
 	lockRetry := flag.Duration("lock-retry", 20*time.Millisecond, "等待表锁的轮询间隔")
@@ -63,6 +64,16 @@ func main() {
 
 	if *pgAddr != "" {
 		pg := &pgwire.Server{DB: d, Addr: *pgAddr}
+		if *pgLog != "" {
+			f, err := os.OpenFile(*pgLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				log.Printf("无法打开 PG 查询日志 %s: %v", *pgLog, err)
+			} else {
+				defer f.Close()
+				pg.QueryLog = f
+				log.Printf("PG 查询日志: %s", *pgLog)
+			}
+		}
 		go func() {
 			if err := pg.ListenAndServe(); err != nil {
 				log.Printf("PostgreSQL 协议监听失败: %v", err)

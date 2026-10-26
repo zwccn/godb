@@ -127,6 +127,16 @@ func writeExpr(b *strings.Builder, e Expr) {
 			writeExpr(b, a)
 		}
 		b.WriteString(")")
+	case *AnyOp:
+		writeExpr(b, n.X)
+		b.WriteString(" " + n.Op + " ")
+		if n.All {
+			b.WriteString("ALL (")
+		} else {
+			b.WriteString("ANY (")
+		}
+		writeExpr(b, n.Arr)
+		b.WriteString(")")
 	case *Between:
 		writeExpr(b, n.X)
 		if n.Not {

@@ -25,6 +25,7 @@ go build -o godb.exe .
 | `-data` | `godb-data` | 数据目录（catalog / 快照 / WAL 都在里面） |
 | `-no-sample` | `false` | 首次启动不灌示例数据 |
 | `-pg` | `127.0.0.1:6432` | PostgreSQL 协议监听地址，留空则不启用 |
+| `-pg-log` | 空 | 把 PG 客户端发来的每条 SQL 追加写到指定文件，排查兼容性问题用 |
 | `-isolation` | `table` | `table`＝表级 S/X 锁；`serial`＝全局串行（旧行为，用于对照） |
 | `-lock-timeout` | `3s` | 等待表锁的最长时间，超时自动放弃并回滚整个事务 |
 | `-lock-retry` | `20ms` | 等待时的轮询间隔（带 ±50% 抖动） |
@@ -135,9 +136,52 @@ psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
 | 事务状态 `ReadyForQuery` 的 `I`/`T`/`E` | ✅ |
 | `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
 | 密码认证（md5 / SCRAM） | ❌ |
-| `pg_catalog` / `information_schema` 系统目录 | ❌ 所以 `psql \dt`、`\d` 会报错，SQL 正常 |
+| `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
+| 子查询 / CTE / 窗口函数 | ❌ 所以 `psql \d`（内部用了子查询和 `OPERATOR()`）仍不可用，`\dt` 可以 |
 
 > 注意端口：默认用 `6432`，因为本机 `5432` 往往已经被真正的 PostgreSQL 占用。
+
+### 系统目录（虚拟表）
+
+客户端连上后第一件事就是读 `pg_catalog`，不实现它们会直接报
+`relation "pg_database" does not exist`。godb 在 `syscat/` 里把这些目录做成
+**虚拟表**：不落盘、只读，行数据在查询时由当前 catalog 实时生成。
+
+已实现 `pg_catalog` 下的：`pg_database`、`pg_namespace`、`pg_class`、`pg_attribute`、
+`pg_type`、`pg_index`、`pg_constraint`、`pg_attrdef`、`pg_am`、`pg_tablespace`、
+`pg_roles`/`pg_user`/`pg_shadow`/`pg_authid`/`pg_group`、`pg_settings`、`pg_description`、
+`pg_inherits`、`pg_enum`、`pg_range`、`pg_collation`、`pg_extension`、`pg_proc`、
+`pg_language`、`pg_trigger`、`pg_rewrite`、`pg_depend`、`pg_operator`、`pg_cast`、
+`pg_opclass`、`pg_opfamily`、`pg_conversion`、`pg_policy`、`pg_publication`、
+`pg_sequence`、`pg_partitioned_table`、`pg_statistic`、`pg_statistic_ext`、
+`pg_foreign_*`、`pg_user_mapping`、`pg_event_trigger`、`pg_subscription`、
+`pg_replication_origin`、`pg_largeobject_metadata`、`pg_seclabel`、`pg_shdepend`、
+`pg_ts_*`，以及视图 `pg_tables`、`pg_views`、`pg_matviews`、`pg_indexes`、
+`pg_sequences`、`pg_stat_activity`、`pg_locks`、`pg_prepared_statements`、
+`pg_prepared_xacts`、`pg_cursors`、`pg_timezone_names`、`pg_available_extensions`、
+`pg_stat_user_tables`、`pg_stat_all_tables`、`pg_stat_database`、`pg_stat_user_indexes`。
+
+`information_schema` 下的：`schemata`、`tables`、`columns`、`table_constraints`、
+`key_column_usage`、`constraint_column_usage`、`referential_constraints`、`views`、
+`sequences`、`routines`、`parameters`、`triggers`、`domains`、`table_privileges`、
+`column_privileges`、`character_sets`、`collations`、`check_constraints`、
+`element_types`、`sql_features`。
+
+为了让这些查询能跑，SQL 层还补了客户端实际用到的东西：
+
+| 语法/函数 | 例子 |
+|---|---|
+| schema 限定表名 | `FROM pg_catalog.pg_class c` |
+| schema 限定函数名 | `pg_catalog.format_type(...)`、`pg_catalog.set_config(...)` |
+| 数组字面量与成员判断 | `relkind = ANY (ARRAY['r','p'])`、`x <> ALL (…)` |
+| 正则运算符 | `nspname !~ '^pg_'`、`~`、`~*`、`!~*` |
+| 目录函数 | `format_type`、`pg_get_expr`、`pg_get_userbyid`、`pg_encoding_to_char`、`pg_table_is_visible`、`has_table_privilege`、`current_schemas`、`quote_ident`、`pg_size_pretty` 等 100 多个（见 `exec/compat.go`） |
+
+写入保护：对系统目录做 `INSERT/UPDATE/DELETE/DROP` 会报
+`permission denied: "pg_class" is a system catalog`；查询它们也不会加表锁。
+
+**排查工具**：如果某个客户端还有语句跑不通，启动时加 `-pg-log ./pg-queries.log`，
+把客户端发来的每条 SQL 原样记下来，就能知道缺哪块。
 
 ## 耗时显示
 
@@ -243,3 +287,6 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - JOIN 会物化两侧数据；连接结果超过 200 万行会直接报错而不是把内存吃光。
 - 没有查询优化器（不做谓词下推、连接顺序重排），执行计划就是 SQL 的直译。
 - DDL 不能在事务块内执行；二级索引、多列主键、外键、子查询都在待办清单里。
+- 系统目录是"够客户端用"的子集：`pg_proc` 只列了少量函数、统计视图（`pg_stat_*`）大多是空壳，
+  需要新表时补 `syscat/syscat.go` 的 `specs` 与 `syscat/rows.go` 的生成逻辑即可。
+- `psql \d <表名>` 仍不可用：它内部用了子查询和 `OPERATOR(pg_catalog.~)` 语法。`\dt` 可以。

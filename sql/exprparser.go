@@ -61,17 +61,34 @@ func (p *parser) parseComparison() (Expr, error) {
 		if t.Kind == Punct {
 			op := ""
 			switch t.Text {
-			case "=", "<", ">", "<=", ">=", "<>", "!=":
+			case "=", "<", ">", "<=", ">=", "<>", "!=", "~", "~*", "!~", "!~*":
 				op = t.Text
 			}
 			if op != "" {
 				p.pos++
+				if op == "!=" {
+					op = "<>"
+				}
+				// x <op> ANY (arr) / x <op> ALL (arr)
+				if p.atKw("any") || p.atKw("all") {
+					all := p.atKw("all")
+					p.pos++
+					if err := p.expectPunct("("); err != nil {
+						return nil, err
+					}
+					arr, err := p.parseExpr()
+					if err != nil {
+						return nil, err
+					}
+					if err := p.expectPunct(")"); err != nil {
+						return nil, err
+					}
+					left = &AnyOp{Op: op, All: all, X: left, Arr: arr}
+					continue
+				}
 				right, err := p.parseAdditive()
 				if err != nil {
 					return nil, err
-				}
-				if op == "!=" {
-					op = "<>"
 				}
 				left = &Binary{Op: op, L: left, R: right}
 				continue
@@ -303,6 +320,8 @@ func (p *parser) parsePrimaryBase() (Expr, error) {
 			return &Cast{X: x, TypeName: tn, TypeArgs: ta}, nil
 		case "CASE":
 			return p.parseCase()
+		case "ARRAY":
+			return p.parseArrayLiteral()
 		}
 	}
 
@@ -311,39 +330,80 @@ func (p *parser) parsePrimaryBase() (Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.acceptPunct("(") {
-		fc := &FuncCall{Name: name}
-		if p.acceptKw("distinct") {
-			fc.Distinct = true
-		}
-		if p.acceptPunct("*") {
-			fc.Star = true
-		} else if !p.atPunct(")") {
-			for {
-				a, err := p.parseExpr()
-				if err != nil {
-					return nil, err
-				}
-				fc.Args = append(fc.Args, a)
-				if p.acceptPunct(",") {
-					continue
-				}
-				break
+	// 限定名：
+	//   schema.func(...)      —— 客户端大量使用 pg_catalog.format_type(...)
+	//   table.column          —— 常规列引用
+	if p.atPunct(".") {
+		save := p.pos
+		p.pos++
+		if second, e2 := p.ident(); e2 == nil {
+			if p.atPunct("(") {
+				return p.parseCallArgs(second)
 			}
+			return &ColumnRef{Table: name, Name: second}, nil
 		}
-		if err := p.expectPunct(")"); err != nil {
-			return nil, err
-		}
-		return fc, nil
+		p.pos = save
 	}
-	if p.acceptPunct(".") {
-		col, err := p.ident()
-		if err != nil {
-			return nil, err
-		}
-		return &ColumnRef{Table: name, Name: col}, nil
+	if p.atPunct("(") {
+		return p.parseCallArgs(name)
 	}
 	return &ColumnRef{Name: name}, nil
+}
+
+// parseCallArgs 解析 name(...) 形式的函数调用（当前位置在 '('）。
+func (p *parser) parseCallArgs(name string) (Expr, error) {
+	if err := p.expectPunct("("); err != nil {
+		return nil, err
+	}
+	fc := &FuncCall{Name: name}
+	if p.acceptKw("distinct") {
+		fc.Distinct = true
+	}
+	if p.acceptPunct("*") {
+		fc.Star = true
+	} else if !p.atPunct(")") {
+		for {
+			a, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			fc.Args = append(fc.Args, a)
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+	}
+	if err := p.expectPunct(")"); err != nil {
+		return nil, err
+	}
+	return fc, nil
+}
+
+// parseArrayLiteral 解析 ARRAY[...]，内部表示成一个 array(...) 函数调用。
+func (p *parser) parseArrayLiteral() (Expr, error) {
+	p.pos++ // ARRAY
+	if err := p.expectPunct("["); err != nil {
+		return nil, err
+	}
+	fc := &FuncCall{Name: "array"}
+	if !p.atPunct("]") {
+		for {
+			a, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			fc.Args = append(fc.Args, a)
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+	}
+	if err := p.expectPunct("]"); err != nil {
+		return nil, err
+	}
+	return fc, nil
 }
 
 func (p *parser) parseCase() (Expr, error) {

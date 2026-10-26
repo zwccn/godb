@@ -7,6 +7,7 @@ import (
 	"godb/catalog"
 	"godb/sql"
 	"godb/storage"
+	"godb/syscat"
 	"godb/types"
 )
 
@@ -202,6 +203,9 @@ func (e *Engine) execDropTable(s *sql.DropTable) (*Result, error) {
 func (e *Engine) execTruncate(tx *storage.Tx, s *sql.Truncate) (*Result, error) {
 	t, ok := e.Cat.Get(s.Table)
 	if !ok {
+		if _, sys := syscat.Lookup("", s.Table); sys {
+			return nil, fmt.Errorf("permission denied: %q is a system catalog", s.Table)
+		}
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	var refs []storage.Ref
@@ -224,6 +228,9 @@ func (e *Engine) execTruncate(tx *storage.Tx, s *sql.Truncate) (*Result, error) 
 func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 	t, ok := e.Cat.Get(s.Table)
 	if !ok {
+		if _, sys := syscat.Lookup("", s.Table); sys {
+			return nil, fmt.Errorf("permission denied: %q is a system catalog", s.Table)
+		}
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	td := e.Store.Table(t.Name)
@@ -347,6 +354,9 @@ func (e *Engine) defaultValueOf(col *catalog.Column) (types.Value, error) {
 func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 	t, ok := e.Cat.Get(s.Table)
 	if !ok {
+		if _, sys := syscat.Lookup("", s.Table); sys {
+			return nil, fmt.Errorf("permission denied: %q is a system catalog", s.Table)
+		}
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	targets := make([]int, 0, len(t.Columns))
@@ -476,6 +486,9 @@ func (e *Engine) tableScope(t *catalog.Table, alias string) Schema {
 func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 	t, ok := e.Cat.Get(s.Table)
 	if !ok {
+		if _, sys := syscat.Lookup("", s.Table); sys {
+			return nil, fmt.Errorf("permission denied: %q is a system catalog", s.Table)
+		}
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	sc := e.tableScope(t, s.Alias)
@@ -580,6 +593,9 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 	t, ok := e.Cat.Get(s.Table)
 	if !ok {
+		if _, sys := syscat.Lookup("", s.Table); sys {
+			return nil, fmt.Errorf("permission denied: %q is a system catalog", s.Table)
+		}
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	sc := e.tableScope(t, s.Alias)

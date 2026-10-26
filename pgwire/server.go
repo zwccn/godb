@@ -11,11 +11,13 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"godb/db"
 	"godb/exec"
 	"godb/sql"
 	"godb/txn"
+	"godb/types"
 )
 
 const (
@@ -33,6 +35,24 @@ type Server struct {
 	Addr string
 	// Logf 用于打印连接级日志，可为 nil。
 	Logf func(format string, args ...interface{})
+	// QueryLog 非 nil 时，把客户端发来的每条 SQL 追加写进去，
+	// 用来排查“某个客户端发了我没实现的语句”这类问题。
+	QueryLog io.Writer
+}
+
+// logQuery 记录一条来自客户端的 SQL。
+func (s *Server) logQuery(text string) {
+	if s.QueryLog == nil {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if !strings.HasSuffix(text, ";") {
+		text += ";"
+	}
+	fmt.Fprintf(s.QueryLog, "-- %s\n%s\n\n", time.Now().Format("15:04:05.000"), text)
 }
 
 // ListenAndServe 阻塞式监听。
@@ -290,6 +310,7 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 		_ = c.write(encodeEmptyQuery(), encodeReadyForQuery(c.txStatus()))
 		return
 	}
+	c.srv.logQuery(text)
 	if msgs, ok := c.compat(text); ok {
 		msgs = append(msgs, encodeReadyForQuery(c.txStatus()))
 		_ = c.write(msgs...)
@@ -558,29 +579,9 @@ func (c *conn) fieldsFor(sqlText string) ([]field, bool) {
 // ---------- 类型映射与文本编码 ----------
 
 // typeOID 把我们的类型名映射成 PG 的 OID。
+// typeOID 返回 PG 类型 OID 与 typlen，统一走 types 包，避免两处映射不一致。
 func typeOID(t string) (int32, int16) {
-	t = strings.ToLower(t)
-	switch {
-	case strings.HasPrefix(t, "smallint"):
-		return 21, 2
-	case strings.HasPrefix(t, "bigint"):
-		return 20, 8
-	case strings.HasPrefix(t, "integer"), strings.HasPrefix(t, "int"):
-		return 23, 4
-	case strings.HasPrefix(t, "real"):
-		return 700, 4
-	case strings.HasPrefix(t, "double"), strings.HasPrefix(t, "float"):
-		return 701, 8
-	case strings.HasPrefix(t, "numeric"), strings.HasPrefix(t, "decimal"):
-		return 1700, -1
-	case strings.HasPrefix(t, "bool"):
-		return 16, 1
-	case strings.HasPrefix(t, "date"):
-		return 1082, 4
-	case strings.HasPrefix(t, "timestamp"):
-		return 1114, 8
-	}
-	return 25, -1 // text
+	return types.OIDByName(t), int16(types.TypeLenByName(t))
 }
 
 // textValue 把结果值编码成 PG 文本格式。

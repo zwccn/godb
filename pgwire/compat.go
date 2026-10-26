@@ -5,9 +5,9 @@ import (
 	"strings"
 )
 
-// compat 处理 PG 客户端连上来后自动发出的一批“探针语句”。
-// 我们不是真的 PostgreSQL，没有 pg_catalog / information_schema，
-// 这些语句如果不拦，客户端会在连接测试阶段就直接报错。
+// compat 拦下引擎不支持的会话语句（SET / SHOW）。
+// 其它探针（version()、current_schema()、set_config() 等）现在由
+// exec 里的兼容函数直接执行，走正常查询路径，所以不在这里处理。
 //
 // 返回 (消息列表, 是否已处理)。
 func (c *conn) compat(sqlText string) ([][]byte, bool) {
@@ -33,36 +33,6 @@ func (c *conn) compat(sqlText string) ([][]byte, bool) {
 			encodeDataRow([][]byte{[]byte(val)}),
 			encodeCommandComplete("SHOW"),
 		}, true
-	}
-
-	// 版本号探针
-	if strings.HasPrefix(norm, "select version()") || strings.HasPrefix(norm, "select pg_catalog.version()") ||
-		strings.HasPrefix(norm, "select pg_catalog.version() as version") {
-		return c.cannedText("version", c.serverVersionLine()), true
-	}
-
-	if strings.HasPrefix(norm, "select current_schema()") {
-		return c.cannedText("current_schema", "public"), true
-	}
-	if strings.HasPrefix(norm, "select current_database()") {
-		return c.cannedText("current_database", c.dbName()), true
-	}
-	if norm == "select current_user" || norm == "select user" || strings.HasPrefix(norm, "select current_user(") {
-		return c.cannedText("current_user", c.user), true
-	}
-	if strings.HasPrefix(norm, "select pg_backend_pid()") {
-		return c.cannedText("pg_backend_pid", "1"), true
-	}
-	if strings.HasPrefix(norm, "select txid_current()") {
-		return c.cannedText("txid_current", "1"), true
-	}
-
-	// 客户端（Navicat / JDBC / psql 的部分路径）会用它来改 search_path 等
-	if strings.HasPrefix(norm, "select pg_catalog.set_config") {
-		return c.cannedText("set_config", ""), true
-	}
-	if strings.HasPrefix(norm, "select current_setting(") {
-		return c.cannedText("current_setting", ""), true
 	}
 
 	return nil, false

@@ -186,20 +186,30 @@ func (l *lexer) next() (Token, error) {
 		return Token{Kind: QIdent, Text: b.String(), Line: startLine, Col: startCol}, nil
 	}
 
+	// 三字符运算符（正则取反）
+	if l.pos+2 < len(l.src) {
+		if tri := string([]rune{l.peekAt(0), l.peekAt(1), l.peekAt(2)}); tri == "!~*" {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Kind: Punct, Text: tri, Line: startLine, Col: startCol}, nil
+		}
+	}
+
 	// 标点与运算符（含多字符）
 	two := ""
 	if l.pos+1 < len(l.src) {
 		two = string([]rune{l.peekAt(0), l.peekAt(1)})
 	}
 	switch two {
-	case "<=", ">=", "<>", "!=", "||", "::":
+	case "<=", ">=", "<>", "!=", "||", "::", "!~", "~*":
 		l.advance()
 		l.advance()
 		return Token{Kind: Punct, Text: two, Line: startLine, Col: startCol}, nil
 	}
 	single := string(l.advance())
 	switch single {
-	case "=", "<", ">", "+", "-", "*", "/", "%", "(", ")", ",", ".", ";", ":":
+	case "=", "<", ">", "+", "-", "*", "/", "%", "(", ")", ",", ".", ";", ":", "[", "]", "~", "|", "!", "^", "&", "@", "#", "?", "{", "}":
 		return Token{Kind: Punct, Text: single, Line: startLine, Col: startCol}, nil
 	}
 	return Token{}, &Error{Msg: fmt.Sprintf("syntax error at or near %q", single), Line: startLine, Col: startCol}

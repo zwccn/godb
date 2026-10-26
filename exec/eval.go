@@ -4,6 +4,7 @@ package exec
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -173,6 +174,20 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		}
 		return &inEval{x: x, list: list, not: n.Not}, nil
 
+	case *sql.AnyOp:
+		x, err := compile(n.X, c)
+		if err != nil {
+			return nil, err
+		}
+		arr, err := compile(n.Arr, c)
+		if err != nil {
+			return nil, err
+		}
+		if n.Op != "=" && n.Op != "<>" {
+			return nil, fmt.Errorf("operator %s is not supported with ANY/ALL", n.Op)
+		}
+		return &anyEval{op: n.Op, all: n.All, x: x, arr: arr}, nil
+
 	case *sql.Between:
 		x, err := compile(n.X, c)
 		if err != nil {
@@ -317,6 +332,23 @@ func (e *binEval) Eval(row types.Row) (types.Value, error) {
 			return types.Null, err
 		}
 		return types.Bool(c == 0), nil
+	case "~", "~*", "!~", "!~*":
+		if lv.IsNull() || rv.IsNull() {
+			return types.Null, nil
+		}
+		pat := rv.TextForm()
+		if e.op == "~*" || e.op == "!~*" {
+			pat = "(?i)" + pat
+		}
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			return types.Null, fmt.Errorf("invalid regular expression: %v", err)
+		}
+		hit := re.MatchString(lv.TextForm())
+		if e.op == "!~" || e.op == "!~*" {
+			hit = !hit
+		}
+		return types.Bool(hit), nil
 	case "||":
 		if lv.IsNull() || rv.IsNull() {
 			return types.Null, nil
@@ -712,6 +744,10 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 		}
 		vals[i] = v
 	}
+	if isCompatFunc(e.name) {
+		v, _, err := evalCompat(e.name, vals)
+		return v, err
+	}
 	switch e.name {
 	case "coalesce":
 		for _, v := range vals {
@@ -752,6 +788,26 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 			return vals[0], nil
 		}
 		return types.Time(time.Now()), nil
+	case "array":
+		var b strings.Builder
+		b.WriteString("{")
+		for i, v := range vals {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			if v.IsNull() {
+				b.WriteString("NULL")
+				continue
+			}
+			s := v.TextForm()
+			if strings.ContainsAny(s, ",{}\" ") {
+				b.WriteString(`"` + strings.ReplaceAll(s, `"`, `\"`) + `"`)
+			} else {
+				b.WriteString(s)
+			}
+		}
+		b.WriteString("}")
+		return types.Text(b.String()), nil
 	case "greatest", "least":
 		if len(vals) == 0 {
 			return types.Null, nil
@@ -902,7 +958,7 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 	}
 	fe := &funcEval{name: name, args: args}
 	switch name {
-	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring", "concat", "text":
+	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring", "concat", "text", "array":
 		fe.t = types.Type{Kind: types.KText, Name: "text"}
 	case "length", "char_length", "character_length":
 		fe.t = types.Type{Kind: types.KInt, Name: "integer"}
@@ -915,6 +971,10 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 			fe.t = types.Type{Kind: types.KText, Name: "text"}
 		}
 	default:
+		if t, ok := compatFuncType(name); ok {
+			fe.t = t
+			break
+		}
 		return nil, fmt.Errorf("function %s does not exist", name)
 	}
 	return fe, nil
@@ -924,7 +984,7 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 
 func binType(op string, l, r types.Type) types.Type {
 	switch op {
-	case "=", "<>", "<", "<=", ">", ">=", "and", "or", "is":
+	case "=", "<>", "<", "<=", ">", ">=", "and", "or", "is", "~", "~*", "!~", "!~*":
 		return types.Type{Kind: types.KBool, Name: "boolean"}
 	case "||":
 		return types.Type{Kind: types.KText, Name: "text"}

@@ -117,10 +117,11 @@ type OrderItem struct {
 // TableRef 是 FROM 子句中的表引用。
 type TableRef interface{ tableRef() }
 
-// BaseTable 是普通表引用。
+// BaseTable 是普通表引用。Schema 非空表示写了限定名（pg_catalog.pg_class）。
 type BaseTable struct {
-	Table string
-	Alias string
+	Schema string
+	Table  string
+	Alias  string
 }
 
 // JoinType 是连接类型。
@@ -221,6 +222,15 @@ type In struct {
 	Not  bool
 }
 
+// AnyOp 表示 x <op> ANY (arr) / x <op> ALL (arr)。
+// 系统目录查询里非常常见（如 relkind = ANY (ARRAY['r','p'])）。
+type AnyOp struct {
+	Op  string // 比较运算符，= <> < <= > >=
+	All bool   // true 表示 ALL，false 表示 ANY
+	X   Expr
+	Arr Expr
+}
+
 // Between 是 [NOT] BETWEEN。
 type Between struct {
 	X, Lo, Hi Expr
@@ -246,6 +256,7 @@ func (*Case) exprNode()       {}
 func (*Cast) exprNode()       {}
 func (*IsNull) exprNode()     {}
 func (*In) exprNode()         {}
+func (*AnyOp) exprNode()      {}
 func (*Between) exprNode()    {}
 func (*Like) exprNode()       {}
 func (*DefaultVal) exprNode() {}

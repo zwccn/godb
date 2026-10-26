@@ -59,6 +59,9 @@ func Walk(e Expr, visit func(Expr) bool) {
 		Walk(n.Else, visit)
 	case *Cast:
 		Walk(n.X, visit)
+	case *AnyOp:
+		Walk(n.X, visit)
+		Walk(n.Arr, visit)
 	case *IsNull:
 		Walk(n.X, visit)
 	case *In:
@@ -167,6 +170,19 @@ func canon(b *strings.Builder, e Expr) {
 			b.WriteString(",")
 			canon(b, a)
 		}
+		b.WriteByte(')')
+	case *AnyOp:
+		b.WriteString("A(")
+		b.WriteString(n.Op)
+		if n.All {
+			b.WriteString("ALL")
+		} else {
+			b.WriteString("ANY")
+		}
+		b.WriteString(",")
+		canon(b, n.X)
+		b.WriteString(",")
+		canon(b, n.Arr)
 		b.WriteByte(')')
 	case *Between:
 		b.WriteString("W(")

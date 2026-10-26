@@ -947,6 +947,16 @@ func (p *parser) parseBaseTable() (*BaseTable, error) {
 		return nil, err
 	}
 	bt := &BaseTable{Table: name}
+	// 支持限定名 schema.table（pg_catalog.pg_class、information_schema.tables）
+	if p.atPunct(".") {
+		p.pos++
+		second, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		bt.Schema = name
+		bt.Table = second
+	}
 	if alias, ok, err := p.parseOptAlias(); err != nil {
 		return nil, err
 	} else if ok {

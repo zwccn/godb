@@ -571,6 +571,15 @@ var specs = []tableSpec{
 		c("action_statement", "character_data"), c("action_orientation", "character_data"),
 		c("action_timing", "character_data"),
 	}},
+	// 客户端的触发器查询会 LEFT JOIN 这张视图（我们没有任何触发器，恒空）。
+	{"information_schema", "triggered_update_columns", []colSpec{
+		c("trigger_catalog", "sql_identifier"), c("trigger_schema", "sql_identifier"),
+		c("trigger_name", "sql_identifier"),
+		c("event_object_catalog", "sql_identifier"),
+		c("event_object_schema", "sql_identifier"),
+		c("event_object_table", "sql_identifier"),
+		c("event_object_column", "sql_identifier"),
+	}},
 	{"information_schema", "domains", []colSpec{
 		c("domain_catalog", "sql_identifier"), c("domain_schema", "sql_identifier"),
 		c("domain_name", "sql_identifier"), c("data_type", "character_data"),

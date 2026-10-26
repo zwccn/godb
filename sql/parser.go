@@ -398,6 +398,14 @@ func (p *parser) parseTypeRef() (string, []int, bool, error) {
 	}
 	p.pos++
 	name := strings.ToLower(t.Text)
+	// 类型名可以带 schema 限定：information_schema.sql_identifier、
+	// pg_catalog.int4、pg_catalog."char"。我们只有一套内建类型，
+	// 所以丢掉 schema 只取最后一段。
+	if p.atPunct(".") && (p.peekN(1).Kind == Word || p.peekN(1).Kind == QIdent) {
+		p.pos++
+		name = strings.ToLower(p.peek().Text)
+		p.pos++
+	}
 	serial := false
 	switch name {
 	case "double":
@@ -719,7 +727,76 @@ func (p *parser) parseDelete() (Statement, error) {
 
 // ---------- SELECT ----------
 
+// parseSelect 解析一条完整查询：核心 SELECT + 集合运算 + ORDER BY/LIMIT。
 func (p *parser) parseSelect() (Statement, error) {
+	s, err := p.parseSetExpr()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.parseSelectSuffix(s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// parseSetExpr 解析 UNION / INTERSECT / EXCEPT 链（左结合）。
+//
+// 集合运算节点本身是个空壳 Select：SetLeft 与 SetRight 才是两个操作数，
+// 它自己的 Items/From 都是空的。这样左边不需要被改造成「半个查询」。
+func (p *parser) parseSetExpr() (*Select, error) {
+	left, err := p.parseSetOperand()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		var op string
+		switch {
+		case p.atKw("union"):
+			op = "union"
+		case p.atKw("intersect"):
+			op = "intersect"
+		case p.atKw("except"):
+			op = "except"
+		default:
+			return left, nil
+		}
+		p.pos++
+		all := p.acceptKw("all")
+		if !all {
+			p.acceptKw("distinct")
+		}
+		right, err := p.parseSetOperand()
+		if err != nil {
+			return nil, err
+		}
+		left = &Select{SetOp: op, SetAll: all, SetLeft: left, SetRight: right}
+	}
+}
+
+// parseSetOperand 解析集合运算的一个操作数：可以是括号里的子查询，
+// 也可以是裸的 SELECT 核心。
+func (p *parser) parseSetOperand() (*Select, error) {
+	if p.atPunct("(") {
+		p.pos++
+		inner, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		sel, ok := inner.(*Select)
+		if !ok {
+			return nil, p.errAt(p.peek(), "expected SELECT")
+		}
+		return sel, nil
+	}
+	return p.parseSelectCore()
+}
+
+// parseSelectCore 解析 SELECT ... [GROUP BY] [HAVING]，不含集合运算与
+// ORDER BY/LIMIT（那些属于整条查询，见 parseSelectSuffix）。
+func (p *parser) parseSelectCore() (*Select, error) {
 	if err := p.expectKw("select"); err != nil {
 		return nil, err
 	}
@@ -798,16 +875,21 @@ func (p *parser) parseSelect() (Statement, error) {
 		}
 		s.Having = e
 	}
+	return s, nil
+}
+
+// parseSelectSuffix 解析 ORDER BY / LIMIT / OFFSET，作用在整条查询上。
+func (p *parser) parseSelectSuffix(s *Select) error {
 	if p.atKw("order") {
 		p.pos++
 		if err := p.expectKw("by"); err != nil {
-			return nil, err
+			return err
 		}
 		for {
 			oi := &OrderItem{}
 			e, err := p.parseExpr()
 			if err != nil {
-				return nil, err
+				return err
 			}
 			oi.Expr = e
 			if p.acceptKw("desc") {
@@ -820,7 +902,7 @@ func (p *parser) parseSelect() (Statement, error) {
 				if p.acceptKw("first") {
 					first = true
 				} else if err := p.expectKw("last"); err != nil {
-					return nil, err
+					return err
 				}
 				oi.NullsFirst = &first
 			}
@@ -838,7 +920,7 @@ func (p *parser) parseSelect() (Statement, error) {
 			}
 			e, err := p.parseExpr()
 			if err != nil {
-				return nil, err
+				return err
 			}
 			s.Limit = e
 			continue
@@ -846,14 +928,14 @@ func (p *parser) parseSelect() (Statement, error) {
 		if p.acceptKw("offset") {
 			e, err := p.parseExpr()
 			if err != nil {
-				return nil, err
+				return err
 			}
 			s.Offset = e
 			continue
 		}
 		break
 	}
-	return s, nil
+	return nil
 }
 
 func (p *parser) parseSelectItem() (*SelectItem, error) {
@@ -972,13 +1054,30 @@ func (p *parser) parseTableRef() (TableRef, error) {
 	return ref, nil
 }
 
-// parseTablePrimary 解析 FROM 里的一项：裸表、schema.table，或括号联接组。
+// parseTablePrimary 解析 FROM 里的一项：裸表、schema.table、集合函数、
+// 括号子查询，或括号联接组。
 func (p *parser) parseTablePrimary() (TableRef, error) {
 	if p.atPunct("(") {
-		p.pos++
-		if p.atKw("select") || p.atKw("with") || p.atKw("values") {
-			return nil, p.errAt(p.peek(), "subqueries are not supported")
+		if p.startsQuery() {
+			p.pos++
+			st, err := p.parseSelect()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectPunct(")"); err != nil {
+				return nil, err
+			}
+			sel, ok := st.(*Select)
+			if !ok {
+				return nil, p.errAt(p.peek(), "expected SELECT")
+			}
+			alias, cols, err := p.parseAliasCols()
+			if err != nil {
+				return nil, err
+			}
+			return &SubTable{Select: sel, Alias: alias, Cols: cols}, nil
 		}
+		p.pos++
 		inner, err := p.parseTableRef()
 		if err != nil {
 			return nil, err
@@ -995,11 +1094,63 @@ func (p *parser) parseTablePrimary() (TableRef, error) {
 	return p.parseBaseTable()
 }
 
-// parseBaseTable 解析 [schema.]表名 [alias]。
-func (p *parser) parseBaseTable() (*BaseTable, error) {
+// startsQuery 判断当前（跳过左括号后）是不是一个查询。
+//
+// 用它来区分 FROM 里的两种括号：括号子查询 ((SELECT ...) UNION ...) 和
+// 括号联接组 ((a JOIN b ON ...))。跳过连续的 "(" 后第一个词决定一切，
+// 这样嵌套的括号集合运算也能正确识别，而且子查询里的语法错误不会被
+// 当成「括号联接组」的解析失败而丢掉。
+func (p *parser) startsQuery() bool {
+	for i := p.pos; i < len(p.toks); i++ {
+		t := p.toks[i]
+		if t.IsPunct("(") {
+			continue
+		}
+		return t.Is("select") || t.Is("with") || t.Is("values")
+	}
+	return false
+}
+
+// parseAliasCols 解析 [AS] alias [(col, ...)]。
+// 列定义列表在 PG 里既可以给列改名（FROM 子查询、集合函数都用这个写法），
+// 也可以写类型；我们只关心名字，类型留给来源自己。
+func (p *parser) parseAliasCols() (string, []string, error) {
+	alias, ok, err := p.parseOptAlias()
+	if err != nil {
+		return "", nil, err
+	}
+	if alias == "" && !ok {
+		alias = ""
+	}
+	var cols []string
+	if p.atPunct("(") {
+		p.pos++
+		for {
+			c, err := p.ident()
+			if err != nil {
+				return "", nil, err
+			}
+			cols = append(cols, strings.ToLower(c))
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return "", nil, err
+		}
+	}
+	return alias, cols, nil
+}
+
+// parseBaseTable 解析 [schema.]表名 [alias]，或集合函数 func(...) [alias] [(col,...)]。
+func (p *parser) parseBaseTable() (TableRef, error) {
 	name, err := p.ident()
 	if err != nil {
 		return nil, err
+	}
+	if p.atPunct("(") {
+		return p.parseFuncTable(name)
 	}
 	bt := &BaseTable{Table: name}
 	// 支持限定名 schema.table（pg_catalog.pg_class、information_schema.tables）
@@ -1018,4 +1169,34 @@ func (p *parser) parseBaseTable() (*BaseTable, error) {
 		bt.Alias = alias
 	}
 	return bt, nil
+}
+
+// parseFuncTable 解析 FROM 里的集合函数：name(args) [AS] alias [(col, ...)]。
+func (p *parser) parseFuncTable(name string) (TableRef, error) {
+	if err := p.expectPunct("("); err != nil {
+		return nil, err
+	}
+	ft := &FuncTable{Name: strings.ToLower(name)}
+	if !p.atPunct(")") {
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			ft.Args = append(ft.Args, e)
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+	}
+	if err := p.expectPunct(")"); err != nil {
+		return nil, err
+	}
+	alias, cols, err := p.parseAliasCols()
+	if err != nil {
+		return nil, err
+	}
+	ft.Alias, ft.Cols = alias, cols
+	return ft, nil
 }

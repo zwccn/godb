@@ -91,6 +91,9 @@ type Delete struct {
 // ---------- DQL ----------
 
 // Select 对应 SELECT。
+//
+// SetOp 非空表示这是一个集合运算（UNION / INTERSECT / EXCEPT）的左边，
+// 右边放在 SetRight 里。ORDER BY / LIMIT 只属于最外层。
 type Select struct {
 	Distinct bool
 	Items    []*SelectItem
@@ -101,6 +104,11 @@ type Select struct {
 	OrderBy  []*OrderItem
 	Limit    Expr
 	Offset   Expr
+
+	SetOp    string // "union" / "intersect" / "except"
+	SetAll   bool
+	SetLeft  *Select
+	SetRight *Select
 }
 
 // SelectItem 是选择列表中的一项（可能是 * 或 table.*）。
@@ -156,9 +164,26 @@ type ParenJoin struct {
 	Alias string
 }
 
+// SubTable 是 FROM 里的括号子查询：(SELECT ...) [AS] alias [(col, ...)]。
+type SubTable struct {
+	Select *Select
+	Alias  string
+	Cols   []string
+}
+
+// FuncTable 是 FROM 里的集合函数调用：func(args) [AS] alias [(col, ...)]。
+type FuncTable struct {
+	Name  string
+	Args  []Expr
+	Alias string
+	Cols  []string
+}
+
 func (*BaseTable) tableRef() {}
 func (*Join) tableRef()      {}
 func (*ParenJoin) tableRef() {}
+func (*SubTable) tableRef()  {}
+func (*FuncTable) tableRef() {}
 
 // ---------- 事务 ----------
 
@@ -272,6 +297,13 @@ type Like struct {
 	IgnoreCase bool
 }
 
+// Subscript 是数组下标 e[i]。客户端查触发器时会写 rm.m[1]，
+// 我们从数组文本（'{a,b}'）里取第 i 个元素（下标从 1 开始）。
+type Subscript struct {
+	X     Expr
+	Index Expr
+}
+
 // DefaultVal 是 INSERT 里的 DEFAULT 关键字。
 type DefaultVal struct{}
 
@@ -288,4 +320,5 @@ func (*AnyOp) exprNode()      {}
 func (*Subquery) exprNode()   {}
 func (*Between) exprNode()    {}
 func (*Like) exprNode()       {}
+func (*Subscript) exprNode()  {}
 func (*DefaultVal) exprNode() {}

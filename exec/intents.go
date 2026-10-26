@@ -15,9 +15,7 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 	out := map[string]lock.Mode{}
 	switch s := st.(type) {
 	case *sql.Select:
-		for _, ref := range s.From {
-			collectRef(ref, lock.Shared, out)
-		}
+		collectSelect(s, lock.Shared, out)
 	case *sql.Explain:
 		return TableIntents(s.Stmt)
 	case *sql.Insert:
@@ -60,7 +58,49 @@ func collectRef(ref sql.TableRef, mode lock.Mode, out map[string]lock.Mode) {
 	case *sql.Join:
 		collectRef(r.Left, mode, out)
 		collectRef(r.Right, mode, out)
+		collectExpr(r.On, mode, out)
+	case *sql.ParenJoin:
+		collectRef(r.Inner, mode, out)
+	case *sql.SubTable:
+		collectSelect(r.Select, mode, out)
+	case *sql.FuncTable:
+		// 集合函数自己就是数据源（generate_series 之类），没有表可锁
 	}
+}
+
+// collectSelect 收集一条查询（含集合运算两侧、子查询）用到的业务表。
+// 括号联接组与表达式里的标量子查询以前都漏掉了，会读不加锁。
+func collectSelect(s *sql.Select, mode lock.Mode, out map[string]lock.Mode) {
+	if s == nil {
+		return
+	}
+	if s.SetLeft != nil {
+		collectSelect(s.SetLeft, mode, out)
+	}
+	if s.SetRight != nil {
+		collectSelect(s.SetRight, mode, out)
+	}
+	for _, ref := range s.From {
+		collectRef(ref, mode, out)
+	}
+	collectExpr(s.Where, mode, out)
+	collectExpr(s.Having, mode, out)
+	for _, it := range s.Items {
+		collectExpr(it.Expr, mode, out)
+	}
+	for _, oi := range s.OrderBy {
+		collectExpr(oi.Expr, mode, out)
+	}
+}
+
+// collectExpr 找表达式里的标量子查询，把它们引用的表也算上。
+func collectExpr(e sql.Expr, mode lock.Mode, out map[string]lock.Mode) {
+	sql.Walk(e, func(n sql.Expr) bool {
+		if sq, ok := n.(*sql.Subquery); ok {
+			collectSelect(sq.Select, mode, out)
+		}
+		return true
+	})
 }
 
 func addIntent(out map[string]lock.Mode, table string, mode lock.Mode) {

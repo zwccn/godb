@@ -55,7 +55,7 @@ func ParseType(name string, args []int) (Type, error) {
 		t = Type{Kind: KFloat, Name: "numeric"}
 	case "date":
 		t = Type{Kind: KTime, Name: "date"}
-	case "timestamp", "timestamp without time zone", "timestamptz", "timestamp with time zone", "datetime":
+	case "timestamp", "timestamp without time zone", "timestamptz", "timestamp with time zone", "datetime", "time_stamp":
 		t = Type{Kind: KTime, Name: "timestamp"}
 	case "time", "timetz", "time without time zone", "time with time zone", "interval":
 		t = Type{Kind: KText, Name: n}
@@ -68,6 +68,11 @@ func ParseType(name string, args []int) (Type, error) {
 		"macaddr8", "money", "point", "line", "lseg", "box", "path", "polygon", "circle",
 		"tsvector", "tsquery", "pg_node_tree", "pg_lsn", "int2vector", "oidvector", "aclitem",
 		"record", "anyarray", "anyelement", "anyenum", "void", "unknown", "cstring":
+		t = Type{Kind: KText, Name: n}
+	case "sql_identifier", "character_data", "yes_or_no", "cardinal_number":
+		// information_schema 里的域（domain）：值是文本，但客户端会写
+		// (n.nspname)::information_schema.sql_identifier 这样的显式转换。
+		// 不认这些名字会导致整条查询类型错误。
 		t = Type{Kind: KText, Name: n}
 	default:
 		// 数组类型（text[]、oid[]、_text 等）与其它未列出的类型统一按文本处理，

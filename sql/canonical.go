@@ -60,6 +60,9 @@ func Walk(e Expr, visit func(Expr) bool) {
 		Walk(n.Else, visit)
 	case *Cast:
 		Walk(n.X, visit)
+	case *Subscript:
+		Walk(n.X, visit)
+		Walk(n.Index, visit)
 	case *AnyOp:
 		Walk(n.X, visit)
 		Walk(n.Arr, visit)
@@ -146,6 +149,12 @@ func canon(b *strings.Builder, e Expr) {
 		}
 		b.WriteString("|")
 		canon(b, n.Else)
+		b.WriteByte(')')
+	case *Subscript:
+		b.WriteString("S(")
+		canon(b, n.X)
+		b.WriteString(":")
+		canon(b, n.Index)
 		b.WriteByte(')')
 	case *Cast:
 		b.WriteString("T(")

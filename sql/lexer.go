@@ -108,6 +108,52 @@ func (l *lexer) next() (Token, error) {
 	c := l.peekAt(0)
 
 	switch {
+	// E'...' 是 PostgreSQL 的转义字符串常量：反斜杠在这里是转义符。
+	// 客户端查触发器时写 E'.{35,} WHEN \\((.+)\\) EXECUTE PROCEDURE'，
+	// 当成普通标识符 E 加字符串处理会让整条查询语法错误。
+	case (c == 'e' || c == 'E') && l.peekAt(1) == '\'':
+		l.advance() // E
+		l.advance() // '
+		var b strings.Builder
+		for {
+			if l.pos >= len(l.src) {
+				return Token{}, &Error{Msg: "unterminated string literal", Line: startLine, Col: startCol}
+			}
+			ch := l.advance()
+			if ch == '\'' {
+				if l.peekAt(0) == '\'' {
+					l.advance()
+					b.WriteRune('\'')
+					continue
+				}
+				break
+			}
+			if ch == '\\' {
+				e := l.advance()
+				switch e {
+				case 'n':
+					b.WriteRune('\n')
+				case 't':
+					b.WriteRune('\t')
+				case 'r':
+					b.WriteRune('\r')
+				case 'b':
+					b.WriteRune('\b')
+				case 'f':
+					b.WriteRune('\f')
+				case '0':
+					b.WriteRune(0)
+				default:
+					// PostgreSQL 的规则：其余「反斜杠 + 字符」都按字符本身算，
+					// 反斜杠丢掉（要保留反斜杠必须写 \\）。所以 E'\(' 得到 "("。
+					b.WriteRune(e)
+				}
+				continue
+			}
+			b.WriteRune(ch)
+		}
+		return Token{Kind: StringVal, Text: b.String(), Line: startLine, Col: startCol}, nil
+
 	case isIdentStart(c):
 		var b strings.Builder
 		for l.pos < len(l.src) && isIdentPart(l.peekAt(0)) {

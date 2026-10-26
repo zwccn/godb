@@ -43,17 +43,19 @@ go build -o godb.exe .
 | 持久化 | `CHECKPOINT` / `FLUSH`（强制刷盘 + 全量快照，返回代次与统计） |
 | 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`、`UNIQUE`、`NOT NULL`、`DEFAULT`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` |
+| 集合运算 | `UNION [ALL]` / `INTERSECT` / `EXCEPT`；`FROM` 子查询（含 `AS t(a, b)` 列别名） |
+| 集合函数 | `FROM generate_series(a, b[, step])`、`FROM regexp_matches(text, pattern)`，可带列别名列表 |
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
 | 聚合 | `count(*)`、`count(x)`、`sum`、`avg`、`min`、`max`，支持 `DISTINCT` |
 | 增删改 | `INSERT ... VALUES`（多行、`DEFAULT`）、`UPDATE ... SET ... WHERE`、`DELETE ... WHERE` |
-| 表达式 | 算术 `+ - * / %`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`、`\|\|` |
-| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/concat/coalesce/nullif/greatest/least/now` |
+| 表达式 | 算术 `+ - * / %`、位运算 `& \| #`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`（含 `information_schema.sql_identifier` 这类带 schema 的类型名）、数组下标 `a[i]`、`\|\|` |
+| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches` |
 | 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
-**明确不支持**（会报清晰的错误）：`IN`/`EXISTS` 子查询、`FROM` 子查询、CTE、窗口函数、`UNION`、外键、`CHECK`、
+**明确不支持**（会报清晰的错误）：`IN`/`EXISTS` 子查询、CTE、窗口函数、外键、`CHECK`、
 `FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引、`RETURNING`、`INSERT ... SELECT`。
 
 **支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。
@@ -233,7 +235,8 @@ psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
 | 密码认证（md5 / SCRAM） | ❌ |
 | `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
 | 标量子查询 `(SELECT ...)` | ✅ 含相关子查询；多行会报 `more than one row` |
-| `IN`/`EXISTS`/`FROM` 子查询、CTE、窗口函数 | ❌ |
+| `FROM` 子查询、`UNION`/`INTERSECT`/`EXCEPT` | ✅ 客户端触发器页的查询需要 |
+| `IN`/`EXISTS` 子查询、CTE、窗口函数 | ❌ |
 | 括号联接组 `LEFT JOIN (a JOIN b ON …) x ON …` | ✅ 客户端刷对象树必需 |
 
 > 注意端口：默认用 `6432`，因为本机 `5432` 往往已经被真正的 PostgreSQL 占用。

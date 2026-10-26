@@ -259,6 +259,17 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		}
 		return &likeEval{x: x, pat: p, not: n.Not, ic: n.IgnoreCase}, nil
 
+	case *sql.Subscript:
+		x, err := compile(n.X, c)
+		if err != nil {
+			return nil, err
+		}
+		idx, err := compile(n.Index, c)
+		if err != nil {
+			return nil, err
+		}
+		return &subscriptEval{x: x, idx: idx}, nil
+
 	case *sql.Cast:
 		x, err := compile(n.X, c)
 		if err != nil {
@@ -431,6 +442,12 @@ func (e *binEval) Eval(row types.Row) (types.Value, error) {
 				return types.Null, fmt.Errorf("division by zero")
 			}
 			return types.Int(a % b), nil
+		case "&":
+			return types.Int(a & b), nil
+		case "|":
+			return types.Int(a | b), nil
+		case "#":
+			return types.Int(a ^ b), nil
 		}
 	}
 	a, err := toFloat(lv)
@@ -984,6 +1001,39 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 			return types.Text(string(r[from:to])), nil
 		}
 		return types.Text(string(r[from:])), nil
+	case "regexp_matches":
+		// 标量位置调用：只返回第一个匹配的捕获组（数组文本形式），
+		// 外面通常紧跟一个下标 (regexp_matches(...))[1]。
+		if len(vals) < 2 || vals[0].IsNull() || vals[1].IsNull() {
+			return types.Null, nil
+		}
+		re, err := regexp.Compile(vals[1].TextForm())
+		if err != nil {
+			return types.Null, fmt.Errorf("invalid regular expression: %v", err)
+		}
+		m := re.FindStringSubmatch(vals[0].TextForm())
+		if m == nil {
+			return types.Null, nil
+		}
+		groups := m[1:]
+		if len(groups) == 0 {
+			groups = m
+		}
+		return types.Text(arrayLiteral(groups)), nil
+	case "position", "strpos":
+		// position(子串, 字符串)：返回第一次出现的位置（从 1 开始，找不到为 0）。
+		// 客户端查触发器时会用它从 pg_get_triggerdef 里抠 WHEN 子句。
+		if len(vals) < 2 {
+			return types.Null, fmt.Errorf("position requires 2 arguments")
+		}
+		if vals[0].IsNull() || vals[1].IsNull() {
+			return types.Null, nil
+		}
+		idx := strings.Index(vals[1].TextForm(), vals[0].TextForm())
+		if idx < 0 {
+			return types.Int(0), nil
+		}
+		return types.Int(int64(len([]rune(vals[1].TextForm()[:idx]))) + 1), nil
 	}
 	return types.Null, fmt.Errorf("function %s does not exist", e.name)
 }
@@ -1003,9 +1053,10 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 	}
 	fe := &funcEval{name: name, args: args}
 	switch name {
-	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring", "concat", "text", "array":
+	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring",
+		"concat", "text", "array", "regexp_matches":
 		fe.t = types.Type{Kind: types.KText, Name: "text"}
-	case "length", "char_length", "character_length":
+	case "length", "char_length", "character_length", "position", "strpos":
 		fe.t = types.Type{Kind: types.KInt, Name: "integer"}
 	case "now", "current_timestamp":
 		fe.t = types.Type{Kind: types.KTime, Name: "timestamp"}
@@ -1222,4 +1273,75 @@ func systemColumnType(name string) types.Type {
 		return types.Type{Kind: types.KText, Name: "tid"}
 	}
 	return types.Type{Kind: types.KInt, Name: "xid"}
+}
+
+// subscriptEval 求数组下标 e[i]。
+//
+// 我们没有真正的数组类型，数组一律以 PostgreSQL 的文本形式 "{a,b,c}" 存在
+// 值里（current_schemas 之类就是这样返回的）。下标从 1 开始，越界返回 NULL，
+// 和 PostgreSQL 的数组语义一致。
+type subscriptEval struct {
+	x, idx Eval
+}
+
+func (e *subscriptEval) Type() types.Type {
+	return types.Type{Kind: types.KText, Name: "text"}
+}
+
+func (e *subscriptEval) Eval(row types.Row) (types.Value, error) {
+	v, err := e.x.Eval(row)
+	if err != nil {
+		return types.Null, err
+	}
+	iv, err := e.idx.Eval(row)
+	if err != nil {
+		return types.Null, err
+	}
+	if v.IsNull() || iv.IsNull() {
+		return types.Null, nil
+	}
+	n, err := toInt(iv)
+	if err != nil {
+		return types.Null, err
+	}
+	s := v.TextForm()
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		// 不是数组形态：当成标量数组，只有下标 1 有值
+		if n == 1 {
+			return types.Text(s), nil
+		}
+		return types.Null, nil
+	}
+	items := splitArrayElems(s[1 : len(s)-1])
+	if n < 1 || int(n) > len(items) {
+		return types.Null, nil
+	}
+	return types.Text(items[n-1]), nil
+}
+
+// splitArrayElems 按顶层逗号切分数组元素，处理带引号的元素
+// （PG 会对含逗号的元素加双引号）。
+func splitArrayElems(body string) []string {
+	if body == "" {
+		return []string{}
+	}
+	var out []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(body); i++ {
+		ch := body[i]
+		switch {
+		case ch == '"':
+			inQuote = !inQuote
+		case ch == '\\' && i+1 < len(body):
+			i++
+			cur.WriteByte(body[i])
+		case ch == ',' && !inQuote:
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	return append(out, cur.String())
 }

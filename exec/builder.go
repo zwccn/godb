@@ -21,6 +21,10 @@ type Planner struct {
 
 // BuildSelect 构建查询计划。
 func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
+	// 集合运算节点是个空壳：SetLeft/SetRight 才是两个操作数。
+	if s.SetOp != "" {
+		return p.buildSetOp(s)
+	}
 	op, sc, err := p.buildFrom(s.From)
 	if err != nil {
 		return nil, err
@@ -85,6 +89,12 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		}
 		op := newScan(p.Tx, t, qual)
 		return op, op.Schema(), nil
+
+	case *sql.SubTable:
+		return p.buildSubTable(n)
+
+	case *sql.FuncTable:
+		return p.buildFuncTable(n)
 
 	case *sql.ParenJoin:
 		op, sc, err := p.buildTableRef(n.Inner)
@@ -243,6 +253,42 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 	op = &projectOp{child: op, exprs: exprs, sc: out}
 	if s.Distinct {
 		op = &distinctOp{child: op, sc: out}
+	}
+	return p.applyLimit(s, op)
+}
+
+// buildSetOp 构建 UNION / INTERSECT / EXCEPT。
+func (p *Planner) buildSetOp(s *sql.Select) (Operator, error) {
+	left, err := p.BuildSelect(s.SetLeft)
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.BuildSelect(s.SetRight)
+	if err != nil {
+		return nil, err
+	}
+	if s.SetAll && s.SetOp != "union" {
+		return nil, fmt.Errorf("%s ALL is not supported", strings.ToUpper(s.SetOp))
+	}
+	sc := left.Schema()
+	var op Operator = &setOp{left: left, right: right, op: s.SetOp, all: s.SetAll, sc: sc}
+
+	// ORDER BY / LIMIT 属于整条查询，作用在集合运算的结果上。
+	// 结果列名取自左操作数，所以排序键按这份 schema 编译。
+	if len(s.OrderBy) > 0 {
+		keys := make([]sortKey, 0, len(s.OrderBy))
+		for _, oi := range s.OrderBy {
+			ev, err := p.compile(oi.Expr, sc)
+			if err != nil {
+				return nil, err
+			}
+			nullsFirst := oi.Desc
+			if oi.NullsFirst != nil {
+				nullsFirst = *oi.NullsFirst
+			}
+			keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
+		}
+		op = &sortOp{child: op, keys: keys, sc: sc}
 	}
 	return p.applyLimit(s, op)
 }

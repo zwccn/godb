@@ -94,6 +94,11 @@ func writeExpr(b *strings.Builder, e Expr) {
 			writeExpr(b, n.Else)
 		}
 		b.WriteString(" END")
+	case *Subscript:
+		writeExpr(b, n.X)
+		b.WriteString("[")
+		writeExpr(b, n.Index)
+		b.WriteString("]")
 	case *Cast:
 		b.WriteString("CAST(")
 		writeExpr(b, n.X)

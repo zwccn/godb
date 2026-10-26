@@ -52,7 +52,7 @@ func (p *parser) parseNot() (Expr, error) {
 }
 
 func (p *parser) parseComparison() (Expr, error) {
-	left, err := p.parseAdditive()
+	left, err := p.parseBitwise()
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func (p *parser) parseComparison() (Expr, error) {
 					left = &AnyOp{Op: op, All: all, X: left, Arr: arr}
 					continue
 				}
-				right, err := p.parseAdditive()
+				right, err := p.parseBitwise()
 				if err != nil {
 					return nil, err
 				}
@@ -182,6 +182,29 @@ func (p *parser) parseComparison() (Expr, error) {
 	}
 }
 
+// parseBitwise 解析位运算符（& | #）。PostgreSQL 把这三个和大部分
+// "other operator" 放在同一优先级：低于加减、高于比较，左结合。
+// 客户端查触发器时会写 (t.tgtype)::integer & 1。
+func (p *parser) parseBitwise() (Expr, error) {
+	left, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t := p.peek()
+		if t.Kind == Punct && (t.Text == "&" || t.Text == "|" || t.Text == "#") {
+			p.pos++
+			right, err := p.parseAdditive()
+			if err != nil {
+				return nil, err
+			}
+			left = &Binary{Op: t.Text, L: left, R: right}
+			continue
+		}
+		return left, nil
+	}
+}
+
 func (p *parser) parseAdditive() (Expr, error) {
 	left, err := p.parseMultiplicative()
 	if err != nil {
@@ -243,15 +266,31 @@ func (p *parser) parsePrimary() (Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-	for p.acceptPunct("::") {
-		tn, ta, serial, err := p.parseTypeRef()
-		if err != nil {
-			return nil, err
+	for {
+		if p.acceptPunct("::") {
+			tn, ta, serial, err := p.parseTypeRef()
+			if err != nil {
+				return nil, err
+			}
+			if serial {
+				return nil, p.errAt(p.peek(), "cannot cast to serial")
+			}
+			e = &Cast{X: e, TypeName: tn, TypeArgs: ta}
+			continue
 		}
-		if serial {
-			return nil, p.errAt(p.peek(), "cannot cast to serial")
+		// 数组下标 e[i]（PG 的下标从 1 开始）
+		if p.acceptPunct("[") {
+			idx, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectPunct("]"); err != nil {
+				return nil, err
+			}
+			e = &Subscript{X: e, Index: idx}
+			continue
 		}
-		e = &Cast{X: e, TypeName: tn, TypeArgs: ta}
+		break
 	}
 	return e, nil
 }

@@ -127,3 +127,28 @@ func TestInformationSchemaCompat(t *testing.T) {
 		t.Fatalf("E 字符串 = %s，期望 a\\(b\\)", got)
 	}
 }
+
+// 数组类型后缀：Navicat 统计对象数时会写 c.relkind = ANY ('{r,v,m}'::char[])。
+// 类型名后面跟 [] 以前会被当成语法错误（就在 "]" 上报）。
+func TestArrayTypeCast(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE atc (id INTEGER PRIMARY KEY)`)
+
+	res := run(t, d, s, `
+		SELECT count(*) FROM pg_catalog.pg_class c
+		WHERE c.relkind = ANY ('{r,v,m}'::char[])`)
+	if len(res[0].Rows) != 1 {
+		t.Fatalf("应有 1 行，实际 %d", len(res[0].Rows))
+	}
+	// 至少要数到我们自己建的表
+	if got := fmt.Sprint(res[0].Rows[0][0]); got == "0" {
+		t.Fatal("ANY ('{r,v,m}'::char[]) 没匹配到任何普通表")
+	}
+
+	// 带长度参数的数组类型也要能解析
+	res = run(t, d, s, `SELECT ARRAY['a','b']::varchar(10)[] AS a`)
+	if res[0].Rows[0][0] == nil {
+		t.Fatal("varchar(10)[] 转换结果不该是 NULL")
+	}
+}

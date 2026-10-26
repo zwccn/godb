@@ -221,6 +221,9 @@ var specs = []tableSpec{
 		c("oid", tOid), c("proname", tName), c("pronamespace", tOid), c("proowner", tOid),
 		c("prolang", tOid), c("procost", tFloat4), c("prorows", tFloat4),
 		c("provariadic", tOid), c("prosupport", tRegproc), c("prokind", tChar),
+		// proisagg / proiswindow 在 PG 11 被 prokind 取代，但老客户端
+		// （Navicat 的函数列表）仍在 SELECT，缺列整条查询就失败。
+		c("proisagg", tBool), c("proiswindow", tBool),
 		c("prosecdef", tBool), c("proleakproof", tBool), c("proisstrict", tBool),
 		c("proretset", tBool), c("provolatile", tChar), c("proparallel", tChar),
 		c("pronargs", tInt2), c("pronargdefaults", tInt2), c("prorettype", tOid),

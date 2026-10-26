@@ -89,3 +89,25 @@ func TestSystemColumns(t *testing.T) {
 		}
 	}
 }
+
+// pg_proc.proisagg / proiswindow 在 PG 11 被 prokind 取代，但客户端函数列表
+// 仍在 SELECT 它们 —— 和 consrc、relhasoids 是同一类问题。
+func TestProcLegacyColumns(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	res := run(t, d, s, `
+		SELECT p.proname, p.prokind, p.proisagg, p.proiswindow
+		FROM pg_catalog.pg_proc p LIMIT 3`)
+	if len(res[0].Rows) == 0 {
+		t.Fatal("pg_proc 应该有内置函数行")
+	}
+	if got := fmt.Sprint(res[0].Rows[0][2]); got != "false" {
+		t.Fatalf("proisagg = %s，期望 false", got)
+	}
+	for _, c := range res[0].Columns {
+		if c.Name == "proisagg" || c.Name == "proiswindow" {
+			return
+		}
+	}
+	t.Fatal("结果里缺 proisagg / proiswindow 列")
+}

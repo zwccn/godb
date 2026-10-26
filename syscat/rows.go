@@ -652,7 +652,8 @@ func procRows(def *catalog.Table) []types.Row {
 		out = append(out, mk(def, map[string]types.Value{
 			"oid": iv(int(p.oid)), "proname": sv(p.name), "pronamespace": iv(NamespaceCatalog),
 			"proowner": iv(OwnerOID), "prolang": iv(12), "procost": types.Float(1),
-			"prorows": types.Float(0), "prokind": sv("f"), "prosecdef": bv(false),
+			"prorows": types.Float(0), "prokind": sv("f"),
+			"proisagg": bv(false), "proiswindow": bv(false), "prosecdef": bv(false),
 			"proleakproof": bv(false), "proisstrict": bv(true), "proretset": bv(false),
 			"provolatile": sv("s"), "proparallel": sv("s"), "pronargs": iv(p.nargs),
 			"pronargdefaults": iv(0), "prorettype": iv(int(p.rettype)),

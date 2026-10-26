@@ -467,6 +467,18 @@ func (p *parser) parseTypeRef() (string, []int, bool, error) {
 			return "", nil, false, err
 		}
 	}
+	// 数组类型后缀：char[]、text[]、int4[]，客户端会写 '{r,v,m}'::char[]。
+	// 我们没有真正的数组类型，统一按文本处理（见 types.ParseType）。
+	for p.atPunct("[") {
+		p.pos++
+		if p.peek().Kind == NumberVal {
+			p.pos++
+		}
+		if err := p.expectPunct("]"); err != nil {
+			return "", nil, false, err
+		}
+		name += "[]"
+	}
 	return name, args, serial, nil
 }
 

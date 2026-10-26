@@ -23,6 +23,7 @@ func Load(dir string) (*Catalog, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
+	c.EnsureIDs()
 	c.Rebuild()
 	return &c, nil
 }

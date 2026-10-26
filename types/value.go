@@ -40,23 +40,41 @@ func (k Kind) String() string {
 	return "unknown"
 }
 
-// Value 是一个 SQL 值。使用 Kind 判别当前哪个字段有效，避免重复的类型断言。
+// Value 是一个 SQL 值。
+//
+// 内存布局是刻意压小的：行数据全驻内存，一个 Value 的大小直接乘上行数。
+// 早期版本把 int64/float64/bool/time.Time 各占一个字段，一个 Value 要 72 字节，
+// 4 列的表一行就要 300 多字节。现在只保留 I 一个 8 字节槽位，按 Kind 复用：
+//
+//	KInt      I = 整数值
+//	KFloat    I = float64 的位模式（math.Float64bits）
+//	KBool     I = 0 / 1
+//	KTime     I = UnixNano，z = 时区偏移（分钟）
+//	KText     S
+//
+// 结果：32 字节（K 1 + z 2 + 对齐 5 + I 8 + S 16），比原来小一半以上。
 type Value struct {
 	K Kind
+	z int16
 	I int64
-	F float64
 	S string
-	B bool
-	T time.Time
 }
 
 var Null = Value{K: KNull}
 
-func Int(i int64) Value      { return Value{K: KInt, I: i} }
-func Float(f float64) Value  { return Value{K: KFloat, F: f} }
-func Text(s string) Value    { return Value{K: KText, S: s} }
-func Bool(b bool) Value      { return Value{K: KBool, B: b} }
-func Time(t time.Time) Value { return Value{K: KTime, T: t} }
+func Int(i int64) Value     { return Value{K: KInt, I: i} }
+func Float(f float64) Value { return Value{K: KFloat, I: int64(math.Float64bits(f))} }
+func Text(s string) Value   { return Value{K: KText, S: s} }
+func Bool(b bool) Value {
+	if b {
+		return Value{K: KBool, I: 1}
+	}
+	return Value{K: KBool}
+}
+func Time(t time.Time) Value {
+	_, offSec := t.Zone()
+	return Value{K: KTime, I: t.UnixNano(), z: int16(offSec / 60)}
+}
 
 func (v Value) IsNull() bool    { return v.K == KNull }
 func (v Value) IsNumeric() bool { return v.K == KInt || v.K == KFloat }
@@ -67,9 +85,24 @@ func (v Value) Float() float64 {
 	case KInt:
 		return float64(v.I)
 	case KFloat:
-		return v.F
+		return math.Float64frombits(uint64(v.I))
 	}
 	return math.NaN()
+}
+
+// Bool 返回布尔值（非布尔类型返回 false）。
+func (v Value) Bool() bool { return v.K == KBool && v.I != 0 }
+
+// Time 返回时间值（非时间类型返回零值）。
+func (v Value) Time() time.Time {
+	if v.K != KTime {
+		return time.Time{}
+	}
+	t := time.Unix(0, v.I)
+	if v.z == 0 {
+		return t.UTC()
+	}
+	return t.In(time.FixedZone("", int(v.z)*60))
 }
 
 // TextForm 是值的文本表现形式，用于字符串拼接、LIKE、显示。
@@ -78,14 +111,14 @@ func (v Value) TextForm() string {
 	case KInt:
 		return strconv.FormatInt(v.I, 10)
 	case KFloat:
-		return formatFloat(v.F)
+		return formatFloat(v.Float())
 	case KBool:
-		if v.B {
+		if v.Bool() {
 			return "true"
 		}
 		return "false"
 	case KTime:
-		return v.T.Format("2006-01-02 15:04:05")
+		return v.Time().Format("2006-01-02 15:04:05")
 	case KText:
 		return v.S
 	}
@@ -110,16 +143,17 @@ func Compare(a, b Value) (int, error) {
 		case KInt:
 			return cmpInt(a.I, b.I), nil
 		case KFloat:
-			return cmpFloat(a.F, b.F), nil
+			return cmpFloat(a.Float(), b.Float()), nil
 		case KText:
 			return strings.Compare(a.S, b.S), nil
 		case KBool:
-			return cmpInt(b2i(a.B), b2i(b.B)), nil
+			return cmpInt(b2i(a.Bool()), b2i(b.Bool())), nil
 		case KTime:
+			at, bt := a.Time(), b.Time()
 			switch {
-			case a.T.Before(b.T):
+			case at.Before(bt):
 				return -1, nil
-			case a.T.After(b.T):
+			case at.After(bt):
 				return 1, nil
 			}
 			return 0, nil
@@ -179,13 +213,13 @@ func Same(a, b Value) bool {
 	case KInt:
 		return a.I == b.I
 	case KFloat:
-		return a.F == b.F
+		return a.Float() == b.Float()
 	case KText:
 		return a.S == b.S
 	case KBool:
-		return a.B == b.B
+		return a.Bool() == b.Bool()
 	case KTime:
-		return a.T.Equal(b.T)
+		return a.I == b.I && a.z == b.z
 	}
 	return false
 }
@@ -222,9 +256,9 @@ func AppendKey(b *strings.Builder, v Value) {
 	case KInt:
 		b.WriteString(strconv.FormatInt(v.I, 10))
 	case KFloat:
-		b.WriteString(strconv.FormatFloat(v.F, 'g', -1, 64))
+		b.WriteString(strconv.FormatFloat(v.Float(), 'g', -1, 64))
 	case KBool:
-		if v.B {
+		if v.Bool() {
 			b.WriteByte('t')
 		} else {
 			b.WriteByte('f')
@@ -234,7 +268,7 @@ func AppendKey(b *strings.Builder, v Value) {
 		b.WriteByte(':')
 		b.WriteString(v.S)
 	case KTime:
-		b.WriteString(strconv.FormatInt(v.T.UnixNano(), 10))
+		b.WriteString(strconv.FormatInt(v.I, 10))
 	}
 	b.WriteByte('|')
 }
@@ -247,16 +281,17 @@ func (v Value) MarshalJSON() ([]byte, error) {
 	case KInt:
 		return []byte(strconv.FormatInt(v.I, 10)), nil
 	case KFloat:
-		if math.IsInf(v.F, 0) || math.IsNaN(v.F) {
-			return json.Marshal(map[string]string{"$f": formatFloat(v.F)})
+		f := v.Float()
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return json.Marshal(map[string]string{"$f": formatFloat(f)})
 		}
-		return []byte(strconv.FormatFloat(v.F, 'g', -1, 64)), nil
+		return []byte(strconv.FormatFloat(f, 'g', -1, 64)), nil
 	case KBool:
-		return json.Marshal(v.B)
+		return json.Marshal(v.Bool())
 	case KText:
 		return json.Marshal(v.S)
 	case KTime:
-		return json.Marshal(map[string]string{"$ts": v.T.UTC().Format(time.RFC3339Nano)})
+		return json.Marshal(map[string]string{"$ts": v.Time().UTC().Format(time.RFC3339Nano)})
 	}
 	return []byte("null"), nil
 }
@@ -322,16 +357,17 @@ func (v Value) Interface() interface{} {
 	case KInt:
 		return v.I
 	case KFloat:
-		if math.IsInf(v.F, 0) || math.IsNaN(v.F) {
-			return formatFloat(v.F)
+		f := v.Float()
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return formatFloat(f)
 		}
-		return v.F
+		return f
 	case KBool:
-		return v.B
+		return v.Bool()
 	case KText:
 		return v.S
 	case KTime:
-		return v.T.Format("2006-01-02 15:04:05")
+		return v.Time().Format("2006-01-02 15:04:05")
 	}
 	return nil
 }

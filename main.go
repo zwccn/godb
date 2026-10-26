@@ -95,7 +95,16 @@ func main() {
 	if *pgAddr != "" {
 		log.Printf("PG 协议: %s（trust 认证，任意用户名）", *pgAddr)
 	}
-	log.Printf("数据目录: %s", *dir)
+	info := d.Store.Info()
+	log.Printf("数据目录: %s（%d 张表 / %d 行，已加载 %d 张，数据 %.1f MB，WAL %d 字节）",
+		*dir, info.Tables, info.Rows, info.Loaded,
+		float64(info.Bytes)/(1<<20), info.WALBytes)
+	if n := info.Repaired; n > 0 {
+		log.Printf("注意：启动时修复了 %d 个单元格（表结构与磁盘数据不一致）", n)
+	}
+	if err := d.Store.LoadError(); err != nil {
+		log.Printf("注意：读取表文件时出错: %v", err)
+	}
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP 服务异常: %v\n", err)
 		os.Exit(1)

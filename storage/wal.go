@@ -490,8 +490,12 @@ func (s *Store) replayWAL() error {
 	type pendingTx struct{ recs []walRec }
 	pending := map[int64]*pendingTx{}
 	for _, rec := range recs {
-		if rec.Gen <= s.snapshotGen {
-			continue // 快照已经包含这一代的改动
+		// 每张表的数据文件各自记录"已经包含到哪个代次"，
+		// 所以这里按表过滤：该表文件已经包含这一代的改动就跳过。
+		if rec.Op != opCommit {
+			if rec.Gen <= s.tableGen[cleanName(rec.Table)] {
+				continue
+			}
 		}
 		if rec.Op == opCommit {
 			if p, ok := pending[rec.Tx]; ok {
@@ -514,7 +518,11 @@ func (s *Store) replayWAL() error {
 }
 
 func (s *Store) applyRec(rec walRec) error {
-	td := s.Table(rec.Table)
+	key := cleanName(rec.Table)
+	if !s.isLoaded(key) {
+		s.ensureLoaded(key)
+	}
+	td := s.Data[key]
 	if td == nil {
 		return nil
 	}
@@ -522,6 +530,10 @@ func (s *Store) applyRec(rec walRec) error {
 	if !ok {
 		return nil
 	}
+	// 重放的改动只存在于内存里，必须标脏，否则接下来的轮转会把它丢掉
+	s.loadMu.Lock()
+	s.dirty[key] = true
+	s.loadMu.Unlock()
 	switch rec.Op {
 	case opIns:
 		row, rep := castRow(t, rec.New)

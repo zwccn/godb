@@ -19,9 +19,9 @@ func Cast(v Value, t Type) (Value, error) {
 		case KInt:
 			return v, nil
 		case KFloat:
-			return Int(int64(math.Round(v.F))), nil
+			return Int(int64(math.Round(v.Float()))), nil
 		case KBool:
-			if v.B {
+			if v.Bool() {
 				return Int(1), nil
 			}
 			return Int(0), nil
@@ -50,7 +50,7 @@ func Cast(v Value, t Type) (Value, error) {
 			}
 			return Float(f), nil
 		case KBool:
-			if v.B {
+			if v.Bool() {
 				return Float(1), nil
 			}
 			return Float(0), nil

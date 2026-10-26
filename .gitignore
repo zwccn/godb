@@ -8,6 +8,7 @@ godb
 
 # 运行时数据（WAL / 快照 / 表结构），首次启动会自动生成
 godb-data/
+godb-data.bak/
 
 # 日志与临时文件
 *.log

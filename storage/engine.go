@@ -41,6 +41,18 @@ type Store struct {
 	commits int
 	txSeq   int64
 
+	// 分表快照的状态。key 一律是 cleanName(表名)。
+	tableGen  map[string]int64 // 该表的数据文件已包含到哪个 WAL 代次
+	tableRows map[string]int   // 该表文件里的行数（未加载时用它回答行数查询）
+	hasSnap   map[string]bool  // 是否已经有数据文件
+	dirty     map[string]bool  // 上一次 checkpoint 之后有没有改动
+	loaded    map[string]bool  // 行是否已经在内存里
+	metaGen   int64
+	snapBytes int64
+	loadMu    sync.RWMutex
+	// loadErr 记录读取表文件时的错误（不为 nil 时启动日志会提示）。
+	loadErr error
+
 	// appliedGen 是"已经应用到内存的最高 WAL 代次"，snapshotGen 是磁盘快照
 	// 覆盖到的代次。重放时只应用代次更大的记录，避免和快照重复。
 	appliedGen  int64
@@ -54,7 +66,16 @@ func Open(dir string, cat *catalog.Catalog) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	s := &Store{Dir: dir, Cat: cat, Data: map[string]*TableData{}}
+	s := &Store{
+		Dir:       dir,
+		Cat:       cat,
+		Data:      map[string]*TableData{},
+		tableGen:  map[string]int64{},
+		tableRows: map[string]int{},
+		hasSnap:   map[string]bool{},
+		dirty:     map[string]bool{},
+		loaded:    map[string]bool{},
+	}
 	for _, t := range cat.Tables {
 		s.Data[cleanName(t.Name)] = newTableData(t.Name)
 	}
@@ -86,30 +107,147 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// Table 按名字取表数据。
+// Table 按名字取表数据；行还没加载就先从磁盘读进来（按需加载）。
+//
+// 并发说明：加载在 loadMu 下完成，且 ensureLoaded 之后 Rows 不会再被写，
+// 所以并发读同一个表不会看到半加载状态。
 func (s *Store) Table(name string) *TableData {
-	return s.Data[cleanName(name)]
+	key := cleanName(name)
+	s.loadMu.RLock()
+	td := s.Data[key]
+	ready := td == nil || s.loaded[key]
+	s.loadMu.RUnlock()
+	if ready {
+		return td
+	}
+	s.ensureLoaded(key)
+	s.loadMu.RLock()
+	td = s.Data[key]
+	s.loadMu.RUnlock()
+	return td
 }
 
-// AddTable 为新建的表准备空数据。
+// LoadError 返回加载表文件时遇到的错误（没有则为 nil）。
+func (s *Store) LoadError() error {
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	return s.loadErr
+}
+
+// isLoaded 判断某张表的行是否已经在内存里。
+func (s *Store) isLoaded(name string) bool {
+	key := cleanName(name)
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	return s.loaded[key]
+}
+
+// ensureLoaded 把一张表的行从磁盘读进内存（幂等）。
+func (s *Store) ensureLoaded(key string) {
+	s.loadMu.Lock()
+	defer s.loadMu.Unlock()
+	s.ensureLoadedLocked(key)
+}
+
+func (s *Store) ensureLoadedLocked(key string) {
+	if s.loaded[key] {
+		return
+	}
+	td := s.Data[key]
+	if td == nil {
+		return
+	}
+	t, ok := s.Cat.Get(td.Name)
+	if !ok {
+		s.loaded[key] = true
+		return
+	}
+	rows, gen, repaired, err := readTableSnap(s.Dir, t.ID, t)
+	if err != nil {
+		// 文件坏了：当作空表，但保留错误信息给启动日志
+		s.loadErr = err
+		rows = nil
+	}
+	if gen > s.tableGen[key] {
+		s.tableGen[key] = gen
+	}
+	s.Repaired += int64(repaired)
+	td.Rows = rows
+	s.tableRows[key] = len(rows)
+	s.loaded[key] = true
+}
+
+// LoadTables 预加载一批表（语句执行前调用，避免在持 schema 锁时做磁盘 IO）。
+func (s *Store) LoadTables(names []string) {
+	for _, n := range names {
+		key := cleanName(n)
+		s.loadMu.RLock()
+		need := !s.loaded[key] && s.Data[key] != nil
+		s.loadMu.RUnlock()
+		if need {
+			s.ensureLoaded(key)
+		}
+	}
+}
+
+// AddTable 为新建的表准备空数据（新表没有任何行，直接算已加载）。
 func (s *Store) AddTable(name string) {
-	s.Data[cleanName(name)] = newTableData(name)
+	key := cleanName(name)
+	s.loadMu.Lock()
+	defer s.loadMu.Unlock()
+	s.Data[key] = newTableData(name)
+	s.loaded[key] = true
+	s.tableRows[key] = 0
 }
 
 // DropTable 删除表数据。
 func (s *Store) DropTable(name string) {
-	delete(s.Data, cleanName(name))
+	key := cleanName(name)
+	s.loadMu.Lock()
+	defer s.loadMu.Unlock()
+	delete(s.Data, key)
+	delete(s.loaded, key)
+	delete(s.tableGen, key)
+	delete(s.tableRows, key)
+	delete(s.hasSnap, key)
+	delete(s.dirty, key)
 }
 
-// RenameTable 重命名表数据。
+// RenameTable 重命名表数据。表文件的命名基于稳定 ID，所以不需要搬文件。
 func (s *Store) RenameTable(oldName, newName string) {
-	td := s.Data[cleanName(oldName)]
+	oldKey, newKey := cleanName(oldName), cleanName(newName)
+	s.loadMu.Lock()
+	defer s.loadMu.Unlock()
+	td := s.Data[oldKey]
 	if td == nil {
 		return
 	}
-	delete(s.Data, cleanName(oldName))
+	delete(s.Data, oldKey)
 	td.Name = newName
-	s.Data[cleanName(newName)] = td
+	s.Data[newKey] = td
+	move := func(m map[string]bool) {
+		if v, ok := m[oldKey]; ok {
+			m[newKey] = v
+			delete(m, oldKey)
+		}
+	}
+	if s.loaded[oldKey] {
+		s.loaded[newKey] = true
+		delete(s.loaded, oldKey)
+	}
+	if v, ok := s.tableGen[oldKey]; ok {
+		s.tableGen[newKey] = v
+		delete(s.tableGen, oldKey)
+	}
+	if v, ok := s.tableRows[oldKey]; ok {
+		s.tableRows[newKey] = v
+		delete(s.tableRows, oldKey)
+	}
+	move(s.hasSnap)
+	if s.dirty[oldKey] {
+		s.dirty[newKey] = true
+		delete(s.dirty, oldKey)
+	}
 }
 
 // RebuildIndex 重建某张表的主键索引。
@@ -123,24 +261,37 @@ func (s *Store) RebuildIndex(name string) {
 	}
 }
 
+// rebuildAll 为已加载的表重建主键索引（未加载的表等它被读进来时再说，
+// 那时 ensureLoaded 之后不需要索引也能正确扫描，索引在首次写入前会重建）。
 func (s *Store) rebuildAll() {
 	for _, t := range s.Cat.Tables {
-		td := s.Table(t.Name)
+		key := cleanName(t.Name)
+		if !s.isLoaded(key) {
+			continue
+		}
+		td := s.Data[key]
 		if td == nil {
 			td = newTableData(t.Name)
-			s.Data[cleanName(t.Name)] = td
+			s.Data[key] = td
+			s.loaded[key] = true
 		}
 		td.RebuildIndex(t)
 	}
 }
 
-// RowCount 返回已提交的行数。
+// RowCount 返回已提交的行数。表还没加载时直接用文件头里的行数，
+// 这样 pg_class.reltuples 之类的元数据查询不会把整库拉进内存。
 func (s *Store) RowCount(name string) int {
-	td := s.Table(name)
-	if td == nil {
+	key := cleanName(name)
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	if s.loaded[key] {
+		if td := s.Data[key]; td != nil {
+			return len(td.Rows)
+		}
 		return 0
 	}
-	return len(td.Rows)
+	return s.tableRows[key]
 }
 
 // Begin 开启一个事务。事务 ID 原子自增，可并发调用。
@@ -567,6 +718,11 @@ func (tx *Tx) commitLocked() (int64, error) {
 		if t, ok := tx.st.Cat.Get(c.table); ok {
 			td.RebuildIndex(t)
 		}
+		key := cleanName(c.table)
+		tx.st.loadMu.Lock()
+		tx.st.dirty[key] = true
+		tx.st.tableRows[key] = len(c.rows)
+		tx.st.loadMu.Unlock()
 	}
 
 	tx.ov = map[string]*overlay{}

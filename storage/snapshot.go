@@ -5,57 +5,143 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"godb/types"
 )
 
-const snapshotFile = "snapshot.json"
+const (
+	// metaFile 记录下一批 WAL 记录该用哪个代次。
+	metaFile = "meta.json"
+	// legacySnapshotFile 是改动前的单文件全量快照，只在迁移时读一次。
+	legacySnapshotFile = "snapshot.json"
+)
 
-type tableSnap struct {
-	Rows [][]interface{} `json:"rows"`
-	Seq  int64           `json:"seq,omitempty"`
+// metaInfo 是 meta.json 的内容。
+type metaInfo struct {
+	Generation int64 `json:"generation"`
+	Format     int   `json:"format"`
 }
 
-type snapFile struct {
-	// Generation 是这份快照覆盖到的 WAL 代次：代次 <= Generation 的记录
-	// 都已经体现在 Rows 里，重放时必须跳过。
-	Generation int64                 `json:"generation"`
-	Tables     map[string]*tableSnap `json:"tables"`
+// snapFormat 是当前磁盘格式版本（2 = 分表快照）。
+const snapFormat = 2
+
+func (s *Store) metaPath() string { return filepath.Join(s.Dir, metaFile) }
+
+func (s *Store) legacySnapshotPath() string { return filepath.Join(s.Dir, legacySnapshotFile) }
+
+// loadMeta 读 meta.json，返回代次；文件不存在返回 0。
+func (s *Store) loadMeta() (int64, error) {
+	b, err := os.ReadFile(s.metaPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var m metaInfo
+	if err := json.Unmarshal(b, &m); err != nil {
+		return 0, fmt.Errorf("解析 %s 失败: %w", metaFile, err)
+	}
+	return m.Generation, nil
 }
 
-func (s *Store) snapshotPath() string { return filepath.Join(s.Dir, snapshotFile) }
+func (s *Store) writeMeta(gen int64) error {
+	b, err := json.Marshal(&metaInfo{Generation: gen, Format: snapFormat})
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(s.metaPath(), b)
+}
 
-// loadSnapshot 读快照。行宽和当前 catalog 不一致时按 castRow 的规则修复，
-// 不再让整个库因为一个 ALTER TABLE 之后的小概率崩溃而打不开。
+// writeFileAtomic 用 tmp + fsync + rename 原子写文件。
+func writeFileAtomic(path string, b []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// loadSnapshot 读磁盘状态：meta.json + 每张表的文件头。
+//
+// 只读文件头（24 字节/表），不读行数据 —— 行在第一次真正访问时才加载
+// （见 ensureLoaded）。这样表很多、数据很大时冷启动也不用把全部数据读进内存。
 func (s *Store) loadSnapshot() error {
-	f, err := os.Open(s.snapshotPath())
+	metaGen, err := s.loadMeta()
+	if err != nil {
+		return err
+	}
+	// 旧的单文件快照：只在 meta.json 不存在时迁移一次
+	if _, statErr := os.Stat(s.metaPath()); os.IsNotExist(statErr) {
+		if err := s.migrateLegacySnapshot(); err != nil {
+			return err
+		}
+		metaGen = s.appliedGen
+	}
+	s.metaGen = metaGen
+	if metaGen > s.appliedGen {
+		s.appliedGen = metaGen
+	}
+	for _, t := range s.Cat.Tables {
+		key := cleanName(t.Name)
+		hdr, err := readTableSnapHeader(tableFileName(s.Dir, t.ID))
+		if err != nil {
+			return err
+		}
+		if !hdr.Exists {
+			continue
+		}
+		s.hasSnap[key] = true
+		s.tableGen[key] = hdr.Generation
+		s.tableRows[key] = hdr.Rows
+	}
+	return nil
+}
+
+// migrateLegacySnapshot 把旧的单文件 snapshot.json 迁移成分表文件。
+// 只读一次：迁移成功后把旧文件改名成 .bak，之后再也不碰。
+func (s *Store) migrateLegacySnapshot() error {
+	path := s.legacySnapshotPath()
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	defer f.Close()
-
-	dec := json.NewDecoder(f)
-	dec.UseNumber()
-	var snap snapFile
-	if err := dec.Decode(&snap); err != nil {
-		return fmt.Errorf("解析快照失败: %w", err)
+	var old struct {
+		Generation int64 `json:"generation"`
+		Tables     map[string]struct {
+			Rows [][]any `json:"rows"`
+		} `json:"tables"`
 	}
-	s.snapshotGen = snap.Generation
-	s.appliedGen = snap.Generation
-	for name, ts := range snap.Tables {
+	if err := json.Unmarshal(b, &old); err != nil {
+		return fmt.Errorf("解析旧快照失败: %w", err)
+	}
+	for name, ts := range old.Tables {
 		td := s.Table(name)
 		if td == nil {
-			// 快照里有、catalog 里没有的表（崩溃在 DROP TABLE 之后）：忽略
 			continue
 		}
 		t, ok := s.Cat.Get(name)
 		if !ok {
 			continue
 		}
+		key := cleanName(name)
 		rows := make([]types.Row, 0, len(ts.Rows))
 		for _, raw := range ts.Rows {
 			vals := make([]types.Value, len(raw))
@@ -67,12 +153,18 @@ func (s *Store) loadSnapshot() error {
 			rows = append(rows, row)
 		}
 		td.Rows = rows
-		td.Seq = ts.Seq
+		s.loaded[key] = true
+		s.dirty[key] = true // 让接下来那次 checkpoint 写出分表文件
+	}
+	s.appliedGen = old.Generation
+	s.metaGen = old.Generation
+	if err := os.Rename(path, path+".bak"); err != nil {
+		return err
 	}
 	return nil
 }
 
-// Checkpoint 把当前内存数据整体写成快照，然后轮转 WAL。
+// Checkpoint 把内存数据写成快照，然后轮转 WAL。
 func (s *Store) Checkpoint() error {
 	s.CommitMu.Lock()
 	defer s.CommitMu.Unlock()
@@ -98,41 +190,58 @@ func (s *Store) Flush() error {
 
 // checkpointLocked 在已持有 CommitMu 时执行 checkpoint。
 //
-// 顺序很关键：先把快照（含 Generation）原子落盘，再轮转 WAL。
-// 崩溃在两者之间也没关系——新 WAL 里残留的旧代次记录会被重放逻辑按
-// Generation 过滤掉，不会重复应用。
+// 关键点：**只重写有改动的表**。以前每次 checkpoint 都把整库序列化一遍，
+// 40 万行要 500ms+，期间所有写事务被堵住；现在写一张表的代价只和那张表有关。
+//
+// 顺序：写脏表 → 删掉已不存在的表 → 写 meta → 轮转 WAL。
+// 崩在中间也安全：每张表的文件在文件头里带自己的代次，重放时按
+// "记录代次 > 该表文件代次" 过滤，既不会重复应用，也不会丢。
 func (s *Store) checkpointLocked() error {
 	gen := s.appliedGen
-	snap := snapFile{Generation: gen, Tables: map[string]*tableSnap{}}
-	for name, td := range s.Data {
-		snap.Tables[name] = &tableSnap{Rows: encodeRows(td.Rows), Seq: td.Seq}
+	var written int64
+	for _, t := range s.Cat.Tables {
+		key := cleanName(t.Name)
+		td := s.Data[key]
+		if td == nil || !s.loaded[key] {
+			continue
+		}
+		if !s.dirty[key] && s.hasSnap[key] {
+			continue // 没改动就跳过
+		}
+		n, err := writeTableSnap(s.Dir, t.ID, gen, td.Rows)
+		if err != nil {
+			return err
+		}
+		written += n
+		s.dirty[key] = false
+		s.hasSnap[key] = true
+		s.tableGen[key] = gen
+		s.tableRows[key] = len(td.Rows)
 	}
-	b, err := json.Marshal(&snap)
-	if err != nil {
-		return err
+
+	// 清理已 DROP 的表留下的数据文件
+	live := make(map[int64]bool, len(s.Cat.Tables))
+	for _, t := range s.Cat.Tables {
+		live[t.ID] = true
 	}
-	path := s.snapshotPath()
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
+	if files, err := os.ReadDir(filepath.Join(s.Dir, "tables")); err == nil {
+		for _, de := range files {
+			var id int64
+			if _, err := fmt.Sscanf(de.Name(), "t%d.snp", &id); err != nil {
+				continue
+			}
+			if !live[id] {
+				_ = os.Remove(filepath.Join(s.Dir, "tables", de.Name()))
+			}
+		}
 	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+
+	if err := s.writeMeta(gen); err != nil {
 		return err
 	}
 	s.snapshotGen = gen
 	s.commits = 0
+	s.snapBytes = written
 	if s.wal != nil {
 		return s.wal.Rotate(gen + 1)
 	}
@@ -151,16 +260,40 @@ type SnapshotInfo struct {
 	WALFrames      int64
 	WALSyncs       int64
 	Repaired       int64
+	// Loaded / Tables 说明按需加载的进度。
+	Loaded int
+	Tables int
+	// Dirty 是上一次 checkpoint 之后有改动的表数。
+	Dirty int
 }
 
 // Info 返回持久化层的当前状态。
 func (s *Store) Info() SnapshotInfo {
-	info := SnapshotInfo{Generation: s.snapshotGen, Repaired: s.Repaired}
-	for _, td := range s.Data {
-		info.Rows += len(td.Rows)
+	info := SnapshotInfo{
+		Generation: s.snapshotGen,
+		Repaired:   s.Repaired,
+		Tables:     len(s.Cat.Tables),
 	}
-	if st, err := os.Stat(s.snapshotPath()); err == nil {
-		info.Bytes = st.Size()
+	for key, td := range s.Data {
+		if s.loaded[key] {
+			info.Loaded++
+			info.Rows += len(td.Rows)
+		} else {
+			info.Rows += s.tableRows[key]
+		}
+		if s.dirty[key] {
+			info.Dirty++
+		}
+	}
+	if files, err := os.ReadDir(filepath.Join(s.Dir, "tables")); err == nil {
+		for _, de := range files {
+			if fi, err := de.Info(); err == nil {
+				info.Bytes += fi.Size()
+			}
+		}
+	}
+	if st, err := os.Stat(s.metaPath()); err == nil {
+		info.Bytes += st.Size()
 	}
 	if s.wal != nil {
 		info.NextGeneration = s.wal.Gen()
@@ -173,6 +306,14 @@ func (s *Store) Info() SnapshotInfo {
 	return info
 }
 
-func parseRFC3339(s string) (time.Time, error) { return time.Parse(time.RFC3339Nano, s) }
+// TableNames 返回按名字排序的表名（调试用）。
+func (s *Store) TableNames() []string {
+	out := make([]string, 0, len(s.Cat.Tables))
+	for _, t := range s.Cat.Tables {
+		out = append(out, t.Name)
+	}
+	sort.Strings(out)
+	return out
+}
 
-var _ = filepath.Join
+func parseRFC3339(s string) (time.Time, error) { return time.Parse(time.RFC3339Nano, s) }

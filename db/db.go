@@ -44,8 +44,10 @@ func (d *DB) execCheckpoint(sess *txn.Session) (*exec.Result, error) {
 	res.Rows = [][]interface{}{
 		{"snapshot_generation", fmt.Sprintf("%d", after.Generation)},
 		{"next_wal_generation", fmt.Sprintf("%d", after.NextGeneration)},
+		{"tables", fmt.Sprintf("%d", after.Tables)},
+		{"tables_in_memory", fmt.Sprintf("%d", after.Loaded)},
 		{"rows", fmt.Sprintf("%d", after.Rows)},
-		{"snapshot_bytes", fmt.Sprintf("%d", after.Bytes)},
+		{"data_bytes", fmt.Sprintf("%d", after.Bytes)},
 		{"wal_bytes_before", fmt.Sprintf("%d", before.WALBytes)},
 		{"wal_fsyncs", fmt.Sprintf("%d", after.WALSyncs)},
 	}
@@ -209,6 +211,15 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	intents, err := exec.TableIntents(st)
 	if err != nil {
 		return nil, err
+	}
+	// 按需加载：把这条语句要碰的表先读进内存。
+	// 必须放在拿 SchemaMu 之前 —— 加载是磁盘 IO，不能持着锁做。
+	if len(intents) > 0 {
+		names := make([]string, 0, len(intents))
+		for n := range intents {
+			names = append(names, n)
+		}
+		d.Store.LoadTables(names)
 	}
 
 	// 1) 先拿表锁（可能长时间等待，此时不持 schema 锁，避免 DDL 被连带阻塞）

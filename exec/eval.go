@@ -1000,9 +1000,9 @@ func toInt(v types.Value) (int64, error) {
 	case types.KInt:
 		return v.I, nil
 	case types.KFloat:
-		return int64(v.F), nil
+		return int64(v.Float()), nil
 	case types.KBool:
-		if v.B {
+		if v.Bool() {
 			return 1, nil
 		}
 		return 0, nil
@@ -1019,13 +1019,13 @@ func toFloat(v types.Value) (float64, error) {
 	case types.KInt:
 		return float64(v.I), nil
 	case types.KFloat:
-		return v.F, nil
+		return v.Float(), nil
 	}
 	c, err := types.Cast(v, types.Type{Kind: types.KFloat, Name: "double precision"})
 	if err != nil {
 		return 0, err
 	}
-	return c.F, nil
+	return c.Float(), nil
 }
 
 // asBool 把值解释成布尔（NULL 返回 isNull=true）。
@@ -1034,13 +1034,13 @@ func asBool(v types.Value) (val bool, isNull bool, err error) {
 		return false, true, nil
 	}
 	if v.K == types.KBool {
-		return v.B, false, nil
+		return v.Bool(), false, nil
 	}
 	c, err := types.Cast(v, types.Type{Kind: types.KBool, Name: "boolean"})
 	if err != nil {
 		return false, false, fmt.Errorf("argument must be type boolean")
 	}
-	return c.B, false, nil
+	return c.Bool(), false, nil
 }
 
 // likeMatch 实现 SQL LIKE 的 % 与 _ 通配（\ 转义）。

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // openDir 在指定目录打开数据库（用于"重开一次模拟崩溃恢复"）。
@@ -260,10 +261,14 @@ func TestAddColumnDoesNotRewriteSnapshot(t *testing.T) {
 	run(t, d, "s", `INSERT INTO ac VALUES (1,'a')`)
 	run(t, d, "s", `CHECKPOINT`) // 让快照稳定下来
 
-	snapPath := filepath.Join(dir, "snapshot.json")
+	tbl, ok := d.Cat.Get("ac")
+	if !ok {
+		t.Fatal("catalog 里找不到 ac")
+	}
+	snapPath := filepath.Join(dir, "tables", fmt.Sprintf("t%06d.snp", tbl.ID))
 	before, err := os.Stat(snapPath)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("数据文件应该存在: %v", err)
 	}
 	beforeMod := before.ModTime()
 	beforeGen := d.Store.Info().Generation
@@ -275,7 +280,7 @@ func TestAddColumnDoesNotRewriteSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !after.ModTime().Equal(beforeMod) {
-		t.Fatal("ALTER TABLE ADD COLUMN 不应该重写快照文件")
+		t.Fatal("ALTER TABLE ADD COLUMN 不应该重写数据文件")
 	}
 	if d.Store.Info().Generation != beforeGen {
 		t.Fatal("ALTER TABLE ADD COLUMN 不应该轮转 WAL 代次")
@@ -297,4 +302,118 @@ func TestAddColumnDoesNotRewriteSnapshot(t *testing.T) {
 	d2 := openDir(t, dir)
 	assertRows(t, run(t, d2, "s", `SELECT id, extra FROM ac`), []string{"1|<nil>"})
 	d2.Close()
+}
+
+// ---------- 分表快照 + 按需加载 ----------
+
+// 只改一张表时，其它表的数据文件不应该被重写。
+func TestIncrementalCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	defer d.Close()
+	for _, n := range []string{"a", "b", "c"} {
+		run(t, d, "s", fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY, v TEXT)`, n))
+		run(t, d, "s", fmt.Sprintf(`INSERT INTO %s VALUES (1,'x')`, n))
+	}
+	run(t, d, "s", `CHECKPOINT`)
+
+	mtime := func(name string) time.Time {
+		tb, ok := d.Cat.Get(name)
+		if !ok {
+			t.Fatalf("找不到表 %s", name)
+		}
+		st, err := os.Stat(filepath.Join(dir, "tables", fmt.Sprintf("t%06d.snp", tb.ID)))
+		if err != nil {
+			t.Fatalf("数据文件不存在: %v", err)
+		}
+		return st.ModTime()
+	}
+	a0, b0, c0 := mtime("a"), mtime("b"), mtime("c")
+
+	// 只动 b
+	time.Sleep(20 * time.Millisecond)
+	run(t, d, "s", `INSERT INTO b VALUES (2,'y')`)
+	run(t, d, "s", `CHECKPOINT`)
+
+	if !mtime("a").Equal(a0) {
+		t.Fatal("没改过的表 a 不应该被重写")
+	}
+	if !mtime("c").Equal(c0) {
+		t.Fatal("没改过的表 c 不应该被重写")
+	}
+	if mtime("b").Equal(b0) {
+		t.Fatal("改过的表 b 应该被重写")
+	}
+	// 数据仍然正确
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM b`), []string{"2"})
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM a`), []string{"1"})
+}
+
+// 冷启动不该把所有表都读进内存，访问到哪张表才加载哪张。
+func TestLazyLoadOnStartup(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	for i := 0; i < 5; i++ {
+		run(t, d, "s", fmt.Sprintf(`CREATE TABLE l%d (id INTEGER PRIMARY KEY, v TEXT)`, i))
+		run(t, d, "s", fmt.Sprintf(`INSERT INTO l%d VALUES (1,'x')`, i))
+	}
+	run(t, d, "s", `CHECKPOINT`)
+	d.Close()
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+
+	info := d2.Store.Info()
+	if info.Loaded != 0 {
+		t.Fatalf("刚打开时不应加载任何表，实际加载了 %d 张", info.Loaded)
+	}
+	if info.Tables != 5 {
+		t.Fatalf("表数 = %d", info.Tables)
+	}
+	// 行数不靠加载也能回答（pg_class.reltuples 用得上）
+	if info.Rows != 5 {
+		t.Fatalf("行数（未加载）= %d，期望 5", info.Rows)
+	}
+
+	// 只查一张表 → 只加载那一张
+	assertRows(t, run(t, d2, "s", `SELECT count(*) FROM l2`), []string{"1"})
+	info = d2.Store.Info()
+	if info.Loaded != 1 {
+		t.Fatalf("查一张表之后应只加载 1 张，实际 %d", info.Loaded)
+	}
+	// 未加载的表里没被碰过，但 RowCount 仍然准确
+	if got := d2.Store.RowCount("l4"); got != 1 {
+		t.Fatalf("未加载表的行数 = %d，期望 1", got)
+	}
+}
+
+// 旧的单文件 snapshot.json 要能自动迁移成分表文件。
+func TestLegacySnapshotMigration(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	run(t, d, "s", `CREATE TABLE lm (id INTEGER PRIMARY KEY, v TEXT)`)
+	d.Close()
+	// 手工造一个旧格式快照，同时删掉新格式的 meta.json 与表文件
+	legacy := `{"generation":3,"tables":{"lm":{"rows":[[1,"旧数据"],[2,"也还在"]]}}}`
+	if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(dir, "meta.json"))
+	os.RemoveAll(filepath.Join(dir, "tables"))
+
+	d2 := openDir(t, dir)
+	assertRows(t, run(t, d2, "s", `SELECT id, v FROM lm ORDER BY id`), []string{"1|旧数据", "2|也还在"})
+	d2.Close()
+
+	// 迁移后旧文件应该被改名，新格式文件就位
+	if _, err := os.Stat(filepath.Join(dir, "snapshot.json.bak")); err != nil {
+		t.Fatal("旧快照应该被改名成 .bak")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err != nil {
+		t.Fatal("应该生成 meta.json")
+	}
+
+	d3 := openDir(t, dir)
+	defer d3.Close()
+	assertRows(t, run(t, d3, "s", `SELECT count(*) FROM lm`), []string{"2"})
 }

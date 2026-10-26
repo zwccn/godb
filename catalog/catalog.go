@@ -42,6 +42,9 @@ func (c *Column) Type() types.Type {
 
 // Table 是一张表的定义。
 type Table struct {
+	// ID 是建表时分配的稳定编号，用于命名磁盘上的数据文件。
+	// 它不随 RENAME 变化，DROP 之后也不会被复用，所以文件不会互相覆盖。
+	ID      int64     `json:"id,omitempty"`
 	Name    string    `json:"name"`
 	Columns []*Column `json:"columns"`
 
@@ -170,6 +173,22 @@ func (c *Catalog) Names() []string {
 	return out
 }
 
+// EnsureIDs 给还没有 ID 的表补一个（读旧版 catalog.json 时会用到）。
+func (c *Catalog) EnsureIDs() {
+	var max int64
+	for _, t := range c.Tables {
+		if t.ID > max {
+			max = t.ID
+		}
+	}
+	for _, t := range c.Tables {
+		if t.ID == 0 {
+			max++
+			t.ID = max
+		}
+	}
+}
+
 // Add 新增表。
 func (c *Catalog) Add(t *Table) error {
 	if _, ok := c.Get(t.Name); ok {
@@ -179,6 +198,7 @@ func (c *Catalog) Add(t *Table) error {
 		return err
 	}
 	c.Tables = append(c.Tables, t)
+	c.EnsureIDs()
 	c.Rebuild()
 	return nil
 }

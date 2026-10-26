@@ -37,10 +37,10 @@ func appendValue(b []byte, v types.Value) []byte {
 		return binary.LittleEndian.AppendUint64(b, uint64(v.I))
 	case types.KFloat:
 		b = append(b, tagFloat)
-		return binary.LittleEndian.AppendUint64(b, math.Float64bits(v.F))
+		return binary.LittleEndian.AppendUint64(b, math.Float64bits(v.Float()))
 	case types.KBool:
 		b = append(b, tagBool)
-		if v.B {
+		if v.Bool() {
 			return append(b, 1)
 		}
 		return append(b, 0)
@@ -50,8 +50,8 @@ func appendValue(b []byte, v types.Value) []byte {
 		return append(b, v.S...)
 	case types.KTime:
 		b = append(b, tagTime)
-		b = binary.LittleEndian.AppendUint64(b, uint64(v.T.UnixNano()))
-		_, off := v.T.Zone()
+		b = binary.LittleEndian.AppendUint64(b, uint64(v.I))
+		_, off := v.Time().Zone()
 		return binary.LittleEndian.AppendUint32(b, uint32(int32(off)))
 	}
 	return append(b, tagNull)

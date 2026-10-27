@@ -200,6 +200,15 @@ async function api(path, body) {
   }
 }
 
+/* ---------------- 弹窗的关闭规则 ---------------- */
+
+// 所有弹窗（设置 / 数据库 / 表设计器 / 输入 / 历史）**点遮罩不关闭**。
+// 理由：这些弹窗里都有正在填的内容（表名、字段、库名、SQL 历史），误点一下空白
+// 就丢掉输入是最容易招骂的交互。关它只有三条路：× 按钮、取消/关闭按钮、Esc。
+//
+// 以前设置/数据库/历史三个弹窗各自挂了「点遮罩关闭」，删掉时一并集中到这里说明，
+// 免得后加的弹窗又照着旧代码抄回去。抽屉（锁状态）本来就不吃遮罩点击，无需处理。
+
 /* ---------------- 执行 ---------------- */
 
 let busy = false;
@@ -1002,9 +1011,6 @@ async function saveSettings() {
 document.getElementById('btnSettings').addEventListener('click', openSettings);
 document.getElementById('btnSettingsClose').addEventListener('click', closeSettings);
 document.getElementById('btnSettingsSave').addEventListener('click', saveSettings);
-settingsModal.addEventListener('click', e => {
-  if (e.target === settingsModal) closeSettings();
-});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !settingsModal.classList.contains('hidden')) closeSettings();
 });
@@ -1741,9 +1747,6 @@ document.getElementById('btnHistoryClear').addEventListener('click', () => {
   localStorage.removeItem(HISTORY_KEY);
   openHistory();
 });
-document.getElementById('historyModal').addEventListener('click', ev => {
-  if (ev.target.id === 'historyModal') closeHistory();
-});
 document.addEventListener('keydown', ev => {
   if (ev.key !== 'Escape') return;
   const m = document.getElementById('historyModal');
@@ -1913,9 +1916,6 @@ document.getElementById('btnDBDone').addEventListener('click', closeDBModal);
 document.getElementById('btnDBCreate').addEventListener('click', createDB);
 document.getElementById('dbNewName').addEventListener('keydown', e => {
   if (e.key === 'Enter') createDB();
-});
-document.getElementById('dbModal').addEventListener('click', e => {
-  if (e.target === document.getElementById('dbModal')) closeDBModal();
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !document.getElementById('dbModal').classList.contains('hidden')) closeDBModal();

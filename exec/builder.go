@@ -233,26 +233,50 @@ func (p *Planner) tryIndexScan(bt *sql.BaseTable, where sql.Expr) (Operator, boo
 		qual = t.Name
 	}
 	qual = strings.ToLower(qual)
-	ixName, cols, vals, ok := pickIndex(t, where, qual)
+	plan, ok := pickIndex(t, where, qual)
 	if !ok {
 		return nil, false
 	}
-	return newIndexScan(p.Tx, t, ixName, cols, vals, qual), true
+	if plan.isRange {
+		return newIndexRangeScan(p.Tx, t, plan.ixName, plan.cols, plan.r, qual), true
+	}
+	return newIndexScan(p.Tx, t, plan.ixName, plan.cols, plan.eq, qual), true
 }
 
-// pickIndex 从 WHERE 里挑一个能完整匹配的索引，主键优先。
-// ixName 为空表示走主键哈希索引。三个返回值分别是索引名、列位置、归一后的键值。
+// indexPlan 描述一次索引访问。
+//
+//	eq 非空        → 完整键等值（所有列都有 `= 常量`）
+//	否则 r 是区间 → 首列的范围条件（`> < >= <= BETWEEN LIKE 'x%'`）
+type indexPlan struct {
+	ixName  string // 空表示主键
+	cols    []int
+	eq      []types.Value
+	r       storage.KeyRange
+	isRange bool
+}
+
+// pickIndex 从 WHERE 里挑一条能用的索引：等值优先，其次首列的范围条件。
 //
 // UPDATE / DELETE 也用同一套选择逻辑：它们的 WHERE 和 SELECT 是一回事，
-// 没道理查询走索引、按主键改一行还要全表扫。
-func pickIndex(t *catalog.Table, where sql.Expr, qual string) (string, []int, []types.Value, bool) {
+// 没道理查询能走索引、按主键改一行还要全表扫。
+func pickIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) {
+	// 1) 完整键等值：覆盖的列最多、命中最少
+	if p, ok := pickEqualityIndex(t, where, qual); ok {
+		return p, true
+	}
+	// 2) 首列的范围条件
+	return pickRangeIndex(t, where, qual)
+}
+
+// pickEqualityIndex 找一个「每一列都被 `= 常量` 约束住」的索引，主键优先。
+func pickEqualityIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) {
 	eq := equalities(where, qual)
 	if len(eq) == 0 {
-		return "", nil, nil, false
+		return indexPlan{}, false
 	}
 	if pk := t.PKIdxes(); len(pk) > 0 {
 		if vals, ok := constrainByPos(t, pk, eq); ok {
-			return "", pk, vals, true
+			return indexPlan{cols: pk, eq: vals}, true
 		}
 	}
 	// 多个索引都能用时选列最多的那个：命中的行最少。
@@ -269,9 +293,261 @@ func pickIndex(t *catalog.Table, where sql.Expr, qual string) (string, []int, []
 		}
 	}
 	if best == nil {
-		return "", nil, nil, false
+		return indexPlan{}, false
 	}
-	return best.Name, bestCols, bestVals, true
+	return indexPlan{ixName: best.Name, cols: bestCols, eq: bestVals}, true
+}
+
+// pickRangeIndex 用索引的**首列**做区间扫描。
+//
+// 多列索引 (a,b) 的键是 enc(a)+enc(b)，所以「a 的区间」在键上表现为一个前缀区间：
+// 任何 a>5 的键都大于 enc(5)+0xFF（因为下一列的编码从类型标签开始，远小于 0xFF）。
+// 单列索引同理，所以下面的边界扩展规则两种情况共用。
+func pickRangeIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) {
+	ranges := rangeConds(t, where, qual)
+	if len(ranges) == 0 {
+		return indexPlan{}, false
+	}
+	// 主键优先
+	if pk := t.PKIdxes(); len(pk) > 0 {
+		if cr, ok := ranges[strings.ToLower(t.Columns[pk[0]].Name)]; ok {
+			return indexPlan{cols: pk, r: cr.toKeyRange(), isRange: true}, true
+		}
+	}
+	var best *catalog.Index
+	var bestCols []int
+	var bestRange storage.KeyRange
+	for _, ux := range t.Indexes {
+		if len(ux.Columns) == 0 {
+			continue
+		}
+		first := strings.ToLower(ux.Columns[0])
+		cr, ok := ranges[first]
+		if !ok {
+			continue
+		}
+		ci, exists := t.ColumnIdx(first)
+		if !exists {
+			continue
+		}
+		if best == nil {
+			best, bestCols, bestRange = ux, []int{ci}, cr.toKeyRange()
+		}
+	}
+	if best == nil {
+		return indexPlan{}, false
+	}
+	return indexPlan{ixName: best.Name, cols: bestCols, r: bestRange, isRange: true}, true
+}
+
+// colRange 是一列上的区间约束，边界直接存成**保序键**（所以能和其它键比较大小）。
+type colRange struct {
+	loKey, hiKey string
+	hasLo, hasHi bool
+	loInc, hiInc bool
+}
+
+// toKeyRange 把「某列的区间」翻译成索引上的键区间。
+//
+// 含下界（>=）：enc(v) 本身就在区间里，直接当下界。
+// 不含下界（>）：要跳过所有以 enc(v) 开头的键，下界抬到 enc(v)+0xFF。
+// 上界反过来。
+func (c *colRange) toKeyRange() storage.KeyRange {
+	r := storage.KeyRange{}
+	if c.hasLo {
+		if c.loInc {
+			r.Lo, r.LoInc = c.loKey, true
+		} else {
+			r.Lo, r.LoInc = c.loKey+keyTail, true
+		}
+		r.HasLo = true
+	}
+	if c.hasHi {
+		if c.hiInc {
+			r.Hi, r.HiInc = c.hiKey+keyTail, false
+		} else {
+			r.Hi, r.HiInc = c.hiKey, false
+		}
+		r.HasHi = true
+	}
+	return r
+}
+
+// keyTail 是「比任何真实键都大的尾巴」：文本/数值编码里都不会出现 0xFF
+// （UTF-8 不用 0xFF；数值编码最后一个字节可以是 0xFF，但那时键已经比边界长了）。
+const keyTail = "\xff\xff\xff\xff\xff\xff\xff\xff"
+
+// addLo 收紧下界：更大的键更紧，同键时开区间更紧。
+func (c *colRange) addLo(key string, inc bool) {
+	if !c.hasLo || key > c.loKey || (key == c.loKey && !inc) {
+		c.loKey, c.loInc, c.hasLo = key, inc, true
+	}
+}
+
+// addHi 收紧上界：更小的键更紧，同键时开区间更紧。
+func (c *colRange) addHi(key string, inc bool) {
+	if !c.hasHi || key < c.hiKey || (key == c.hiKey && !inc) {
+		c.hiKey, c.hiInc, c.hasHi = key, inc, true
+	}
+}
+
+// rangeConds 从 WHERE 的 AND 合取里收集每列的区间约束。
+//
+// 值会先 Cast 到列类型再编码，和索引里的键保持一致；Cast 不了就忽略这条
+// （宁可退化成全表扫描，也不能拿错类型的界去查索引）。
+func rangeConds(t *catalog.Table, where sql.Expr, qual string) map[string]*colRange {
+	out := map[string]*colRange{}
+	get := func(name string) *colRange {
+		c := out[name]
+		if c == nil {
+			c = &colRange{}
+			out[name] = c
+		}
+		return c
+	}
+	// 解析出一个「列 + 常量值」的条件
+	addCol := func(ref *sql.ColumnRef, v types.Value, setLo, setHi bool, inc bool) {
+		if ref.Table != "" && !strings.EqualFold(ref.Table, qual) {
+			return
+		}
+		name := strings.ToLower(ref.Name)
+		ci, ok := t.ColumnIdx(name)
+		if !ok {
+			return
+		}
+		cv, err := types.Cast(v, t.Columns[ci].Type())
+		if err != nil || cv.IsNull() {
+			return
+		}
+		key := storage.OrderKey([]types.Value{cv})
+		c := get(name)
+		if setLo {
+			c.addLo(key, inc)
+		}
+		if setHi {
+			c.addHi(key, inc)
+		}
+	}
+	for _, e := range splitConjuncts(where) {
+		switch c := e.(type) {
+		case *sql.Binary:
+			ref, val, flipped, ok := colConstPair(c)
+			if !ok {
+				continue
+			}
+			op := c.Op
+			if flipped {
+				op = flipOp(op)
+			}
+			switch op {
+			case "=":
+				addCol(ref, val, true, true, true)
+			case ">":
+				addCol(ref, val, true, false, false)
+			case ">=":
+				addCol(ref, val, true, false, true)
+			case "<":
+				addCol(ref, val, false, true, false)
+			case "<=":
+				addCol(ref, val, false, true, true)
+			}
+		case *sql.Between:
+			if c.Not {
+				continue
+			}
+			ref, ok := c.X.(*sql.ColumnRef)
+			if !ok {
+				continue
+			}
+			lo, err1 := CompileConst(c.Lo)
+			hi, err2 := CompileConst(c.Hi)
+			if err1 != nil || err2 != nil {
+				continue
+			}
+			addCol(ref, lo, true, false, true)
+			addCol(ref, hi, false, true, true)
+		case *sql.Like:
+			// 只认 `LIKE 'abc%'`：前缀之后没有通配符，大小写敏感
+			if c.Not || c.IgnoreCase {
+				continue
+			}
+			ref, ok := c.X.(*sql.ColumnRef)
+			if !ok {
+				continue
+			}
+			pat, err := CompileConst(c.Pattern)
+			if err != nil || pat.K != types.KText {
+				continue
+			}
+			prefix, ok := likePrefix(pat.S)
+			if !ok {
+				continue
+			}
+			if ref.Table != "" && !strings.EqualFold(ref.Table, qual) {
+				continue
+			}
+			name := strings.ToLower(ref.Name)
+			ci, exists := t.ColumnIdx(name)
+			if !exists || t.Columns[ci].Type().Kind != types.KText {
+				continue
+			}
+			lo := storage.OrderKey([]types.Value{types.Text(prefix)})
+			_, hiKey := storage.TextPrefixRange(prefix)
+			c2 := get(name)
+			c2.addLo(lo, true)
+			c2.addHi(hiKey, false)
+		}
+	}
+	return out
+}
+
+// colConstPair 把 `列 op 常量` / `常量 op 列` 拆成（列引用、常量、是否左右翻转）。
+func colConstPair(b *sql.Binary) (*sql.ColumnRef, types.Value, bool, bool) {
+	if ref, ok := b.L.(*sql.ColumnRef); ok {
+		if _, isRef := b.R.(*sql.ColumnRef); !isRef {
+			if v, err := CompileConst(b.R); err == nil {
+				return ref, v, false, true
+			}
+		}
+	}
+	if ref, ok := b.R.(*sql.ColumnRef); ok {
+		if _, isRef := b.L.(*sql.ColumnRef); !isRef {
+			if v, err := CompileConst(b.L); err == nil {
+				return ref, v, true, true
+			}
+		}
+	}
+	return nil, types.Null, false, false
+}
+
+// flipOp 把 `5 < col` 翻成 `col > 5`。
+func flipOp(op string) string {
+	switch op {
+	case "<":
+		return ">"
+	case "<=":
+		return ">="
+	case ">":
+		return "<"
+	case ">=":
+		return "<="
+	}
+	return op
+}
+
+// likePrefix 从 LIKE 模式里取出前缀：必须只有结尾一个 `%`，中间不能有通配符。
+func likePrefix(p string) (string, bool) {
+	if !strings.HasSuffix(p, "%") {
+		return "", false
+	}
+	body := p[:len(p)-1]
+	if strings.ContainsAny(body, "%_") {
+		return "", false
+	}
+	if body == "" {
+		return "", false // LIKE '%' 等于没条件
+	}
+	return body, true
 }
 
 // equalities 从 WHERE 里收集「列 = 常量」形式的等值约束。

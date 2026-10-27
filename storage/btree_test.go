@@ -97,7 +97,7 @@ func TestBTreeRange(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		tr.Insert(fmt.Sprintf("%04d", i), i)
 	}
-	collect := func(r keyRange) []string {
+	collect := func(r KeyRange) []string {
 		var out []string
 		tr.Range(r, func(k string, _ int) bool {
 			out = append(out, k)
@@ -106,33 +106,33 @@ func TestBTreeRange(t *testing.T) {
 		return out
 	}
 	// [0100, 0103]
-	got := collect(keyRange{lo: "0100", hi: "0103", hasLo: true, hasHi: true, loInc: true, hiInc: true})
+	got := collect(KeyRange{Lo: "0100", Hi: "0103", HasLo: true, HasHi: true, LoInc: true, HiInc: true})
 	if len(got) != 4 || got[0] != "0100" || got[3] != "0103" {
 		t.Fatalf("闭区间 [0100,0103] = %v", got)
 	}
 	// (0100, 0103)
-	got = collect(keyRange{lo: "0100", hi: "0103", hasLo: true, hasHi: true})
+	got = collect(KeyRange{Lo: "0100", Hi: "0103", HasLo: true, HasHi: true})
 	if len(got) != 2 || got[0] != "0101" || got[1] != "0102" {
 		t.Fatalf("开区间 (0100,0103) = %v", got)
 	}
 	// >= 0997
-	got = collect(keyRange{lo: "0997", hasLo: true, loInc: true})
+	got = collect(KeyRange{Lo: "0997", HasLo: true, LoInc: true})
 	if len(got) != 3 || got[0] != "0997" || got[2] != "0999" {
 		t.Fatalf(">= 0997 = %v", got)
 	}
 	// < 0003
-	got = collect(keyRange{hi: "0003", hasHi: true})
+	got = collect(KeyRange{Hi: "0003", HasHi: true})
 	if len(got) != 3 || got[0] != "0000" || got[2] != "0002" {
 		t.Fatalf("< 0003 = %v", got)
 	}
 	// 无边界 = 全量
-	got = collect(keyRange{})
+	got = collect(KeyRange{})
 	if len(got) != 1000 {
 		t.Fatalf("全量扫 = %d", len(got))
 	}
 	// 提前结束
 	n := 0
-	tr.Range(keyRange{}, func(string, int) bool { n++; return n < 5 })
+	tr.Range(KeyRange{}, func(string, int) bool { n++; return n < 5 })
 	if n != 5 {
 		t.Fatalf("提前结束应访问 5 条，实际 %d", n)
 	}

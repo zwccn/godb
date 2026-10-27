@@ -770,23 +770,33 @@ func collectByIndex(tx *storage.Tx, t *catalog.Table, where sql.Expr) ([]storage
 	if where == nil {
 		return nil, nil, false
 	}
-	ixName, cols, vals, found := pickIndex(t, where, t.Name)
+	plan, found := pickIndex(t, where, t.Name)
 	if !found {
 		return nil, nil, false
 	}
-	for _, v := range vals {
+	if plan.isRange {
+		hits := tx.IndexRange(t, plan.ixName, plan.cols, plan.r)
+		refs := make([]storage.Ref, 0, len(hits))
+		rows := make([]types.Row, 0, len(hits))
+		for _, h := range hits {
+			refs = append(refs, h.Ref)
+			rows = append(rows, h.Row)
+		}
+		return refs, rows, true
+	}
+	for _, v := range plan.eq {
 		if v.IsNull() {
 			return nil, nil, true // 键里有 NULL：恒不匹配
 		}
 	}
-	key := storage.OrderKey(vals) // 索引键用保序编码，和树里的键一致
-	if ixName == "" {
+	key := storage.OrderKey(plan.eq) // 索引键用保序编码，和树里的键一致
+	if plan.ixName == "" {
 		if hit, ok := tx.PKLookup(t, key); ok {
 			return []storage.Ref{hit.Ref}, []types.Row{hit.Row}, true
 		}
 		return nil, nil, true
 	}
-	hits := tx.IndexLookup(t, ixName, cols, key)
+	hits := tx.IndexLookup(t, plan.ixName, plan.cols, key)
 	refs := make([]storage.Ref, 0, len(hits))
 	rows := make([]types.Row, 0, len(hits))
 	for _, h := range hits {

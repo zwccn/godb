@@ -638,6 +638,109 @@ func (tx *Tx) IndexLookup(t *catalog.Table, ixName string, cols []int, key strin
 	return out
 }
 
+// IndexRange 用索引扫一个键区间，返回事务视角的行（`BETWEEN`、`>`、`LIKE 'x%'` 都走它）。
+//
+// 和 IndexLookup 一样要合并两边：已提交索引给候选（按索引序），再用 tx.Get 过滤
+// 掉本事务删掉的、重新校验键是否还在区间内（本事务可能把键改出去了）；overlay
+// 里新插入和改键进来的行再补一遍。
+//
+// **不保证输出顺序**：overlay 补的行追加在末尾。需要按索引序输出时，
+// 调用方自己排序（结果集通常远小于全表，排一次很便宜）。
+func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange) []IndexHit {
+	td := tx.st.Table(t.Name)
+	if td == nil {
+		return nil
+	}
+	tree := td.pk
+	if ixName != "" {
+		tree = td.IndexTree(ixName)
+	}
+	if tree == nil {
+		return nil
+	}
+	o := tx.ov[cleanName(t.Name)]
+	var out []IndexHit
+	// 没有写集时不必记录 seen，也不必重新校验键（省一次编码/行）
+	var seen map[int]bool
+	if o != nil {
+		seen = make(map[int]bool, 16)
+	}
+	tree.Range(r, func(key string, slot int) bool {
+		if seen != nil {
+			seen[slot] = true
+		}
+		row, ok := tx.Get(t.Name, Ref{Slot: slot})
+		if !ok {
+			return true
+		}
+		if o != nil && !rowInKeyRange(row, cols, r) {
+			return true
+		}
+		out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
+		return true
+	})
+	if o == nil {
+		return out
+	}
+	for i, row := range o.ins {
+		if o.insDel[i] {
+			continue
+		}
+		if nr, ok := o.insUpd[i]; ok {
+			row = nr
+		}
+		if !rowInKeyRange(row, cols, r) {
+			continue
+		}
+		out = append(out, IndexHit{Ref: Ref{New: true, Slot: i}, Row: row})
+	}
+	var slots []int
+	for slot := range o.upd {
+		if !seen[slot] {
+			slots = append(slots, slot)
+		}
+	}
+	if len(slots) > 1 {
+		sort.Ints(slots)
+	}
+	for _, slot := range slots {
+		if o.del[slot] {
+			continue
+		}
+		row := o.upd[slot]
+		if !rowInKeyRange(row, cols, r) {
+			continue
+		}
+		out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
+	}
+	return out
+}
+
+// rowInKeyRange 判断一行在指定列上的键是否落在区间内。
+func rowInKeyRange(row types.Row, cols []int, r KeyRange) bool {
+	k, ok := OrderKeyOfRow(row, cols)
+	if !ok {
+		return false
+	}
+	if r.HasLo {
+		if r.LoInc && k < r.Lo {
+			return false
+		}
+		if !r.LoInc && k <= r.Lo {
+			return false
+		}
+	}
+	if r.HasHi {
+		if r.HiInc && k > r.Hi {
+			return false
+		}
+		if !r.HiInc && k >= r.Hi {
+			return false
+		}
+	}
+	return true
+}
+
 // PKLookup 用主键哈希索引按完整主键值取一行。
 func (tx *Tx) PKLookup(t *catalog.Table, key string) (IndexHit, bool) {
 	cols := t.PKIdxes()

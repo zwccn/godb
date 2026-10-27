@@ -170,6 +170,63 @@ func (o *indexScanOp) Describe() string {
 
 func (o *indexScanOp) Children() []Operator { return nil }
 
+// indexRangeScanOp 用索引扫一个键区间（`BETWEEN`、`>`、`LIKE 'x%'`）。
+//
+// 和等值扫描一样，它只负责缩小候选集，WHERE 仍由上层 filterOp 再判一遍。
+type indexRangeScanOp struct {
+	tx     *storage.Tx
+	tbl    *catalog.Table
+	ixName string // 空表示主键
+	cols   []int
+	r      storage.KeyRange
+	sc     Schema
+	rows   []types.Row
+	i      int
+}
+
+func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols []int, r storage.KeyRange, qual string) *indexRangeScanOp {
+	return &indexRangeScanOp{
+		tx: tx, tbl: t, ixName: ixName, cols: cols, r: r,
+		sc: tableSchema(t, qual),
+	}
+}
+
+func (o *indexRangeScanOp) Schema() Schema { return o.sc }
+
+func (o *indexRangeScanOp) Open() error {
+	o.rows = o.rows[:0]
+	o.i = 0
+	for _, h := range o.tx.IndexRange(o.tbl, o.ixName, o.cols, o.r) {
+		o.rows = append(o.rows, h.Row)
+	}
+	return nil
+}
+
+func (o *indexRangeScanOp) Next() (types.Row, bool, error) {
+	if o.i >= len(o.rows) {
+		return nil, false, nil
+	}
+	r := o.rows[o.i]
+	o.i++
+	return r, true, nil
+}
+
+func (o *indexRangeScanOp) Close() error {
+	o.rows = nil
+	o.i = 0
+	return nil
+}
+
+func (o *indexRangeScanOp) Describe() string {
+	name := o.ixName
+	if name == "" {
+		name = o.tbl.Name + "_pkey"
+	}
+	return fmt.Sprintf("Index Range Scan using %s on %s", name, o.tbl.Name)
+}
+
+func (o *indexRangeScanOp) Children() []Operator { return nil }
+
 // ---------- 单行（无 FROM 的 SELECT） ----------
 
 type oneRowOp struct {

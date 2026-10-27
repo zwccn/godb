@@ -31,10 +31,10 @@ func TestIndexScanForEquality(t *testing.T) {
 	}
 	assertRows(t, run(t, d, s, `SELECT name FROM ixq WHERE id = 7`), []string{"n7"})
 
-	// 非等值条件哈希索引帮不上忙，仍然全表扫（结果必须照样对）
+	// 范围条件走索引区间扫描（B+Tree 之后这条不再是全表扫）
 	plan = fmt.Sprint(rowsOf(t, run(t, d, s, `EXPLAIN SELECT * FROM ixq WHERE score > 500`)))
-	if !strings.Contains(plan, "Seq Scan") {
-		t.Fatalf("范围条件应退回全表扫描，实际计划: %s", plan)
+	if !strings.Contains(plan, "Index Range Scan using ixq_score") {
+		t.Fatalf("范围条件应走区间扫描，实际计划: %s", plan)
 	}
 
 	// 索引只缩小候选集，剩余条件仍由 filter 判：命中多行时不能多也不能少

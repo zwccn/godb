@@ -172,33 +172,33 @@ func (t *btree) Delete(key string, slot int) bool {
 	return false
 }
 
-// keyRange 描述一个键区间。hasLo/hasHi 为 false 表示该侧不设限。
-type keyRange struct {
-	lo, hi       string
-	hasLo, hasHi bool
-	loInc, hiInc bool
+// KeyRange 描述一个键区间。HasLo/HasHi 为 false 表示该侧不设限。
+type KeyRange struct {
+	Lo, Hi       string
+	HasLo, HasHi bool
+	LoInc, HiInc bool
 }
 
 // Range 按键升序遍历区间内的条目，fn 返回 false 时提前结束。
-func (t *btree) Range(r keyRange, fn func(key string, slot int) bool) {
+func (t *btree) Range(r KeyRange, fn func(key string, slot int) bool) {
 	var n *bnode
 	idx := 0
-	if r.hasLo {
-		n, idx = t.seek(r.lo)
+	if r.HasLo {
+		n, idx = t.seek(r.Lo)
 	} else {
 		n = t.leftmost() // 根可能是内部节点，必须先降到最左叶
 	}
 	for ; n != nil; n, idx = n.next, 0 {
 		for ; idx < len(n.keys); idx++ {
 			k := n.keys[idx]
-			if r.hasLo && k < r.lo {
+			if r.HasLo && k < r.Lo {
 				continue // seek 可能落在含更小键的叶子上
 			}
-			if r.hasLo && !r.loInc && k == r.lo {
+			if r.HasLo && !r.LoInc && k == r.Lo {
 				continue // 开区间：跳过所有等于 lo 的条目
 			}
-			if r.hasHi {
-				if k > r.hi || (!r.hiInc && k == r.hi) {
+			if r.HasHi {
+				if k > r.Hi || (!r.HiInc && k == r.Hi) {
 					return
 				}
 			}

@@ -112,6 +112,37 @@ func (t *Table) UniqueCols() []int {
 	return out
 }
 
+// PKIdxes 返回主键包含的所有列位置。
+//
+// 单列主键返回一个元素，复合主键返回多个（按声明顺序）。PKIdx 仍然返回
+// 第一个，供只关心「有没有主键」的调用方使用。
+func (t *Table) PKIdxes() []int {
+	var out []int
+	for i, c := range t.Columns {
+		if c.PrimaryKey {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// UniqueGroups 返回所有「必须整体唯一」的列组：
+// 主键（可能多列）算一组，每个 UNIQUE 列各自一组。
+//
+// 复合主键下不能把每个主键列当成单独唯一——(a,b) 主键允许 a 重复。
+func (t *Table) UniqueGroups() [][]int {
+	var out [][]int
+	if pk := t.PKIdxes(); len(pk) > 0 {
+		out = append(out, pk)
+	}
+	for i, c := range t.Columns {
+		if c.Unique && !c.PrimaryKey {
+			out = append(out, []int{i})
+		}
+	}
+	return out
+}
+
 // Validate 校验表定义是否自洽。
 func (t *Table) Validate() error {
 	if len(t.Columns) == 0 {
@@ -129,9 +160,9 @@ func (t *Table) Validate() error {
 			pks++
 		}
 	}
-	if pks > 1 {
-		return fmt.Errorf("multiple primary keys for table %q are not allowed", t.Name)
-	}
+	// 允许多列带 PrimaryKey：那就是复合主键。
+	// 「一列写两次 PRIMARY KEY」这类错误在解析阶段就拦掉了。
+	_ = pks
 	t.Rebuild()
 	return nil
 }

@@ -21,17 +21,26 @@ func newTableData(name string) *TableData {
 
 // RebuildIndex 依据主键重建哈希索引。
 func (td *TableData) RebuildIndex(t *catalog.Table) {
-	pk := t.PKIdx()
-	if pk < 0 {
+	pk := t.PKIdxes()
+	if len(pk) == 0 {
 		td.Index = map[string]int{}
 		return
 	}
 	idx := make(map[string]int, len(td.Rows))
+	vals := make([]types.Value, len(pk))
 	for i, r := range td.Rows {
-		if pk >= len(r) {
+		ok := true
+		for j, ci := range pk {
+			if ci >= len(r) {
+				ok = false
+				break
+			}
+			vals[j] = r[ci]
+		}
+		if !ok {
 			continue
 		}
-		idx[types.Key([]types.Value{r[pk]})] = i
+		idx[types.Key(vals)] = i
 	}
 	td.Index = idx
 }

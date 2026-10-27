@@ -126,3 +126,100 @@ func TestInAndExistsSubquery(t *testing.T) {
 		t.Fatal("IN 子查询返回多列应该报错")
 	}
 }
+
+// 复合主键：以前直接报「不支持」。关键是按「整组」判重——单列重复是合法的。
+func TestCompositePrimaryKey(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE cp (a int4, b int4, note text, PRIMARY KEY (a, b))`)
+
+	// a 单独重复必须允许（这正是复合主键的意义）
+	run(t, d, s, `INSERT INTO cp VALUES (1, 1, 'x'), (1, 2, 'y'), (2, 1, 'z')`)
+	if got := fmt.Sprint(run(t, d, s, `SELECT count(*) FROM cp`)[0].Rows[0][0]); got != "3" {
+		t.Fatalf("应有 3 行，实际 %s", got)
+	}
+
+	// 整组重复要拦
+	if err := runErr(t, d, s, `INSERT INTO cp VALUES (1, 1, 'dup')`); err == nil {
+		t.Fatal("(1,1) 重复应该报唯一约束错误")
+	}
+	// 同一语句内部重复也要拦
+	if err := runErr(t, d, s, `INSERT INTO cp VALUES (3, 3, 'a'), (3, 3, 'b')`); err == nil {
+		t.Fatal("同一语句内的重复应该报错")
+	}
+	if got := fmt.Sprint(run(t, d, s, `SELECT count(*) FROM cp`)[0].Rows[0][0]); got != "3" {
+		t.Fatalf("失败的插入不该留下数据，实际 %s 行", got)
+	}
+
+	// UPDATE 改成已存在的组合要拦
+	if err := runErr(t, d, s, `UPDATE cp SET b = 2 WHERE a = 1 AND b = 1`); err == nil {
+		t.Fatal("UPDATE 撞上 (1,2) 应该报错")
+	}
+	// 改成不冲突的组合可以
+	run(t, d, s, `UPDATE cp SET b = 9 WHERE a = 1 AND b = 1`)
+	if got := fmt.Sprint(run(t, d, s, `SELECT b FROM cp WHERE a = 1 AND b = 9`)[0].Rows[0][0]); got != "9" {
+		t.Fatalf("更新成功后应能查到 b=9，实际 %s", got)
+	}
+
+	// 复合主键的每一列都是 NOT NULL
+	if err := runErr(t, d, s, `INSERT INTO cp VALUES (NULL, 5, 'n')`); err == nil {
+		t.Fatal("主键列不允许 NULL")
+	}
+
+	// 系统目录要能看到两列：
+	// conkey = {1,2}（int2[]），indkey = "1 2"（int2vector，空格分隔无括号）
+	res := run(t, d, s, `
+		SELECT c.conkey FROM pg_catalog.pg_constraint c
+		JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
+		WHERE t.relname = 'cp' AND c.contype = 'p'`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "{1,2}" {
+		t.Fatalf("conkey = %q，期望 {1,2}", got)
+	}
+	res = run(t, d, s, `
+		SELECT i.indkey, i.indclass FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+		WHERE t.relname = 'cp'`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "1 2" {
+		t.Fatalf("indkey = %q，期望 \"1 2\"", got)
+	}
+	// 两列都是 int4，操作符类应该是 1978 1978
+	if got := fmt.Sprint(res[0].Rows[0][1]); got != "1978 1978" {
+		t.Fatalf("indclass = %q，期望 \"1978 1978\"", got)
+	}
+}
+
+// 复合主键写入后重启，索引重建必须按整组来，否则重启后判重会回到「单列」。
+func TestCompositePrimaryKeySurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sess := d.Session("s")
+	for _, q := range []string{
+		`CREATE TABLE cpr (a int4, b int4, PRIMARY KEY (a, b))`,
+		`INSERT INTO cpr VALUES (1,1), (1,2)`,
+	} {
+		if _, err := d.Exec(sess, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	d2, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+	s2 := d2.Session("s")
+	// 仍允许 a 重复（说明索引按整组重建了）
+	if _, err := d2.Exec(s2, `INSERT INTO cpr VALUES (1,3)`); err != nil {
+		t.Fatalf("重启后 (1,3) 应该能插入: %v", err)
+	}
+	// 整组重复仍然要拦
+	if _, err := d2.Exec(s2, `INSERT INTO cpr VALUES (1,2)`); err == nil {
+		t.Fatal("重启后 (1,2) 重复应该被拦")
+	}
+}

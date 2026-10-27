@@ -269,6 +269,7 @@ func (p *parser) parseCreate() (Statement, error) {
 	if err := p.expectPunct("("); err != nil {
 		return nil, err
 	}
+	colPK := 0
 	for {
 		if p.atKw("primary") || p.atKw("unique") || p.atKw("check") {
 			if err := p.parseTableConstraint(ct); err != nil {
@@ -278,6 +279,13 @@ func (p *parser) parseCreate() (Statement, error) {
 			col, err := p.parseColumnDef()
 			if err != nil {
 				return nil, err
+			}
+			// 列级 PRIMARY KEY 只能出现一次；多列主键要走表级 PRIMARY KEY (a, b)。
+			if col.PrimaryKey {
+				colPK++
+				if colPK > 1 {
+					return nil, p.errAt(p.peek(), "multiple primary keys for table %q are not allowed", ct.Table)
+				}
 			}
 			ct.Cols = append(ct.Cols, col)
 		}
@@ -301,15 +309,15 @@ func (p *parser) parseTableConstraint(ct *CreateTable) error {
 		if err != nil {
 			return err
 		}
-		if len(cols) != 1 {
-			return p.errAt(p.peek(), "composite primary key is not supported")
+		// 多列主键：把这些列都打上 PrimaryKey（复合唯一性由引擎按「整组」判重）。
+		for _, name := range cols {
+			col := findColDef(ct.Cols, name)
+			if col == nil {
+				return p.errAt(p.peek(), "column %q named in key does not exist", name)
+			}
+			col.PrimaryKey = true
+			col.NotNull = true
 		}
-		col := findColDef(ct.Cols, cols[0])
-		if col == nil {
-			return p.errAt(p.peek(), "column %q named in key does not exist", cols[0])
-		}
-		col.PrimaryKey = true
-		col.NotNull = true
 		return nil
 	}
 	if p.acceptKw("unique") {

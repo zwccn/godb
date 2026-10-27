@@ -527,24 +527,39 @@ func (tx *Tx) OverlayInsLen(table string) int {
 // FindUnique 检查某列上是否已存在该值（排除 self 指向的行）。
 // scanTo 限制扫描 overlay 插入行的范围（只扫 [0,scanTo)），传 -1 表示全扫。
 func (tx *Tx) FindUnique(t *catalog.Table, col int, val types.Value, self *Ref, scanTo int) (bool, error) {
-	if col < 0 || val.IsNull() {
+	return tx.FindUniqueGroup(t, []int{col}, []types.Value{val}, self, scanTo)
+}
+
+// FindUniqueGroup 检查一组列的组合值是否已存在（主键可能是复合的）。
+//
+// 复合主键必须按「整组」判重：(a,b) 主键下 a 单独重复是合法的。
+// 主键组走内存哈希索引；非主键的 UNIQUE 组只能全表扫描。
+func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, self *Ref, scanTo int) (bool, error) {
+	if len(cols) == 0 || len(cols) != len(vals) {
 		return false, nil
 	}
-	key := types.Key([]types.Value{val})
+	// 含 NULL 的组合不参与唯一性判断（和 SQL 一致）
+	for _, v := range vals {
+		if v.IsNull() {
+			return false, nil
+		}
+	}
+	key := types.Key(vals)
 	td := tx.st.Table(t.Name)
 	if td == nil {
 		return false, fmt.Errorf("relation %q does not exist", t.Name)
 	}
 	o := tx.ov[cleanName(t.Name)]
+	isPK := sameCols(cols, t.PKIdxes())
 
-	if idx, ok := td.Index[key]; ok {
-		if col == t.PKIdx() {
+	if isPK {
+		if idx, ok := td.Index[key]; ok {
 			deleted := o != nil && o.del[idx]
 			if !deleted {
 				conflict := true
 				if o != nil {
 					if nr, isUpd := o.upd[idx]; isUpd {
-						if nr[col].K != val.K || types.Key([]types.Value{nr[col]}) != key {
+						if !groupKeyEqual(nr, cols, key) {
 							conflict = false
 						}
 					}
@@ -567,13 +582,10 @@ func (tx *Tx) FindUnique(t *catalog.Table, col int, val types.Value, self *Ref, 
 	}
 	for i := 0; i < limit; i++ {
 		row := o.ins[i]
-		if col >= len(row) {
-			continue
-		}
 		if o.insDel[i] {
 			continue
 		}
-		if !types.Same(row[col], val) {
+		if !groupKeyEqual(row, cols, key) {
 			continue
 		}
 		if self != nil && self.New && self.Slot == i {
@@ -582,31 +594,22 @@ func (tx *Tx) FindUnique(t *catalog.Table, col int, val types.Value, self *Ref, 
 		return true, nil
 	}
 	for idx, row := range o.upd {
-		if col >= len(row) {
-			continue
-		}
-		if !types.Same(row[col], val) {
+		if o.del[idx] || !groupKeyEqual(row, cols, key) {
 			continue
 		}
 		if self != nil && !self.New && self.Slot == idx {
 			continue
 		}
-		if o.del[idx] {
-			continue
-		}
 		return true, nil
 	}
-	// 非主键的唯一列：全表扫描（含已提交行）
-	if col != t.PKIdx() {
+	// 非主键的唯一组合：全表扫描（含已提交行）
+	if !isPK {
 		var conflict bool
 		err := tx.Scan(t.Name, func(ref Ref, row types.Row) error {
-			if col >= len(row) {
-				return nil
-			}
 			if self != nil && ref.New == self.New && ref.Slot == self.Slot {
 				return nil
 			}
-			if types.Same(row[col], val) {
+			if groupKeyEqual(row, cols, key) {
 				conflict = true
 			}
 			return nil
@@ -619,6 +622,34 @@ func (tx *Tx) FindUnique(t *catalog.Table, col int, val types.Value, self *Ref, 
 		}
 	}
 	return false, nil
+}
+
+// groupKeyEqual 判断某行的这组列编码后是否等于 key。
+func groupKeyEqual(row types.Row, cols []int, key string) bool {
+	vals := make([]types.Value, len(cols))
+	for i, ci := range cols {
+		if ci >= len(row) {
+			return false
+		}
+		vals[i] = row[ci]
+		if vals[i].IsNull() {
+			return false
+		}
+	}
+	return types.Key(vals) == key
+}
+
+// sameCols 判断两个列位置列表是否相同（顺序敏感）。
+func sameCols(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Rollback 丢弃整个事务。

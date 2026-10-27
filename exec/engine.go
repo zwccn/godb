@@ -412,7 +412,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		}
 	}
 
-	uniq := t.UniqueCols()
+	groups := t.UniqueGroups()
 	checks, err := e.compileChecks(t)
 	if err != nil {
 		return nil, err
@@ -506,27 +506,28 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		if err := evalChecks(checks, row); err != nil {
 			return nil, err
 		}
-		for _, ci := range uniq {
-			if row[ci].IsNull() {
-				continue
+		for gi, g := range groups {
+			vals, ok := groupValues(row, g)
+			if !ok {
+				continue // 含 NULL 的组合不参与唯一性判断
 			}
-			k := types.Key([]types.Value{row[ci]})
-			cm := seen[ci]
+			k := types.Key(vals)
+			cm := seen[gi]
 			if cm == nil {
 				cm = map[string]bool{}
-				seen[ci] = cm
+				seen[gi] = cm
 			}
 			if cm[k] {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", constraintName(t.Name, ci))
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
 			}
 			cm[k] = true
 			// 只扫本语句之前插入的行；本语句内重复已由 seen 拦住
-			dup, err := tx.FindUnique(t, ci, row[ci], nil, baseIns)
+			dup, err := tx.FindUniqueGroup(t, g, vals, nil, baseIns)
 			if err != nil {
 				return nil, err
 			}
 			if dup {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", constraintName(t.Name, ci))
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
 			}
 		}
 		if _, err := tx.Insert(t.Name, row); err != nil {
@@ -616,8 +617,34 @@ func (e *Engine) compileReturning(sc Schema, items []*sql.SelectItem, tx *storag
 	return evals, cols, nil
 }
 
-func constraintName(table string, colIdx int) string {
-	return fmt.Sprintf("%s_col%d_key", table, colIdx)
+// groupValues 取一组列的值；任一列为 NULL 时返回 ok=false（不参与唯一性判断）。
+func groupValues(row types.Row, cols []int) ([]types.Value, bool) {
+	vals := make([]types.Value, len(cols))
+	for i, ci := range cols {
+		if ci >= len(row) || row[ci].IsNull() {
+			return nil, false
+		}
+		vals[i] = row[ci]
+	}
+	return vals, true
+}
+
+// groupUnchanged 判断这一组列在更新前后是否完全相同。
+func groupUnchanged(before, after types.Row, cols []int) bool {
+	for _, ci := range cols {
+		if ci >= len(before) || ci >= len(after) || !types.Same(before[ci], after[ci]) {
+			return false
+		}
+	}
+	return true
+}
+
+// groupName 给唯一组造约束名：主键用 <表>_pkey，单个 UNIQUE 列用 <表>_<列>_key。
+func groupName(t *catalog.Table, cols []int) string {
+	if len(cols) == 1 && !t.Columns[cols[0]].PrimaryKey {
+		return fmt.Sprintf("%s_%s_key", t.Name, t.Columns[cols[0]].Name)
+	}
+	return t.Name + "_pkey"
 }
 
 // ---------- UPDATE / DELETE ----------
@@ -692,7 +719,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		return nil, err
 	}
 
-	uniq := t.UniqueCols()
+	groups := t.UniqueGroups()
 	affected := 0
 	var refs []storage.Ref
 	var rows []types.Row
@@ -740,16 +767,20 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			return nil, err
 		}
 		self := refs[i]
-		for _, ci := range uniq {
-			if types.Same(newRow[ci], row[ci]) {
+		for _, g := range groups {
+			vals, ok := groupValues(newRow, g)
+			if !ok {
 				continue
 			}
-			dup, err := tx.FindUnique(t, ci, newRow[ci], &self, -1)
+			if groupUnchanged(row, newRow, g) {
+				continue // 没动这一组，不必查重
+			}
+			dup, err := tx.FindUniqueGroup(t, g, vals, &self, -1)
 			if err != nil {
 				return nil, err
 			}
 			if dup {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", constraintName(t.Name, ci))
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
 			}
 		}
 		if err := tx.Update(t.Name, refs[i], newRow); err != nil {

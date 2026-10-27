@@ -43,7 +43,7 @@ go build -o godb.exe .
 | 类别 | 支持 |
 |---|---|
 | 持久化 | `CHECKPOINT` / `FLUSH`（强制刷盘 + 全量快照，返回代次与统计） |
-| 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`、`UNIQUE`、`NOT NULL`、`DEFAULT`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
+| 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
 | 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；三者都支持 `RETURNING`（含 `RETURNING *`、表达式与别名） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` |
 | 集合运算 | `UNION [ALL]` / `INTERSECT` / `EXCEPT`；`FROM` 子查询（含 `AS t(a, b)` 列别名） |
@@ -59,7 +59,7 @@ go build -o godb.exe .
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：CTE、窗口函数、外键、
-`FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引。
+`FULL JOIN`、`NATURAL JOIN`、行级锁、二级索引。
 
 **支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。
 这不是为了 SQL 完整性，而是客户端刚需：Navicat 刷新对象树时会发

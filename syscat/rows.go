@@ -21,7 +21,8 @@ type colMeta struct {
 type idxMeta struct {
 	oid     int32
 	name    string
-	colIdx  int
+	cols    []int // 复合主键会有多列
+	colIdx  int   // 首列（只关心一列的旧代码用）
 	primary bool
 	conOid  int32
 	defOid  int32
@@ -63,7 +64,8 @@ func buildMeta(src Source) *meta {
 			tm.cols = append(tm.cols, colMeta{idx: ci, atttypid: types.OIDOf(col.Type()), attlen: types.TypeLenByName(col.Type().String())})
 		}
 		n := 0
-		for _, ci := range t.UniqueCols() {
+		for _, grp := range t.UniqueGroups() {
+			ci := grp[0]
 			prim := t.Columns[ci].PrimaryKey
 			name := fmt.Sprintf("%s_%s_key", t.Name, t.Columns[ci].Name)
 			if prim {
@@ -72,6 +74,7 @@ func buildMeta(src Source) *meta {
 			tm.idx = append(tm.idx, idxMeta{
 				oid:     int32(indexOIDBase + n*len(src.tables()) + i),
 				name:    name,
+				cols:    grp,
 				colIdx:  ci,
 				primary: prim,
 				conOid:  int32(constraintOIDBase + n*len(src.tables()) + i),
@@ -245,9 +248,9 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"indisclustered": bv(false), "indisvalid": bv(true),
 					"indcheckxmin": bv(false), "indisready": bv(true), "indislive": bv(true),
 					"indisreplident": bv(false),
-					"indkey":         sv(fmt.Sprintf("%d", ix.colIdx+1)),
-					"indcollation":   sv("0"), "indoption": sv("0"),
-					"indclass": sv(fmt.Sprintf("%d", opclassOf(tm.colType(ix.colIdx)))),
+					"indkey":         sv(indexColList(ix)),
+					"indcollation":   sv(indexZeros(ix)), "indoption": sv(indexZeros(ix)),
+					"indclass": sv(indexOpclasses(&tm, ix)),
 				}))
 			}
 		}
@@ -269,7 +272,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"conparentid": iv(0), "confrelid": iv(0),
 					"confupdtype": sv(" "), "confdeltype": sv(" "), "confmatchtype": sv(" "),
 					"conislocal": bv(true), "coninhcount": iv(0), "connoinherit": bv(false),
-					"conkey": sv(fmt.Sprintf("{%d}", ix.colIdx+1)),
+					"conkey": sv(constraintColList(ix)),
 				}))
 			}
 		}
@@ -556,12 +559,15 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 			for _, ix := range tm.idx {
 				col := tm.t.Columns[ix.colIdx]
 				if def.Name == "key_column_usage" {
-					out = append(out, mk(def, map[string]types.Value{
-						"constraint_catalog": sv(DatabaseName), "constraint_schema": sv("public"),
-						"constraint_name": sv(ix.name), "table_catalog": sv(DatabaseName),
-						"table_schema": sv("public"), "table_name": sv(tm.t.Name),
-						"column_name": sv(col.Name), "ordinal_position": iv(1),
-					}))
+					// 复合主键的每一列各占一行，ordinal_position 是它在键里的次序
+					for ord, ci := range ix.cols {
+						out = append(out, mk(def, map[string]types.Value{
+							"constraint_catalog": sv(DatabaseName), "constraint_schema": sv("public"),
+							"constraint_name": sv(ix.name), "table_catalog": sv(DatabaseName),
+							"table_schema": sv("public"), "table_name": sv(tm.t.Name),
+							"column_name": sv(tm.t.Columns[ci].Name), "ordinal_position": iv(ord + 1),
+						}))
+					}
 				} else {
 					out = append(out, mk(def, map[string]types.Value{
 						"table_catalog": sv(DatabaseName), "table_schema": sv("public"),
@@ -795,12 +801,48 @@ func typmodOf(col *catalog.Column) int {
 }
 
 func indexDef(tm *tblMeta, ix idxMeta) string {
-	col := tm.t.Columns[ix.colIdx]
-	uniq := "UNIQUE "
-	if ix.primary {
-		uniq = "UNIQUE "
+	names := make([]string, 0, len(ix.cols))
+	for _, ci := range ix.cols {
+		names = append(names, tm.t.Columns[ci].Name)
 	}
-	return fmt.Sprintf("CREATE %sINDEX %s ON public.%s USING btree (%s)", uniq, ix.name, tm.t.Name, col.Name)
+	return fmt.Sprintf("CREATE UNIQUE INDEX %s ON public.%s USING btree (%s)",
+		ix.name, tm.t.Name, strings.Join(names, ", "))
+}
+
+// indexColList 生成 indkey：列号空格分隔（int2vector 的文本形式，不带括号）。
+func indexColList(ix idxMeta) string {
+	parts := make([]string, len(ix.cols))
+	for i, ci := range ix.cols {
+		parts[i] = fmt.Sprintf("%d", ci+1)
+	}
+	return strings.Join(parts, " ")
+}
+
+// indexZeros 生成 indcollation / indoption：每列一个 0，空格分隔。
+func indexZeros(ix idxMeta) string {
+	parts := make([]string, len(ix.cols))
+	for i := range ix.cols {
+		parts[i] = "0"
+	}
+	return strings.Join(parts, " ")
+}
+
+// indexOpclasses 生成 indclass：每列的操作符类 oid，空格分隔。
+func indexOpclasses(tm *tblMeta, ix idxMeta) string {
+	parts := make([]string, len(ix.cols))
+	for i, ci := range ix.cols {
+		parts[i] = fmt.Sprintf("%d", opclassOf(tm.colType(ci)))
+	}
+	return strings.Join(parts, " ")
+}
+
+// constraintColList 生成 conkey：带花括号的 int2[] 字面量。
+func constraintColList(ix idxMeta) string {
+	parts := make([]string, len(ix.cols))
+	for i, ci := range ix.cols {
+		parts[i] = fmt.Sprintf("%d", ci+1)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 func nullableText(s string) types.Value {

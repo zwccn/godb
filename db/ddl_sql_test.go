@@ -4,7 +4,14 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"godb/sql"
 )
+
+// sqlCopyFor 造一个 COPY 语句对象，方便直接调 db 层的导入导出。
+func sqlCopyFor(table string, to bool) *sql.Copy {
+	return &sql.Copy{Table: table, To: to}
+}
 
 // string_agg / unnest：psql 的 \d 依赖这两个（拼列名数组、再把数组摊成行）。
 func TestStringAggAndUnnest(t *testing.T) {
@@ -191,5 +198,68 @@ func TestBareKeywordFunctions(t *testing.T) {
 		if len(res[0].Rows) != 1 || res[0].Rows[0][0] == nil {
 			t.Fatalf("%s 应返回一行非 NULL，实际 %v", q, res[0].Rows)
 		}
+	}
+}
+
+// COPY 文本协议：tab 分隔、\N 为 NULL、转义往返一致，且约束照常生效。
+func TestCopyInOut(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE cpx (id int4 PRIMARY KEY, name text, qty int4)`)
+
+	data := []byte("1\talpha\t10\n2\tbeta\t20\n3\t\\N\t30\n")
+	n, err := d.CopyIn(d.Session(s), sqlCopyFor("cpx", false), data)
+	if err != nil {
+		t.Fatalf("CopyIn: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("导入 %d 行，期望 3", n)
+	}
+	if got := fmt.Sprint(run(t, d, s, `SELECT name FROM cpx WHERE id = 3`)[0].Rows[0][0]); got != "<nil>" {
+		// 输出可能是 nil 的字符串形式，这里只确认它是 NULL
+		if run(t, d, s, `SELECT name FROM cpx WHERE id = 3`)[0].Rows[0][0] != nil {
+			t.Fatalf("id=3 的 name 应该是 NULL，实际 %q", got)
+		}
+	}
+
+	lines, cnt, err := d.CopyOut(d.Session(s), sqlCopyFor("cpx", true))
+	if err != nil {
+		t.Fatalf("CopyOut: %v", err)
+	}
+	if cnt != 3 || len(lines) != 3 {
+		t.Fatalf("导出 %d 行 / %d 条，期望 3", cnt, len(lines))
+	}
+	// NULL 要写成 \N
+	found := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "3\t") && strings.Contains(l, `\N`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("导出的 NULL 应为 \\N，实际: %v", lines)
+	}
+
+	// 值里带 tab / 换行 / 反斜杠时，导出要转义，再导入要还原
+	if _, err := d.CopyIn(d.Session(s), sqlCopyFor("cpx", false), []byte("9\ta\\tb\t1\n")); err != nil {
+		t.Fatalf("导入带转义的值: %v", err)
+	}
+	lines, _, err = d.CopyOut(d.Session(s), sqlCopyFor("cpx", true))
+	if err != nil {
+		t.Fatalf("CopyOut: %v", err)
+	}
+	escaped := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "9\t") && strings.Contains(l, `\t`) {
+			escaped = true
+		}
+	}
+	if !escaped {
+		t.Fatalf("值里的 tab 应转义成 \\t，实际: %v", lines)
+	}
+
+	// 主键冲突要被拦住
+	if _, err := d.CopyIn(d.Session(s), sqlCopyFor("cpx", false), []byte("1\tdup\t1\n")); err == nil {
+		t.Fatal("COPY 也要做唯一性校验")
 	}
 }

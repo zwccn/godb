@@ -449,6 +449,13 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 	c.srv.logQuery(text)
 	// SET / SHOW 由 SQL 层处理（见 exec.ShowResult），这里不再拦一道，
 	// 免得网页控制台和 PG 协议两条路径的行为分叉。
+	// COPY 走自己的数据流（CopyIn/CopyOut），不能按普通查询处理
+	if cp := parseCopyStatement(text); cp != nil {
+		c.setActivity("active", text)
+		c.handleCopy(cp)
+		c.setActivity("idle", "")
+		return
+	}
 	c.setActivity("active", text)
 	results, err := c.srv.DB.Exec(c.sess, text)
 	defer c.setActivity("idle", "")
@@ -767,4 +774,73 @@ func mapError(err error) (string, string) {
 		return "25001", msg
 	}
 	return "42000", msg
+}
+
+// parseCopyStatement 判断这条语句是不是单独的 COPY。不是就返回 nil（走普通路径）。
+func parseCopyStatement(text string) *sql.Copy {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) < 4 || !strings.EqualFold(trimmed[:4], "copy") {
+		return nil
+	}
+	stmts, err := sql.Parse(text)
+	if err != nil || len(stmts) != 1 {
+		return nil
+	}
+	if cp, ok := stmts[0].(*sql.Copy); ok {
+		return cp
+	}
+	return nil
+}
+
+// handleCopy 执行 COPY FROM STDIN / TO STDOUT。
+func (c *conn) handleCopy(cp *sql.Copy) {
+	if cp.To {
+		lines, n, err := c.srv.DB.CopyOut(c.sess, cp)
+		if err != nil {
+			_ = c.write(c.errorResponse(err)...)
+			_ = c.write(encodeReadyForQuery(c.txStatus()))
+			return
+		}
+		msgs := [][]byte{encodeCopyResponse(msgCopyOutResponse, 1)}
+		for _, line := range lines {
+			msgs = append(msgs, encodeCopyData([]byte(line+"\n")))
+		}
+		msgs = append(msgs, encodeCopyDone(),
+			encodeCommandComplete(fmt.Sprintf("COPY %d", n)),
+			encodeReadyForQuery(c.txStatus()))
+		_ = c.write(msgs...)
+		return
+	}
+
+	// COPY FROM STDIN：先告诉客户端可以发数据了
+	if err := c.write(encodeCopyResponse(msgCopyInResponse, 1)); err != nil {
+		return
+	}
+	var data []byte
+	for {
+		typ, body, err := c.readMsg()
+		if err != nil {
+			return
+		}
+		switch typ {
+		case msgCopyData:
+			data = append(data, body...)
+		case msgCopyDone:
+			n, err := c.srv.DB.CopyIn(c.sess, cp, data)
+			if err != nil {
+				_ = c.write(c.errorResponse(err)...)
+				_ = c.write(encodeReadyForQuery(c.txStatus()))
+				return
+			}
+			_ = c.write(encodeCommandComplete(fmt.Sprintf("COPY %d", n)),
+				encodeReadyForQuery(c.txStatus()))
+			return
+		case msgCopyFail:
+			_ = c.write(c.errorResponse(fmt.Errorf("COPY from stdin failed: %s", string(body)))...)
+			_ = c.write(encodeReadyForQuery(c.txStatus()))
+			return
+		default:
+			// Sync / Flush 之类：忽略
+		}
+	}
 }

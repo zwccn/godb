@@ -51,6 +51,9 @@ func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 		return e.execSelect(tx, sel, []string{})
 	case *sql.Insert:
 		return e.execInsert(tx, s)
+	case *sql.Copy:
+		// COPY 需要协议层的 CopyIn/CopyOut 数据流，SQL 层单独调不通
+		return nil, fmt.Errorf("COPY must be executed through the PostgreSQL protocol")
 	case *sql.Update:
 		return e.execUpdate(tx, s)
 	case *sql.Delete:

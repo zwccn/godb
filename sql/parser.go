@@ -183,6 +183,9 @@ func (p *parser) parseStatement() (Statement, error) {
 	case "CHECKPOINT", "FLUSH":
 		p.pos++
 		return &Checkpoint{}, nil
+	case "COPY":
+		p.pos++
+		return p.parseCopy()
 	case "INSERT":
 		p.pos++
 		return p.parseInsert()
@@ -810,6 +813,52 @@ func (p *parser) parseTruncate() (Statement, error) {
 }
 
 // ---------- DML ----------
+
+// parseCopy 解析 COPY t [(列...)] FROM STDIN | TO STDOUT。
+//
+// 只支持标准输入输出：读写服务器本地文件是安全风险（任意文件读写），
+// PostgreSQL 本身也建议用 psql 的 \copy 代替。
+func (p *parser) parseCopy() (Statement, error) {
+	name, err := p.tableName()
+	if err != nil {
+		return nil, err
+	}
+	c := &Copy{Table: name}
+	if p.atPunct("(") {
+		p.pos++
+		for {
+			col, err := p.ident()
+			if err != nil {
+				return nil, err
+			}
+			c.Cols = append(c.Cols, col)
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+	}
+	switch {
+	case p.acceptKw("from"):
+		c.To = false
+	case p.acceptKw("to"):
+		c.To = true
+	default:
+		return nil, p.errAt(p.peek(), "expected FROM or TO")
+	}
+	switch {
+	case p.acceptKw("stdin"), p.acceptKw("stdout"):
+		// 标准流，忽略后面的 WITH (...) 选项
+	case p.acceptKw("strict"):
+		return nil, p.errAt(p.peek(), "COPY from a file is not supported, use psql's \\copy")
+	default:
+		return nil, p.errAt(p.peek(), "COPY from/to a file is not supported, use psql's \\copy")
+	}
+	return c, nil
+}
 
 func (p *parser) parseInsert() (Statement, error) {
 	if err := p.expectKw("into"); err != nil {

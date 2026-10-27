@@ -183,3 +183,36 @@ func encodeNotice(message string) []byte {
 	w.byte(0)
 	return w.message(msgNoticeResponse)
 }
+
+// ---------- COPY 相关消息 ----------
+
+const (
+	msgCopyInResponse  = 'G'
+	msgCopyOutResponse = 'H'
+	msgCopyData        = 'd'
+	msgCopyDone        = 'c'
+	msgCopyFail        = 'f'
+)
+
+// encodeCopyResponse 生成 CopyInResponse('G') 或 CopyOutResponse('H')。
+// 格式固定为 text（0），每列也用 text。
+func encodeCopyResponse(typ byte, numCols int) []byte {
+	w := &writer{}
+	w.byte(0) // overall format: text
+	w.int16(int16(numCols))
+	for i := 0; i < numCols; i++ {
+		w.int16(0) // per-column format: text
+	}
+	return w.message(typ)
+}
+
+func encodeCopyData(b []byte) []byte {
+	w := &writer{}
+	w.bytes(b)
+	return w.message(msgCopyData)
+}
+
+func encodeCopyDone() []byte {
+	w := &writer{}
+	return w.message(msgCopyDone)
+}

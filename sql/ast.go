@@ -56,6 +56,13 @@ type FKDef struct {
 	OnUpdate string
 }
 
+// Copy 对应 COPY ... FROM STDIN / TO STDOUT（只支持标准输入输出，不支持文件名）。
+type Copy struct {
+	Table string
+	Cols  []string
+	To    bool // true = TO STDOUT（导出），false = FROM STDIN（导入）
+}
+
 // DropTable 对应 DROP TABLE。
 type DropTable struct {
 	Tables   []string
@@ -256,6 +263,7 @@ func (*Checkpoint) stmtNode()  {}
 func (*Show) stmtNode()        {}
 func (*SetStmt) stmtNode()     {}
 func (*Insert) stmtNode()      {}
+func (*Copy) stmtNode()        {}
 func (*Update) stmtNode()      {}
 func (*Delete) stmtNode()      {}
 func (*Select) stmtNode()      {}

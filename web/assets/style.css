@@ -337,7 +337,10 @@ body {
   height: 52px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* 左：汉堡 + 品牌；右：动作区（top-actions 自己 margin-left:auto 顶过去）。
+     不用 space-between，否则窄屏多出一个汉堡后品牌会被推到中间去。 */
+  justify-content: flex-start;
+  gap: 10px;
   padding: 0 16px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
@@ -362,7 +365,7 @@ body {
   letter-spacing: 0.2px;
 }
 
-.top-actions { display: flex; align-items: center; gap: 8px; }
+.top-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
 .pill {
   font-size: calc(11.5px * var(--fs));
@@ -893,6 +896,62 @@ table.grid td.bool { color: var(--warn-text); }
 
 @media (max-width: 860px) {
   .sidebar { flex-basis: 210px; }
+}
+
+/* ---------- 窄屏：左侧表结构变成可收起的抽屉 ---------- */
+/* 手机上 390px 宽时侧栏要吃掉 210px，主区只剩一条缝，SQL 都没法看。
+   这里把它改成覆盖式抽屉：默认收起，点顶栏的 ☰ 拉开，点遮罩/选完表自动收起。 */
+.sidebar-toggle { display: none; }
+.sidebar-scrim { display: none; }
+.lbl-short { display: none; }
+
+@media (max-width: 720px) {
+  .sidebar-toggle { display: inline-flex; flex: 0 0 auto; }
+
+  .sidebar {
+    position: fixed;
+    top: 52px; /* 顶栏高度 */
+    left: 0;
+    bottom: 0;
+    width: min(280px, 84vw);
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform .18s ease;
+    box-shadow: 12px 0 36px var(--shadow-color);
+  }
+
+  body.sidebar-open .sidebar { transform: none; }
+
+  .sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 52px 0 0 0;
+    z-index: 35;
+    background: var(--overlay);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+  }
+
+  body.sidebar-open .sidebar-scrim { opacity: 1; pointer-events: auto; }
+
+  /* 顶栏控件太多，390px 放不下：brand 只留图标、「锁状态」缩成「锁」、
+     藏掉「库」标签和「管理」（库管理还能点侧栏里的库名） */
+  .topbar { padding: 0 10px; }
+  .top-actions { gap: 6px; }
+  .brand { gap: 0; }
+  .brand-text { display: none; }
+  .db-pick-label { display: none; }
+  #btnDBs { display: none; }
+  .db-pick select { max-width: 104px; }
+  .lbl-full { display: none; }
+  .lbl-short { display: inline; }
+
+  /* 编辑器工具栏同理：标题和低频按钮让位给「执行」 */
+  .editor-bar { padding: 7px 10px; }
+  .editor-label { display: none; }
+  #btnExplain, #btnClear { display: none; }
+  .editor-lead { gap: 8px; }
 }
 
 

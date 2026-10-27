@@ -31,6 +31,9 @@ try {
 </head>
 <body>
 <header class="topbar">
+  <!-- 只有窄屏（≤720px）才显示：把左边表结构栏当抽屉拉开 -->
+  <button id="btnSidebar" class="icon-btn sidebar-toggle" type="button"
+          aria-label="表结构" aria-expanded="false" aria-controls="sidebar">☰</button>
   <div class="brand">
     <span class="logo" aria-hidden="true">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
@@ -52,13 +55,16 @@ try {
     <!-- 顶栏只留「随时要看 / 随手要切」的东西：库、事务状态、锁、设置。
          皮肤、字号、载入示例数据、清空数据库都是低频操作，收进设置页。 -->
     <span id="txPill" class="pill pill-idle">空闲</span>
-    <button id="btnLocks" class="btn btn-ghost">锁状态<span id="lockBadge" class="badge hidden">0</span></button>
+    <!-- 窄屏把「锁状态」缩成「锁」，省下来的宽度留给库下拉和执行 -->
+    <button id="btnLocks" class="btn btn-ghost" title="锁状态">
+      <span class="lbl-full">锁状态</span><span class="lbl-short">锁</span><span id="lockBadge" class="badge hidden">0</span>
+    </button>
     <button id="btnSettings" class="btn btn-ghost">设置</button>
   </div>
 </header>
 
 <main class="layout">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="sidebar-head">
       <span class="sidebar-title">表结构<button id="dbBadge" class="db-badge" type="button"
         title="当前数据库（点击管理）">godb</button></span>
@@ -71,6 +77,9 @@ try {
       <div class="empty-hint">暂无表，试试「设置 → 载入示例数据」</div>
     </div>
   </aside>
+
+  <!-- 窄屏抽屉的遮罩：点一下收起侧栏（不挡桌面布局） -->
+  <div id="sidebarScrim" class="sidebar-scrim"></div>
 
   <section class="main">
     <div class="editor-wrap">

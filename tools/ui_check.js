@@ -510,6 +510,67 @@ class CDP {
     await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
     await sleep(300);
 
+    // 5) 窄屏：左侧表结构默认收起成抽屉，点 ☰ 拉开
+    //    注意 headless 的 --window-size 会把宽度钳到 500，所以这里显式设视口
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 1, mobile: true });
+    await sleep(700);
+    const mob = await cdp.eval(`(() => {
+      const sb = document.getElementById('sidebar').getBoundingClientRect();
+      return {
+        sidebarRight: Math.round(sb.right),
+        toggle: getComputedStyle(document.getElementById('btnSidebar')).display,
+        bodyScroll: document.body.scrollWidth,
+        inner: window.innerWidth,
+      };
+    })()`);
+    check('窄屏下侧栏自动收起（不占位）', mob.sidebarRight <= 0, `右边界 ${mob.sidebarRight}px`);
+    check('窄屏下有 ☰ 按钮', mob.toggle !== 'none', mob.toggle);
+    check('窄屏顶栏不撑破页面（无横向滚动）',
+      mob.bodyScroll <= mob.inner + 1, `${mob.bodyScroll} / ${mob.inner}`);
+
+    await cdp.eval(`document.getElementById('btnSidebar').click()`);
+    await sleep(400);
+    const opened = await cdp.eval(`(() => {
+      const sb = document.getElementById('sidebar').getBoundingClientRect();
+      return {
+        left: Math.round(sb.left),
+        w: Math.round(sb.width),
+        cls: document.body.classList.contains('sidebar-open'),
+        expanded: document.getElementById('btnSidebar').getAttribute('aria-expanded'),
+        scrim: getComputedStyle(document.getElementById('sidebarScrim')).opacity,
+      };
+    })()`);
+    check('点 ☰ 拉开抽屉（带遮罩）',
+      opened.cls && opened.left === 0 && opened.w > 200 && Number(opened.scrim) > 0.5,
+      `${opened.w}px，遮罩 ${opened.scrim}，aria-expanded=${opened.expanded}`);
+
+    await cdp.eval(`document.getElementById('sidebarScrim').click()`);
+    await sleep(300);
+    check('点遮罩收起抽屉', await cdp.eval(`!document.body.classList.contains('sidebar-open')`));
+
+    // 点表之后自动收起：手机上接着要看的是结果
+    await cdp.eval(`document.getElementById('btnSidebar').click()`);
+    await sleep(300);
+    await cdp.eval(`document.querySelector('.table-row').click()`);
+    await sleep(600);
+    check('窄屏点表后抽屉自动收起',
+      await cdp.eval(`!document.body.classList.contains('sidebar-open')`));
+
+    // 转回宽屏：侧栏恢复常驻、☰ 消失、状态复位
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(700);
+    const wide = await cdp.eval(`(() => {
+      const sb = document.getElementById('sidebar').getBoundingClientRect();
+      return {
+        w: Math.round(sb.width),
+        toggle: getComputedStyle(document.getElementById('btnSidebar')).display,
+        cls: document.body.classList.contains('sidebar-open'),
+      };
+    })()`);
+    check('转回宽屏：侧栏常驻、☰ 隐藏、状态复位',
+      wide.w > 200 && wide.toggle === 'none' && !wide.cls,
+      `侧栏 ${wide.w}px，☰ ${wide.toggle}`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

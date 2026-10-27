@@ -1444,6 +1444,37 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !settingsModal.classList.contains('hidden')) closeSettings();
 });
 
+/* ---------------- 窄屏：表结构抽屉 ---------------- */
+
+// 手机上侧栏默认收起（布局见 CSS 的 max-width:720px 段），这里只管状态与交互。
+const sidebarToggle = document.getElementById('btnSidebar');
+const sidebarScrim = document.getElementById('sidebarScrim');
+const narrowMQ = window.matchMedia('(max-width: 720px)');
+
+function setSidebarOpen(open) {
+  document.body.classList.toggle('sidebar-open', !!open);
+  sidebarToggle.setAttribute('aria-expanded', String(!!open));
+}
+
+sidebarToggle.addEventListener('click', () => {
+  setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+});
+sidebarScrim.addEventListener('click', () => setSidebarOpen(false));
+
+// 点表就把抽屉收起来：手机上紧接着要看的是查询结果，不是继续挑表
+treeEl.addEventListener('click', ev => {
+  if (narrowMQ.matches && ev.target.closest('.table-row')) setSidebarOpen(false);
+});
+
+// 转回宽屏时清掉状态，否则 body 上还挂着 class、☰ 的 aria-expanded 也对不上
+narrowMQ.addEventListener('change', e => {
+  if (!e.matches) setSidebarOpen(false);
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.body.classList.contains('sidebar-open')) setSidebarOpen(false);
+});
+
 /* ---------------- 启动 ---------------- */
 
 (function init() {

@@ -500,7 +500,16 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, er
 		spec.Type = types.Type{Kind: types.KInt, Name: "bigint"}
 		return spec, nil
 	}
-	if len(fc.Args) != 1 {
+	if name == "string_agg" {
+		if len(fc.Args) != 2 {
+			return nil, fmt.Errorf("string_agg requires two arguments")
+		}
+		sep, err := CompileConst(fc.Args[1])
+		if err != nil {
+			return nil, fmt.Errorf("string_agg delimiter must be a constant")
+		}
+		spec.Separator = sep.TextForm()
+	} else if len(fc.Args) != 1 {
 		return nil, fmt.Errorf("aggregate %s requires exactly one argument", name)
 	}
 	sub := &compileCtx{sc: sc, postAgg: parent.postAgg, keys: parent.keys, aggs: parent.aggs,
@@ -511,6 +520,8 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, er
 	}
 	spec.Arg = arg
 	switch name {
+	case "string_agg":
+		spec.Type = types.Type{Kind: types.KText, Name: "text"}
 	case "count":
 		spec.Type = types.Type{Kind: types.KInt, Name: "bigint"}
 	case "sum":

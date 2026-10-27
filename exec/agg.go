@@ -9,13 +9,16 @@ import (
 
 // aggSpec 描述一个聚合调用。
 type aggSpec struct {
-	Fn       string // count | sum | avg | min | max
-	Arg      Eval   // nil 表示 count(*)
-	Star     bool
-	Distinct bool
-	Label    string
-	Type     types.Type
-	key      string // 规范文本，用于去重与下标映射
+	Fn string // count | sum | avg | min | max | string_agg
+	// Separator 是 string_agg 的分隔符。要求是常量：客户端与 psql 都是写字面量，
+	// 支持非常量需要让累加器拿到整行，收益不大。
+	Separator string
+	Arg       Eval // nil 表示 count(*)
+	Star      bool
+	Distinct  bool
+	Label     string
+	Type      types.Type
+	key       string // 规范文本，用于去重与下标映射
 }
 
 func (a *aggSpec) String() string {
@@ -194,6 +197,8 @@ func newAccum(spec *aggSpec) accum {
 			a.seen = map[string]bool{}
 		}
 		return a
+	case "string_agg":
+		return &strAggAcc{sep: spec.Separator, distinct: spec.Distinct, seen: map[string]bool{}}
 	case "min", "max":
 		a := &minMaxAcc{isMin: spec.Fn == "min", distinct: spec.Distinct}
 		if spec.Distinct {
@@ -316,4 +321,37 @@ func (o *aggOp) Next() (types.Row, bool, error) {
 	r := o.rows[o.i]
 	o.i++
 	return r, true, nil
+}
+
+// strAggAcc 实现 string_agg(expr, sep)：把值拼成一个字符串。
+type strAggAcc struct {
+	parts    []string
+	sep      string
+	distinct bool
+	seen     map[string]bool
+	has      bool
+}
+
+func (a *strAggAcc) add(v types.Value) error {
+	if v.IsNull() {
+		// PostgreSQL 的 string_agg 跳过 NULL
+		return nil
+	}
+	s := v.TextForm()
+	if a.distinct {
+		if a.seen[s] {
+			return nil
+		}
+		a.seen[s] = true
+	}
+	a.parts = append(a.parts, s)
+	a.has = true
+	return nil
+}
+
+func (a *strAggAcc) result() types.Value {
+	if !a.has {
+		return types.Null
+	}
+	return types.Text(strings.Join(a.parts, a.sep))
 }

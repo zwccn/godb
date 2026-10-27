@@ -15,6 +15,8 @@ var AggregateFuncs = map[string]bool{
 	"avg":   true,
 	"min":   true,
 	"max":   true,
+	// string_agg(expr, sep)：psql 的 \d 用它拼列名列表
+	"string_agg": true,
 }
 
 // IsAggregate 判断函数名是否为聚合函数。

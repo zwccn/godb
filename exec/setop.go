@@ -279,6 +279,19 @@ func (p *Planner) buildFuncTable(n *sql.FuncTable) (Operator, Schema, error) {
 // tableFuncRows 计算集合函数的行。未知函数返回 0 行。
 func tableFuncRows(name string, args []types.Value) ([]types.Row, error) {
 	switch name {
+	case "unnest":
+		// unnest(数组)：数组在我们这里就是 {a,b} 这样的文本。
+		// psql 的 \d 用它把列名数组摊成行。
+		if len(args) < 1 || args[0].IsNull() {
+			return nil, nil
+		}
+		txt := args[0].TextForm()
+		body := strings.TrimSuffix(strings.TrimPrefix(txt, "{"), "}")
+		var rows []types.Row
+		for _, el := range splitArrayElems(body) {
+			rows = append(rows, types.Row{types.Text(el)})
+		}
+		return rows, nil
 	case "generate_series":
 		if len(args) < 2 {
 			return nil, nil

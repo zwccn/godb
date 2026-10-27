@@ -176,6 +176,9 @@ func (e *Engine) persistSchema(needsSnapshot bool) error {
 }
 
 func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
+	if s.As != nil {
+		return e.execCreateTableAs(s)
+	}
 	if _, exists := e.Cat.Get(s.Table); exists {
 		if s.IfNotExists {
 			return &Result{Command: "CREATE TABLE", Tag: "CREATE TABLE", Message: "表已存在，跳过"}, nil
@@ -946,4 +949,70 @@ func evalChecks(checks []checkEval, row types.Row) error {
 		return fmt.Errorf("new row for relation %q violates check constraint %q", ck.table, ck.name)
 	}
 	return nil
+}
+
+// ---------- CREATE TABLE AS SELECT ----------
+
+// execCreateTableAs 建表并灌数据。
+//
+// 列名/类型全部来自查询的输出 schema。建表是 DDL（不需要事务），灌数据自己
+// 开一个事务：这样客户端拿到的语义是「表和数据一起出现」。
+func (e *Engine) execCreateTableAs(s *sql.CreateTable) (*Result, error) {
+	if _, exists := e.Cat.Get(s.Table); exists {
+		if s.IfNotExists {
+			return &Result{Command: "CREATE TABLE AS", Tag: "CREATE TABLE AS", Message: "表已存在，跳过"}, nil
+		}
+		return nil, fmt.Errorf("relation %q already exists", s.Table)
+	}
+
+	src := e.Store.Begin()
+	defer src.Rollback()
+	rows, sc, err := e.selectRows(src, s.As)
+	if err != nil {
+		return nil, err
+	}
+
+	used := map[string]int{}
+	cols := make([]*catalog.Column, len(sc))
+	for i, c := range sc {
+		name := strings.ToLower(c.Name)
+		if name == "" || name == "?column?" {
+			name = fmt.Sprintf("column%d", i+1)
+		}
+		// SELECT 允许重名列，表不行：自动加序号
+		if n, dup := used[name]; dup {
+			used[name] = n + 1
+			name = fmt.Sprintf("%s%d", name, n+1)
+		} else {
+			used[name] = 1
+		}
+		cols[i] = catalog.NewColumn(name, c.Type)
+	}
+
+	t := &catalog.Table{Name: s.Table, Columns: cols}
+	if err := e.Cat.Add(t); err != nil {
+		return nil, err
+	}
+	e.Store.AddTable(t.Name)
+	if err := e.persistSchema(false); err != nil {
+		return nil, err
+	}
+
+	if len(rows) > 0 {
+		tx := e.Store.Begin()
+		for _, r := range rows {
+			if _, err := tx.Insert(t.Name, r); err != nil {
+				tx.Rollback()
+				return nil, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+	}
+	return &Result{
+		Command:  "SELECT",
+		Tag:      fmt.Sprintf("SELECT %d", len(rows)),
+		Affected: len(rows),
+	}, nil
 }

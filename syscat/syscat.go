@@ -317,9 +317,23 @@ var specs = []tableSpec{
 	{"pg_catalog", "pg_statistic_ext", []colSpec{
 		c("oid", tOid), c("stxrelid", tOid), c("stxname", tName),
 		c("stxnamespace", tOid), c("stxowner", tOid), c("stxstattarget", tInt4),
+		// PG 10 的扩展统计有这两列，psql 的 \d 会读它们判断有没有统计信息
+		c("stxkeys", "int2vector"), c("stxkind", "char[]"),
 	}},
-	{"pg_catalog", "pg_statistic", []colSpec{
-		c("starelid", tOid), c("staattnum", tInt2), c("stainherit", tBool),
+	// 逻辑复制与统计扩展的伴生表：我们没有这些功能，但 psql 的 \d 会无条件
+	// 查它们（LEFT JOIN），缺表会让整条查询失败。空表即可。
+	{"pg_catalog", "pg_publication_rel", []colSpec{
+		c("oid", tOid), c("prpubid", tOid), c("prrelid", tOid),
+	}},
+	{"pg_catalog", "pg_transform", []colSpec{
+		c("oid", tOid), c("trftype", tOid), c("trflang", tOid),
+		c("trffromsql", tRegproc), c("trftosql", tRegproc),
+	}},
+	{"pg_catalog", "pg_statistic_ext_data", []colSpec{
+		c("stxoid", tOid), c("stxddistsqldata", tNodeTree), c("stxdndistinct", tNodeTree),
+		c("stxddependencies", tNodeTree), c("stxdmcv", tNodeTree),
+	}},
+	{"pg_catalog", "pg_statistic", []colSpec{c("starelid", tOid), c("staattnum", tInt2), c("stainherit", tBool),
 		c("stanullfrac", tFloat4), c("stawidth", tInt4), c("stadistinct", tFloat4),
 	}},
 	{"pg_catalog", "pg_foreign_data_wrapper", []colSpec{

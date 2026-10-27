@@ -266,6 +266,19 @@ func (p *parser) parseCreate() (Statement, error) {
 		return nil, err
 	}
 	ct.Table = name
+	// CREATE TABLE ... AS SELECT
+	if p.acceptKw("as") {
+		st0, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		sel, ok := st0.(*Select)
+		if !ok {
+			return nil, p.errAt(p.peek(), "expected SELECT")
+		}
+		ct.As = sel
+		return ct, nil
+	}
 	if err := p.expectPunct("("); err != nil {
 		return nil, err
 	}
@@ -1301,6 +1314,10 @@ func (p *parser) parseBaseTable() (TableRef, error) {
 		second, err := p.ident()
 		if err != nil {
 			return nil, err
+		}
+		// schema.函数(...)：psql 会写 pg_catalog.unnest(stxkeys)
+		if p.atPunct("(") {
+			return p.parseFuncTable(second)
 		}
 		bt.Schema = name
 		bt.Table = second

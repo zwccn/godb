@@ -18,6 +18,9 @@ type CreateTable struct {
 
 	// Checks 是表级 CHECK 约束的表达式原文；列级 CHECK 在引擎里并进来。
 	Checks []string
+
+	// As 非空表示 CREATE TABLE ... AS SELECT：列名与类型都来自这条查询。
+	As *Select
 }
 
 // ColumnDef 是一列的定义。

@@ -238,34 +238,138 @@ func (p *Planner) tryIndexScan(bt *sql.BaseTable, where sql.Expr) (Operator, boo
 		return nil, false
 	}
 	if plan.isRange {
-		return newIndexRangeScan(p.Tx, t, plan.ixName, plan.cols, plan.r, qual), true
+		return newIndexRangeScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.rs, qual), true
 	}
-	return newIndexScan(p.Tx, t, plan.ixName, plan.cols, plan.eq, qual), true
+	return newIndexScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.eq, qual), true
 }
 
 // indexPlan 描述一次索引访问。
 //
-//	eq 非空        → 完整键等值（所有列都有 `= 常量`）
-//	否则 r 是区间 → 首列的范围条件（`> < >= <= BETWEEN LIKE 'x%'`）
+//	isRange        → 扫 rs 里的键区间（OR 合并后可能多于一个）
+//	否则 eq 非空    → 完整键等值
 type indexPlan struct {
 	ixName  string // 空表示主键
-	cols    []int
+	cols    []int  // 参与条件的列（等值按索引顺序；区间只有首列）
+	ixCols  []int  // 索引的完整列（按索引定义顺序），ORDER BY 前缀匹配要看它
 	eq      []types.Value
-	r       storage.KeyRange
+	rs      []storage.KeyRange
 	isRange bool
 }
 
-// pickIndex 从 WHERE 里挑一条能用的索引：等值优先，其次首列的范围条件。
+// ranges 把计划统一成键区间列表（OR 合并与算子构造都走它）。
+func (p indexPlan) ranges() []storage.KeyRange {
+	if p.isRange {
+		return p.rs
+	}
+	k := storage.OrderKey(p.eq)
+	return []storage.KeyRange{{Lo: k, Hi: k, HasLo: true, HasHi: true, LoInc: true, HiInc: true}}
+}
+
+// pickIndex 从 WHERE 里挑一条能用的索引：OR 合并 → 等值 → 首列区间。
 //
 // UPDATE / DELETE 也用同一套选择逻辑：它们的 WHERE 和 SELECT 是一回事，
 // 没道理查询能走索引、按主键改一行还要全表扫。
 func pickIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) {
-	// 1) 完整键等值：覆盖的列最多、命中最少
+	// 1) 顶层是 OR：每个分支各自能走索引，就合并成一次多区间扫描
+	if p, ok := pickOrIndex(t, where, qual); ok {
+		return p, true
+	}
+	// 2) 完整键等值：覆盖的列最多、命中最少
 	if p, ok := pickEqualityIndex(t, where, qual); ok {
 		return p, true
 	}
-	// 2) 首列的范围条件
+	// 3) 首列的范围条件
 	return pickRangeIndex(t, where, qual)
+}
+
+// pickOrIndex 把顶层 OR 的每个分支翻译成键区间，合并成一次索引扫描。
+//
+// 条件很严：**每个**分支都得落在同一个索引上，否则退回全表扫 —— 部分命中
+// 就等于漏行。分支内部只认等值和单列区间，嵌套 OR 交给外层全表扫。
+func pickOrIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) {
+	brs := splitDisjuncts(where)
+	if len(brs) < 2 {
+		return indexPlan{}, false
+	}
+	var plan indexPlan
+	var rs []storage.KeyRange
+	for i, b := range brs {
+		p, ok := pickBranchIndex(t, b, qual)
+		if !ok {
+			return indexPlan{}, false
+		}
+		if i == 0 {
+			plan = p
+		} else if p.ixName != plan.ixName || !sameCols(p.ixCols, plan.ixCols) {
+			// 两个分支落在不同索引上：没法一次扫完，整条 OR 放弃
+			return indexPlan{}, false
+		}
+		rs = append(rs, p.ranges()...)
+	}
+	plan.isRange = true
+	plan.eq = nil
+	plan.rs = rs
+	// 校验与排序都换成索引**完整列**的键：各分支约束的列未必一样（一个只卡首列、
+	// 一个卡满复合索引），拿「第一个分支的约束列」算键会把另一个分支的行判成
+	// 不在区间 —— 静默漏行。区间本身是按索引完整键编码的，用完整键判断才是对的。
+	if len(plan.ixCols) > 0 {
+		plan.cols = plan.ixCols
+	}
+	return plan, true
+}
+
+// pickBranchIndex 单个 OR 分支：只认完整键等值或单列区间。
+func pickBranchIndex(t *catalog.Table, e sql.Expr, qual string) (indexPlan, bool) {
+	if len(splitDisjuncts(e)) > 1 {
+		return indexPlan{}, false // 嵌套 OR：不处理
+	}
+	if p, ok := pickEqualityIndex(t, e, qual); ok {
+		for _, v := range p.eq {
+			if v.IsNull() {
+				return indexPlan{}, false // `col = NULL` 恒不成立，交给全表扫
+			}
+		}
+		return p, true
+	}
+	return pickRangeIndex(t, e, qual)
+}
+
+// sameCols 判断两组列位置是否相同（OR 各分支必须落在同一个索引上）。
+func sameCols(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// splitDisjuncts 拆开 OR。只有顶层就是 OR 时才返回多于一个分支。
+func splitDisjuncts(e sql.Expr) []sql.Expr {
+	if e == nil {
+		return nil
+	}
+	if b, ok := e.(*sql.Binary); ok && b.Op == "or" {
+		return append(splitDisjuncts(b.L), splitDisjuncts(b.R)...)
+	}
+	return []sql.Expr{e}
+}
+
+// indexColIdxes 把索引定义的列名翻成列位置。翻不出来（索引过期）就返回 nil，
+// 调用方会当成「没有可用的列信息」，只影响 ORDER BY 免排序，不影响查得对不对。
+func indexColIdxes(t *catalog.Table, ix *catalog.Index) []int {
+	out := make([]int, 0, len(ix.Columns))
+	for _, n := range ix.Columns {
+		ci, ok := t.ColumnIdx(strings.ToLower(n))
+		if !ok {
+			return nil
+		}
+		out = append(out, ci)
+	}
+	return out
 }
 
 // pickEqualityIndex 找一个「每一列都被 `= 常量` 约束住」的索引，主键优先。
@@ -276,7 +380,7 @@ func pickEqualityIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan
 	}
 	if pk := t.PKIdxes(); len(pk) > 0 {
 		if vals, ok := constrainByPos(t, pk, eq); ok {
-			return indexPlan{cols: pk, eq: vals}, true
+			return indexPlan{cols: pk, ixCols: pk, eq: vals}, true
 		}
 	}
 	// 多个索引都能用时选列最多的那个：命中的行最少。
@@ -295,7 +399,7 @@ func pickEqualityIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan
 	if best == nil {
 		return indexPlan{}, false
 	}
-	return indexPlan{ixName: best.Name, cols: bestCols, eq: bestVals}, true
+	return indexPlan{ixName: best.Name, cols: bestCols, ixCols: indexColIdxes(t, best), eq: bestVals}, true
 }
 
 // pickRangeIndex 用索引的**首列**做区间扫描。
@@ -311,7 +415,7 @@ func pickRangeIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, b
 	// 主键优先
 	if pk := t.PKIdxes(); len(pk) > 0 {
 		if cr, ok := ranges[strings.ToLower(t.Columns[pk[0]].Name)]; ok {
-			return indexPlan{cols: pk, r: cr.toKeyRange(), isRange: true}, true
+			return indexPlan{cols: pk, ixCols: pk, rs: []storage.KeyRange{cr.toKeyRange()}, isRange: true}, true
 		}
 	}
 	var best *catalog.Index
@@ -337,7 +441,14 @@ func pickRangeIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, b
 	if best == nil {
 		return indexPlan{}, false
 	}
-	return indexPlan{ixName: best.Name, cols: bestCols, r: bestRange, isRange: true}, true
+	ixCols := indexColIdxes(t, best)
+	if len(ixCols) > 0 {
+		// 键是「索引完整列」拼出来的，所以拿完整键判断在不在区间里；
+		// bestCols 只记录「条件打在哪一列」。
+		bestCols = ixCols
+	}
+	return indexPlan{ixName: best.Name, cols: bestCols, ixCols: ixCols,
+		rs: []storage.KeyRange{bestRange}, isRange: true}, true
 }
 
 // colRange 是一列上的区间约束，边界直接存成**保序键**（所以能和其它键比较大小）。
@@ -664,6 +775,58 @@ func itemName(it *sql.SelectItem) string {
 	return "?column?"
 }
 
+// orderedScan 表示算子已经按某个索引的键序输出行。
+type orderedScan interface {
+	orderedColumns() []string // 索引列，按索引定义顺序
+	isReversed() bool
+	setReversed(bool)
+}
+
+// orderCovered 判断下层算子是否已经按 ORDER BY 要求的顺序输出行。
+//
+// 三个前提缺一不可：
+//  1. 隔着 filter 看下去是索引扫描 —— filter 是流式的，不打乱顺序；
+//  2. ORDER BY 的列正好是索引列的**前缀**、顺序一致（`(a,b)` 索引上只认 `a` 或 `a,b`；
+//     单独 `b` 不行，那得全表按 a 扫一遍才能排）；
+//  3. 所有排序列方向一致 —— 索引只能整体正扫或反扫，`a ASC, b DESC` 做不到。
+//
+// NULL 不用特殊处理：索引里不含 NULL 键，而能命中索引的条件本身就排除了 NULL 行。
+func orderCovered(op Operator, orderBy []*sql.OrderItem) bool {
+	src := op
+	for {
+		if f, ok := src.(*filterOp); ok {
+			src = f.child
+			continue
+		}
+		break
+	}
+	os, ok := src.(orderedScan)
+	if !ok {
+		return false
+	}
+	cols := os.orderedColumns()
+	if len(cols) == 0 || len(orderBy) == 0 || len(orderBy) > len(cols) {
+		return false
+	}
+	desc := orderBy[0].Desc
+	for i, oi := range orderBy {
+		if oi.Desc != desc {
+			return false // 混合方向
+		}
+		ref, ok := oi.Expr.(*sql.ColumnRef)
+		if !ok {
+			return false // 表达式排序用不上索引序
+		}
+		if !strings.EqualFold(ref.Name, cols[i]) {
+			return false
+		}
+	}
+	if desc && !os.isReversed() {
+		os.setReversed(true)
+	}
+	return true
+}
+
 // buildSimple 处理不含聚合的 SELECT。
 func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operator, sc Schema) (Operator, error) {
 	exprs := make([]Eval, len(items))
@@ -678,19 +841,23 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 	}
 
 	if len(s.OrderBy) > 0 {
-		keys := make([]sortKey, 0, len(s.OrderBy))
-		for _, oi := range s.OrderBy {
-			ev, err := p.orderKey(oi, items, exprs, out, &compileCtx{sc: sc})
-			if err != nil {
-				return nil, err
+		// 下层是索引扫描、并且 ORDER BY 正好是索引列的前缀时，行已经有序，
+		// 不必再排序（索引扫描按键升序输出，整体反向扫就是降序）。
+		if !orderCovered(op, s.OrderBy) {
+			keys := make([]sortKey, 0, len(s.OrderBy))
+			for _, oi := range s.OrderBy {
+				ev, err := p.orderKey(oi, items, exprs, out, &compileCtx{sc: sc})
+				if err != nil {
+					return nil, err
+				}
+				nullsFirst := oi.Desc
+				if oi.NullsFirst != nil {
+					nullsFirst = *oi.NullsFirst
+				}
+				keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 			}
-			nullsFirst := oi.Desc
-			if oi.NullsFirst != nil {
-				nullsFirst = *oi.NullsFirst
-			}
-			keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
+			op = &sortOp{child: op, keys: keys, sc: sc}
 		}
-		op = &sortOp{child: op, keys: keys, sc: sc}
 	}
 
 	op = &projectOp{child: op, exprs: exprs, sc: out}

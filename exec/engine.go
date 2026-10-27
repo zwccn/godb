@@ -775,7 +775,7 @@ func collectByIndex(tx *storage.Tx, t *catalog.Table, where sql.Expr) ([]storage
 		return nil, nil, false
 	}
 	if plan.isRange {
-		hits := tx.IndexRange(t, plan.ixName, plan.cols, plan.r)
+		hits := tx.IndexRanges(t, plan.ixName, plan.cols, plan.ixCols, plan.rs)
 		refs := make([]storage.Ref, 0, len(hits))
 		rows := make([]types.Row, 0, len(hits))
 		for _, h := range hits {

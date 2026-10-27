@@ -104,21 +104,39 @@ func tableSchema(t *catalog.Table, qual string) Schema {
 // 假设有偏差，也不会返回不该出现的行（漏行则由下面的选索引规则兜住 ——
 // 只有常量能安全 Cast 到列类型时才会用索引）。
 type indexScanOp struct {
-	tx     *storage.Tx
-	tbl    *catalog.Table
-	ixName string // 空表示走主键哈希索引
-	cols   []int
-	vals   []types.Value // 已按列类型归一
-	sc     Schema
-	rows   []types.Row
-	i      int
+	tx      *storage.Tx
+	tbl     *catalog.Table
+	ixName  string // 空表示走主键索引
+	cols    []int
+	ixCols  []int         // 索引的完整列，ORDER BY 前缀匹配用
+	ixNames []string      // 同上，换成列名（等值扫描恒按这些列有序）
+	vals    []types.Value // 已按列类型归一
+	sc      Schema
+	rows    []types.Row
+	i       int
 }
 
-func newIndexScan(tx *storage.Tx, t *catalog.Table, ixName string, cols []int, vals []types.Value, qual string) *indexScanOp {
+func newIndexScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, vals []types.Value, qual string) *indexScanOp {
 	return &indexScanOp{
-		tx: tx, tbl: t, ixName: ixName, cols: cols, vals: vals,
+		tx: tx, tbl: t, ixName: ixName, cols: cols, ixCols: ixCols,
+		ixNames: colNames(t, ixCols), vals: vals,
 		sc: tableSchema(t, qual),
 	}
+}
+
+// colNames 把列位置翻成小写列名（ORDER BY 比对用）。
+func colNames(t *catalog.Table, idxes []int) []string {
+	if len(idxes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(idxes))
+	for _, ci := range idxes {
+		if ci < 0 || ci >= len(t.Columns) {
+			return nil
+		}
+		out = append(out, strings.ToLower(t.Columns[ci].Name))
+	}
+	return out
 }
 
 func (o *indexScanOp) Schema() Schema { return o.sc }
@@ -170,24 +188,30 @@ func (o *indexScanOp) Describe() string {
 
 func (o *indexScanOp) Children() []Operator { return nil }
 
-// indexRangeScanOp 用索引扫一个键区间（`BETWEEN`、`>`、`LIKE 'x%'`）。
+// indexRangeScanOp 用索引扫键区间（`BETWEEN`、`>`、`LIKE 'x%'`，以及 OR 合并出来的多段）。
 //
 // 和等值扫描一样，它只负责缩小候选集，WHERE 仍由上层 filterOp 再判一遍。
+// 输出按索引键升序（存储层保证），所以 `ORDER BY` 命中索引前缀时可以省掉排序；
+// desc 只影响遍历方向，扫描的仍是同一批行。
 type indexRangeScanOp struct {
-	tx     *storage.Tx
-	tbl    *catalog.Table
-	ixName string // 空表示主键
-	cols   []int
-	r      storage.KeyRange
-	sc     Schema
-	rows   []types.Row
-	i      int
+	tx      *storage.Tx
+	tbl     *catalog.Table
+	ixName  string // 空表示主键
+	cols    []int
+	ixCols  []int // 索引的完整列，ORDER BY 前缀匹配用
+	rs      []storage.KeyRange
+	desc    bool
+	sc      Schema
+	rows    []types.Row
+	i       int
+	ixNames []string // 同上，换成列名
 }
 
-func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols []int, r storage.KeyRange, qual string) *indexRangeScanOp {
+func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, rs []storage.KeyRange, qual string) *indexRangeScanOp {
 	return &indexRangeScanOp{
-		tx: tx, tbl: t, ixName: ixName, cols: cols, r: r,
-		sc: tableSchema(t, qual),
+		tx: tx, tbl: t, ixName: ixName, cols: cols, ixCols: ixCols, rs: rs,
+		ixNames: colNames(t, ixCols),
+		sc:      tableSchema(t, qual),
 	}
 }
 
@@ -196,8 +220,13 @@ func (o *indexRangeScanOp) Schema() Schema { return o.sc }
 func (o *indexRangeScanOp) Open() error {
 	o.rows = o.rows[:0]
 	o.i = 0
-	for _, h := range o.tx.IndexRange(o.tbl, o.ixName, o.cols, o.r) {
+	for _, h := range o.tx.IndexRanges(o.tbl, o.ixName, o.cols, o.ixCols, o.rs) {
 		o.rows = append(o.rows, h.Row)
+	}
+	if o.desc {
+		for i, j := 0, len(o.rows)-1; i < j; i, j = i+1, j-1 {
+			o.rows[i], o.rows[j] = o.rows[j], o.rows[i]
+		}
 	}
 	return nil
 }
@@ -222,10 +251,28 @@ func (o *indexRangeScanOp) Describe() string {
 	if name == "" {
 		name = o.tbl.Name + "_pkey"
 	}
-	return fmt.Sprintf("Index Range Scan using %s on %s", name, o.tbl.Name)
+	var s string
+	if len(o.rs) > 1 {
+		s = fmt.Sprintf("Index Union Scan using %s (%d ranges) on %s", name, len(o.rs), o.tbl.Name)
+	} else {
+		s = fmt.Sprintf("Index Range Scan using %s on %s", name, o.tbl.Name)
+	}
+	if o.desc {
+		s += " (backward)"
+	}
+	return s
 }
 
 func (o *indexRangeScanOp) Children() []Operator { return nil }
+
+// 两个索引扫描算子都能按索引键序输出，ORDER BY 前缀匹配时省掉排序。
+func (o *indexScanOp) orderedColumns() []string { return o.ixNames }
+func (o *indexScanOp) isReversed() bool         { return false }
+func (o *indexScanOp) setReversed(bool)         {}
+
+func (o *indexRangeScanOp) orderedColumns() []string { return o.ixNames }
+func (o *indexRangeScanOp) isReversed() bool         { return o.desc }
+func (o *indexRangeScanOp) setReversed(v bool)       { o.desc = v }
 
 // ---------- 单行（无 FROM 的 SELECT） ----------
 

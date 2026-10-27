@@ -639,14 +639,25 @@ func (tx *Tx) IndexLookup(t *catalog.Table, ixName string, cols []int, key strin
 }
 
 // IndexRange 用索引扫一个键区间，返回事务视角的行（`BETWEEN`、`>`、`LIKE 'x%'` 都走它）。
+func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange) []IndexHit {
+	return tx.IndexRanges(t, ixName, cols, nil, []KeyRange{r})
+}
+
+// IndexRanges 一次扫多个键区间，返回**按索引键升序**、按槽位去重的行。
+//
+// 多个区间是给 OR 用的：`WHERE a = 1 OR a = 2` 拆成两个精确区间，一次查完。
+// 结果必须有序 —— ORDER BY 免排序靠的就是这个顺序；区间按起点排好序后逐段扫，
+// 重叠部分由 seen 去掉，剩下的仍然递增（后一段的输出要么已被前一段覆盖，要么更大）。
 //
 // 和 IndexLookup 一样要合并两边：已提交索引给候选（按索引序），再用 tx.Get 过滤
 // 掉本事务删掉的、重新校验键是否还在区间内（本事务可能把键改出去了）；overlay
-// 里新插入和改键进来的行再补一遍。
-//
-// **不保证输出顺序**：overlay 补的行追加在末尾。需要按索引序输出时，
-// 调用方自己排序（结果集通常远小于全表，排一次很便宜）。
-func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange) []IndexHit {
+// 里新插入和改键进来的行按 key 归并进来。
+// orderCols 是**索引的完整列**（用于给 overlay 行定排序位置）。cols 只是「条件列」，
+// 往往只有首列；同首列内部还要按后面的索引列排，才能和树的键序对齐。
+func (tx *Tx) IndexRanges(t *catalog.Table, ixName string, cols, orderCols []int, rs []KeyRange) []IndexHit {
+	if len(rs) == 0 {
+		return nil
+	}
 	td := tx.st.Table(t.Name)
 	if td == nil {
 		return nil
@@ -658,29 +669,50 @@ func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange
 	if tree == nil {
 		return nil
 	}
-	o := tx.ov[cleanName(t.Name)]
 	var out []IndexHit
-	// 没有写集时不必记录 seen，也不必重新校验键（省一次编码/行）
+	var keys []string // 与 out 对齐：合并 overlay 时要按 key 归并
+	// 没有写集且只有一个区间时不必记录 seen，也不必重新校验键（省一次编码/行）
 	var seen map[int]bool
-	if o != nil {
+	if tx.ov[cleanName(t.Name)] != nil || len(rs) > 1 {
 		seen = make(map[int]bool, 16)
 	}
-	tree.Range(r, func(key string, slot int) bool {
-		if seen != nil {
-			seen[slot] = true
-		}
-		row, ok := tx.Get(t.Name, Ref{Slot: slot})
-		if !ok {
+	for _, r := range orderedRanges(rs) {
+		run := r
+		tree.Range(run, func(key string, slot int) bool {
+			if seen != nil {
+				if seen[slot] {
+					return true // 多个区间重叠时同一个槽位只出一次
+				}
+				seen[slot] = true
+			}
+			row, ok := tx.Get(t.Name, Ref{Slot: slot})
+			if !ok {
+				return true
+			}
+			if seen != nil && !rowInKeyRanges(row, cols, rs) {
+				return true
+			}
+			out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
+			keys = append(keys, key)
 			return true
-		}
-		if o != nil && !rowInKeyRange(row, cols, r) {
-			return true
-		}
-		out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
-		return true
-	})
+		})
+	}
+	o := tx.ov[cleanName(t.Name)]
 	if o == nil {
 		return out
+	}
+	// overlay 补的行要靠索引完整列定位：只按条件列排的话，同一首列下的
+	// 多行顺序和树的键序对不上，ORDER BY a, b 会输出错序。
+	sortCols := orderCols
+	if len(sortCols) == 0 {
+		sortCols = cols
+	}
+	// overlay 补的行：key 单独收集，最后和已排序的主结果归并
+	var extra []IndexHit
+	var extraKeys []string
+	push := func(key string, hit IndexHit) {
+		extra = append(extra, hit)
+		extraKeys = append(extraKeys, key)
 	}
 	for i, row := range o.ins {
 		if o.insDel[i] {
@@ -689,10 +721,11 @@ func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange
 		if nr, ok := o.insUpd[i]; ok {
 			row = nr
 		}
-		if !rowInKeyRange(row, cols, r) {
+		if !rowInKeyRanges(row, cols, rs) {
 			continue
 		}
-		out = append(out, IndexHit{Ref: Ref{New: true, Slot: i}, Row: row})
+		k, _ := OrderKeyOfRow(row, sortCols)
+		push(k, IndexHit{Ref: Ref{New: true, Slot: i}, Row: row})
 	}
 	var slots []int
 	for slot := range o.upd {
@@ -708,12 +741,91 @@ func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange
 			continue
 		}
 		row := o.upd[slot]
-		if !rowInKeyRange(row, cols, r) {
+		if !rowInKeyRanges(row, cols, rs) {
 			continue
 		}
-		out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
+		k, _ := OrderKeyOfRow(row, sortCols)
+		push(k, IndexHit{Ref: Ref{Slot: slot}, Row: row})
 	}
+	return mergeByKey(out, keys, extra, extraKeys)
+}
+
+// orderedRanges 按区间起点排序。
+//
+// 排序之后逐个区间扫描，重叠部分被去重，剩下的输出仍然全局递增：后一段的起点
+// 不小于前一段，落在前一段里的键已经输出过了，新输出的键必然更大。
+func orderedRanges(rs []KeyRange) []KeyRange {
+	if len(rs) < 2 {
+		return rs
+	}
+	out := make([]KeyRange, len(rs))
+	copy(out, rs)
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.HasLo != b.HasLo {
+			return !a.HasLo // 没有下界 = 从最小开始
+		}
+		if a.Lo != b.Lo {
+			return a.Lo < b.Lo
+		}
+		return !a.LoInc && b.LoInc
+	})
 	return out
+}
+
+// mergeByKey 把两段 (hit, key) 归并成一段升序。
+//
+// a 来自索引扫描，本来就按 key 升序；b 是 overlay 补的行（插入顺序、按槽位顺序），
+// 必须在这里先排一次 —— 少了这一步，本事务里改过键的行就会以「键 2 排在键 2 前面
+// 但顺序反了」的方式混进结果，ORDER BY 免排序会直接输出错序。
+func mergeByKey(a []IndexHit, ak []string, b []IndexHit, bk []string) []IndexHit {
+	if len(b) == 0 {
+		return a
+	}
+	if len(b) > 1 {
+		order := make([]int, len(b))
+		for i := range order {
+			order[i] = i
+		}
+		sort.SliceStable(order, func(i, j int) bool { return bk[order[i]] < bk[order[j]] })
+		nb := make([]IndexHit, len(b))
+		nk := make([]string, len(b))
+		for i, idx := range order {
+			nb[i], nk[i] = b[idx], bk[idx]
+		}
+		b, bk = nb, nk
+	}
+	if len(a) == 0 {
+		return b
+	}
+	out := make([]IndexHit, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if ak[i] <= bk[j] {
+			out = append(out, a[i])
+			i++
+			continue
+		}
+		out = append(out, b[j])
+		j++
+	}
+	out = append(out, a[i:]...)
+	out = append(out, b[j:]...)
+	return out
+}
+
+// rowInKeyRanges 判断一行在指定列上的键是否落在任何一个区间内。
+func rowInKeyRanges(row types.Row, cols []int, rs []KeyRange) bool {
+	k, ok := OrderKeyOfRow(row, cols)
+	if !ok {
+		return false
+	}
+	for _, r := range rs {
+		if keyInRange(k, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // rowInKeyRange 判断一行在指定列上的键是否落在区间内。
@@ -722,6 +834,10 @@ func rowInKeyRange(row types.Row, cols []int, r KeyRange) bool {
 	if !ok {
 		return false
 	}
+	return keyInRange(k, r)
+}
+
+func keyInRange(k string, r KeyRange) bool {
 	if r.HasLo {
 		if r.LoInc && k < r.Lo {
 			return false

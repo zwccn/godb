@@ -66,6 +66,12 @@ func (p *Planner) virtualTable(schema, name, qual string) (Operator, Schema, boo
 		return nil, nil, false
 	}
 	src := syscat.Source{Cat: p.Cat}
+	if p.Info != nil {
+		src.Current = p.Info.Name
+		if p.Info.All != nil {
+			src.All = p.Info.All()
+		}
+	}
 	if p.Tx != nil {
 		if st := p.Tx.Store(); st != nil {
 			src.Count = func(t string) int { return st.RowCount(t) }
@@ -163,7 +169,8 @@ func compatFuncType(name string) (types.Type, bool) {
 
 // evalCompat 计算兼容函数。第二个返回值表示是否已处理。
 // cat 只给需要反查系统目录的函数用（可 为 nil，此时那些函数返回空串）。
-func evalCompat(cat *catalog.Catalog, name string, vals []types.Value) (types.Value, bool, error) {
+// dbName 是当前库名（多库模式下由连接决定）；空串表示单库模式，回退到默认库名。
+func evalCompat(cat *catalog.Catalog, dbName, name string, vals []types.Value) (types.Value, bool, error) {
 	arg := func(i int) types.Value {
 		if i < len(vals) {
 			return vals[i]
@@ -186,7 +193,10 @@ func evalCompat(cat *catalog.Catalog, name string, vals []types.Value) (types.Va
 	case "version":
 		return types.Text(syscat.ServerVersionLine), true, nil
 	case "current_database":
-		return types.Text(syscat.DatabaseName), true, nil
+		if dbName == "" {
+			dbName = syscat.DefaultDatabaseName
+		}
+		return types.Text(dbName), true, nil
 	case "current_schema":
 		return types.Text("public"), true, nil
 	case "current_user", "session_user", "user":

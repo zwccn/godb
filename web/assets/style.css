@@ -1388,3 +1388,27 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
   overflow: hidden;
 }
 .hist-empty { color: var(--text-3); font-size: calc(12px * var(--fs)); padding: 10px 2px; }
+
+/* ---------------- 数据库选择 ---------------- */
+
+.db-pick {
+  display: flex;
+  align-items: center;
+}
+
+.db-pick select {
+  height: 26px;
+  max-width: 160px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  line-height: 1;
+  cursor: pointer;
+}
+
+.db-pick select:hover { background: var(--bg-3); }
+.db-pick select:focus { outline: none; box-shadow: 0 0 0 2px var(--accent-soft-bg); }

@@ -39,7 +39,11 @@ const (
 
 // Server 是一个 PostgreSQL 协议监听器，SQL 交给 db.DB 执行。
 type Server struct {
-	DB   *db.DB
+	// DB 是单库模式下的默认库（测试与老调用方用）。
+	// DBs 非空时按连接的 database 参数选库，DB 只作为兜底。
+	DB  *db.DB
+	DBs *db.Manager
+
 	Addr string
 	// Logf 用于打印连接级日志，可为 nil。
 	Logf func(format string, args ...interface{})
@@ -131,8 +135,10 @@ type conn struct {
 	br  *bufio.Reader
 	bw  *bufio.Writer
 
-	user string
-	sess *txn.Session
+	user   string
+	dbName string // startup 里声明的 database，空表示用默认库
+	db     *db.DB // 选中的库，startup 成功后就固定
+	sess   *txn.Session
 
 	prepared map[string]*preparedStmt
 	portals  map[string]*portal
@@ -156,7 +162,7 @@ func (s *Server) handle(nc net.Conn) {
 	if err := c.startup(); err != nil {
 		return
 	}
-	c.sess = s.DB.Session("pg-" + randHex())
+	c.sess = c.db.Session("pg-" + randHex())
 	c.register()
 	defer func() {
 		if c.sess != nil && c.sess.InTx() {
@@ -169,6 +175,32 @@ func (s *Server) handle(nc net.Conn) {
 	c.loop()
 }
 
+// selectDB 按 startup 里声明的 database 选库。多库模式下库不存在直接 FATAL。
+func (c *conn) selectDB() error {
+	if c.srv.DBs == nil {
+		// 单库模式（测试、嵌入式用法）
+		c.db = c.srv.DB
+		if c.db == nil {
+			return fmt.Errorf("no database available")
+		}
+		return nil
+	}
+	d, err := c.srv.DBs.Get(c.dbName)
+	if err != nil {
+		return err
+	}
+	c.db = d
+	return nil
+}
+
+// dbNameOr 返回 pg_stat_activity 里要显示的库名。
+func (c *conn) dbNameOr() string {
+	if c.db != nil {
+		return c.db.Name
+	}
+	return syscat.DefaultDatabaseName
+}
+
 // register 把这条连接登记到 pg_stat_activity。
 func (c *conn) register() {
 	addr, port := "", int32(0)
@@ -179,7 +211,7 @@ func (c *conn) register() {
 		}
 	}
 	c.pid, c.unregister = syscat.RegisterActivity(syscat.Activity{
-		User: c.user, DB: "godb", Addr: addr, Port: port,
+		User: c.user, DB: c.dbNameOr(), Addr: addr, Port: port,
 		State: "idle", AppName: "godb client",
 	})
 }
@@ -266,14 +298,22 @@ func (c *conn) startup() error {
 			}
 			val := string(rest[:vEnd])
 			rest = rest[vEnd+1:]
-			if key == "user" {
+			switch key {
+			case "user":
 				c.user = val
+			case "database":
+				c.dbName = val
 			}
 		}
 		break
 	}
 	if c.user == "" {
 		c.user = "godb"
+	}
+	// 选库放在认证之后：未认证就告诉对方「这个库不存在」等于泄露库名。
+	if err := c.selectDB(); err != nil {
+		c.write(encodeError("FATAL", "3D000", err.Error()))
+		return err
 	}
 
 	// 认证：需要密码时走 AuthenticationCleartextPassword，否则 trust 直接放行
@@ -457,7 +497,7 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 		return
 	}
 	c.setActivity("active", text)
-	results, err := c.srv.DB.Exec(c.sess, text)
+	results, err := c.db.Exec(c.sess, text)
 	defer c.setActivity("idle", "")
 	var out [][]byte
 	for _, r := range results {
@@ -646,7 +686,7 @@ func (c *conn) handleExecute(payload []byte) {
 		_ = c.write(encodeEmptyQuery())
 		return
 	}
-	results, err := c.srv.DB.Exec(c.sess, p.sql)
+	results, err := c.db.Exec(c.sess, p.sql)
 	var out [][]byte
 	for _, r := range results {
 		out = append(out, encodeResult(r)...)
@@ -705,7 +745,7 @@ func (c *conn) fieldsFor(sqlText string) ([]field, bool) {
 	if err != nil || len(stmts) == 0 {
 		return nil, false
 	}
-	sc, err := exec.Describe(c.srv.DB.Cat, stmts[len(stmts)-1])
+	sc, err := exec.DescribeWith(c.db.Cat, c.db.Engine.Info, stmts[len(stmts)-1])
 	if err != nil || len(sc) == 0 {
 		return nil, false
 	}
@@ -795,7 +835,7 @@ func parseCopyStatement(text string) *sql.Copy {
 // handleCopy 执行 COPY FROM STDIN / TO STDOUT。
 func (c *conn) handleCopy(cp *sql.Copy) {
 	if cp.To {
-		lines, n, err := c.srv.DB.CopyOut(c.sess, cp)
+		lines, n, err := c.db.CopyOut(c.sess, cp)
 		if err != nil {
 			_ = c.write(c.errorResponse(err)...)
 			_ = c.write(encodeReadyForQuery(c.txStatus()))
@@ -826,7 +866,7 @@ func (c *conn) handleCopy(cp *sql.Copy) {
 		case msgCopyData:
 			data = append(data, body...)
 		case msgCopyDone:
-			n, err := c.srv.DB.CopyIn(c.sess, cp, data)
+			n, err := c.db.CopyIn(c.sess, cp, data)
 			if err != nil {
 				_ = c.write(c.errorResponse(err)...)
 				_ = c.write(encodeReadyForQuery(c.txStatus()))

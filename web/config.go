@@ -44,6 +44,7 @@ type runtimeView struct {
 	ClientIP   string         `json:"clientIp"`
 	CanEdit    bool           `json:"canEdit"`
 	Checkpoint checkpointView `json:"checkpoint"`
+	Databases  int            `json:"databases"`
 	Tables     int            `json:"tables"`
 	Rows       int            `json:"rows"`
 	Loaded     int            `json:"loaded"`
@@ -211,12 +212,23 @@ func (s *Server) configView(r *http.Request) configResp {
 		resp.Runtime.Checkpoint.SecondsAgo = int64(time.Since(cp.LastAt).Seconds())
 	}
 
+	// 多库：表数/行数/占用按**所有库**合计，只显示默认库会让人以为数据丢了
 	info := s.DB.Store.Info()
-	resp.Runtime.Tables = info.Tables
-	resp.Runtime.Rows = info.Rows
 	resp.Runtime.Loaded = info.Loaded
-	resp.Runtime.DataBytes = info.Bytes
-	resp.Runtime.WALBytes = info.WALBytes
+	if s.DBs != nil {
+		st := s.DBs.Stats()
+		resp.Runtime.Databases = st.Databases
+		resp.Runtime.Tables = st.Tables
+		resp.Runtime.Rows = st.Rows
+		resp.Runtime.DataBytes = st.Bytes
+		resp.Runtime.WALBytes = st.WALBytes
+	} else {
+		resp.Runtime.Databases = 1
+		resp.Runtime.Tables = info.Tables
+		resp.Runtime.Rows = info.Rows
+		resp.Runtime.DataBytes = info.Bytes
+		resp.Runtime.WALBytes = info.WALBytes
+	}
 	resp.Runtime.Checkpoint.BytesWritten = info.Written
 	resp.Runtime.Checkpoint.BytesTotal = info.WrittenTotal
 	resp.Runtime.WALSyncs = info.WALSyncs

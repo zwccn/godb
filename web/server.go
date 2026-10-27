@@ -20,7 +20,10 @@ import (
 
 // Server 提供 HTTP API 与内嵌前端。
 type Server struct {
-	DB *db.DB
+	// DB 是默认库（配置页、落盘统计这类全局东西用它）。
+	// DBs 非空时，业务请求按 cookie godb_db 选库。
+	DB  *db.DB
+	DBs *db.Manager
 
 	// Config 与 Net 只在「带配置文件启动」时非 nil；
 	// 单元测试里直接 New(d) 即可，设置页会返回 501。
@@ -76,6 +79,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/sample", s.handleSample)
 	mux.HandleFunc("/api/locks", s.handleLocks)
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/dbs", s.handleDBs)
 	return mux
 }
 
@@ -87,7 +91,35 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// currentDB 选本次请求要操作的库：cookie godb_db 优先，取不到就用默认库。
+//
+// 用 cookie 而不是每个接口都加 ?db= 参数：前端切库只写一次 cookie，
+// 之后所有既有接口（查询/表结构/事务/导出）都不用改 URL。
+func (s *Server) currentDB(r *http.Request) *db.DB {
+	if s.DBs == nil {
+		return s.DB
+	}
+	name := ""
+	if c, err := r.Cookie("godb_db"); err == nil {
+		name = c.Value
+	}
+	if name == "" {
+		return s.DBs.Default()
+	}
+	d, err := s.DBs.Get(name)
+	if err != nil {
+		return s.DBs.Default() // 库被删掉了：默默回落到默认库，不打断操作
+	}
+	return d
+}
+
 func (s *Server) session(w http.ResponseWriter, r *http.Request) *txn.Session {
+	return s.sessionOf(w, r, s.currentDB(r))
+}
+
+// sessionOf 在指定库上取会话。会话表是每库独立的，所以同一个浏览器
+// 在两个库里各有一个事务上下文，切库不会串。
+func (s *Server) sessionOf(w http.ResponseWriter, r *http.Request, d *db.DB) *txn.Session {
 	id := ""
 	if c, err := r.Cookie("godb_sid"); err == nil {
 		id = c.Value
@@ -102,7 +134,40 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) *txn.Session {
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
-	return s.DB.Session(id)
+	return d.Session(id)
+}
+
+// handleDBs 列出所有库 + 当前库；POST 切换当前库。
+func (s *Server) handleDBs(w http.ResponseWriter, r *http.Request) {
+	if s.DBs == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"dbs": []string{s.DB.Name}, "current": s.DB.Name,
+		})
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req struct {
+			DB string `json:"db"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法解析请求体"})
+			return
+		}
+		d, err := s.DBs.Get(req.DB)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name: "godb_db", Value: d.Name, Path: "/", SameSite: http.SameSiteLaxMode,
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "current": d.Name})
+		return
+	}
+	cur := s.currentDB(r)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"dbs": s.DBs.Names(), "current": cur.Name,
+	})
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
@@ -117,19 +182,20 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法解析请求体"})
 		return
 	}
-	sess := s.session(w, r)
+	d := s.currentDB(r)
+	sess := s.sessionOf(w, r, d)
 	if strings.TrimSpace(req.SQL) == "" {
-		writeJSON(w, http.StatusOK, queryResp{Results: []*exec.Result{}, Tx: s.DB.TxState(sess)})
+		writeJSON(w, http.StatusOK, queryResp{Results: []*exec.Result{}, Tx: d.TxState(sess)})
 		return
 	}
 
 	start := hrtime.Now()
-	results, err := s.DB.Exec(sess, req.SQL)
+	results, err := d.Exec(sess, req.SQL)
 	resp := queryResp{
 		Results:     results,
 		ElapsedNs:   hrtime.Since(start),
-		ClockGranNs: s.DB.ClockGranNs,
-		Tx:          s.DB.TxState(sess),
+		ClockGranNs: d.ClockGranNs,
+		Tx:          d.TxState(sess),
 		Statements:  len(results),
 	}
 	if resp.Results == nil {
@@ -162,13 +228,14 @@ func classifyError(err error, stmt int) *apiError {
 }
 
 func (s *Server) handleLocks(w http.ResponseWriter, r *http.Request) {
-	snap := s.DB.LockSnapshot()
+	snap := s.currentDB(r).LockSnapshot()
 	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleSchema(w http.ResponseWriter, r *http.Request) {
-	sess := s.session(w, r)
-	writeJSON(w, http.StatusOK, schemaResp{Tables: s.DB.Tables(), Tx: s.DB.TxState(sess), ClockGranNs: s.DB.ClockGranNs})
+	d := s.currentDB(r)
+	sess := s.sessionOf(w, r, d)
+	writeJSON(w, http.StatusOK, schemaResp{Tables: d.Tables(), Tx: d.TxState(sess), ClockGranNs: d.ClockGranNs})
 }
 
 func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
@@ -195,10 +262,11 @@ func (s *Server) handleTx(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未知事务动作"})
 		return
 	}
-	sess := s.session(w, r)
+	d := s.currentDB(r)
+	sess := s.sessionOf(w, r, d)
 	start := hrtime.Now()
-	results, err := s.DB.Exec(sess, stmt)
-	resp := queryResp{Results: results, ElapsedNs: hrtime.Since(start), Tx: s.DB.TxState(sess), ClockGranNs: s.DB.ClockGranNs}
+	results, err := d.Exec(sess, stmt)
+	resp := queryResp{Results: results, ElapsedNs: hrtime.Since(start), Tx: d.TxState(sess), ClockGranNs: d.ClockGranNs}
 	if resp.Results == nil {
 		resp.Results = []*exec.Result{}
 	}
@@ -213,15 +281,16 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sess := s.session(w, r)
+	d := s.currentDB(r)
+	sess := s.sessionOf(w, r, d)
 	if sess.InTx() {
 		sess.ForceRollback()
 	}
-	if err := s.DB.DropAll(); err != nil {
+	if err := d.DropAll(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": s.DB.Tables()})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": d.Tables()})
 }
 
 func (s *Server) handleSample(w http.ResponseWriter, r *http.Request) {
@@ -229,15 +298,16 @@ func (s *Server) handleSample(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sess := s.session(w, r)
+	d := s.currentDB(r)
+	sess := s.sessionOf(w, r, d)
 	if sess.InTx() {
 		sess.ForceRollback()
 	}
-	if err := s.DB.LoadSample(sess); err != nil {
+	if err := d.LoadSample(sess); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": s.DB.Tables()})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": d.Tables()})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {

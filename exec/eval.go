@@ -840,6 +840,8 @@ type funcEval struct {
 	// cat 供需要查系统目录的兼容函数使用（目前只有 pg_get_indexdef
 	// 和 pg_get_constraintdef 这类「按 OID 拼定义」的函数）。
 	cat *catalog.Catalog
+	// dbName 供 current_database() 用。空串表示单库模式，回退到默认库名。
+	dbName string
 }
 
 func (e *funcEval) Type() types.Type { return e.t }
@@ -854,7 +856,7 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 		vals[i] = v
 	}
 	if isCompatFunc(e.name) {
-		v, _, err := evalCompat(e.cat, e.name, vals)
+		v, _, err := evalCompat(e.cat, e.dbName, e.name, vals)
 		return v, err
 	}
 	switch e.name {
@@ -1099,9 +1101,13 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 		args = append(args, ev)
 	}
 	fe := &funcEval{name: name, args: args}
-	// pg_get_indexdef / pg_get_constraintdef 要按 OID 反查目录，得带上 catalog。
+	// pg_get_indexdef / pg_get_constraintdef 要按 OID 反查目录，得带上 catalog；
+	// current_database() 要知道当前连的是哪个库。
 	if c.planner != nil {
 		fe.cat = c.planner.Cat
+		if c.planner.Info != nil {
+			fe.dbName = c.planner.Info.Name
+		}
 	}
 	switch name {
 	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring",

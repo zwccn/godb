@@ -32,7 +32,8 @@ type State struct {
 // Manager 持有两个 listener 的生命周期。
 type Manager struct {
 	cfg      *config.Store
-	db       *db.DB
+	db       *db.DB      // 默认库（兜底）
+	dbs      *db.Manager // 多库：PG 连接按 database 参数选库
 	handler  http.Handler
 	logf     func(format string, args ...interface{})
 	queryLog io.Writer
@@ -49,12 +50,12 @@ type Manager struct {
 }
 
 // New 创建监听管理器。handler 是 Web 控制台的路由，queryLog 可为 nil。
-func New(cfg *config.Store, d *db.DB, handler http.Handler,
+func New(cfg *config.Store, dbs *db.Manager, handler http.Handler,
 	logf func(string, ...interface{}), queryLog io.Writer) *Manager {
 	if logf == nil {
 		logf = func(string, ...interface{}) {}
 	}
-	return &Manager{cfg: cfg, db: d, handler: handler, logf: logf, queryLog: queryLog}
+	return &Manager{cfg: cfg, db: dbs.Default(), dbs: dbs, handler: handler, logf: logf, queryLog: queryLog}
 }
 
 // Start 按当前配置启动两个监听。HTTP 失败会返回错误（控制台是必需品），
@@ -234,6 +235,7 @@ func (m *Manager) rebindPG(addr string) error {
 	}
 	srv := &pgwire.Server{
 		DB:       m.db,
+		DBs:      m.dbs,
 		Addr:     addr,
 		Logf:     m.logf,
 		QueryLog: m.queryLog,

@@ -52,7 +52,8 @@ func main() {
 	}
 
 	start := time.Now()
-	d, err := db.Open(*dir, db.Options{
+	// 多库：默认库在 <data> 根，其它库在 <data>/db/<名字>/
+	dbs, warns, err := db.OpenManager(*dir, db.Options{
 		Isolation: isolation,
 		Lock: lock.Options{
 			Timeout:        *lockTimeout,
@@ -65,7 +66,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "打开数据库失败: %v\n", err)
 		os.Exit(1)
 	}
-	defer d.Close()
+	defer dbs.Close()
+	for _, w := range warns {
+		log.Printf("注意: %v", w)
+	}
+	d := dbs.Default()
 
 	// 配置：唯一来源是 <数据目录>/config.json。命令行里的地址只作为
 	// 首次生成文件时的种子，之后以文件为准（下面会明确提示）。
@@ -109,7 +114,8 @@ func main() {
 	}
 
 	srv := web.New(d)
-	mgr := netsrv.New(cfg, d, srv.Routes(), log.Printf, pgLogFile)
+	srv.DBs = dbs
+	mgr := netsrv.New(cfg, dbs, srv.Routes(), log.Printf, pgLogFile)
 	srv.WithConfig(cfg, mgr)
 	if err := mgr.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -147,6 +153,13 @@ func main() {
 	log.Printf("数据目录: %s（%d 张表 / %d 行，已加载 %d 张，数据 %.1f MB，WAL %d 字节）",
 		*dir, info.Tables, info.Rows, info.Loaded,
 		float64(info.Bytes)/(1<<20), info.WALBytes)
+	if names := dbs.Names(); len(names) > 1 {
+		log.Printf("数据库: %d 个（%s）；默认库 %s，其它库在 %s/db/ 下",
+			len(names), strings.Join(names, ", "), dbs.Default().Name, *dir)
+	} else {
+		log.Printf("数据库: 只有默认库 %s（CREATE DATABASE 可新建，放在 %s/db/ 下）",
+			dbs.Default().Name, *dir)
+	}
 	if n := info.Repaired; n > 0 {
 		log.Printf("注意：启动时修复了 %d 个单元格（表结构与磁盘数据不一致）", n)
 	}
@@ -160,7 +173,7 @@ func main() {
 	<-sig
 	log.Printf("收到退出信号，正在保存数据...")
 	mgr.Close()
-	if err := d.Close(); err != nil {
+	if err := dbs.Close(); err != nil {
 		log.Printf("退出时保存失败: %v", err)
 	}
 	log.Printf("已退出")

@@ -200,13 +200,19 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 	m := buildMeta(src)
 	switch def.Name {
 	case "pg_database":
-		return []types.Row{mk(def, map[string]types.Value{
-			"oid": iv(DbOID), "datname": sv(DatabaseName), "datdba": iv(OwnerOID),
-			"encoding": iv(6), "datcollate": sv("C"), "datctype": sv("C"),
-			"datistemplate": bv(false), "datallowconn": bv(true), "datconnlimit": iv(-1),
-			"datlastsysoid": iv(LastSystemOID), "datfrozenxid": iv(0), "datminmxid": iv(1),
-			"dattablespace": iv(TablespaceDef),
-		})}
+		names := src.Databases()
+		oids := dbOIDs(names)
+		out := make([]types.Row, 0, len(names))
+		for _, n := range names {
+			out = append(out, mk(def, map[string]types.Value{
+				"oid": iv(oids[n]), "datname": sv(n), "datdba": iv(OwnerOID),
+				"encoding": iv(6), "datcollate": sv("C"), "datctype": sv("C"),
+				"datistemplate": bv(false), "datallowconn": bv(true), "datconnlimit": iv(-1),
+				"datlastsysoid": iv(LastSystemOID), "datfrozenxid": iv(0), "datminmxid": iv(1),
+				"dattablespace": iv(TablespaceDef),
+			}))
+		}
+		return out
 
 	case "pg_namespace":
 		return []types.Row{

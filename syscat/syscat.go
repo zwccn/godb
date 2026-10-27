@@ -36,8 +36,12 @@ const (
 // OwnerName 是本库唯一的角色名，与 pgwire 返回的 current_user 保持一致。
 const OwnerName = "godb"
 
-// DatabaseName 是唯一的数据库名。
-const DatabaseName = "godb"
+// DefaultDatabaseName 是默认库（也就是「数据目录根部」那一套）的名字。
+// 其它库放在 <数据目录>/db/<名字>/ 下，名字由 CREATE DATABASE 决定。
+const DefaultDatabaseName = "godb"
+
+// DatabaseName 保留旧名字，等价于 DefaultDatabaseName（很多地方还在引用）。
+const DatabaseName = DefaultDatabaseName
 
 // ServerVersion / ServerVersionNum 是汇报给客户端的版本号，三处必须一致：
 // 这里、pgwire 的握手参数、exec 里 current_setting('server_version')。
@@ -743,6 +747,41 @@ func IsSystem(schema, name string) bool {
 type Source struct {
 	Cat   *catalog.Catalog
 	Count func(table string) int
+
+	// Current 是当前连接的库名，All 是可连接的库名（已排序、含 Current）。
+	// 两者都为空时按单库模式处理：只报 DefaultDatabaseName。
+	Current string
+	All     []string
+}
+
+// Databases 返回要列进 pg_database 的库名，第一项是当前库。
+func (s Source) Databases() []string {
+	if len(s.All) == 0 {
+		if s.Current != "" {
+			return []string{s.Current}
+		}
+		return []string{DefaultDatabaseName}
+	}
+	return s.All
+}
+
+// dbOIDs 给每个库分配一个稳定的对象号：默认库固定 DbOID，其余按名字顺序往后排。
+//
+// 客户端会拿 pg_database.oid 去关联别的东西（比如 pg_database_size），所以同一个库
+// 在不同连接、不同时间看到的 oid 必须一致 —— 按「排序后的位置」分配就够了，
+// 因为库名集合只在 CREATE/DROP DATABASE 时变。
+func dbOIDs(names []string) map[string]int {
+	out := make(map[string]int, len(names))
+	next := DbOID
+	for _, n := range names {
+		if n == DefaultDatabaseName {
+			out[n] = DbOID
+			continue
+		}
+		next++
+		out[n] = next
+	}
+	return out
 }
 
 func (s Source) tables() []*catalog.Table {

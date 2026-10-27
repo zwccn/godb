@@ -253,6 +253,18 @@ func (p *parser) parseStatement() (Statement, error) {
 // ---------- DDL ----------
 
 func (p *parser) parseCreate() (Statement, error) {
+	// CREATE DATABASE name
+	if p.acceptKw("database") {
+		if p.atKw("if") {
+			// CREATE DATABASE IF NOT EXISTS 不是 PostgreSQL 语法，直接拒绝
+			return nil, p.errAt(p.peek(), "CREATE DATABASE does not support IF NOT EXISTS")
+		}
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		return &CreateDatabase{Name: name}, nil
+	}
 	// CREATE [UNIQUE] INDEX name ON table (cols)
 	if p.atKw("index") || p.atKw("unique") {
 		uniq := p.acceptKw("unique")
@@ -684,6 +696,22 @@ func (p *parser) skipCollation() error {
 }
 
 func (p *parser) parseDrop() (Statement, error) {
+	if p.acceptKw("database") {
+		st := &DropDatabase{}
+		if p.atKw("if") {
+			p.pos++
+			if err := p.expectKw("exists"); err != nil {
+				return nil, err
+			}
+			st.IfExists = true
+		}
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		st.Name = name
+		return st, nil
+	}
 	if p.acceptKw("index") {
 		st := &DropIndex{}
 		if p.atKw("if") {

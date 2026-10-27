@@ -1736,3 +1736,47 @@ document.addEventListener('keydown', ev => {
   const m = document.getElementById('historyModal');
   if (m && !m.classList.contains('hidden')) closeHistory();
 });
+
+/* ---------------- 数据库切换 ---------------- */
+
+// 库列表与当前库都存服务端（cookie godb_db），前端只负责展示与切换。
+// 所有既有接口都不用改 URL —— cookie 自动带上。
+async function loadDBs() {
+  const sel = document.getElementById('dbSelect');
+  if (!sel) return;
+  let data;
+  try {
+    data = await api('/api/dbs');
+  } catch (e) {
+    sel.innerHTML = '';
+    return;
+  }
+  const dbs = data.dbs || [];
+  sel.innerHTML = '';
+  for (const name of dbs) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    if (name === data.current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.title = '当前数据库：' + (data.current || '');
+}
+
+document.getElementById('dbSelect').addEventListener('change', async ev => {
+  const name = ev.target.value;
+  try {
+    const r = await api('/api/dbs', { db: name });
+    if (r.error) throw new Error(r.error);
+  } catch (e) {
+    alert('切换数据库失败：' + e.message);
+    await loadDBs();
+    return;
+  }
+  // 换了库：表结构、结果区、事务状态都要重新拉
+  const out = document.getElementById('result');
+  if (out) out.innerHTML = '';
+  await loadSchema();
+});
+
+loadDBs();

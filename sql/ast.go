@@ -413,3 +413,18 @@ func (*Between) exprNode()    {}
 func (*Like) exprNode()       {}
 func (*Subscript) exprNode()  {}
 func (*DefaultVal) exprNode() {}
+
+// CreateDatabase 是 CREATE DATABASE name。库之间的数据完全隔离，
+// 不支持跨库查询（PostgreSQL 也要 dblink/FDW 才能做到）。
+type CreateDatabase struct {
+	Name string
+}
+
+// DropDatabase 是 DROP DATABASE [IF EXISTS] name。
+type DropDatabase struct {
+	Name     string
+	IfExists bool
+}
+
+func (*CreateDatabase) stmtNode() {}
+func (*DropDatabase) stmtNode()   {}

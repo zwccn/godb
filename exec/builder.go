@@ -15,6 +15,10 @@ type Planner struct {
 	Tx  *storage.Tx
 	Cat *catalog.Catalog
 
+	// Info 是当前库的名字与库列表；nil 表示单库模式（pg_database 只报默认库）。
+	// 只影响系统目录与 current_database()，不影响查询计划。
+	Info *DBInfo
+
 	// outerScopes 是编译子查询时压入的外层作用域（见 buildSubquery）。
 	outerScopes []outerScope
 
@@ -1041,7 +1045,10 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 	}
 
 	agg := &aggOp{child: op, groupEvals: groupEvals, groupTypes: groupTypes, aggs: col.aggs, sc: outSc}
-	ctx := &compileCtx{postAgg: true, keys: keys, aggs: aggIdx, groupN: len(groupEvals), scOut: outSc, sc: outSc}
+	// planner 必须带上：聚合后的 select 列表里也可能有 current_database()
+	// 这类要查「当前是哪个库」的兼容函数。
+	ctx := &compileCtx{postAgg: true, keys: keys, aggs: aggIdx, groupN: len(groupEvals),
+		scOut: outSc, sc: outSc, planner: p}
 
 	if s.Having != nil {
 		pred, err := compile(s.Having, ctx)

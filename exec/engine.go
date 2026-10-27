@@ -36,6 +36,26 @@ type Engine struct {
 	Dir   string
 	Cat   *catalog.Catalog
 	Store *storage.Store
+
+	// Info 描述「当前是哪个库、还有哪些库」。单库模式（测试里常见）留 nil，
+	// 此时 pg_database / current_database() 只报一个默认库。
+	Info *DBInfo
+}
+
+// DBInfo 是一个库的自我描述。
+//
+// All 用函数而不是切片：CREATE DATABASE / DROP DATABASE 之后不用回头去改
+// 引擎里存的副本，查目录时现取即可。
+type DBInfo struct {
+	Name string
+	All  func() []string
+}
+
+// planner 统一构造 Planner，把库信息带上。
+// 之前有三处各自 `&Planner{Tx: tx, Cat: e.Cat}`，加字段容易漏。
+func (e *Engine) planner(tx *storage.Tx) *Planner {
+	p := &Planner{Tx: tx, Cat: e.Cat, Info: e.Info}
+	return p
 }
 
 // ExecStmt 执行一条非事务控制语句。
@@ -77,7 +97,7 @@ func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 // ---------- SELECT ----------
 
 func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, explainTag []string) (*Result, error) {
-	plan, err := (&Planner{Tx: tx, Cat: e.Cat}).BuildSelect(s)
+	plan, err := e.planner(tx).BuildSelect(s)
 	if err != nil {
 		return nil, err
 	}
@@ -633,7 +653,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 // selectRows 跑一条查询，返回原始值行（不受客户端格式影响）。
 // INSERT ... SELECT 用它取数据源。
 func (e *Engine) selectRows(tx *storage.Tx, s *sql.Select) ([][]types.Value, Schema, error) {
-	plan, err := (&Planner{Tx: tx, Cat: e.Cat}).BuildSelect(s)
+	plan, err := e.planner(tx).BuildSelect(s)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -665,7 +685,7 @@ func (e *Engine) compileReturning(sc Schema, items []*sql.SelectItem, tx *storag
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx := &compileCtx{sc: sc, planner: &Planner{Tx: tx, Cat: e.Cat}}
+	ctx := &compileCtx{sc: sc, planner: e.planner(tx)}
 	evals := make([]Eval, 0, len(items))
 	cols := make([]Column, 0, len(items))
 	for _, it := range items {

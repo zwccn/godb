@@ -4,7 +4,9 @@ package db
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"godb/catalog"
@@ -13,6 +15,7 @@ import (
 	"godb/lock"
 	"godb/sql"
 	"godb/storage"
+	"godb/syscat"
 	"godb/txn"
 )
 
@@ -20,6 +23,8 @@ import (
 type Options struct {
 	Isolation txn.Isolation
 	Lock      lock.Options
+	// Name 是库名。空表示默认库（godb）。多库模式下由 Manager 逐个设。
+	Name string
 }
 
 // execCheckpoint 处理 CHECKPOINT / FLUSH 语句：把 WAL 刷盘并写一份全量快照。
@@ -64,6 +69,7 @@ var ErrAborted = errors.New("current transaction is aborted, commands ignored un
 // DB 是一个数据库实例。
 type DB struct {
 	dir    string
+	Name   string // 库名，默认库是 "godb"
 	Cat    *catalog.Catalog
 	Store  *storage.Store
 	Engine *exec.Engine
@@ -84,6 +90,19 @@ type DB struct {
 
 	mu       sync.Mutex
 	sessions map[string]*txn.Session
+
+	// stop 让会话巡检 goroutine 在 Close 时退出。多库模式下每库一个巡检，
+	// 库被 DROP 掉还不退出的话 goroutine 会一直堆积。
+	stop      chan struct{}
+	closeOnce sync.Once
+
+	// closed 在 Close 之后为 true。库被 DROP 掉时，还挂在旧对象上的连接
+	// 后续请求会拿到明确的错误，而不是撞上一个已经关掉的 Store。
+	closed atomic.Bool
+
+	// mgr 指向管理这个库的 Manager（单库模式下为 nil）。
+	// 只有 CREATE/DROP DATABASE 需要它 —— 那是跨库操作，得由 Manager 做。
+	mgr *Manager
 }
 
 // ColumnInfo 是前端展示用的列信息。
@@ -117,8 +136,13 @@ func Open(dir string, o Options) (*DB, error) {
 	if o.Lock.Timeout <= 0 {
 		o.Lock = lock.DefaultOptions()
 	}
+	name := strings.ToLower(strings.TrimSpace(o.Name))
+	if name == "" {
+		name = syscat.DefaultDatabaseName
+	}
 	d := &DB{
 		dir:      dir,
+		Name:     name,
 		Cat:      cat,
 		Store:    st,
 		Mgr:      txn.NewManager(),
@@ -126,22 +150,35 @@ func Open(dir string, o Options) (*DB, error) {
 		Iso:      o.Isolation,
 		lockOpts: o.Lock,
 		sessions: map[string]*txn.Session{},
+		stop:     make(chan struct{}),
 	}
-	d.Engine = &exec.Engine{Dir: dir, Cat: cat, Store: st}
+	// Info.Name 是库名；All 由 Manager 在打开后注入（它才知道一共有哪些库）。
+	d.Engine = &exec.Engine{Dir: dir, Cat: cat, Store: st,
+		Info: &exec.DBInfo{Name: name}}
 	d.ClockGranNs = int64(hrtime.Granularity())
 	go d.sweepSessions()
 	return d, nil
 }
 
 // Close 落盘并关闭。
+// Close 落盘并关闭。可以重复调用（Manager 退出和 DROP DATABASE 都会碰它）。
 func (d *DB) Close() error {
-	d.Store.SchemaMu.Lock()
-	defer d.Store.SchemaMu.Unlock()
-	// 先等 WAL 落盘，再写快照：任何已确认的提交都不会丢
-	if err := d.Store.Flush(); err != nil {
-		return err
-	}
-	return d.Store.Close()
+	var err error
+	d.closeOnce.Do(func() {
+		d.closed.Store(true)
+		if d.stop != nil {
+			close(d.stop)
+		}
+		d.Store.SchemaMu.Lock()
+		defer d.Store.SchemaMu.Unlock()
+		// 先等 WAL 落盘，再写快照：任何已确认的提交都不会丢
+		if e := d.Store.Flush(); e != nil {
+			err = e
+			return
+		}
+		err = d.Store.Close()
+	})
+	return err
 }
 
 // Dir 返回数据目录。
@@ -162,6 +199,9 @@ func (d *DB) Session(id string) *txn.Session {
 // Exec 执行一段 SQL（可含多条语句），返回每条语句的结果。
 // 出错时返回已成功语句的结果 + 错误。
 func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
+	if d.closed.Load() {
+		return nil, fmt.Errorf("database %q has been dropped", d.Name)
+	}
 	start := hrtime.Now()
 	stmts, err := sql.Parse(text)
 	if err != nil {
@@ -184,7 +224,16 @@ func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
 
 	var out []*exec.Result
 	for _, st := range stmts {
-		res, err := d.execOne(sess, st, pre)
+		var res *exec.Result
+		var err error
+		switch s := st.(type) {
+		case *sql.CreateDatabase:
+			res, err = d.createDatabase(sess, s)
+		case *sql.DropDatabase:
+			res, err = d.dropDatabase(sess, s)
+		default:
+			res, err = d.execOne(sess, st, pre)
+		}
 		if err != nil {
 			return out, err
 		}
@@ -404,7 +453,12 @@ func (d *DB) DropAll() error {
 func (d *DB) sweepSessions() {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
-	for range t.C {
+	for {
+		select {
+		case <-d.stop:
+			return
+		case <-t.C:
+		}
 		d.mu.Lock()
 		list := make([]*txn.Session, 0, len(d.sessions))
 		for _, s := range d.sessions {

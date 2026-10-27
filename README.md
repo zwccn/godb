@@ -60,6 +60,7 @@ go build -o godb.exe .
 | 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
+| 多库 | `CREATE DATABASE` / `DROP DATABASE`；每个库一套独立的 catalog / WAL / 锁，互不影响；`pg_database` 与 `\l` 能看到全部库 |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：递归 CTE（`WITH RECURSIVE`）、窗口函数、
@@ -74,6 +75,58 @@ go build -o godb.exe .
 **支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。
 这不是为了 SQL 完整性，而是客户端刚需：Navicat 刷新对象树时会发
 `(SELECT count(*) FROM pg_inherits WHERE inhparent = c.oid) > 0`，不支持就整个表列表刷不出来。
+
+## 多库
+
+一个 `-data` 目录下可以放多个互相隔离的数据库。**每个库是完全独立的一套**：
+自己的 `catalog.json`、表快照、WAL、锁管理器和事务管理器。所以库 A 的写事务
+不会挡住库 B，`DROP DATABASE` 也只动那一个目录。
+
+### 目录
+
+```
+godb-data/
+  config.json                    全局配置（端口/密码/落盘节奏，不分库）
+  catalog.json  tables/  wal.log  meta.json    ← 默认库 godb（就是原来的布局）
+  db/
+    shop/     catalog.json  tables/  wal.log  meta.json
+    archive/  …
+```
+
+**默认库故意留在根目录**：这样从单库版本升级上来的部署一个字节都不用动，
+不存在迁移失败把数据搞坏的风险。新库统一放 `db/<名字>/` 下。
+
+### 用法
+
+```sql
+CREATE DATABASE shop;          -- 建一个空库
+DROP DATABASE shop;            -- 删库（连带删除数据目录）
+DROP DATABASE IF EXISTS shop;
+SELECT datname FROM pg_database ORDER BY datname;   -- 列出所有库（psql 的 \l 同款）
+```
+
+```bash
+psql "host=127.0.0.1 port=6432 user=u dbname=shop"   # 直接连到 shop
+```
+
+Web 控制台顶栏左上角有库下拉，切换后表树、查询、事务都跟着切（库名存在 cookie
+`godb_db` 里，所以所有既有接口都不用改）。
+
+### 规则与边界
+
+| 规则 | 原因 |
+|---|---|
+| 默认库不能删 | 它就在数据目录根上，删了服务下次起不来 |
+| 当前连着的库不能删（`DROP DATABASE` 会报错） | 删掉后这条连接就没地方可去了 |
+| 有**进行中的事务**的库不能删 | 半截事务没法回滚到别处；空闲连接不挡（Web 会话关浏览器也不会消失，挡了就没法用） |
+| 库名只收小写字母/数字/下划线，≤63 字符，`template0/1` 保留 | 名字要直接当目录名用，这条也顺手挡住 `../` 这类路径穿越 |
+| `CREATE/DROP DATABASE` 不能在事务块里执行 | 和 PostgreSQL 一致 |
+
+库被删掉之后，还挂在旧对象上的连接不会写坏数据：下一次请求直接拿到
+`database "x" has been dropped`。
+
+**不支持**：跨库查询（`shop.orders` 这种写法，PostgreSQL 也要 dblink/FDW）、
+`ALTER DATABASE`、`RENAME DATABASE`、库级权限隔离（所有库共用一套认证）。
 
 ## 表管理（右键菜单 + 表设计器）
 
@@ -290,6 +343,10 @@ psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
 | psql / pgcli | `-h 127.0.0.1 -p 6432 -U 任意用户名 -d godb` |
 | Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名随意，**密码留空** |
 
+`-d` 换成别的库名就连到那个库（见下面的「多库」）。不写库名或写 `postgres`
+都落到默认库 `godb` —— 客户端工具的输入框里默认就是 `postgres`，报「库不存在」
+只会让人困惑。
+
 协议实现范围：
 
 | 能力 | 状态 |
@@ -378,7 +435,7 @@ SELECT 1    1 行 · <0.20 ms
 
 ```
 main.go        启动装配、参数解析
-  db/          会话管理、语句分发、事务控制、整批预扫描、示例数据
+  db/          多库管理、会话管理、语句分发、事务控制、整批预扫描、示例数据
   sql/         lexer → parser → AST（递归下降 + Pratt 表达式优先级）
   lock/        表级 S/X 锁管理器：批量原子申请、等待重试、超时、等待图
   catalog/     表/列元数据，catalog.json 持久化
@@ -573,12 +630,15 @@ main.go        启动装配、参数解析
 
 ### 数据文件
 
+每个库（默认库在数据目录根、其它库在 `db/<名字>/`）下都有这一套：
+
 | 文件 | 内容 |
 |---|---|
 | `catalog.json` | 表结构、列类型、约束、默认值（tmp + fsync + rename 原子写） |
 | `meta.json` | 全局元信息：下一批 WAL 记录使用的代次号 |
 | `tables/tXXXXXX.snp` | **每张表一个数据文件**（文件名用 catalog 分配的稳定表 ID） |
 | `wal.log` | 追加写的提交日志，二进制帧（`长度 + CRC32 + 负载`） |
+| `config.json` | **只在数据根目录**，全局配置（端口、密码、落盘节奏），不分库 |
 
 checkpoint 触发点：启动完成、每 128 次提交（还要看攒的改动够不够，见下）、需要重写快照的 DDL、`CHECKPOINT` 语句、进程退出。
 
@@ -723,8 +783,8 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - 耗时精度受操作系统时钟限制：小于本机时钟步进（沙箱里约 0.2ms）的操作只能显示上界 `<0.20 ms`。
 - JOIN 会物化两侧数据；连接结果超过 200 万行会直接报错而不是把内存吃光。
 - 没有查询优化器（不做谓词下推、连接顺序重排），执行计划就是 SQL 的直译。
-- DDL 不能在事务块内执行。大件功能里只剩「多库」没做：一个 `-data` 目录就是一套 catalog，
-  没有 `CREATE DATABASE`。
+- DDL 不能在事务块内执行。多库已经支持（见上），但**库之间完全不能互相访问**：
+  没有跨库查询、没有 `ALTER DATABASE`、没有库级权限。
 - 索引是**有序**的（B+Tree），但只用得上「完整键等值 + 首列区间 + `IN` 列表 +
   `OR` 合并 + 前缀排序」：`OR` 要求所有分支落在同一个索引上、`NOT IN` 用不上索引、
   `(a,b)` 索引上 `b > 5` 用不上、没有索引跳跃扫描和覆盖索引。

@@ -31,6 +31,10 @@ type checkpointView struct {
 	LastAt       string `json:"lastAt"`
 	SecondsAgo   int64  `json:"secondsAgo"`
 	WALBytes     int64  `json:"walBytes"`
+	// BytesWritten 是上一次落盘实际写入的字节数，BytesTotal 是本进程累计写入。
+	// 两者对比 dataBytes（文件总大小）能看出「改一行重写整表」到底放大了多少。
+	BytesWritten int64 `json:"bytesWritten"`
+	BytesTotal   int64 `json:"bytesTotal"`
 }
 
 type runtimeView struct {
@@ -213,6 +217,8 @@ func (s *Server) configView(r *http.Request) configResp {
 	resp.Runtime.Loaded = info.Loaded
 	resp.Runtime.DataBytes = info.Bytes
 	resp.Runtime.WALBytes = info.WALBytes
+	resp.Runtime.Checkpoint.BytesWritten = info.Written
+	resp.Runtime.Checkpoint.BytesTotal = info.WrittenTotal
 	resp.Runtime.WALSyncs = info.WALSyncs
 	return resp
 }

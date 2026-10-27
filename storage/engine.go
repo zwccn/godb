@@ -66,6 +66,18 @@ type Store struct {
 	cpStop     chan struct{}
 	cpOnce     sync.Once
 	cpWG       sync.WaitGroup
+
+	// cpMu 只串行化「写快照文件」这一段（在 CommitMu 之外拿）。
+	// cpBusy 保证同一时刻只有一个 checkpoint 在拍快照 + 写盘：
+	// 后来的直接跳过，等下一轮 —— 否则两个 checkpoint 可能乱序覆盖文件。
+	cpMu   sync.Mutex
+	cpBusy atomic.Bool
+	// dirtyRows 是「自上次落盘以来这张表改了多少行」。
+	// 只改一两行就重写整张表的代价太大（实测 2 万行的表改一行要写 0.97 MB），
+	// 所以攒够比例再落盘，中间靠 WAL 兜底。
+	dirtyRows map[string]int64
+	// written 是累计写盘字节数（给 CHECKPOINT / 状态页看）
+	written atomic.Int64
 }
 
 // Open 打开数据目录：加载快照 → 重放 WAL → 立刻 checkpoints 并截断 WAL。
@@ -81,6 +93,7 @@ func Open(dir string, cat *catalog.Catalog) (*Store, error) {
 		tableRows: map[string]int{},
 		hasSnap:   map[string]bool{},
 		dirty:     map[string]bool{},
+		dirtyRows: map[string]int64{},
 		loaded:    map[string]bool{},
 	}
 	for _, t := range cat.Tables {
@@ -848,6 +861,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 	type change struct {
 		table  string
 		rows   []types.Row
+		dirty  int64
 		seq    int64
 		seqSet bool
 	}
@@ -862,14 +876,17 @@ func (tx *Tx) commitLocked() (int64, error) {
 			return 0, fmt.Errorf("relation %q does not exist", name)
 		}
 		newRows := make([]types.Row, 0, len(td.Rows)+len(o.ins))
+		dirty := 0
 		for i, row := range td.Rows {
 			if o.del[i] {
 				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Old: row})
+				dirty++
 				continue
 			}
 			if nr, ok := o.upd[i]; ok {
 				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Old: row, New: nr})
 				newRows = append(newRows, nr)
+				dirty++
 				continue
 			}
 			newRows = append(newRows, row)
@@ -883,8 +900,9 @@ func (tx *Tx) commitLocked() (int64, error) {
 			}
 			recs = append(recs, walRec{Tx: tx.ID, Op: opIns, Table: td.Name, New: row})
 			newRows = append(newRows, row)
+			dirty++
 		}
-		c := &change{table: name, rows: newRows}
+		c := &change{table: name, rows: newRows, dirty: int64(dirty)}
 		if v, ok := tx.seq[name]; ok {
 			c.seq, c.seqSet = v, true
 		}
@@ -921,6 +939,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 		key := cleanName(c.table)
 		tx.st.loadMu.Lock()
 		tx.st.dirty[key] = true
+		tx.st.dirtyRows[key] += c.dirty
 		tx.st.tableRows[key] = len(c.rows)
 		tx.st.loadMu.Unlock()
 	}
@@ -932,12 +951,15 @@ func (tx *Tx) commitLocked() (int64, error) {
 	tx.st.commits++
 	tx.st.cpSince.Add(1)
 	if tx.st.needCheckpointLocked() {
-		if err := tx.st.checkpointLocked(); err != nil {
+		done, err := tx.st.tryCheckpointLocked()
+		if err != nil {
 			return 0, err
 		}
-		tx.st.noteCheckpointLocked()
-		// checkpoint 已经把数据写进快照，这批记录不需要再等 fsync
-		return 0, nil
+		if done {
+			// checkpoint 已经把数据写进快照，这批记录不需要再等 fsync
+			return 0, nil
+		}
+		// 撞上别人正在写盘：这一批还在 WAL 里没落盘，得照常等 fsync
 	}
 	return seq, nil
 }

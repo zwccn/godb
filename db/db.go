@@ -48,6 +48,9 @@ func (d *DB) execCheckpoint(sess *txn.Session) (*exec.Result, error) {
 		{"tables_in_memory", fmt.Sprintf("%d", after.Loaded)},
 		{"rows", fmt.Sprintf("%d", after.Rows)},
 		{"data_bytes", fmt.Sprintf("%d", after.Bytes)},
+		// 这一次实际写了多少（和 data_bytes 不是一回事：后者是表文件总大小）
+		{"bytes_written", fmt.Sprintf("%d", after.Written)},
+		{"bytes_written_total", fmt.Sprintf("%d", after.WrittenTotal)},
 		{"wal_bytes_before", fmt.Sprintf("%d", before.WALBytes)},
 		{"wal_fsyncs", fmt.Sprintf("%d", after.WALSyncs)},
 	}

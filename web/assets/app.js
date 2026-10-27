@@ -859,6 +859,8 @@ function renderSettings() {
   stat('累计落盘', (cp.runs || 0) + ' 次');
   stat('上次落盘', cp.lastAt ? (cp.secondsAgo || 0) + ' 秒前' : '尚未');
   stat('之后已提交', (cp.commitsSince || 0) + ' 次');
+  stat('上次写入', fmtBytes(cp.bytesWritten || 0));
+  stat('累计写入', fmtBytes(cp.bytesTotal || 0));
   stat('当前 WAL', fmtBytes(cp.walBytes || 0));
   stat('数据文件', fmtBytes(rt.dataBytes || 0));
   stat('表 / 行数', (rt.tables || 0) + ' / ' + (rt.rows || 0));

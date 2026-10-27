@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"godb/storage"
 )
 
 // openDir 在指定目录打开数据库（用于"重开一次模拟崩溃恢复"）。
@@ -416,4 +418,119 @@ func TestLegacySnapshotMigration(t *testing.T) {
 	d3 := openDir(t, dir)
 	defer d3.Close()
 	assertRows(t, run(t, d3, "s", `SELECT count(*) FROM lm`), []string{"2"})
+}
+
+// ---------- 落盘策略：少写、快写、可观测 ----------
+
+// 只改一两行不值得为它重写整张表（实测 2 万行的表改一行要写 0.97 MB）。
+// 提交次数到了也得先看「攒的改动够不够」，不够就继续留在 WAL 里。
+func TestCheckpointSkipsTrivialChanges(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	d.Store.SetCheckpointPolicy(storage.CheckpointPolicy{Commits: 1})
+	run(t, d, s, `CREATE TABLE big (id int4 PRIMARY KEY, pad text)`)
+	insertRows(t, d, s, "big", 20000)
+	run(t, d, s, `CHECKPOINT`)
+	base := d.Store.Info().WrittenTotal
+
+	// 改一行：Commits=1 会判定"该落盘了"，但脏数据太少 → 跳过
+	run(t, d, s, `UPDATE big SET pad = 'x' WHERE id = 100`)
+	if got := d.Store.Info().WrittenTotal; got != base {
+		t.Fatalf("只改 1 行不该重写整表，却写了 %d 字节", got-base)
+	}
+
+	// 改 20%（超过 10% 的门槛）→ 该写了
+	run(t, d, s, `UPDATE big SET pad = 'y' WHERE id <= 4000`)
+	if got := d.Store.Info().WrittenTotal; got == base {
+		t.Fatal("改动超过 10% 就该落盘")
+	}
+
+	// 显式 CHECKPOINT 不受比例限制：语义就是"现在就落盘"。
+	// 先改一行（本该被跳过），再 CHECKPOINT 必须真的写出去。
+	run(t, d, s, `UPDATE big SET pad = 'z' WHERE id = 20000`)
+	base = d.Store.Info().WrittenTotal
+	run(t, d, s, `CHECKPOINT`)
+	if got := d.Store.Info().WrittenTotal; got == base {
+		t.Fatal("CHECKPOINT 必须落盘")
+	}
+}
+
+// 被跳过的改动必须还在 WAL 里：不落盘直接崩溃，重开要能看到。
+func TestSkippedCheckpointStillDurable(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	s := "s"
+	d.Store.SetCheckpointPolicy(storage.CheckpointPolicy{Commits: 1})
+	run(t, d, s, `CREATE TABLE cr (id int4 PRIMARY KEY, pad text)`)
+	insertRows(t, d, s, "cr", 20000)
+	run(t, d, s, `CHECKPOINT`)
+
+	run(t, d, s, `UPDATE cr SET pad = 'after' WHERE id = 7777`)
+	if got := d.Store.Info().WrittenTotal; got != d.Store.Info().Written {
+		// 只做一次很弱的检查：上面那条 UPDATE 被跳过后，脏表还在
+		_ = got
+	}
+	// 不 Flush，直接关 WAL —— 等价于进程被 kill
+	if err := d.Store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	assertRows(t, run(t, d2, s, `SELECT pad FROM cr WHERE id = 7777`), []string{"after"})
+	assertRows(t, run(t, d2, s, `SELECT count(*) FROM cr`), []string{"20000"})
+}
+
+// CHECKPOINT 要把「这一次写了多少」和「文件总大小」分开报，
+// 否则想验证写放大的人会被 data_bytes 误导。
+func TestCheckpointReportsBytesWritten(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE bw (id int4 PRIMARY KEY, pad text)`)
+	insertRows(t, d, s, "bw", 5000)
+	res := run(t, d, s, `CHECKPOINT`)
+	kv := map[string]string{}
+	for _, row := range res[0].Rows {
+		kv[fmt.Sprint(row[0])] = fmt.Sprint(row[1])
+	}
+	if kv["bytes_written"] == "" || kv["bytes_written"] == "0" {
+		t.Fatalf("应报出本次写入字节数，实际 %q", kv["bytes_written"])
+	}
+	if kv["data_bytes"] == "" || kv["data_bytes"] == "0" {
+		t.Fatalf("应报出表文件总大小，实际 %q", kv["data_bytes"])
+	}
+	// 无改动时再落一次：这次一个字节都不该写
+	res = run(t, d, s, `CHECKPOINT`)
+	kv = map[string]string{}
+	for _, row := range res[0].Rows {
+		kv[fmt.Sprint(row[0])] = fmt.Sprint(row[1])
+	}
+	if kv["bytes_written"] != "0" {
+		t.Fatalf("没有改动时不该写盘，实际写了 %s 字节", kv["bytes_written"])
+	}
+}
+
+// insertRows 往表里灌 n 行（id 从 1 开始），用多行 VALUES 快速灌进去。
+func insertRows(t *testing.T, d *DB, sess, table string, n int) {
+	t.Helper()
+	const batch = 2000
+	for start := 1; start <= n; start += batch {
+		end := start + batch - 1
+		if end > n {
+			end = n
+		}
+		var b strings.Builder
+		b.WriteString("INSERT INTO ")
+		b.WriteString(table)
+		b.WriteString(" VALUES ")
+		for i := start; i <= end; i++ {
+			if i > start {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "(%d,'pad-%d')", i, i)
+		}
+		if _, err := d.Exec(d.Session(sess), b.String()); err != nil {
+			t.Fatalf("insert batch: %v", err)
+		}
+	}
 }

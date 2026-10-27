@@ -168,13 +168,10 @@ func (s *Store) migrateLegacySnapshot() error {
 func (s *Store) Checkpoint() error {
 	s.CommitMu.Lock()
 	defer s.CommitMu.Unlock()
-	if err := s.checkpointLocked(); err != nil {
-		return err
-	}
 	// 手动 CHECKPOINT / 退出时的 Flush 也算一次落盘：更新统计并清零计数，
 	// 否则后台定时器还会因为「计数没清」再补写一次快照。
-	s.noteCheckpointLocked()
-	return nil
+	// （这一步现在由 checkpointBodyLocked 内部完成）
+	return s.forceCheckpointLocked()
 }
 
 // Flush 强制落盘：先把 WAL 里未 fsync 的记录刷下去，再做一次 checkpoint。
@@ -191,26 +188,32 @@ func (s *Store) Flush() error {
 			return err
 		}
 	}
-	if err := s.checkpointLocked(); err != nil {
-		return err
-	}
 	// Flush（手动 CHECKPOINT / 进程退出）同样算一次落盘：更新统计并清零
 	// 提交计数，否则后台定时器会因为「计数没清」再补写一次快照。
-	s.noteCheckpointLocked()
-	return nil
+	return s.forceCheckpointLocked()
 }
 
-// checkpointLocked 在已持有 CommitMu 时执行 checkpoint。
+// snapshotJob 是一次「已经拍好的快照」：只持有行切片的引用，不含序列化结果。
 //
-// 关键点：**只重写有改动的表**。以前每次 checkpoint 都把整库序列化一遍，
-// 40 万行要 500ms+，期间所有写事务被堵住；现在写一张表的代价只和那张表有关。
-//
-// 顺序：写脏表 → 删掉已不存在的表 → 写 meta → 轮转 WAL。
-// 崩在中间也安全：每张表的文件在文件头里带自己的代次，重放时按
-// "记录代次 > 该表文件代次" 过滤，既不会重复应用，也不会丢。
-func (s *Store) checkpointLocked() error {
-	gen := s.appliedGen
-	var written int64
+// 行是不可变的（UPDATE 复制整行、提交时重组的是切片头），所以在锁外读这些行
+// 是安全的 —— 这正是能把「序列化 + fsync」挪出 CommitMu 的前提。
+type snapshotJob struct {
+	gen     int64
+	tables  []snapshotTable
+	written int64
+}
+
+type snapshotTable struct {
+	id       int64
+	key      string
+	rows     []types.Row
+	dirtyCnt int64 // 拍快照时这张表的累计脏行数，收尾时用来判断期间有没有新改动
+}
+
+// checkpointStartLocked 拍快照：只拷切片头，不做序列化、不碰磁盘。
+// 调用方必须持有 CommitMu。
+func (s *Store) checkpointStartLocked() *snapshotJob {
+	job := &snapshotJob{gen: s.appliedGen}
 	for _, t := range s.Cat.Tables {
 		key := cleanName(t.Name)
 		td := s.Data[key]
@@ -220,15 +223,47 @@ func (s *Store) checkpointLocked() error {
 		if !s.dirty[key] && s.hasSnap[key] {
 			continue // 没改动就跳过
 		}
-		n, err := writeTableSnap(s.Dir, t.ID, gen, td.Rows)
+		job.tables = append(job.tables, snapshotTable{
+			id: t.ID, key: key, rows: td.Rows, dirtyCnt: s.dirtyRows[key],
+		})
+	}
+	return job
+}
+
+// checkpointWrite 在**不持 CommitMu** 的时候序列化并写盘。
+func (s *Store) checkpointWrite(job *snapshotJob) error {
+	var written int64
+	for _, t := range job.tables {
+		n, err := writeTableSnap(s.Dir, t.id, job.gen, t.rows)
 		if err != nil {
 			return err
 		}
 		written += n
-		s.dirty[key] = false
-		s.hasSnap[key] = true
-		s.tableGen[key] = gen
-		s.tableRows[key] = len(td.Rows)
+	}
+	job.written = written
+	return nil
+}
+
+// checkpointFinishLocked 写盘成功后更新内存状态、清理孤儿文件、写 meta、轮转 WAL。
+// 调用方必须持有 CommitMu。
+func (s *Store) checkpointFinishLocked(job *snapshotJob) error {
+	// 一张表都不需要重写、WAL 也还小：这一轮纯属空转，别去动 meta 和 WAL。
+	// 写一次 meta 就是一次 tmp+fsync+rename，轮转 WAL 要删文件重建 —— 都是白做功。
+	if len(job.tables) == 0 && (s.wal == nil || s.wal.LiveBytes() < 1<<20) {
+		s.commits = 0
+		s.snapBytes = 0 // 这一轮确实一个字节都没写，别把上一轮的数字留着
+		return nil
+	}
+	for _, t := range job.tables {
+		// 写盘期间又改了这张表 → dirty 不能清，改动留在 WAL 里等下一轮。
+		// 少了这个判断，那些改动会被永久标记成「已落盘」而丢掉。
+		if s.dirtyRows[t.key] == t.dirtyCnt {
+			s.dirty[t.key] = false
+			s.dirtyRows[t.key] = 0
+		}
+		s.hasSnap[t.key] = true
+		s.tableGen[t.key] = job.gen
+		s.tableRows[t.key] = len(t.rows)
 	}
 
 	// 清理已 DROP 的表留下的数据文件
@@ -248,16 +283,72 @@ func (s *Store) checkpointLocked() error {
 		}
 	}
 
-	if err := s.writeMeta(gen); err != nil {
+	if err := s.writeMeta(job.gen); err != nil {
 		return err
 	}
-	s.snapshotGen = gen
+	s.snapshotGen = job.gen
 	s.commits = 0
-	s.snapBytes = written
+	s.snapBytes = job.written
+	s.written.Add(job.written)
 	if s.wal != nil {
-		return s.wal.Rotate(gen + 1)
+		return s.wal.Rotate(job.gen + 1)
 	}
 	return nil
+}
+
+// checkpointBodyLocked 走完一整轮：拍快照（锁内）→ 写盘（锁外）→ 收尾（锁内）。
+//
+// 这么拆是为了把几十毫秒的「序列化 + fsync」移出 CommitMu：之前整段都在锁里，
+// 一次 checkpoint 会把所有写事务堵在门外（40 万行的表约 50 ms）。拆完之后
+// 锁内只剩「拷一遍切片头 + 更新几个 map」，几毫秒量级。
+//
+// 调用方必须持有 CommitMu，并且仍在 SchemaMu 的锁内 —— 行数据在锁外被读的
+// 前提是期间没有 DDL 能改它们。checkpoint 的所有触发点都满足：提交在语句的
+// 读锁内，DDL 的 checkpoint 在写锁内，后台 ticker 自己先拿读锁。
+func (s *Store) checkpointBodyLocked() error {
+	job := s.checkpointStartLocked()
+	s.CommitMu.Unlock()
+	err := func() error {
+		s.cpMu.Lock()
+		defer s.cpMu.Unlock()
+		return s.checkpointWrite(job)
+	}()
+	s.CommitMu.Lock()
+	if err != nil {
+		return err
+	}
+	if err := s.checkpointFinishLocked(job); err != nil {
+		return err
+	}
+	s.noteCheckpointLocked()
+	return nil
+}
+
+// tryCheckpointLocked 用于提交路径与后台定时器：已经有 checkpoint 在写盘时直接
+// 放弃这一次（返回 false）。数据在 WAL 里不会丢，等它写完下一轮自然会触发。
+//
+// 不能排队等 —— 两个 checkpoint 抢着写、后拍的先写完，旧数据就会覆盖新文件，
+// 而 WAL 又被轮转掉，那就是真的丢数据了。
+//
+// 返回值表示「这一轮到底落了盘没有」：提交路径要靠它决定还用不用等 fsync。
+func (s *Store) tryCheckpointLocked() (bool, error) {
+	if !s.cpBusy.CompareAndSwap(false, true) {
+		return false, nil
+	}
+	defer s.cpBusy.Store(false)
+	return true, s.checkpointBodyLocked()
+}
+
+// forceCheckpointLocked 用于 CHECKPOINT 语句、DDL 与关闭：语义要求返回时确实已落盘，
+// 所以撞上正在写的那一轮就等它。（轮询期间放开 CommitMu，别把提交堵死。）
+func (s *Store) forceCheckpointLocked() error {
+	for !s.cpBusy.CompareAndSwap(false, true) {
+		s.CommitMu.Unlock()
+		time.Sleep(2 * time.Millisecond)
+		s.CommitMu.Lock()
+	}
+	defer s.cpBusy.Store(false)
+	return s.checkpointBodyLocked()
 }
 
 // SnapshotInfo 是给 CHECKPOINT 语句/状态查询用的快照信息。
@@ -267,11 +358,16 @@ type SnapshotInfo struct {
 	// NextGeneration 是下一批写入使用的代次。
 	NextGeneration int64
 	Rows           int
-	Bytes          int64
-	WALBytes       int64
-	WALFrames      int64
-	WALSyncs       int64
-	Repaired       int64
+	// Bytes 是磁盘上表文件的总大小（不是这一次写了多少）。
+	Bytes int64
+	// Written 是上一次 checkpoint 实际写进磁盘的字节数。
+	Written int64
+	// WrittenTotal 是本进程累计写入的字节数 —— 用它判断「改一行到底让磁盘写了多少」。
+	WrittenTotal int64
+	WALBytes     int64
+	WALFrames    int64
+	WALSyncs     int64
+	Repaired     int64
 	// Loaded / Tables 说明按需加载的进度。
 	Loaded int
 	Tables int
@@ -282,9 +378,11 @@ type SnapshotInfo struct {
 // Info 返回持久化层的当前状态。
 func (s *Store) Info() SnapshotInfo {
 	info := SnapshotInfo{
-		Generation: s.snapshotGen,
-		Repaired:   s.Repaired,
-		Tables:     len(s.Cat.Tables),
+		Generation:   s.snapshotGen,
+		Repaired:     s.Repaired,
+		Tables:       len(s.Cat.Tables),
+		Written:      s.snapBytes,
+		WrittenTotal: s.written.Load(),
 	}
 	for key, td := range s.Data {
 		if s.loaded[key] {

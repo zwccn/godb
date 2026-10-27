@@ -351,6 +351,58 @@ class CDP {
     await cdp.eval(`openSettings()`);
     await sleep(900);
     check('设置：打开后可见', await cdp.eval(`!document.getElementById('settingsModal').classList.contains('hidden')`));
+
+    // 顶栏只留高频入口，皮肤/字号/示例数据/清库都进设置页
+    const setUi = await cdp.eval(`(() => {
+      const bar = document.querySelector('.top-actions');
+      const body = document.getElementById('settingsBody');
+      const picks = [...body.querySelectorAll('.theme-pick')];
+      const active = body.querySelector('.theme-pick[aria-pressed="true"]');
+      const btns = [...body.querySelectorAll('button')].map(b => b.textContent.trim());
+      return {
+        barText: bar.textContent.replace(/\\s+/g, ' ').trim(),
+        barHasTheme: !!bar.querySelector('.theme-pick, .theme-dot, .fs-ctl'),
+        barHasData: !!document.getElementById('btnSample') || !!document.getElementById('btnReset'),
+        picks: picks.length,
+        pickNames: picks.map(p => p.textContent.trim()),
+        activeTheme: active ? active.dataset.theme : '',
+        fsValues: body.querySelectorAll('.fs-value').length,
+        fsBtns: body.querySelectorAll('.fs-btn').length,
+        fsText: (body.querySelector('.fs-value') || {}).textContent || '',
+        hasSample: btns.indexOf('载入示例数据') >= 0,
+        hasReset: btns.indexOf('清空当前库') >= 0,
+        secs: [...body.querySelectorAll('.set-sec')].map(s => s.textContent.trim()),
+      };
+    })()`);
+    check('顶栏清瘦：不再挂皮肤/字号/示例数据/清库',
+      !setUi.barHasTheme && !setUi.barHasData, setUi.barText);
+    check('顶栏仍保留 库/空闲/锁状态/设置',
+      ['库', '空闲', '锁状态', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
+    check('设置页有 4 个带名字的皮肤卡片',
+      setUi.picks === 4 && setUi.pickNames.join('/') === '深色/淡蓝/芋紫/薄荷绿',
+      setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);
+    check('设置页有字号控件', setUi.fsBtns === 2 && setUi.fsValues === 1 && /%$/.test(setUi.fsText), setUi.fsText);
+    check('设置页有载入示例数据 / 清空当前库',
+      setUi.hasSample && setUi.hasReset);
+    check('设置页分区顺序：外观 → 数据 → 落盘…',
+      /外观/.test(setUi.secs[0] || '') && setUi.secs[1] === '数据', setUi.secs.slice(0, 3).join(' / '));
+
+    // 点了要立刻生效（不依赖「保存并应用」）
+    await cdp.eval(`document.querySelector('.theme-pick[data-theme="taro"]').click()`);
+    await sleep(250);
+    check('设置页点皮肤立即生效并记住',
+      await cdp.eval(`document.documentElement.getAttribute('data-theme') === 'taro' &&
+        localStorage.getItem('godb.theme') === 'taro'`),
+      await cdp.eval(`document.documentElement.getAttribute('data-theme')`));
+    const fs0 = await cdp.eval(`getComputedStyle(document.documentElement).getPropertyValue('--fs').trim()`);
+    await cdp.eval(`[...document.querySelectorAll('.fs-btn')].find(b => b.dataset.fsStep === '1').click()`);
+    await sleep(200);
+    const fs1 = await cdp.eval(`getComputedStyle(document.documentElement).getPropertyValue('--fs').trim()`);
+    check('设置页点 A+ 字号立即变大', parseFloat(fs1) > parseFloat(fs0), `${fs0} → ${fs1}`);
+    // 回到原皮肤，别影响后面的断言
+    await cdp.eval(`document.querySelector('.theme-pick[data-theme="sky"]').click()`);
+    await sleep(150);
+
     await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 8, y: 8, button: 'left', clickCount: 1 });
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 8, y: 8, button: 'left', clickCount: 1 });
     await sleep(200);

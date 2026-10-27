@@ -35,7 +35,14 @@ const txPill = document.getElementById('txPill');
 // ---------- 皮肤 ----------
 // 颜色全在 CSS 变量里，这里只负责切 html[data-theme]，并把选择记在本机。
 const THEME_KEY = 'godb.theme';
-const THEMES = ['dark', 'sky', 'taro', 'mint'];
+// 顺序即设置页里的展示顺序；深色是默认值
+const THEME_LIST = [
+  { id: 'dark', name: '深色' },
+  { id: 'sky', name: '淡蓝' },
+  { id: 'taro', name: '芋紫' },
+  { id: 'mint', name: '薄荷绿' },
+];
+const THEMES = THEME_LIST.map(t => t.id);
 
 function applyTheme(name, save) {
   if (!THEMES.includes(name)) name = 'dark';
@@ -45,8 +52,9 @@ function applyTheme(name, save) {
   } else {
     document.documentElement.setAttribute('data-theme', name);
   }
-  for (const dot of document.querySelectorAll('.theme-dot')) {
-    dot.setAttribute('aria-pressed', String(dot.dataset.theme === name));
+  // 皮肤按钮现在渲染在设置页里，每次都是新建的元素，所以这里按当前 DOM 查
+  for (const pick of document.querySelectorAll('.theme-pick')) {
+    pick.setAttribute('aria-pressed', String(pick.dataset.theme === name));
   }
   // 只有用户点按钮时才记为偏好；链接参数（?theme=）只是当次预览
   if (save) {
@@ -54,9 +62,11 @@ function applyTheme(name, save) {
   }
 }
 
-for (const dot of document.querySelectorAll('.theme-dot')) {
-  dot.addEventListener('click', () => applyTheme(dot.dataset.theme, true));
-}
+// 用事件委托：设置页每次打开都会重建皮肤按钮，逐个绑会绑到已经销毁的节点上
+document.addEventListener('click', ev => {
+  const pick = ev.target.closest && ev.target.closest('.theme-pick');
+  if (pick) applyTheme(pick.dataset.theme, true);
+});
 // 进入页面时按上次的选择点亮按钮（属性已经由 head 里的内联脚本设好了）
 applyTheme(document.documentElement.getAttribute('data-theme') || 'dark', false);
 
@@ -68,9 +78,6 @@ const FS_MIN = 85;
 const FS_MAX = 165;
 const FS_STEP = 5;
 
-const fsValueEl = document.getElementById('fsValue');
-const fsBtns = Array.from(document.querySelectorAll('.fs-btn'));
-
 function clampFs(pct) {
   if (!Number.isFinite(pct)) return FS_DEFAULT;
   // 对齐到 5% 的档位，避免链接参数带进奇怪的数字
@@ -81,8 +88,9 @@ function clampFs(pct) {
 function applyFontScale(pct, save) {
   const v = clampFs(pct);
   document.documentElement.style.setProperty('--fs', (v / 100).toFixed(2));
-  if (fsValueEl) fsValueEl.textContent = v + '%';
-  for (const btn of fsBtns) {
+  // 字号控件在设置页里是动态渲染的，用类名查而不是缓存的引用
+  for (const node of document.querySelectorAll('.fs-value')) node.textContent = v + '%';
+  for (const btn of document.querySelectorAll('.fs-btn')) {
     const step = Number(btn.dataset.fsStep);
     btn.disabled = step < 0 ? v <= FS_MIN : v >= FS_MAX;
   }
@@ -92,11 +100,12 @@ function applyFontScale(pct, save) {
   return v;
 }
 
-for (const btn of fsBtns) {
-  btn.addEventListener('click', () => {
-    applyFontScale(clampFs(currentFsPct()) + Number(btn.dataset.fsStep) * FS_STEP, true);
-  });
-}
+// 同样走委托（设置页重建后不需要重新绑定）
+document.addEventListener('click', ev => {
+  const btn = ev.target.closest && ev.target.closest('.fs-btn');
+  if (!btn || btn.disabled) return;
+  applyFontScale(clampFs(currentFsPct()) + Number(btn.dataset.fsStep) * FS_STEP, true);
+});
 
 // 当前生效的百分比（从 --fs 反推，这样链接参数 ?fs= 也算在内）
 function currentFsPct() {
@@ -1022,7 +1031,8 @@ document.getElementById('btnLockClose').addEventListener('click', () => toggleLo
 document.getElementById('btnCommit').addEventListener('click', () => txAction('commit'));
 document.getElementById('btnRollback').addEventListener('click', () => txAction('rollback'));
 
-document.getElementById('btnSample').addEventListener('click', async () => {
+// 这两个原来是顶栏按钮，现在收在设置页里（低频 + 一个会清库），实现不变
+async function loadSample() {
   if (!confirm('将重建示例数据（departments / employees），当前所有表会被清空。继续？')) return;
   try {
     await api('/api/sample', {});
@@ -1030,12 +1040,13 @@ document.getElementById('btnSample').addEventListener('click', async () => {
     editor.value = EXAMPLES.select;
     autoSize();
     run();
+    closeSettings();
   } catch (e) {
     alert('载入失败：' + e.message);
   }
-});
+}
 
-document.getElementById('btnReset').addEventListener('click', async () => {
+async function resetDatabase() {
   const cur = (document.getElementById('dbBadge') || {}).textContent || '当前库';
   if (!confirm(`确定要删除「${cur}」里的所有表吗？此操作不可撤销。`)) return;
   try {
@@ -1044,10 +1055,11 @@ document.getElementById('btnReset').addEventListener('click', async () => {
     resultsEl.innerHTML = '';
     resultsEl.appendChild(el('div', 'msg', '数据库已清空'));
     updateTx({ active: false });
+    closeSettings();
   } catch (e) {
     alert('清空失败：' + e.message);
   }
-});
+}
 
 for (const chip of document.querySelectorAll('.chip')) {
   chip.addEventListener('click', () => {
@@ -1171,6 +1183,61 @@ function renderSettings() {
     settingsBody.appendChild(el('div', 'set-readonly',
       '当前连接来自 ' + (rt.clientIp || '远程序') + '，只能查看。配置的写操作只接受本机（127.0.0.1）请求。'));
   }
+
+  /* ---- 外观（本机偏好，改完立即生效） ---- */
+  settingsBody.appendChild(el('div', 'set-sec', '外观（只影响这台浏览器）'));
+  const curTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+  const picks = el('div', 'theme-picks');
+  for (const t of THEME_LIST) {
+    const btn = el('button', 'theme-pick');
+    btn.type = 'button';
+    btn.dataset.theme = t.id;
+    btn.setAttribute('aria-pressed', String(t.id === curTheme));
+    btn.appendChild(el('span', 'theme-dot theme-dot-' + t.id));
+    btn.appendChild(el('span', '', t.name));
+    picks.appendChild(btn);
+  }
+  settingsBody.appendChild(picks);
+
+  const fsCtl = el('div', 'fs-ctl');
+  fsCtl.setAttribute('role', 'group');
+  fsCtl.setAttribute('aria-label', '字号');
+  const fsMinus = el('button', 'fs-btn', 'A−');
+  fsMinus.type = 'button';
+  fsMinus.dataset.fsStep = '-1';
+  fsMinus.title = '缩小字号';
+  const fsVal = el('span', 'fs-value', currentFsPct() + '%');
+  fsVal.title = '当前字号';
+  const fsPlus = el('button', 'fs-btn', 'A+');
+  fsPlus.type = 'button';
+  fsPlus.dataset.fsStep = '1';
+  fsPlus.title = '放大字号';
+  fsCtl.appendChild(fsMinus);
+  fsCtl.appendChild(fsVal);
+  fsCtl.appendChild(fsPlus);
+  settingsBody.appendChild(setRow('字号', fsCtl));
+  settingsBody.appendChild(el('div', 'set-hint',
+    '皮肤和字号改完立刻生效，只存在本机，不用点下面的「保存并应用」（那只提交服务器配置）。'));
+  // 刚建出来的按钮需要拿到当前档位的 disabled 状态
+  applyFontScale(currentFsPct(), false);
+
+  /* ---- 数据 ---- */
+  settingsBody.appendChild(el('div', 'set-sec', '数据'));
+  const dataActs = el('div', 'set-actions');
+  const sampleBtn = el('button', 'btn btn-ghost btn-sm', '载入示例数据');
+  sampleBtn.type = 'button';
+  sampleBtn.title = '清空当前库并重建 departments / employees';
+  sampleBtn.addEventListener('click', loadSample);
+  const resetBtn = el('button', 'btn btn-ghost btn-sm btn-danger-text', '清空当前库');
+  resetBtn.type = 'button';
+  resetBtn.title = '删除当前库里的所有表（不可撤销）';
+  resetBtn.addEventListener('click', resetDatabase);
+  dataActs.appendChild(sampleBtn);
+  dataActs.appendChild(resetBtn);
+  settingsBody.appendChild(setRow('维护', dataActs));
+  settingsBody.appendChild(el('div', 'set-hint',
+    '两条都会二次确认，且只作用于当前库（' +
+    ((document.getElementById('dbBadge') || {}).textContent || '当前库') + '）。'));
 
   /* ---- 落盘 ---- */
   settingsBody.appendChild(el('div', 'set-sec', '落盘节奏（checkpoint）'));

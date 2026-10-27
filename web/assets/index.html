@@ -49,27 +49,11 @@ try {
       <select id="dbSelect" aria-label="数据库" title="切换数据库"></select>
       <button id="btnDBs" class="btn btn-ghost btn-sm" type="button" title="管理数据库（新建 / 删除）">管理</button>
     </div>
-    <div class="theme-switch" role="group" aria-label="皮肤">
-      <span class="theme-switch-label">皮肤</span>
-      <button class="theme-dot theme-dot-dark" type="button" data-theme="dark"
-              title="深色" aria-label="深色" aria-pressed="true"></button>
-      <button class="theme-dot theme-dot-sky" type="button" data-theme="sky"
-              title="淡蓝" aria-label="淡蓝" aria-pressed="false"></button>
-      <button class="theme-dot theme-dot-taro" type="button" data-theme="taro"
-              title="芋紫" aria-label="芋紫" aria-pressed="false"></button>
-      <button class="theme-dot theme-dot-mint" type="button" data-theme="mint"
-              title="薄荷绿" aria-label="薄荷绿" aria-pressed="false"></button>
-    </div>
-    <div class="fs-ctl" role="group" aria-label="字号">
-      <button class="fs-btn" type="button" data-fs-step="-1" title="缩小字号" aria-label="缩小字号">A−</button>
-      <span id="fsValue" class="fs-value" title="当前字号">120%</span>
-      <button class="fs-btn" type="button" data-fs-step="1" title="放大字号" aria-label="放大字号">A+</button>
-    </div>
+    <!-- 顶栏只留「随时要看 / 随手要切」的东西：库、事务状态、锁、设置。
+         皮肤、字号、载入示例数据、清空数据库都是低频操作，收进设置页。 -->
     <span id="txPill" class="pill pill-idle">空闲</span>
     <button id="btnLocks" class="btn btn-ghost">锁状态<span id="lockBadge" class="badge hidden">0</span></button>
     <button id="btnSettings" class="btn btn-ghost">设置</button>
-    <button id="btnSample" class="btn">载入示例数据</button>
-    <button id="btnReset" class="btn btn-ghost">清空数据库</button>
   </div>
 </header>
 

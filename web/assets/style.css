@@ -221,24 +221,7 @@ html[data-theme="mint"] {
   --shadow-color: rgba(20, 60, 50, .18);
 }
 
-/* ---------- 皮肤切换器 ---------- */
-.theme-switch {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px 3px 6px;
-  margin-right: 4px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-2);
-}
-
-.theme-switch-label {
-  font-size: calc(11px * var(--fs));
-  color: var(--text-3);
-  letter-spacing: .02em;
-}
-
+/* ---------- 皮肤切换器（现在在设置页里；圆点本身仍复用这套渐变） ---------- */
 .theme-dot {
   width: 16px;
   height: 16px;
@@ -251,8 +234,38 @@ html[data-theme="mint"] {
 
 .theme-dot:hover { transform: scale(1.12); }
 
-.theme-dot[aria-pressed="true"] {
-  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3.5px var(--accent);
+/* 设置页里一排「圆点 + 名字」的卡片：比光秃秃的圆点好认，也不会点错 */
+.theme-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.theme-pick {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-family: var(--sans);
+  font-size: calc(12px * var(--fs));
+  cursor: pointer;
+}
+
+.theme-pick:hover { border-color: var(--border-hover); color: var(--text); }
+
+.theme-pick[aria-pressed="true"] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft-bg);
+  color: var(--text);
+}
+
+.theme-pick[aria-pressed="true"] .theme-dot {
+  box-shadow: 0 0 0 2px var(--accent-soft-bg), 0 0 0 3px var(--accent);
 }
 
 .fs-ctl {
@@ -802,13 +815,6 @@ table.grid td.bool { color: var(--warn-text); }
   .sidebar { flex-basis: 210px; }
 }
 
-/* 顶栏右侧现在多了皮肤圆点和字号控件，窗口窄（或者字号调到 150% 以上）
-   时先收起皮肤/字号的文字标签，别让按钮挤成两行 */
-@media (max-width: 1320px) {
-  .theme-switch-label { display: none; }
-  .theme-switch { padding: 3px 6px; }
-}
-
 
 /* ---------- 锁面板 ---------- */
 .badge {
@@ -1029,6 +1035,9 @@ body.locks-open .layout { margin-right: 350px; }
   font-family: var(--mono);
   font-size: calc(11.5px * var(--fs));
 }
+
+/* 设置页里一行放多个按钮（载入示例 / 清空当前库） */
+.set-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
 .set-row input[type="number"],
 .set-row input[type="text"],

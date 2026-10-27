@@ -227,8 +227,32 @@ func (p *parser) parseStatement() (Statement, error) {
 		if !p.acceptKw("transaction") {
 			p.acceptKw("work")
 		}
+		// ROLLBACK TO [SAVEPOINT] name：回到保存点，事务继续
+		if p.acceptKw("to") {
+			p.acceptKw("savepoint")
+			name, err := p.ident()
+			if err != nil {
+				return nil, err
+			}
+			return &SavepointStmt{Kind: "rollback_to", Name: name}, nil
+		}
 		p.skipTxChain() // ROLLBACK AND [NO] CHAIN
 		return &TxStmt{Kind: "rollback"}, nil
+	case "SAVEPOINT":
+		p.pos++
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		return &SavepointStmt{Kind: "savepoint", Name: name}, nil
+	case "RELEASE":
+		p.pos++
+		p.acceptKw("savepoint")
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		return &SavepointStmt{Kind: "release", Name: name}, nil
 	case "EXPLAIN":
 		p.pos++
 		analyze := p.acceptKw("analyze") // ANALYZE 可选：带上就真的跑一遍

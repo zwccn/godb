@@ -391,6 +391,10 @@ type Tx struct {
 	ov  map[string]*overlay
 	seq map[string]int64
 	n   int
+
+	// lastSeq / hasLastSeq 记录本事务最后一次 nextval 分配的值（lastval() 用）。
+	lastSeq    int64
+	hasLastSeq bool
 }
 
 // Changes 返回事务内已修改的行数。
@@ -539,7 +543,34 @@ func (tx *Tx) NextSeq(table string) int64 {
 	}
 	v++
 	tx.seq[k] = v
+	tx.lastSeq, tx.hasLastSeq = v, true
 	return v
+}
+
+// SeqCurrent 返回自增计数器的当前值（不分配新值），
+// ok=false 表示这张表没有自增列。currval() 用它。
+func (tx *Tx) SeqCurrent(table string) (int64, bool) {
+	k := cleanName(table)
+	// 优先读本事务已分配但还没提交的值
+	if v, ok := tx.seq[k]; ok {
+		return v, true
+	}
+	td := tx.st.Table(table)
+	if td == nil {
+		return 0, false
+	}
+	return td.Seq, true
+}
+
+// LastSeqValue 返回本事务最后一次 nextval 分配的值。lastval() 用它。
+func (tx *Tx) LastSeqValue() (int64, bool) {
+	return tx.lastSeq, tx.hasLastSeq
+}
+
+// SetLastSeq 把一个会话级的「最后一次序列值」带进新事务。
+// lastval() 在 PostgreSQL 里是会话级的，跨语句有效，所以每次开事务都要继承。
+func (tx *Tx) SetLastSeq(v int64) {
+	tx.lastSeq, tx.hasLastSeq = v, true
 }
 
 // ResetSeq 把自增序列重置为 0（TRUNCATE 用）。
@@ -1446,6 +1477,19 @@ func (tx *Tx) RestoreTo(m *TxSnapshot) {
 	tx.ov = m.ov
 	tx.seq = m.seq
 	tx.n = m.n
+}
+
+// Clone 复制一份快照。SAVEPOINT 用它：ROLLBACK TO 之后同一个保存点还能再回滚
+// 一次（PostgreSQL 允许），所以快照不能被子类「消费」掉。
+func (m *TxSnapshot) Clone() *TxSnapshot {
+	c := &TxSnapshot{ov: make(map[string]*overlay, len(m.ov)), seq: make(map[string]int64, len(m.seq)), n: m.n}
+	for k, o := range m.ov {
+		c.ov[k] = o.clone()
+	}
+	for k, v := range m.seq {
+		c.seq[k] = v
+	}
+	return c
 }
 
 // DataDir 返回数据目录。

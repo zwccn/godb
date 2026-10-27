@@ -64,6 +64,81 @@ type Session struct {
 	aborted    bool
 	last       time.Time
 	lastWaitNs int64
+	// savepoints 是 SAVEPOINT 栈（由内到外）。提交/回滚时整栈丢弃。
+	savepoints []savepoint
+	// lastSeq 是会话级的最后一次序列值（lastval() 跨语句有效）。
+	lastSeq    int64
+	hasLastSeq bool
+}
+
+// savepoint 是一个保存点：名字 + 当时的事务快照。
+type savepoint struct {
+	name string
+	mark *storage.TxSnapshot
+}
+
+// Savepoint 建立保存点。同名保存点允许并存：查找时最近的那个生效，
+// 和 PostgreSQL 的行为一致（旧的只是被挡住，RELEASE 到底名时才被丢弃）。
+func (s *Session) Savepoint(name string) error {
+	if s.tx == nil {
+		return errors.New("SAVEPOINT can only be used in transaction blocks")
+	}
+	s.savepoints = append(s.savepoints, savepoint{name: normalizeSavepointName(name), mark: s.tx.Mark()})
+	s.Touch()
+	return nil
+}
+
+// RollbackToSavepoint 回滚到保存点：保存点本身保留（可以再回滚一次），
+// 之后建立的保存点全部丢弃，事务从中毒状态恢复可用。
+func (s *Session) RollbackToSavepoint(name string) error {
+	if s.tx == nil {
+		return errors.New("ROLLBACK TO SAVEPOINT can only be used in transaction blocks")
+	}
+	idx := s.findSavepoint(name)
+	if idx < 0 {
+		return fmt.Errorf("savepoint %q does not exist", name)
+	}
+	s.tx.RestoreTo(s.savepoints[idx].mark.Clone())
+	s.savepoints = s.savepoints[:idx+1]
+	s.aborted = false
+	s.Touch()
+	return nil
+}
+
+// ReleaseSavepoint 释放保存点及其之后的所有层。
+func (s *Session) ReleaseSavepoint(name string) error {
+	if s.tx == nil {
+		return errors.New("RELEASE SAVEPOINT can only be used in transaction blocks")
+	}
+	idx := s.findSavepoint(name)
+	if idx < 0 {
+		return fmt.Errorf("savepoint %q does not exist", name)
+	}
+	s.savepoints = s.savepoints[:idx]
+	s.Touch()
+	return nil
+}
+
+// SetLastSeq 记录会话最后一次分配的自增值。
+func (s *Session) SetLastSeq(v int64) {
+	s.lastSeq, s.hasLastSeq = v, true
+}
+
+// SavepointDepth 返回当前保存点层数（测试与前端用）。
+func (s *Session) SavepointDepth() int { return len(s.savepoints) }
+
+func (s *Session) findSavepoint(name string) int {
+	want := normalizeSavepointName(name)
+	for i := len(s.savepoints) - 1; i >= 0; i-- {
+		if s.savepoints[i].name == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func normalizeSavepointName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 // NewSession 创建会话。
@@ -123,6 +198,7 @@ func (s *Session) startTx(intents map[string]lock.Mode) error {
 		}
 		s.global = true
 		s.tx = s.st.Begin()
+		s.inheritLastSeq()
 		s.aborted = false
 		return nil
 	}
@@ -137,10 +213,18 @@ func (s *Session) startTx(intents map[string]lock.Mode) error {
 	}
 	s.noteWait(start)
 	s.tx = tx
+	s.inheritLastSeq()
 	s.lockTx = id
 	s.age = age
 	s.aborted = false
 	return nil
+}
+
+// inheritLastSeq 把会话级的 lastval 值带进新事务（lastval() 跨语句有效）。
+func (s *Session) inheritLastSeq() {
+	if s.tx != nil && s.hasLastSeq {
+		s.tx.SetLastSeq(s.lastSeq)
+	}
 }
 
 func (s *Session) noteWait(start hrtime.Stamp) {
@@ -295,4 +379,5 @@ func (s *Session) releaseAll() {
 	s.lockTx = 0
 	s.age = 0
 	s.aborted = false
+	s.savepoints = nil
 }

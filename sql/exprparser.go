@@ -467,22 +467,55 @@ func (p *parser) parsePrimaryBase() (Expr, error) {
 		p.pos++
 		if second, e2 := p.ident(); e2 == nil {
 			if p.atPunct("(") {
-				return p.parseCallArgs(second)
+				return p.finishCall(second)
 			}
 			return &ColumnRef{Table: name, Name: second}, nil
 		}
 		p.pos = save
 	}
 	if p.atPunct("(") {
-		return p.parseCallArgs(name)
+		return p.finishCall(name)
 	}
 	return &ColumnRef{Name: name}, nil
+}
+
+// finishCall 解析完 name(...) 之后检查它是不是窗口函数。
+//
+// row_number() OVER (...)、sum(x) OVER (...) 这类现在完全没实现，
+// 与其让它掉到更深的地方报一个含糊的 42601（客户端只看到 syntax error），
+// 不如在这里明确说「不支持」——测试报告里 P2 的最后一条就是指这个。
+func (p *parser) finishCall(name string) (Expr, error) {
+	e, err := p.parseCallArgs(name)
+	if err != nil {
+		return nil, err
+	}
+	if p.atKw("over") {
+		return nil, p.errAt(p.peek(), "window functions (%s(...) OVER ...) are not supported", strings.ToLower(name))
+	}
+	return e, nil
 }
 
 // parseCallArgs 解析 name(...) 形式的函数调用（当前位置在 '('）。
 func (p *parser) parseCallArgs(name string) (Expr, error) {
 	if err := p.expectPunct("("); err != nil {
 		return nil, err
+	}
+	// EXTRACT(field FROM source)：field 是关键字不是表达式，不能当列引用求值
+	// （否则 col 层报 column "year" does not exist）。归一成 extract('year', src)。
+	if strings.EqualFold(name, "extract") &&
+		(p.peek().Kind == Word || p.peek().Kind == QIdent) && p.peekN(1).Is("from") {
+		fld := strings.ToLower(p.advance().Text)
+		p.pos++ // FROM
+		src, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		return &FuncCall{Name: "extract", Args: []Expr{
+			&Literal{Val: types.Text(fld)}, src,
+		}}, nil
 	}
 	fc := &FuncCall{Name: name}
 	if p.acceptKw("distinct") {

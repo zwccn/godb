@@ -11,6 +11,7 @@ import (
 
 	"godb/catalog"
 	"godb/sql"
+	"godb/storage"
 	"godb/syscat"
 	"godb/types"
 )
@@ -865,6 +866,8 @@ type funcEval struct {
 	cat *catalog.Catalog
 	// dbName 供 current_database() 用。空串表示单库模式，回退到默认库名。
 	dbName string
+	// tx 供 currval / lastval / nextval 读自增计数器用。
+	tx *storage.Tx
 }
 
 func (e *funcEval) Type() types.Type { return e.t }
@@ -968,7 +971,12 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 	if len(vals) > 0 && vals[0].IsNull() && e.name != "length" {
 		return types.Null, nil
 	}
-	v := vals[0]
+	// 无参函数（lastval() / current_date 之类）走到这里时 vals 是空的，
+	// 直接取 vals[0] 会 panic。零值就是 NULL，当作空参数处理即可。
+	var v types.Value
+	if len(vals) > 0 {
+		v = vals[0]
+	}
 	switch e.name {
 	case "lower":
 		return types.Text(strings.ToLower(v.TextForm())), nil
@@ -1106,6 +1114,72 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 			return types.Int(0), nil
 		}
 		return types.Int(int64(len([]rune(vals[1].TextForm()[:idx]))) + 1), nil
+	case "extract", "date_part":
+		// EXTRACT(field FROM ts) 在解析阶段就归一成 extract('field', ts)，
+		// date_part('field', ts) 本来就是两参数，两者共用这段。
+		if len(vals) < 2 {
+			return types.Null, fmt.Errorf("%s requires 2 arguments", e.name)
+		}
+		if vals[0].IsNull() || vals[1].IsNull() {
+			return types.Null, nil
+		}
+		tv, ok := valueAsTime(vals[1])
+		if !ok {
+			return types.Null, fmt.Errorf("%s: cannot cast %q to timestamp", e.name, vals[1].TextForm())
+		}
+		f, err := extractField(tv, vals[0].TextForm())
+		if err != nil {
+			return types.Null, err
+		}
+		if e.name == "date_part" {
+			return types.Float(f), nil
+		}
+		return types.Float(f), nil
+	case "date_trunc":
+		if len(vals) < 2 {
+			return types.Null, fmt.Errorf("date_trunc requires 2 arguments")
+		}
+		if vals[0].IsNull() || vals[1].IsNull() {
+			return types.Null, nil
+		}
+		tv, ok := valueAsTime(vals[1])
+		if !ok {
+			return types.Null, fmt.Errorf("date_trunc: cannot cast %q to timestamp", vals[1].TextForm())
+		}
+		out, err := dateTrunc(tv, vals[0].TextForm())
+		if err != nil {
+			return types.Null, err
+		}
+		return types.Time(out), nil
+	case "currval", "nextval":
+		if len(vals) < 1 || vals[0].IsNull() {
+			return types.Null, fmt.Errorf("%s requires a sequence name", e.name)
+		}
+		if e.tx == nil {
+			return types.Null, fmt.Errorf("%s is not available in this context", e.name)
+		}
+		table, ok := serialTable(e.cat, vals[0].TextForm())
+		if !ok {
+			return types.Null, fmt.Errorf("relation %q does not exist", vals[0].TextForm())
+		}
+		if e.name == "nextval" {
+			return types.Int(e.tx.NextSeq(table)), nil
+		}
+		v, ok := e.tx.SeqCurrent(table)
+		if !ok {
+			return types.Null, fmt.Errorf("relation %q does not exist", vals[0].TextForm())
+		}
+		return types.Int(v), nil
+	case "lastval":
+		if e.tx == nil {
+			return types.Null, fmt.Errorf("lastval is not available in this context")
+		}
+		v, ok := e.tx.LastSeqValue()
+		if !ok {
+			// PG 在没有 nextval 的会话里调 lastval 也是这个错。
+			return types.Null, fmt.Errorf("lastval is not yet defined in this session")
+		}
+		return types.Int(v), nil
 	}
 	return types.Null, fmt.Errorf("function %s does not exist", e.name)
 }
@@ -1125,9 +1199,10 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 	}
 	fe := &funcEval{name: name, args: args}
 	// pg_get_indexdef / pg_get_constraintdef 要按 OID 反查目录，得带上 catalog；
-	// current_database() 要知道当前连的是哪个库。
+	// current_database() 要知道当前连的是哪个库；currval / lastval 要读自增计数器。
 	if c.planner != nil {
 		fe.cat = c.planner.Cat
+		fe.tx = c.planner.Tx
 		if c.planner.Info != nil {
 			fe.dbName = c.planner.Info.Name
 		}
@@ -1138,8 +1213,14 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 		fe.t = types.Type{Kind: types.KText, Name: "text"}
 	case "length", "char_length", "character_length", "position", "strpos":
 		fe.t = types.Type{Kind: types.KInt, Name: "integer"}
-	case "now", "current_timestamp":
+	case "now", "current_timestamp", "date_trunc":
 		fe.t = types.Type{Kind: types.KTime, Name: "timestamp"}
+	case "extract", "date_part":
+		// PG 14 起 extract 返回 numeric；老版本是 double precision，
+		// 用 numeric 两边都能接受（Npgsql 的 GetDouble 会做转换）。
+		fe.t = types.Type{Kind: types.KFloat, Name: "numeric"}
+	case "currval", "lastval", "nextval":
+		fe.t = types.Type{Kind: types.KInt, Name: "bigint"}
 	case "abs", "round", "ceil", "ceiling", "floor", "greatest", "least", "coalesce", "nullif":
 		if len(args) > 0 {
 			fe.t = args[0].Type()

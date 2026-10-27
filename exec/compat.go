@@ -250,6 +250,13 @@ func evalCompat(cat *catalog.Catalog, dbName, name string, vals []types.Value) (
 	case "pg_get_function_arguments", "pg_get_function_result":
 		return types.Text(""), true, nil
 	case "pg_get_serial_sequence":
+		// pg_get_serial_sequence('表', '列') → 'public.表_列_seq'
+		// 客户端常写 currval(pg_get_serial_sequence('t','id'))，所以这里要真算。
+		if len(vals) >= 2 {
+			if name, ok := SerialSequenceName(cat, vals[0].TextForm(), vals[1].TextForm()); ok {
+				return types.Text("public." + name), true, nil
+			}
+		}
 		return types.Null, true, nil
 	case "obj_description":
 		// obj_description(oid [, 目录名]) 返回表/库的注释。

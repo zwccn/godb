@@ -302,6 +302,12 @@ type TxStmt struct {
 	ReadOnly  bool
 }
 
+// SavepointStmt 对应 SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT。
+type SavepointStmt struct {
+	Kind string // savepoint / release / rollback_to
+	Name string
+}
+
 // Explain 对应 EXPLAIN。
 type Explain struct {
 	Stmt Statement
@@ -327,6 +333,7 @@ func (*Update) stmtNode()         {}
 func (*Delete) stmtNode()         {}
 func (*Select) stmtNode()         {}
 func (*TxStmt) stmtNode()         {}
+func (*SavepointStmt) stmtNode()  {}
 func (*Explain) stmtNode()        {}
 
 // ---------- 表达式 ----------

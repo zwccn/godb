@@ -4,6 +4,8 @@ package db
 import (
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -228,6 +230,9 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 
 	defer func() {
 		if r := recover(); r != nil {
+			if os.Getenv("GODB_DEBUG_STACK") != "" {
+				debug.PrintStack()
+			}
 			if sess.InTx() {
 				sess.ForceRollback()
 			}
@@ -302,6 +307,12 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 		return exec.CleanupResult(sc), nil
 	}
 
+	// SAVEPOINT 系列也要放在中毒检查之前：ROLLBACK TO 本来就是用来把事务
+	// 从中毒状态里救回来的（ORM 的嵌套事务/TransactionScope 全靠这个）。
+	if sp, ok := st.(*sql.SavepointStmt); ok {
+		return d.execSavepoint(sess, sp)
+	}
+
 	if sess.InTx() && sess.Aborted() {
 		return nil, ErrAborted
 	}
@@ -330,17 +341,15 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	}
 
 	// 2) 再执行（DDL 独占 schema，普通语句持读锁）
-	ddl := isDDL(st)
-	if ddl {
-		d.Store.SchemaMu.Lock()
-	} else {
-		d.Store.SchemaMu.RLock()
-	}
-	res, execErr := d.Engine.ExecStmt(stmt.Tx(), st)
-	if ddl {
-		d.Store.SchemaMu.Unlock()
-	} else {
-		d.Store.SchemaMu.RUnlock()
+	//
+	// 解锁必须用 defer：引擎里任何一处 panic（曾被「无参函数取 vals[0]」踩到）
+	// 都会跳过 Unlock，SchemaMu 被永久占住 —— 之后所有语句、甚至 Close 都会
+	// 卡死，整个库看起来像挂了。panic 由 Exec 的 recover 兜住并转成错误，
+	// 但锁不能再靠调用顺序保证。
+	res, execErr := d.execLocked(stmt, st)
+	// lastval() 是会话级的：把本事务最后一次分配的序列值带回会话。
+	if v, ok := stmt.Tx().LastSeqValue(); ok {
+		sess.SetLastSeq(v)
 	}
 
 	// 3) 收尾：语句级回滚 + 自动提交
@@ -391,6 +400,45 @@ func (d *DB) execTxControl(sess *txn.Session, ts *sql.TxStmt, pre map[string]loc
 		return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK"}, nil
 	}
 	return nil, fmt.Errorf("unsupported transaction command")
+}
+
+// execLocked 在 schema 锁保护下执行一条语句。DDL 独占，普通语句共享读锁；
+// 解锁走 defer，保证 panic 时锁也一定会放开。
+func (d *DB) execLocked(stmt *txn.Stmt, st sql.Statement) (*exec.Result, error) {
+	if isDDL(st) {
+		d.Store.SchemaMu.Lock()
+		defer d.Store.SchemaMu.Unlock()
+	} else {
+		d.Store.SchemaMu.RLock()
+		defer d.Store.SchemaMu.RUnlock()
+	}
+	return d.Engine.ExecStmt(stmt.Tx(), st)
+}
+
+// execSavepoint 实现 SAVEPOINT / RELEASE / ROLLBACK TO。
+//
+// 存储层本来就有语句级快照（Mark/RestoreTo），保存点就是在此基础上再压一层，
+// 所以 ROLLBACK TO 能把事务从「中毒」状态里救回来继续用 —— ORM 的嵌套事务
+// （Npgsql 的 TransactionScope）依赖这个语义。
+func (d *DB) execSavepoint(sess *txn.Session, sp *sql.SavepointStmt) (*exec.Result, error) {
+	switch sp.Kind {
+	case "savepoint":
+		if err := sess.Savepoint(sp.Name); err != nil {
+			return nil, err
+		}
+		return &exec.Result{Command: "SAVEPOINT", Tag: "SAVEPOINT"}, nil
+	case "release":
+		if err := sess.ReleaseSavepoint(sp.Name); err != nil {
+			return nil, err
+		}
+		return &exec.Result{Command: "RELEASE", Tag: "RELEASE"}, nil
+	case "rollback_to":
+		if err := sess.RollbackToSavepoint(sp.Name); err != nil {
+			return nil, err
+		}
+		return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK"}, nil
+	}
+	return nil, fmt.Errorf("unsupported savepoint command %q", sp.Kind)
 }
 
 func isDDL(st sql.Statement) bool {

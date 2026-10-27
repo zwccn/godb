@@ -274,6 +274,7 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 	}
 	td := e.Store.Table(t.Name)
 	act := s.Action
+	note := ""
 	switch act.Kind {
 	case "add_column":
 		if _, _, exists := t.Col(act.Col.Name); exists {
@@ -319,6 +320,28 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		if err := t.Validate(); err != nil {
 			return nil, err
 		}
+		// 引用了被删列的索引必须一起删：留着它，列号会指向错位的列，
+		// 查询可能走索引拿到完全不相干的行。PostgreSQL 也是连带删除。
+		var kept []*catalog.Index
+		var dropped []string
+		for _, ix := range t.Indexes {
+			uses := false
+			for _, cn := range ix.Columns {
+				if strings.EqualFold(cn, act.Name) {
+					uses = true
+					break
+				}
+			}
+			if uses {
+				dropped = append(dropped, ix.Name)
+				continue
+			}
+			kept = append(kept, ix)
+		}
+		if len(dropped) > 0 {
+			t.Indexes = kept
+			note = fmt.Sprintf("同时删除了依赖该列的索引：%s", strings.Join(dropped, ", "))
+		}
 		for i, row := range td.Rows {
 			newRow := make(types.Row, 0, len(row)-1)
 			newRow = append(newRow, row[:idx]...)
@@ -335,6 +358,14 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 			return nil, fmt.Errorf("column %q of relation %q already exists", act.NewName, t.Name)
 		}
 		t.Columns[idx].Name = act.NewName
+		// 索引按列名引用列，改名要同步，否则索引变成「引用了不存在的列」而被跳过
+		for _, ix := range t.Indexes {
+			for j, cn := range ix.Columns {
+				if strings.EqualFold(cn, act.Name) {
+					ix.Columns[j] = act.NewName
+				}
+			}
+		}
 		t.Rebuild()
 	case "rename_table":
 		oldName := t.Name
@@ -375,12 +406,15 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 	default:
 		return nil, fmt.Errorf("unsupported ALTER TABLE action")
 	}
+	// 任何一种 ALTER 都可能让现有的哈希索引失效（列位置、表名、列类型都变了），
+	// 统一重建一次。DDL 本来就少，不值得为省这一次扫描去区分。
+	e.Store.RebuildIndex(t.Name)
 	// DROP COLUMN / RENAME TABLE / ALTER TYPE 必须重写快照，见 persistSchema 的说明
 	needsSnapshot := act.Kind == "drop_column" || act.Kind == "rename_table" || act.Kind == "alter_type"
 	if err := e.persistSchema(needsSnapshot); err != nil {
 		return nil, err
 	}
-	return &Result{Command: "ALTER TABLE", Tag: "ALTER TABLE"}, nil
+	return &Result{Command: "ALTER TABLE", Tag: "ALTER TABLE", Message: note}, nil
 }
 
 // ---------- INSERT ----------
@@ -429,6 +463,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 	}
 
 	groups := t.UniqueGroups()
+	uixs := uniqueIndexGroups(t)
 	checks, err := e.compileChecks(t)
 	if err != nil {
 		return nil, err
@@ -469,7 +504,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 	var inserted []types.Row
 
 	// 语句内已出现过的唯一键（避免 O(n²) 的 overlay 扫描）
-	seen := map[int]map[string]bool{}
+	seen := map[string]map[string]bool{}
 	baseIns := tx.OverlayInsLen(t.Name)
 
 	for _, exprs := range rows {
@@ -531,11 +566,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 				continue // 含 NULL 的组合不参与唯一性判断
 			}
 			k := types.Key(vals)
-			cm := seen[gi]
-			if cm == nil {
-				cm = map[string]bool{}
-				seen[gi] = cm
-			}
+			cm := seenKeys(seen, fmt.Sprintf("g%d", gi))
 			if cm[k] {
 				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
 			}
@@ -547,6 +578,23 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 			}
 			if dup {
 				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
+			}
+		}
+		for _, ux := range uixs {
+			vals, ok := groupValues(row, ux.cols)
+			if !ok {
+				continue
+			}
+			k := types.Key(vals)
+			cm := seenKeys(seen, "i"+ux.name)
+			if cm[k] {
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
+			}
+			cm[k] = true
+			// 唯一索引自带哈希表，判重是 O(1)：命中任何一行都算重复。
+			// 本语句刚插入的行也在结果里，但同语句重复已经被上面的 seen 拦住了。
+			if hits := tx.IndexLookup(t, ux.name, ux.cols, k); len(hits) > 0 {
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
 			}
 		}
 		if _, err := tx.Insert(t.Name, row); err != nil {
@@ -666,6 +714,85 @@ func groupName(t *catalog.Table, cols []int) string {
 	return t.Name + "_pkey"
 }
 
+// uxGroup 是一条需要判重的用户唯一索引（列位置已经解析好）。
+type uxGroup struct {
+	name string
+	cols []int
+}
+
+// uniqueIndexGroups 返回表上所有 UNIQUE 的用户索引。
+//
+// 在此之前 CREATE UNIQUE INDEX 只写进 catalog 和系统目录：既不加速查询，
+// 也不参与判重，用户建完以为有了唯一约束、实际还能插重复值。既然索引表
+// 已经真建起来了，判重顺带就能做，而且是 O(1)（列级 UNIQUE 只能全表扫）。
+func uniqueIndexGroups(t *catalog.Table) []uxGroup {
+	var out []uxGroup
+	for _, ix := range t.Indexes {
+		if !ix.Unique || len(ix.Columns) == 0 {
+			continue
+		}
+		cols := make([]int, 0, len(ix.Columns))
+		ok := true
+		for _, cn := range ix.Columns {
+			ci, exists := t.ColumnIdx(cn)
+			if !exists {
+				ok = false
+				break
+			}
+			cols = append(cols, ci)
+		}
+		if !ok {
+			continue
+		}
+		out = append(out, uxGroup{name: ix.Name, cols: cols})
+	}
+	return out
+}
+
+// seenKeys 取出（必要时新建）某个唯一组的「本语句已见过键」集合。
+func seenKeys(m map[string]map[string]bool, group string) map[string]bool {
+	s := m[group]
+	if s == nil {
+		s = map[string]bool{}
+		m[group] = s
+	}
+	return s
+}
+
+// collectByIndex 用索引取出 WHERE 能完整匹配的候选行。
+//
+// 返回的 ok 表示「用上了索引」；false 时调用方退回全表扫描。命中索引但
+// 一行都没有时返回 ok=true 加空结果，这时不能回退 —— 回退会把整表捞回来。
+func collectByIndex(tx *storage.Tx, t *catalog.Table, where sql.Expr) ([]storage.Ref, []types.Row, bool) {
+	if where == nil {
+		return nil, nil, false
+	}
+	ixName, cols, vals, found := pickIndex(t, where, t.Name)
+	if !found {
+		return nil, nil, false
+	}
+	for _, v := range vals {
+		if v.IsNull() {
+			return nil, nil, true // 键里有 NULL：恒不匹配
+		}
+	}
+	key := types.Key(vals)
+	if ixName == "" {
+		if hit, ok := tx.PKLookup(t, key); ok {
+			return []storage.Ref{hit.Ref}, []types.Row{hit.Row}, true
+		}
+		return nil, nil, true
+	}
+	hits := tx.IndexLookup(t, ixName, cols, key)
+	refs := make([]storage.Ref, 0, len(hits))
+	rows := make([]types.Row, 0, len(hits))
+	for _, h := range hits {
+		refs = append(refs, h.Ref)
+		rows = append(rows, h.Row)
+	}
+	return refs, rows, true
+}
+
 // ---------- UPDATE / DELETE ----------
 
 func (e *Engine) tableScope(t *catalog.Table, alias string) Schema {
@@ -739,10 +866,11 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 	}
 
 	groups := t.UniqueGroups()
+	uixs := uniqueIndexGroups(t)
 	affected := 0
 	var refs []storage.Ref
 	var rows []types.Row
-	if err := tx.Scan(t.Name, func(ref storage.Ref, row types.Row) error {
+	collect := func(ref storage.Ref, row types.Row) error {
 		if pred != nil {
 			v, err := pred.Eval(row)
 			if err != nil {
@@ -759,7 +887,15 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		refs = append(refs, ref)
 		rows = append(rows, row)
 		return nil
-	}); err != nil {
+	}
+	// WHERE 能完整匹配某个索引时就不全表扫（多数 UPDATE 都是按主键改一行）。
+	if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
+		for i := range irefs {
+			if err := collect(irefs[i], irows[i]); err != nil {
+				return nil, err
+			}
+		}
+	} else if err := tx.Scan(t.Name, collect); err != nil {
 		return nil, err
 	}
 
@@ -803,6 +939,26 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			}
 			if dup {
 				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
+			}
+		}
+		for _, ux := range uixs {
+			vals, ok := groupValues(newRow, ux.cols)
+			if !ok {
+				continue
+			}
+			if groupUnchanged(row, newRow, ux.cols) {
+				continue // 没动这一组，不必查重
+			}
+			dup := false
+			for _, hit := range tx.IndexLookup(t, ux.name, ux.cols, types.Key(vals)) {
+				if hit.Ref == self {
+					continue
+				}
+				dup = true
+				break
+			}
+			if dup {
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
 			}
 		}
 		if err := tx.Update(t.Name, refs[i], newRow); err != nil {
@@ -871,7 +1027,7 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 
 	var refs []storage.Ref
 	var delRows []types.Row
-	if err := tx.Scan(t.Name, func(ref storage.Ref, row types.Row) error {
+	collect := func(ref storage.Ref, row types.Row) error {
 		if pred != nil {
 			v, err := pred.Eval(row)
 			if err != nil {
@@ -891,7 +1047,14 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 		copy(cp, row)
 		delRows = append(delRows, cp)
 		return nil
-	}); err != nil {
+	}
+	if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
+		for i := range irefs {
+			if err := collect(irefs[i], irows[i]); err != nil {
+				return nil, err
+			}
+		}
+	} else if err := tx.Scan(t.Name, collect); err != nil {
 		return nil, err
 	}
 	for i, ref := range refs {
@@ -1064,24 +1227,72 @@ func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
 	if len(s.Cols) == 0 {
 		return nil, fmt.Errorf("CREATE INDEX requires at least one column")
 	}
-	for _, name := range s.Cols {
+	cols := make([]string, len(s.Cols))
+	for i, name := range s.Cols {
 		if _, ok := t.ColumnIdx(name); !ok {
 			return nil, fmt.Errorf("column %q does not exist", name)
 		}
+		cols[i] = strings.ToLower(name)
 	}
-	cols := make([]string, len(s.Cols))
-	for i, n := range s.Cols {
-		cols[i] = strings.ToLower(n)
+	// 和约束隐式建的索引重名会让客户端的索引页出现两条同名索引，提前拦掉。
+	for _, ix := range syscat.ConstraintIndexNames(t) {
+		if strings.EqualFold(ix, s.Name) {
+			return nil, fmt.Errorf("relation %q already exists", s.Name)
+		}
+	}
+	if s.Unique {
+		if err := e.checkUniqueIndexData(t, cols, s.Name); err != nil {
+			return nil, err
+		}
 	}
 	t.Indexes = append(t.Indexes, &catalog.Index{Name: s.Name, Columns: cols, Unique: s.Unique})
 	if err := e.persistSchema(false); err != nil {
 		return nil, err
 	}
-	return &Result{
-		Command: "CREATE INDEX",
-		Tag:     "CREATE INDEX",
-		Message: "索引已登记，但当前版本不会用它加速查询（只有主键走索引）",
-	}, nil
+	// 已有数据得先灌进新索引，否则索引建完只能查到以后写入的行。
+	if e.Store != nil {
+		e.Store.RebuildIndex(t.Name)
+	}
+	msg := "索引已建立：等值查询会走它"
+	if s.Unique {
+		msg += "，并参与唯一性校验"
+	}
+	return &Result{Command: "CREATE INDEX", Tag: "CREATE INDEX", Message: msg}, nil
+}
+
+// checkUniqueIndexData 在建立唯一索引前检查存量数据。
+//
+// PostgreSQL 在这种情况下直接拒绝建索引；放过去的话索引里某一列会有多行，
+// 之后每次查询都要多一步去重，而且和「唯一」的语义自相矛盾。
+func (e *Engine) checkUniqueIndexData(t *catalog.Table, cols []string, name string) error {
+	if e.Store == nil {
+		return nil
+	}
+	td := e.Store.Table(t.Name)
+	if td == nil {
+		return nil
+	}
+	pos := make([]int, 0, len(cols))
+	for _, cn := range cols {
+		ci, ok := t.ColumnIdx(cn)
+		if !ok {
+			return fmt.Errorf("column %q does not exist", cn)
+		}
+		pos = append(pos, ci)
+	}
+	seen := make(map[string]bool, len(td.Rows))
+	for _, row := range td.Rows {
+		vals, ok := groupValues(row, pos)
+		if !ok {
+			continue // 含 NULL 的行不参与唯一性判断
+		}
+		k := types.Key(vals)
+		if seen[k] {
+			return fmt.Errorf("could not create unique index %q: duplicate key value in (%s)", name, strings.Join(cols, ", "))
+		}
+		seen[k] = true
+	}
+	return nil
 }
 
 // execDropIndex 删除一条索引（按名字找，索引名全库唯一）。
@@ -1092,6 +1303,10 @@ func (e *Engine) execDropIndex(s *sql.DropIndex) (*Result, error) {
 				t.Indexes = append(t.Indexes[:i], t.Indexes[i+1:]...)
 				if err := e.persistSchema(false); err != nil {
 					return nil, err
+				}
+				// 重建一次，把这张索引在内存里的哈希表一起清掉
+				if e.Store != nil {
+					e.Store.RebuildIndex(t.Name)
 				}
 				return &Result{Command: "DROP INDEX", Tag: "DROP INDEX"}, nil
 			}

@@ -56,11 +56,7 @@ type scanOp struct {
 }
 
 func newScan(tx *storage.Tx, t *catalog.Table, qual string) *scanOp {
-	sc := make(Schema, len(t.Columns))
-	for i, c := range t.Columns {
-		sc[i] = ColInfo{Qualifier: strings.ToLower(qual), Name: strings.ToLower(c.Name), Type: c.Type()}
-	}
-	return &scanOp{tx: tx, table: t.Name, qual: qual, sc: sc}
+	return &scanOp{tx: tx, table: t.Name, qual: qual, sc: tableSchema(t, qual)}
 }
 
 func (o *scanOp) Schema() Schema { return o.sc }
@@ -89,6 +85,90 @@ func (o *scanOp) Describe() string {
 	return fmt.Sprintf("Seq Scan on %s", o.table)
 }
 func (o *scanOp) Children() []Operator { return nil }
+
+// tableSchema 按表定义生成 FROM 子树的列布局。
+func tableSchema(t *catalog.Table, qual string) Schema {
+	sc := make(Schema, len(t.Columns))
+	for i, c := range t.Columns {
+		sc[i] = ColInfo{Qualifier: strings.ToLower(qual), Name: strings.ToLower(c.Name), Type: c.Type()}
+	}
+	return sc
+}
+
+// ---------- 索引扫描 ----------
+
+// indexScanOp 用索引取出等值匹配的候选行。
+//
+// 它只负责把「整表扫描」缩成「几行」，WHERE 里的谓词仍然由上层 filterOp
+// 再判一遍。重复判一次的代价可以忽略，换来的是：就算这里对类型或常量的
+// 假设有偏差，也不会返回不该出现的行（漏行则由下面的选索引规则兜住 ——
+// 只有常量能安全 Cast 到列类型时才会用索引）。
+type indexScanOp struct {
+	tx     *storage.Tx
+	tbl    *catalog.Table
+	ixName string // 空表示走主键哈希索引
+	cols   []int
+	vals   []types.Value // 已按列类型归一
+	sc     Schema
+	rows   []types.Row
+	i      int
+}
+
+func newIndexScan(tx *storage.Tx, t *catalog.Table, ixName string, cols []int, vals []types.Value, qual string) *indexScanOp {
+	return &indexScanOp{
+		tx: tx, tbl: t, ixName: ixName, cols: cols, vals: vals,
+		sc: tableSchema(t, qual),
+	}
+}
+
+func (o *indexScanOp) Schema() Schema { return o.sc }
+
+func (o *indexScanOp) Open() error {
+	o.rows = o.rows[:0]
+	o.i = 0
+	// 键里有 NULL 就不可能等值命中（`col = NULL` 恒为未知）
+	for _, v := range o.vals {
+		if v.IsNull() {
+			return nil
+		}
+	}
+	key := types.Key(o.vals)
+	if o.ixName == "" {
+		if hit, ok := o.tx.PKLookup(o.tbl, key); ok {
+			o.rows = append(o.rows, hit.Row)
+		}
+		return nil
+	}
+	for _, hit := range o.tx.IndexLookup(o.tbl, o.ixName, o.cols, key) {
+		o.rows = append(o.rows, hit.Row)
+	}
+	return nil
+}
+
+func (o *indexScanOp) Next() (types.Row, bool, error) {
+	if o.i >= len(o.rows) {
+		return nil, false, nil
+	}
+	r := o.rows[o.i]
+	o.i++
+	return r, true, nil
+}
+
+func (o *indexScanOp) Close() error {
+	o.rows = nil
+	o.i = 0
+	return nil
+}
+
+func (o *indexScanOp) Describe() string {
+	name := o.ixName
+	if name == "" {
+		name = o.tbl.Name + "_pkey"
+	}
+	return fmt.Sprintf("Index Scan using %s on %s", name, o.tbl.Name)
+}
+
+func (o *indexScanOp) Children() []Operator { return nil }
 
 // ---------- 单行（无 FROM 的 SELECT） ----------
 

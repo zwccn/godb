@@ -162,7 +162,8 @@ func compatFuncType(name string) (types.Type, bool) {
 }
 
 // evalCompat 计算兼容函数。第二个返回值表示是否已处理。
-func evalCompat(name string, vals []types.Value) (types.Value, bool, error) {
+// cat 只给需要反查系统目录的函数用（可 为 nil，此时那些函数返回空串）。
+func evalCompat(cat *catalog.Catalog, name string, vals []types.Value) (types.Value, bool, error) {
 	arg := func(i int) types.Value {
 		if i < len(vals) {
 			return vals[i]
@@ -219,7 +220,19 @@ func evalCompat(name string, vals []types.Value) (types.Value, bool, error) {
 	case "pg_get_expr":
 		// adbin 本身就存的是表达式文本，直接透出
 		return types.Text(text(0)), true, nil
-	case "pg_get_indexdef", "pg_get_constraintdef", "pg_get_viewdef", "pg_get_ruledef",
+	case "pg_get_indexdef":
+		// psql 的 \d 会从这个结果里截取第一个 '(' 之后的部分来显示索引定义，
+		// 返回空串就会留下 "xxx PRIMARY KEY," 后面什么都没有（行尾多一个逗号）。
+		if v, ok := syscat.IndexDefByOID(cat, int32(integer(0))); ok {
+			return types.Text(v), true, nil
+		}
+		return types.Text(""), true, nil
+	case "pg_get_constraintdef":
+		if v, ok := syscat.ConstraintDefByOID(cat, int32(integer(0))); ok {
+			return types.Text(v), true, nil
+		}
+		return types.Text(""), true, nil
+	case "pg_get_viewdef", "pg_get_ruledef",
 		"pg_get_triggerdef", "pg_get_functiondef", "pg_get_partkeydef",
 		"pg_get_statisticsobjdef", "pg_get_statisticsobjdef_columns":
 		return types.Text(""), true, nil

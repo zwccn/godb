@@ -546,6 +546,124 @@ func (tx *Tx) FindUnique(t *catalog.Table, col int, val types.Value, self *Ref, 
 	return tx.FindUniqueGroup(t, []int{col}, []types.Value{val}, self, scanTo)
 }
 
+// IndexHit 是索引查找命中的一行。Ref 是事务视角的（New 表示本事务新插入的行），
+// 判重时要拿它和 self 比较。
+type IndexHit struct {
+	Ref Ref
+	Row types.Row
+}
+
+// IndexLookup 用用户建的二级索引查一个键对应的全部行。
+//
+// 索引里存的是「已提交态」的行号，所以必须逐个用 tx.Get 取事务视角的行，
+// 再重新校验一次键值：本事务可能已经把这行改成了别的值。反过来，本事务
+// 新插入或改了键的行不在索引里，要单独从 overlay 补一遍。少了任何一边都会
+// 出现「事务里刚插的行自己查不到」或「已删的行又被索引捞回来」。
+func (tx *Tx) IndexLookup(t *catalog.Table, ixName string, cols []int, key string) []IndexHit {
+	td := tx.st.Table(t.Name)
+	if td == nil {
+		return nil
+	}
+	var out []IndexHit
+	// seen 记录「已经按堆索引处理过」的行号，避免 upd 分支重复产出。
+	seen := make(map[int]bool, 4)
+	if m := td.Second[cleanName(ixName)]; m != nil {
+		for _, slot := range m[key] {
+			seen[slot] = true
+			row, ok := tx.Get(t.Name, Ref{Slot: slot})
+			if !ok {
+				continue
+			}
+			if !groupKeyEqual(row, cols, key) {
+				continue
+			}
+			out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
+		}
+	}
+	o := tx.ov[cleanName(t.Name)]
+	if o == nil {
+		return out
+	}
+	for i, row := range o.ins {
+		if o.insDel[i] {
+			continue
+		}
+		if nr, ok := o.insUpd[i]; ok {
+			row = nr
+		}
+		if !groupKeyEqual(row, cols, key) {
+			continue
+		}
+		out = append(out, IndexHit{Ref: Ref{New: true, Slot: i}, Row: row})
+	}
+	// 被本事务改了键的行：新键在堆索引里查不到，只能从 overlay 补。
+	var slots []int
+	for slot := range o.upd {
+		if !seen[slot] {
+			slots = append(slots, slot)
+		}
+	}
+	if len(slots) > 1 {
+		sort.Ints(slots) // map 遍历顺序随机，排一下让结果可复现
+	}
+	for _, slot := range slots {
+		if o.del[slot] {
+			continue
+		}
+		row := o.upd[slot]
+		if !groupKeyEqual(row, cols, key) {
+			continue
+		}
+		out = append(out, IndexHit{Ref: Ref{Slot: slot}, Row: row})
+	}
+	return out
+}
+
+// PKLookup 用主键哈希索引按完整主键值取一行。
+func (tx *Tx) PKLookup(t *catalog.Table, key string) (IndexHit, bool) {
+	cols := t.PKIdxes()
+	if len(cols) == 0 {
+		return IndexHit{}, false
+	}
+	td := tx.st.Table(t.Name)
+	if td == nil {
+		return IndexHit{}, false
+	}
+	if slot, ok := td.Index[key]; ok {
+		if row, exists := tx.Get(t.Name, Ref{Slot: slot}); exists && groupKeyEqual(row, cols, key) {
+			return IndexHit{Ref: Ref{Slot: slot}, Row: row}, true
+		}
+	}
+	o := tx.ov[cleanName(t.Name)]
+	if o == nil {
+		return IndexHit{}, false
+	}
+	for i, row := range o.ins {
+		if o.insDel[i] {
+			continue
+		}
+		if nr, ok := o.insUpd[i]; ok {
+			row = nr
+		}
+		if groupKeyEqual(row, cols, key) {
+			return IndexHit{Ref: Ref{New: true, Slot: i}, Row: row}, true
+		}
+	}
+	best := -1
+	for slot, row := range o.upd {
+		if o.del[slot] {
+			continue
+		}
+		if groupKeyEqual(row, cols, key) && (best < 0 || slot < best) {
+			best = slot
+		}
+	}
+	if best >= 0 {
+		return IndexHit{Ref: Ref{Slot: best}, Row: o.upd[best]}, true
+	}
+	return IndexHit{}, false
+}
+
 // FindUniqueGroup 检查一组列的组合值是否已存在（主键可能是复合的）。
 //
 // 复合主键必须按「整组」判重：(a,b) 主键下 a 单独重复是合法的。
@@ -589,37 +707,59 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 			}
 		}
 	}
-	if o == nil {
-		return false, nil
+	// 本事务的写集里也可能藏着冲突。注意这里不能提前返回：事务外的一条
+	// INSERT 没有写集（o == nil），但已提交行里的重复照样要查 —— 之前
+	// 直接 return false，导致列级 UNIQUE 在自动提交路径上形同虚设。
+	if o != nil {
+		limit := len(o.ins)
+		if scanTo >= 0 && scanTo < limit {
+			limit = scanTo
+		}
+		for i := 0; i < limit; i++ {
+			row := o.ins[i]
+			if o.insDel[i] {
+				continue
+			}
+			if !groupKeyEqual(row, cols, key) {
+				continue
+			}
+			if self != nil && self.New && self.Slot == i {
+				continue
+			}
+			return true, nil
+		}
+		for idx, row := range o.upd {
+			if o.del[idx] || !groupKeyEqual(row, cols, key) {
+				continue
+			}
+			if self != nil && !self.New && self.Slot == idx {
+				continue
+			}
+			return true, nil
+		}
 	}
-	limit := len(o.ins)
-	if scanTo >= 0 && scanTo < limit {
-		limit = scanTo
-	}
-	for i := 0; i < limit; i++ {
-		row := o.ins[i]
-		if o.insDel[i] {
-			continue
-		}
-		if !groupKeyEqual(row, cols, key) {
-			continue
-		}
-		if self != nil && self.New && self.Slot == i {
-			continue
-		}
-		return true, nil
-	}
-	for idx, row := range o.upd {
-		if o.del[idx] || !groupKeyEqual(row, cols, key) {
-			continue
-		}
-		if self != nil && !self.New && self.Slot == idx {
-			continue
-		}
-		return true, nil
-	}
-	// 非主键的唯一组合：全表扫描（含已提交行）
+	// 非主键的唯一组合：查 UNIQUE 列的哈希索引（已提交态）。
+	// 本事务自己的插入/更新上面已经处理过，这里只补「已提交行」这一边。
 	if !isPK {
+		if m := td.UniqueKeys[colsSig(cols)]; m != nil {
+			for _, slot := range m[key] {
+				if o != nil && o.del[slot] {
+					continue
+				}
+				if self != nil && !self.New && self.Slot == slot {
+					continue
+				}
+				// 本事务把这行的这一组改成了别的值，就不算冲突
+				if o != nil {
+					if nr, changed := o.upd[slot]; changed && !groupKeyEqual(nr, cols, key) {
+						continue
+					}
+				}
+				return true, nil
+			}
+			return false, nil
+		}
+		// 兜底：表结构刚变、哈希表还没重建时照样全表扫一遍，不能漏判
 		var conflict bool
 		err := tx.Scan(t.Name, func(ref Ref, row types.Row) error {
 			if self != nil && ref.New == self.New && ref.Slot == self.Slot {

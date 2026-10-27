@@ -256,7 +256,13 @@ func AppendKey(b *strings.Builder, v Value) {
 	case KInt:
 		b.WriteString(strconv.FormatInt(v.I, 10))
 	case KFloat:
-		b.WriteString(strconv.FormatFloat(v.Float(), 'g', -1, 64))
+		f := v.Float()
+		// -0.0 与 0.0 是相等的两个值，编码必须一致，否则哈希索引会把它们
+		// 当成两个键（主键/唯一索引会放过重复值，等值查找还会漏行）。
+		if f == 0 {
+			f = 0
+		}
+		b.WriteString(strconv.FormatFloat(f, 'g', -1, 64))
 	case KBool:
 		if v.Bool() {
 			b.WriteByte('t')

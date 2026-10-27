@@ -264,8 +264,8 @@ func TestCopyInOut(t *testing.T) {
 	}
 }
 
-// CREATE INDEX / DROP INDEX：登记式索引——能建能删、系统目录能看到，
-// 但不加速查询（只有主键走哈希索引）。
+// CREATE INDEX / DROP INDEX：建了就能用——等值查询走索引，
+// UNIQUE 索引同时参与唯一性校验。
 func TestCreateDropIndex(t *testing.T) {
 	d := newTestDB(t)
 	s := "s"
@@ -275,9 +275,9 @@ func TestCreateDropIndex(t *testing.T) {
 	if res[0].Tag != "CREATE INDEX" {
 		t.Fatalf("tag = %q", res[0].Tag)
 	}
-	// 结果里要明确说明不加速，避免误解
-	if !strings.Contains(res[0].Message, "不会用它加速") {
-		t.Fatalf("应提示不加速，实际 %q", res[0].Message)
+	// 结果里要说清楚它确实生效了
+	if !strings.Contains(res[0].Message, "等值查询会走它") {
+		t.Fatalf("应提示索引生效，实际 %q", res[0].Message)
 	}
 
 	// 系统目录里能看到这条索引

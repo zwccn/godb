@@ -70,10 +70,7 @@ func buildMeta(src Source) *meta {
 		for _, grp := range t.UniqueGroups() {
 			ci := grp[0]
 			prim := t.Columns[ci].PrimaryKey
-			name := fmt.Sprintf("%s_%s_key", t.Name, t.Columns[ci].Name)
-			if prim {
-				name = t.Name + "_pkey"
-			}
+			name := constraintIndexName(t, grp)
 			tm.idx = append(tm.idx, idxMeta{
 				oid:     int32(indexOIDBase + n*len(src.tables()) + i),
 				name:    name,
@@ -113,6 +110,30 @@ func buildMeta(src Source) *meta {
 		m.byName[strings.ToLower(tm.t.Name)] = tm
 	}
 	return m
+}
+
+// constraintIndexName 是主键/唯一约束隐式创建的索引名，
+// 与 PostgreSQL 的默认命名一致（t_pkey / t_col_key）。
+func constraintIndexName(t *catalog.Table, cols []int) string {
+	if len(cols) == 1 && !t.Columns[cols[0]].PrimaryKey {
+		return fmt.Sprintf("%s_%s_key", t.Name, t.Columns[cols[0]].Name)
+	}
+	return t.Name + "_pkey"
+}
+
+// ConstraintIndexNames 返回某张表上由约束隐式创建的索引名。
+//
+// 用户 CREATE INDEX 不能用这些名字：重名会让客户端的索引页出现两条同名索引，
+// 也会让按名字的 DROP INDEX 无法判断该删哪一条。
+func ConstraintIndexNames(t *catalog.Table) []string {
+	if t == nil {
+		return nil
+	}
+	var out []string
+	for _, grp := range t.UniqueGroups() {
+		out = append(out, constraintIndexName(t, grp))
+	}
+	return out
 }
 
 // RelationOID 返回一张表在 pg_class 里的 OID（与虚拟表 pg_class 的输出一致）。
@@ -884,12 +905,76 @@ func typmodOf(col *catalog.Column) int {
 }
 
 func indexDef(tm *tblMeta, ix idxMeta) string {
-	names := make([]string, 0, len(ix.cols))
-	for _, ci := range ix.cols {
+	uniq := ""
+	if ix.uniq {
+		uniq = "UNIQUE "
+	}
+	return fmt.Sprintf("CREATE %sINDEX %s ON public.%s USING btree (%s)",
+		uniq, ix.name, tm.t.Name, colNames(tm, ix.cols))
+}
+
+// colNames 把列位置列表渲染成 "a, b"。
+func colNames(tm *tblMeta, cols []int) string {
+	names := make([]string, 0, len(cols))
+	for _, ci := range cols {
+		if ci < 0 || ci >= len(tm.t.Columns) {
+			continue
+		}
 		names = append(names, tm.t.Columns[ci].Name)
 	}
-	return fmt.Sprintf("CREATE UNIQUE INDEX %s ON public.%s USING btree (%s)",
-		ix.name, tm.t.Name, strings.Join(names, ", "))
+	return strings.Join(names, ", ")
+}
+
+// IndexDefByOID 按索引 OID 返回 CREATE INDEX 语句（pg_get_indexdef）。
+//
+// psql 的 \d 会用它的结果截取 "(列, ...)" 部分来显示索引；返回空串的话，
+// 那一行就只剩 "xxx PRIMARY KEY," 后面什么都没有，行尾多出一个逗号。
+func IndexDefByOID(cat *catalog.Catalog, oid int32) (string, bool) {
+	if cat == nil || oid == 0 {
+		return "", false
+	}
+	m := buildMeta(Source{Cat: cat})
+	for i := range m.tables {
+		tm := &m.tables[i]
+		for _, ix := range tm.idx {
+			if ix.oid == oid {
+				return indexDef(tm, ix), true
+			}
+		}
+	}
+	return "", false
+}
+
+// ConstraintDefByOID 按约束 OID 返回约束定义（pg_get_constraintdef）。
+func ConstraintDefByOID(cat *catalog.Catalog, oid int32) (string, bool) {
+	if cat == nil || oid == 0 {
+		return "", false
+	}
+	m := buildMeta(Source{Cat: cat})
+	for i := range m.tables {
+		tm := &m.tables[i]
+		for _, ix := range tm.idx {
+			if ix.conOid != 0 && ix.conOid == oid {
+				kind := "UNIQUE"
+				if ix.primary {
+					kind = "PRIMARY KEY"
+				}
+				return fmt.Sprintf("%s (%s)", kind, colNames(tm, ix.cols)), true
+			}
+		}
+		for fi, fk := range tm.t.ForeignKeys {
+			if int32(fkOIDBase+int(tm.oid)*10+fi) != oid {
+				continue
+			}
+			ref := "@" + fk.RefTable
+			if parent, ok := m.byName[strings.ToLower(fk.RefTable)]; ok {
+				ref = strings.ToLower(parent.t.Name)
+			}
+			return fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s(%s)",
+				strings.Join(fk.Columns, ", "), ref, strings.Join(fk.RefColumns, ", ")), true
+		}
+	}
+	return "", false
 }
 
 // indexColList 生成 indkey：列号空格分隔（int2vector 的文本形式，不带括号）。

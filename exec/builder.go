@@ -48,6 +48,15 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 	}
 
 	if s.Where != nil {
+		// 单表查询才尝试走索引：多表 JOIN 的谓词分不清是连接条件还是过滤条件，
+		// 那属于连接顺序重排的范畴，这个引擎没有优化器。
+		if len(s.From) == 1 {
+			if bt, ok := s.From[0].(*sql.BaseTable); ok {
+				if is, ok2 := p.tryIndexScan(bt, s.Where); ok2 {
+					op = is
+				}
+			}
+		}
 		pred, err := p.compile(s.Where, sc)
 		if err != nil {
 			return nil, err
@@ -203,6 +212,139 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		return j, sc, nil
 	}
 	return nil, nil, fmt.Errorf("unsupported FROM clause")
+}
+
+// tryIndexScan 尝试把「整表扫描 + WHERE」改写成索引查找。
+//
+// 只认最稳的一种情形：索引的每一列都被 `列 = 常量` 约束住（完整键等值）。
+// 前缀匹配、范围条件、IN 列表都留到以后 —— 它们需要的是有序索引，而这里的
+// 索引是哈希表，只有完整键才能查。主键也走这条路径（它有常驻的哈希索引，
+// 之前一直只用来判重、查数据还在全表扫）。
+func (p *Planner) tryIndexScan(bt *sql.BaseTable, where sql.Expr) (Operator, bool) {
+	if p.Tx == nil || p.lookupCTE(bt.Table) != nil {
+		return nil, false
+	}
+	t, ok := p.Cat.Get(bt.Table)
+	if !ok {
+		return nil, false
+	}
+	qual := bt.Alias
+	if qual == "" {
+		qual = t.Name
+	}
+	qual = strings.ToLower(qual)
+	ixName, cols, vals, ok := pickIndex(t, where, qual)
+	if !ok {
+		return nil, false
+	}
+	return newIndexScan(p.Tx, t, ixName, cols, vals, qual), true
+}
+
+// pickIndex 从 WHERE 里挑一个能完整匹配的索引，主键优先。
+// ixName 为空表示走主键哈希索引。三个返回值分别是索引名、列位置、归一后的键值。
+//
+// UPDATE / DELETE 也用同一套选择逻辑：它们的 WHERE 和 SELECT 是一回事，
+// 没道理查询走索引、按主键改一行还要全表扫。
+func pickIndex(t *catalog.Table, where sql.Expr, qual string) (string, []int, []types.Value, bool) {
+	eq := equalities(where, qual)
+	if len(eq) == 0 {
+		return "", nil, nil, false
+	}
+	if pk := t.PKIdxes(); len(pk) > 0 {
+		if vals, ok := constrainByPos(t, pk, eq); ok {
+			return "", pk, vals, true
+		}
+	}
+	// 多个索引都能用时选列最多的那个：命中的行最少。
+	var best *catalog.Index
+	var bestCols []int
+	var bestVals []types.Value
+	for _, ux := range t.Indexes {
+		cols, vals, ok := constrainByIndex(t, ux, eq)
+		if !ok {
+			continue
+		}
+		if best == nil || len(cols) > len(bestCols) {
+			best, bestCols, bestVals = ux, cols, vals
+		}
+	}
+	if best == nil {
+		return "", nil, nil, false
+	}
+	return best.Name, bestCols, bestVals, true
+}
+
+// equalities 从 WHERE 里收集「列 = 常量」形式的等值约束。
+//
+// 同名列出多次（`a = 1 AND a = 2`）时留第一个：候选集可能偏大，但上面的
+// filterOp 会把这些行全过滤掉，结果仍然正确 —— 这里宁可多取也不能少取。
+func equalities(where sql.Expr, qual string) map[string]types.Value {
+	out := map[string]types.Value{}
+	for _, c := range splitConjuncts(where) {
+		b, ok := c.(*sql.Binary)
+		if !ok || b.Op != "=" {
+			continue
+		}
+		lref, lok := b.L.(*sql.ColumnRef)
+		rref, rok := b.R.(*sql.ColumnRef)
+		switch {
+		case lok && !rok:
+			addEquality(out, lref, b.R, qual)
+		case rok && !lok:
+			addEquality(out, rref, b.L, qual)
+		}
+	}
+	return out
+}
+
+func addEquality(dst map[string]types.Value, ref *sql.ColumnRef, val sql.Expr, qual string) {
+	if ref.Table != "" && !strings.EqualFold(ref.Table, qual) {
+		return
+	}
+	v, err := CompileConst(val)
+	if err != nil {
+		return
+	}
+	name := strings.ToLower(ref.Name)
+	if _, exists := dst[name]; !exists {
+		dst[name] = v
+	}
+}
+
+// constrainByPos 检查一组列位置是否都被等值常量约束住，并给出归一后的值。
+func constrainByPos(t *catalog.Table, cols []int, eq map[string]types.Value) ([]types.Value, bool) {
+	vals := make([]types.Value, 0, len(cols))
+	for _, ci := range cols {
+		if ci < 0 || ci >= len(t.Columns) {
+			return nil, false
+		}
+		v, ok := eq[strings.ToLower(t.Columns[ci].Name)]
+		if !ok {
+			return nil, false
+		}
+		cv, err := types.Cast(v, t.Columns[ci].Type())
+		if err != nil {
+			return nil, false
+		}
+		vals = append(vals, cv)
+	}
+	return vals, len(vals) > 0
+}
+
+func constrainByIndex(t *catalog.Table, ux *catalog.Index, eq map[string]types.Value) ([]int, []types.Value, bool) {
+	cols := make([]int, 0, len(ux.Columns))
+	for _, cn := range ux.Columns {
+		ci, ok := t.ColumnIdx(cn)
+		if !ok {
+			return nil, nil, false
+		}
+		cols = append(cols, ci)
+	}
+	vals, ok := constrainByPos(t, cols, eq)
+	if !ok {
+		return nil, nil, false
+	}
+	return cols, vals, true
 }
 
 // expandStars 展开 * 与 table.*。

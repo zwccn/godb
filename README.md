@@ -475,7 +475,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 |---|---|
 | psql / pgcli | `-h 127.0.0.1 -p 6432 -U godb -d godb` |
 | Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名 `godb`，**没设密码时密码留空** |
-| .NET（Npgsql / FreeSql / EF Core / Dapper） | 连接串要带 `Server Compatibility Mode=NoTypeLoading`，见下面「.NET / Npgsql」小节 |
+| .NET（Npgsql / FreeSql / EF Core / Dapper） | 直接连即可（trust 下 `Username` 随便填，调试期建议 `Pooling=false`），见下面「.NET / Npgsql」小节 |
 
 没启用密码时是 trust 认证，用户名填什么都行；在设置页设了密码之后，用户名必须和那里填的
 一致（默认 `godb`），密码不能空。
@@ -522,17 +522,22 @@ Navicat / DBeaver 这类工具里「表数据」网格是否可编辑，看的�
 .NET 生态基本都是 Npgsql，它有两个跟别的客户端不一样的习惯：
 
 **1. 连上之后先拉一份类型目录**。Npgsql 会往 `pg_type` / `pg_enum` 上跑几条联合查询建 OID 映射，
-最后一条 `SELECT pg_type.oid, enumlabel FROM pg_enum JOIN pg_type ON pg_type.oid = enumtypid ORDER BY oid, enumsortorder`
-里的 `order by oid`，PostgreSQL 是先按**输出列名**匹配的（落到第 1 列 `pg_type.oid`），
-godb 目前按来源列解析，而两张表都有 `oid`，于是报 `column reference "oid" is ambiguous`（见「已知限制」）。
-在 ORDER BY 解析规则对齐之前，连接串加 `Server Compatibility Mode=NoTypeLoading` 跳过整段类型加载即可：
+最后一条是 `SELECT pg_type.oid, enumlabel FROM pg_enum JOIN pg_type ON pg_type.oid = enumtypid
+ORDER BY oid, enumsortorder`。这里的 `order by oid` 按 PG 的规矩要**优先当输出列名**（裸名字既像
+输出列又像输入列时按输出列解释），也就是排第 1 列的 `pg_type.oid`。
+
+godb 以前只按来源列解析，两张表都有 `oid` → 报 `column reference "oid" is ambiguous`，所以
+当时的办法是加 `Server Compatibility Mode=NoTypeLoading` 跳过整段类型加载。**2026-10-27 已按 PG 规则
+修正 ORDER BY 的解析顺序**（输出列名 → 来源列 → 序号，见 `TestOrderByPrefersOutputColumnName`
+等 6 个用例），现在直接连就行：
 
 ```
-Host=127.0.0.1;Port=6432;Database=godb;Username=godb;Pooling=false;Server Compatibility Mode=NoTypeLoading
+Host=127.0.0.1;Port=6432;Database=godb;Username=godb;Pooling=false
 ```
 
-枚举值要写成 `NoTypeLoading`（**无空格**），写成 `No Type Loading` 会报
-`Requested value 'No Type Loading' was not found`。`Username` 必须有值，trust 认证下随便填。
+`Username` 必须有值（trust 认证下随便填）。另外 `NoTypeLoading` 这个枚举值只能写成
+`NoTypeLoading`（**无空格**），写成 `No Type Loading` 会报 `Requested value … was not found` ——
+虽然对 godb 已经用不上了，遇到别的兼容问题想临时关掉类型加载时会踩到。
 
 **2. 扩展协议校验很严**。`RowDescription` 只允许由 `Describe` 回一帧，`Execute` 阶段再回一帧就直接抛
 `Received unexpected backend message of type RowDescription`。godb 之前 `handleExecute` 复用
@@ -1040,11 +1045,6 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - `CHECK` 约束会校验，但还没进 `pg_constraint`：psql `\d` 的「Check constraints」
   段和客户端的检查约束页是空的。
 - 标识符统一转小写（`"Ud"` 与 `ud` 视为同一张表），不像 PostgreSQL 那样区分引号标识符的大小写。
-- `ORDER BY` 只按来源列解析，**不会优先匹配输出列名**。PG 的规则是先看 select 列表里有没有同名的输出列：
-  `SELECT pg_type.oid, enumlabel FROM pg_enum JOIN pg_type ON … ORDER BY oid` 在 PG 里落到第 1 列，
-  在 godb 里因为两张表都有 `oid` 而报 `column reference "oid" is ambiguous`。
-  Npgsql 连上来时那条类型目录查询正好撞上，所以 .NET 客户端目前要带 `Server Compatibility Mode=NoTypeLoading`
-  （见「.NET / Npgsql」小节）；要根治得改 `ORDER BY` 的解析顺序（先输出列名，再来源列，最后序号）。
 - 系统目录是"够客户端用"的子集：`pg_proc` 只列了少量函数、统计视图（`pg_stat_*`）大多是空壳，
   需要新表时补 `syscat/syscat.go` 的 `specs` 与 `syscat/rows.go` 的生成逻辑即可。
 - `pg_get_indexdef` / `pg_get_constraintdef` 现在会返回真实定义（`\d` 的索引行不再只剩一个逗号），

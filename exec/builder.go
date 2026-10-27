@@ -1484,14 +1484,29 @@ func (p *Planner) orderKey(oi *sql.OrderItem, items []*sql.SelectItem, targetExp
 		}
 		return nil, fmt.Errorf("ORDER BY position %d is not in select list", n)
 	}
-	// 别名
+	// 输出列名优先于来源列 —— 这是 PG 的规矩（ORDER BY 文档原话：裸名字既像输出列
+	// 又像输入列时，按输出列解释）。例：
+	//   SELECT pg_type.oid, enumlabel FROM pg_enum JOIN pg_type ON … ORDER BY oid
+	// 两张表都有 oid，但输出里那个 oid 是第 1 列，所以按它排，不该报歧义。
+	// Npgsql 加载类型目录的第 4 条查询就卡在这里。
 	if cr, ok := oi.Expr.(*sql.ColumnRef); ok && cr.Table == "" {
+		hit := -1
 		for i, it := range items {
-			if it.Alias != "" && strings.EqualFold(it.Alias, cr.Name) {
-				return targetExprs[i], nil
+			// 比对的是「输出列名」而不是「Alias」：没写别名的 SELECT a, b 也要能按 a/b 排
+			if !strings.EqualFold(itemName(it), cr.Name) {
+				continue
 			}
+			if hit >= 0 {
+				// 输出里有两个同名列（SELECT a.id, b.id … ORDER BY id）：PG 也报歧义
+				return nil, fmt.Errorf("ORDER BY %q is ambiguous", cr.Name)
+			}
+			hit = i
+		}
+		if hit >= 0 {
+			return targetExprs[hit], nil
 		}
 	}
+	// 走到这里说明不是输出列名（或本来就带表限定/是表达式），回落到来源列解析
 	return compile(oi.Expr, ctx)
 }
 

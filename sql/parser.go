@@ -681,8 +681,23 @@ func (p *parser) parseInsert() (Statement, error) {
 		}
 		st.Columns = cols
 	}
-	if p.atKw("select") {
-		return nil, p.errAt(p.peek(), "INSERT ... SELECT is not supported")
+	// INSERT ... SELECT：数据来自一条查询。PG 也允许用括号包住那条查询。
+	if p.atKw("select") || (p.atPunct("(") && p.startsQuery()) {
+		st0, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		sel, ok := st0.(*Select)
+		if !ok {
+			return nil, p.errAt(p.peek(), "expected SELECT")
+		}
+		st.Select = sel
+		ret, err := p.parseReturning()
+		if err != nil {
+			return nil, err
+		}
+		st.Returning = ret
+		return st, nil
 	}
 	if err := p.expectKw("values"); err != nil {
 		return nil, err
@@ -712,7 +727,32 @@ func (p *parser) parseInsert() (Statement, error) {
 		}
 		break
 	}
+	ret, err := p.parseReturning()
+	if err != nil {
+		return nil, err
+	}
+	st.Returning = ret
 	return st, nil
+}
+
+// parseReturning 解析可选的 RETURNING 输出项列表。
+func (p *parser) parseReturning() ([]*SelectItem, error) {
+	if !p.acceptKw("returning") {
+		return nil, nil
+	}
+	var items []*SelectItem
+	for {
+		it, err := p.parseSelectItem()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+		if p.acceptPunct(",") {
+			continue
+		}
+		break
+	}
+	return items, nil
 }
 
 func (p *parser) parseUpdate() (Statement, error) {
@@ -754,6 +794,11 @@ func (p *parser) parseUpdate() (Statement, error) {
 		}
 		st.Where = e
 	}
+	ret, err := p.parseReturning()
+	if err != nil {
+		return nil, err
+	}
+	st.Returning = ret
 	return st, nil
 }
 
@@ -778,6 +823,11 @@ func (p *parser) parseDelete() (Statement, error) {
 		}
 		st.Where = e
 	}
+	ret, err := p.parseReturning()
+	if err != nil {
+		return nil, err
+	}
+	st.Returning = ret
 	return st, nil
 }
 

@@ -73,6 +73,12 @@ type Insert struct {
 	Table   string
 	Columns []string
 	Rows    [][]Expr
+
+	// Select 非空表示数据来自一条查询（INSERT ... SELECT），此时 Rows 为空。
+	Select *Select
+
+	// Returning 是 RETURNING 后面那串输出项。
+	Returning []*SelectItem
 }
 
 // Assignment 是 UPDATE 的一个 SET 项。
@@ -87,6 +93,8 @@ type Update struct {
 	Alias string
 	Sets  []*Assignment
 	Where Expr
+
+	Returning []*SelectItem
 }
 
 // Delete 对应 DELETE。
@@ -94,6 +102,8 @@ type Delete struct {
 	Table string
 	Alias string
 	Where Expr
+
+	Returning []*SelectItem
 }
 
 // ---------- DQL ----------

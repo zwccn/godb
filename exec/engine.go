@@ -407,11 +407,45 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 
 	uniq := t.UniqueCols()
 
+	// INSERT ... SELECT：先把查询跑出全部行，再折成字面量走同一条插入路径。
+	// 这样默认值、自增、NOT NULL 与唯一性校验只有一份实现，不会两边走偏。
+	// 注意不要改 s.Rows —— 语句对象可能被预编译语句反复执行。
+	rows := s.Rows
+	if s.Select != nil {
+		src, _, err := e.selectRows(tx, s.Select)
+		if err != nil {
+			return nil, err
+		}
+		rows = make([][]sql.Expr, 0, len(src))
+		for _, r := range src {
+			if len(r) != len(targets) {
+				return nil, fmt.Errorf("INSERT has %d expressions but %d target columns", len(r), len(targets))
+			}
+			exprs := make([]sql.Expr, len(r))
+			for i, v := range r {
+				exprs[i] = &sql.Literal{Val: v}
+			}
+			rows = append(rows, exprs)
+		}
+	}
+
+	// RETURNING 的输出项按「目标表的一行」编译，插完再逐行求值。
+	var retEvals []Eval
+	var retCols []Column
+	if len(s.Returning) > 0 {
+		ev, cols, cerr := e.compileReturning(e.tableScope(t, ""), s.Returning, tx)
+		if cerr != nil {
+			return nil, cerr
+		}
+		retEvals, retCols = ev, cols
+	}
+	var inserted []types.Row
+
 	// 语句内已出现过的唯一键（避免 O(n²) 的 overlay 扫描）
 	seen := map[int]map[string]bool{}
 	baseIns := tx.OverlayInsLen(t.Name)
 
-	for _, exprs := range s.Rows {
+	for _, exprs := range rows {
 		if len(exprs) != len(targets) {
 			return nil, fmt.Errorf("INSERT has %d expressions but %d target columns", len(exprs), len(targets))
 		}
@@ -483,12 +517,88 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		if _, err := tx.Insert(t.Name, row); err != nil {
 			return nil, err
 		}
+		if len(retEvals) > 0 {
+			inserted = append(inserted, row)
+		}
 	}
-	return &Result{
+	res := &Result{
 		Command:  "INSERT",
-		Tag:      fmt.Sprintf("INSERT 0 %d", len(s.Rows)),
-		Affected: len(s.Rows),
-	}, nil
+		Tag:      fmt.Sprintf("INSERT 0 %d", len(rows)),
+		Affected: len(rows),
+	}
+	if len(retEvals) > 0 {
+		res.Columns = retCols
+		for _, r := range inserted {
+			out := make([]interface{}, len(retEvals))
+			for i, ev := range retEvals {
+				v, err := ev.Eval(r)
+				if err != nil {
+					return nil, err
+				}
+				out[i] = v.Interface()
+			}
+			res.Rows = append(res.Rows, out)
+		}
+		res.RowCount = len(res.Rows)
+	}
+	return res, nil
+}
+
+// selectRows 跑一条查询，返回原始值行（不受客户端格式影响）。
+// INSERT ... SELECT 用它取数据源。
+func (e *Engine) selectRows(tx *storage.Tx, s *sql.Select) ([][]types.Value, Schema, error) {
+	plan, err := (&Planner{Tx: tx, Cat: e.Cat}).BuildSelect(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := plan.Open(); err != nil {
+		return nil, nil, err
+	}
+	defer plan.Close()
+
+	var out [][]types.Value
+	for {
+		r, ok, err := plan.Next()
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			break
+		}
+		// 算子可能复用内部缓冲，必须拷贝一份
+		cp := make([]types.Value, len(r))
+		copy(cp, r)
+		out = append(out, cp)
+	}
+	return out, plan.Schema(), nil
+}
+
+// compileReturning 把 RETURNING 的输出项编译成「针对目标表一行」的求值器。
+func (e *Engine) compileReturning(sc Schema, items []*sql.SelectItem, tx *storage.Tx) ([]Eval, []Column, error) {
+	items, err := expandStars(items, sc)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx := &compileCtx{sc: sc, planner: &Planner{Tx: tx, Cat: e.Cat}}
+	evals := make([]Eval, 0, len(items))
+	cols := make([]Column, 0, len(items))
+	for _, it := range items {
+		ev, err := compile(it.Expr, ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		name := it.Alias
+		if name == "" {
+			if cr, ok := it.Expr.(*sql.ColumnRef); ok {
+				name = cr.Name
+			} else {
+				name = "?column?"
+			}
+		}
+		evals = append(evals, ev)
+		cols = append(cols, Column{Name: name, Type: ev.Type().String()})
+	}
+	return evals, cols, nil
 }
 
 func constraintName(table string, colIdx int) string {
@@ -551,6 +661,18 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		pred = p
 	}
 
+	// RETURNING 按表的一行求值；UPDATE 语义上返回的是「改之后」的行。
+	var retEvals []Eval
+	var retCols []Column
+	if len(s.Returning) > 0 {
+		ev, cols, cerr := e.compileReturning(sc, s.Returning, tx)
+		if cerr != nil {
+			return nil, cerr
+		}
+		retEvals, retCols = ev, cols
+	}
+	var retRows []types.Row
+
 	uniq := t.UniqueCols()
 	affected := 0
 	var refs []storage.Ref
@@ -611,9 +733,36 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		if err := tx.Update(t.Name, refs[i], newRow); err != nil {
 			return nil, err
 		}
+		if len(retEvals) > 0 {
+			retRows = append(retRows, newRow)
+		}
 		affected++
 	}
-	return &Result{Command: "UPDATE", Tag: fmt.Sprintf("UPDATE %d", affected), Affected: affected}, nil
+	res := &Result{Command: "UPDATE", Tag: fmt.Sprintf("UPDATE %d", affected), Affected: affected}
+	if len(retEvals) > 0 {
+		res.Columns = retCols
+		if err := fillReturning(res, retEvals, retRows); err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+// fillReturning 按行求值 RETURNING 的每个输出项，填进 res 的结果集。
+func fillReturning(res *Result, evals []Eval, rows []types.Row) error {
+	for _, r := range rows {
+		out := make([]interface{}, len(evals))
+		for i, ev := range evals {
+			v, err := ev.Eval(r)
+			if err != nil {
+				return err
+			}
+			out[i] = v.Interface()
+		}
+		res.Rows = append(res.Rows, out)
+	}
+	res.RowCount = len(res.Rows)
+	return nil
 }
 
 func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
@@ -634,7 +783,19 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 		pred = p
 	}
 
+	// RETURNING 对 DELETE 返回的是被删掉的那一行。
+	var retEvals []Eval
+	var retCols []Column
+	if len(s.Returning) > 0 {
+		ev, cols, cerr := e.compileReturning(sc, s.Returning, tx)
+		if cerr != nil {
+			return nil, cerr
+		}
+		retEvals, retCols = ev, cols
+	}
+
 	var refs []storage.Ref
+	var delRows []types.Row
 	if err := tx.Scan(t.Name, func(ref storage.Ref, row types.Row) error {
 		if pred != nil {
 			v, err := pred.Eval(row)
@@ -650,6 +811,12 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 			}
 		}
 		refs = append(refs, ref)
+		if len(retEvals) > 0 {
+			// Scan 可能复用缓冲，拷一份留给 RETURNING
+			cp := make(types.Row, len(row))
+			copy(cp, row)
+			delRows = append(delRows, cp)
+		}
 		return nil
 	}); err != nil {
 		return nil, err
@@ -659,5 +826,12 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 			return nil, err
 		}
 	}
-	return &Result{Command: "DELETE", Tag: fmt.Sprintf("DELETE %d", len(refs)), Affected: len(refs)}, nil
+	res := &Result{Command: "DELETE", Tag: fmt.Sprintf("DELETE %d", len(refs)), Affected: len(refs)}
+	if len(retEvals) > 0 {
+		res.Columns = retCols
+		if err := fillReturning(res, retEvals, delRows); err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
 }

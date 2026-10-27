@@ -66,7 +66,9 @@ func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 	case *sql.Explain:
 		sel, ok := s.Stmt.(*sql.Select)
 		if !ok {
-			return nil, fmt.Errorf("EXPLAIN only supports SELECT")
+			// 客户端「执行计划」按钮会对整段 SQL 加 EXPLAIN，多语句/事务演示就会被
+			// 打到这里。错误里说清楚"只有查询能解释"，别让人以为是语法错。
+			return nil, fmt.Errorf("EXPLAIN in godb only supports query statements (SELECT / WITH / VALUES); run other statements directly")
 		}
 		mode := explainPlan
 		if s.Analyze {

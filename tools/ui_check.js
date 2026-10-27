@@ -97,6 +97,39 @@ class CDP {
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
+    // 0.2)「执行计划」按钮：只解释查询，别把 BEGIN/UPDATE 也套上 EXPLAIN
+    //      （以前是 split(';') 全量加前缀，事务演示一按就报 only supports SELECT）
+    const planText = () => cdp.eval(`(document.getElementById('results').textContent || '').replace(/\\s+/g, ' ')`);
+    await cdp.eval(`cm.setValue("BEGIN; UPDATE employees SET salary = salary; SELECT * FROM employees LIMIT 1;")`);
+    await cdp.eval(`document.getElementById('btnExplain').click()`);
+    await sleep(1200);
+    const mixed = await planText();
+    check('执行计划：多语句里只解释 SELECT（不再报错）',
+      /Scan|Project/.test(mixed) && !/only supports/i.test(mixed), mixed.slice(0, 120));
+
+    await cdp.eval(`cm.setValue("EXPLAIN SELECT 1;")`);
+    await cdp.eval(`document.getElementById('btnExplain').click()`);
+    await sleep(900);
+    const doubleEx = await planText();
+    check('执行计划：已经是 EXPLAIN 的语句不再套一层',
+      /Result|Project/.test(doubleEx) && !/only supports/i.test(doubleEx), doubleEx.slice(0, 120));
+
+    // 字符串里的分号不能被当成分隔符
+    await cdp.eval(`cm.setValue("SELECT 'a;b' AS v;")`);
+    await cdp.eval(`document.getElementById('btnExplain').click()`);
+    await sleep(900);
+    const semi = await planText();
+    check('执行计划：字符串里的分号不会被切开',
+      /Result|Project/.test(semi) && !/only supports|执行失败/i.test(semi), semi.slice(0, 120));
+
+    // 一条能解释的都没有：直接说清楚，别发个请求换回看不懂的报错
+    await cdp.eval(`cm.setValue("UPDATE employees SET salary = salary WHERE id = 1;")`);
+    await cdp.eval(`document.getElementById('btnExplain').click()`);
+    await sleep(700);
+    const onlyWrite = await planText();
+    check('执行计划：全是非查询语句时给出明确提示',
+      /只能解释查询语句/.test(onlyWrite) && /UPDATE/.test(onlyWrite), onlyWrite.slice(0, 100));
+
     // 0.5) 编辑器高度：默认够高、能拖、双击回自动
     check('CodeMirror 已接管编辑区（语法高亮 + 补全）',
       await cdp.eval(`!!document.querySelector('.CodeMirror') && !!window.CodeMirror`),

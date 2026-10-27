@@ -550,12 +550,109 @@ window.addEventListener('resize', () => {
 
 let busy = false;
 
+// 按分号切语句，但跳过字符串、引号标识符和注释里的分号。
+// 之前直接用 split(';')，`SELECT 'a;b'` 会被切成两条，后面加 EXPLAIN 全乱套。
+function splitStatements(sql) {
+  const out = [];
+  let buf = '';
+  let quote = null; // 当前在 '...' 还是 "..." 里
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const c = sql[i];
+    const next = sql[i + 1];
+    if (quote) {
+      buf += c;
+      if (c === quote) {
+        if (next === quote) { buf += next; i += 2; continue; } // '' 是转义
+        quote = null;
+      }
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; buf += c; i++; continue; }
+    if (c === '-' && next === '-') {
+      while (i < n && sql[i] !== '\n') buf += sql[i++];
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      buf += '/*';
+      i += 2;
+      while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) buf += sql[i++];
+      if (i < n) { buf += '*/'; i += 2; }
+      continue;
+    }
+    if (c === ';') { out.push(buf); buf = ''; i++; continue; }
+    buf += c;
+    i++;
+  }
+  if (buf.trim()) out.push(buf);
+  return out.map(s => s.trim()).filter(Boolean);
+}
+
+// 跳过空白和注释，取第一个词的小写形式（判断这条语句是什么类型）
+function leadingKeyword(text) {
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '-' && text[i + 1] === '-') {
+      while (i < n && text[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    const m = /^[A-Za-z_]+/.exec(text.slice(i));
+    return m ? m[0].toLowerCase() : '';
+  }
+  return '';
+}
+
+// 「执行计划」要解释哪些语句：只给查询加 EXPLAIN。
+// 两个坑都踩过：
+//   1. 编辑器里已经写了 EXPLAIN（比如从帮助示例填进来）→ 会变成 EXPLAIN EXPLAIN；
+//   2. 事务演示那种 BEGIN / UPDATE 被硬加上 EXPLAIN → 服务端报 only supports SELECT。
+function withExplain(raw) {
+  const keep = [];
+  const skipped = [];
+  for (const part of splitStatements(raw)) {
+    const kw = leadingKeyword(part);
+    if (!kw) continue;
+    if (kw === 'explain') { keep.push(part + ';'); continue; }
+    if (kw === 'select' || kw === 'with' || kw === 'values') {
+      keep.push('EXPLAIN ' + part + ';');
+      continue;
+    }
+    skipped.push(kw.toUpperCase());
+  }
+  return { sql: keep.join('\n'), skipped };
+}
+
 async function run(prefix) {
   if (busy) return;
   let sql = editor.value.trim();
   if (!sql) return;
+  let skipped = [];
   if (prefix === 'explain') {
-    sql = sql.split(';').filter(s => s.trim()).map(s => 'EXPLAIN ' + s.trim() + ';').join('\n');
+    const ex = withExplain(sql);
+    skipped = ex.skipped;
+    if (!ex.sql) {
+      // 一条能解释的都没有：别把请求发出去换个看不懂的报错回来
+      resultsEl.innerHTML = '';
+      resultsEl.appendChild(errorCard({
+        title: '无法生成执行计划',
+        message: skipped.length
+          ? `「执行计划」只能解释查询语句（SELECT / WITH / VALUES）。当前这批是 ${skipped.join('、')}，想直接跑它们请点「执行」。`
+          : '编辑器里还没有可解释的语句。',
+      }));
+      return;
+    }
+    sql = ex.sql;
   }
   busy = true;
   setRunning(true);
@@ -566,6 +663,9 @@ async function run(prefix) {
     renderResults(data);
     updateTx(data.tx);
     pushHistory(sql);
+    if (skipped.length) {
+      toast('已解释查询，跳过 ' + skipped.join('、') + '（EXPLAIN 只解释 SELECT / WITH / VALUES）');
+    }
     // DDL 之后刷新表结构
     const ddl = /(create|drop|alter)\s+table/i.test(sql);
     if (ddl || (data.error && /table/i.test(data.error.message))) {
@@ -822,9 +922,9 @@ function jsonOf(r) {
 
 function errorCard(err) {
   const card = el('div', 'error-card');
-  let title = '执行失败';
-  if (err.kind === 'lock_timeout') title = '锁冲突 · 等待超时';
-  if (err.kind === 'deadlock') title = '检测到死锁 · 已回滚';
+  let title = err.title || '执行失败';
+  if (!err.title && err.kind === 'lock_timeout') title = '锁冲突 · 等待超时';
+  if (!err.title && err.kind === 'deadlock') title = '检测到死锁 · 已回滚';
   const head = el('div', 'error-head', title);
   const body = el('div', 'error-body', err.message || '未知错误');
   card.appendChild(head);

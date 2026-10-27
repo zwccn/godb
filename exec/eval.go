@@ -804,6 +804,23 @@ func compileCase(n *sql.Case, c *compileCtx) (Eval, error) {
 	}
 	var outType types.Type
 	haveType := false
+	sawChar := false
+	// 分支类型登记：文本类里出现 "char"（pg_catalog 的单字节内部类型）时就以它为准。
+	// PG 里字面量 'a' 是 unknown，会向另一分支的 "char" 靠（CASE … THEN 'a' ELSE typtype END
+	// 结果是 "char"）；我们这边字面量按 text 处理，不特殊合并就会退化成一个 text 列 ——
+	// Npgsql 拿 GetChar 读这个列会失败，整个类型目录加载随之降级成 string。
+	noteType := func(t types.Type) {
+		if t.Kind == types.KNull {
+			return
+		}
+		// 列名可能带引号（catalog 里 pg_type.typtype 的类型名是 `"char"`），统一去引号比
+		if t.Kind == types.KText && strings.EqualFold(strings.Trim(t.Name, `"`), "char") {
+			sawChar = true
+		}
+		if !haveType {
+			outType, haveType = t, true
+		}
+	}
 	for _, w := range n.Whens {
 		cond, err := compile(w.Cond, c)
 		if err != nil {
@@ -816,9 +833,7 @@ func compileCase(n *sql.Case, c *compileCtx) (Eval, error) {
 		ce.whens = append(ce.whens, struct {
 			cond, result Eval
 		}{cond, res})
-		if !haveType && res.Type().Kind != types.KNull {
-			outType, haveType = res.Type(), true
-		}
+		noteType(res.Type())
 	}
 	if n.Else != nil {
 		e, err := compile(n.Else, c)
@@ -826,11 +841,13 @@ func compileCase(n *sql.Case, c *compileCtx) (Eval, error) {
 			return nil, err
 		}
 		ce.els = e
-		if !haveType && e.Type().Kind != types.KNull {
-			outType, haveType = e.Type(), true
-		}
+		noteType(e.Type())
 	}
-	if !haveType {
+	if sawChar {
+		// 注意名字要带引号：`"char"` 是 PG 的单字节内部类型（OID 18），
+		// 不带引号的 char 是 bpchar（OID 1042），两者不能混。
+		outType = types.Type{Kind: types.KText, Name: `"char"`}
+	} else if !haveType {
 		outType = types.Type{Kind: types.KText, Name: "text"}
 	}
 	ce.t = outType

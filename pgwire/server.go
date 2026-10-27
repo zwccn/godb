@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -529,7 +530,11 @@ func encodeResult(r *exec.Result, withRowDesc bool) [][]byte {
 		for _, row := range r.Rows {
 			vals := make([][]byte, len(row))
 			for i, v := range row {
-				vals[i] = textValue(v)
+				colType := ""
+				if i < len(r.Columns) {
+					colType = r.Columns[i].Type
+				}
+				vals[i] = textValueAs(v, colType)
 			}
 			out = append(out, encodeDataRow(vals))
 		}
@@ -775,6 +780,30 @@ func (c *conn) fieldsFor(sqlText string) ([]field, bool) {
 // typeOID 返回 PG 类型 OID 与 typlen，统一走 types 包，避免两处映射不一致。
 func typeOID(t string) (int32, int16) {
 	return types.OIDByName(t), int16(types.TypeLenByName(t))
+}
+
+// textValueAs 按列类型把结果值编码成 PG 文本格式。
+//
+// numeric 要用定点表示：内部是 float64，用 'g' 会把 1234567890123.45 输出成
+// 1.23456789012345e+12，而 PG 的 numeric 从不用科学计数法 —— 客户端（Npgsql 的
+// decimal / FreeSql 的 decimal.Parse）拿到指数形式会直接解析失败。
+// float8 保持 'g'，PG 的大数值也是指数形式。
+func textValueAs(v interface{}, colType string) []byte {
+	lower := strings.ToLower(colType)
+	// date 列只输出日期：内部时间值统一带 " HH:MM:SS"，PG 的 date 文本只有年月日
+	if strings.HasPrefix(lower, "date") {
+		if s, ok := v.(string); ok && len(s) >= 10 {
+			return []byte(s[:10])
+		}
+	}
+	if f, ok := v.(float64); ok && strings.HasPrefix(lower, "numeric") {
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			// PG 的 numeric 支持 NaN，输出也是 NaN / Infinity
+			return []byte(strconv.FormatFloat(f, 'g', -1, 64))
+		}
+		return []byte(strconv.FormatFloat(f, 'f', -1, 64))
+	}
+	return textValue(v)
 }
 
 // textValue 把结果值编码成 PG 文本格式。

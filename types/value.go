@@ -118,7 +118,10 @@ func (v Value) TextForm() string {
 		}
 		return "false"
 	case KTime:
-		return v.Time().Format("2006-01-02 15:04:05")
+		// 带微秒：timestamp 的小数秒不能被截掉（客户端写进来 06:07:08.123456，
+		// 读回去只剩 06:07:08 算数据丢失）。.999999 会去掉尾随的 0，
+		// 整秒仍输出 "…:08"，和 PG 的文本格式一致。
+		return v.Time().Format("2006-01-02 15:04:05.999999")
 	case KText:
 		return v.S
 	}
@@ -373,7 +376,10 @@ func (v Value) Interface() interface{} {
 	case KText:
 		return v.S
 	case KTime:
-		return v.Time().Format("2006-01-02 15:04:05")
+		// 带微秒：timestamp 的小数秒不能被截掉（客户端写进来 06:07:08.123456，
+		// 读回去只剩 06:07:08 算数据丢失）。.999999 会去掉尾随的 0，
+		// 整秒仍输出 "…:08"，和 PG 的文本格式一致。
+		return v.Time().Format("2006-01-02 15:04:05.999999")
 	}
 	return nil
 }

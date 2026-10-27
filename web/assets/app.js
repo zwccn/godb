@@ -1,6 +1,31 @@
 'use strict';
 
-const editor = document.getElementById('editor');
+// ---------------- 编辑器 ----------------
+//
+// 用 CodeMirror 5（vendor 里，不走 CDN）做 SQL 高亮 + 智能提示。它把 textarea
+// 藏起来换成自己的 DOM，所以这里包一层 `editor` 适配器：上层代码继续写
+// `editor.value` / `editor.focus()`，底下走 CodeMirror 还是原生 textarea 由
+// cm 是否为 null 决定 —— 万一 vendor 脚本没加载起来，编辑区照样能用。
+const editorEl = document.getElementById('editor');
+let cm = null; // CodeMirror 实例；null 表示退回原生 textarea
+
+const editor = {
+  get value() { return cm ? cm.getValue() : editorEl.value; },
+  set value(v) {
+    const text = v == null ? '' : String(v);
+    if (cm) {
+      cm.setValue(text);
+      cm.setCursor({ line: cm.lineCount() - 1, ch: 0 });
+    } else {
+      editorEl.value = text;
+    }
+    autoSize();
+  },
+  focus() { if (cm) cm.focus(); else editorEl.focus(); },
+  getBoundingClientRect() {
+    return (cm ? cm.getWrapperElement() : editorEl).getBoundingClientRect();
+  },
+};
 const resultsEl = document.getElementById('results');
 const treeEl = document.getElementById('schemaTree');
 const txBar = document.getElementById('txBar');
@@ -196,7 +221,13 @@ function editorMaxH() {
 }
 
 function setEditorHeight(h) {
-  editor.style.height = Math.round(h) + 'px';
+  const px = Math.round(h);
+  if (cm) {
+    // CodeMirror 的官方接口：直接定 wrapper 高度，内部自己滚
+    cm.setSize(null, px + 'px');
+    return;
+  }
+  editorEl.style.height = px + 'px';
 }
 
 function autoSize() {
@@ -205,13 +236,68 @@ function autoSize() {
     setEditorHeight(Math.min(editorManualH, editorMaxH()));
     return;
   }
-  editor.style.height = 'auto';
-  setEditorHeight(Math.min(editor.scrollHeight + 2, window.innerHeight * 0.55));
+  // 内容高度 + 最低 180px：一行 SQL 时不该塌成一条缝
+  //
+  // CodeMirror 不用 getScrollInfo().height —— 它对没渲染的行是估算值，
+  // 刚 setValue 完往往还是旧的，表现为「贴了 40 行进来，高度却不涨」。
+  // 行数 × 单行高 + 上下内边距（CSS 里 .CodeMirror-lines 是 10px）更可靠。
+  let content;
+  if (cm) {
+    content = cm.lineCount() * cm.defaultTextHeight() + 20;
+  } else {
+    editorEl.style.height = 'auto';
+    content = editorEl.scrollHeight + 2;
+  }
+  const h = Math.max(EDITOR_MIN, Math.min(content, window.innerHeight * 0.55));
+  setEditorHeight(h);
 }
 
 function loadEditorHeight() {
   const n = parseInt(localStorage.getItem(EDITOR_H_KEY), 10);
   if (n > 0) editorManualH = Math.max(EDITOR_MIN, n);
+}
+
+// initCodeMirror 把 textarea 换成 CodeMirror（本地 vendor），并接上补全。
+// vendor 没加载起来就静默保持 textarea —— 宁可少个高亮，也不能让编辑区不可用。
+function initCodeMirror() {
+  if (!window.CodeMirror || !window.GodbHint) return;
+  cm = CodeMirror.fromTextArea(editorEl, {
+    mode: 'text/x-pgsql', // 用 PostgreSQL 方言做高亮
+    theme: 'godb',
+    lineWrapping: true,
+    indentUnit: 2,
+    tabSize: 2,
+    lineNumbers: false,
+    placeholder: '-- 在这里写 SQL，Ctrl+Enter 执行；Ctrl+Space 唤出补全',
+    hintOptions: {
+      hint: window.GodbHint.complete,
+      // 渲染函数挂在每条候选上（show-hint 是逐条 render），这里不配全局 render
+      completeSingle: false,     // 只有一个候选时不要自动吞掉，让人自己按 Tab/Enter
+      completeOnSingleClick: true, // 默认要双击才插入，太反直觉：点一下就该补上
+    },
+    extraKeys: {
+      'Ctrl-Enter': () => run(),
+      'Cmd-Enter': () => run(),
+      'Ctrl-Space': 'autocomplete',
+      Tab: c => c.replaceSelection('  ', 'end'),
+    },
+  });
+  cm.on('change', onEditorChange);
+
+  // 打字时自动弹补全：只在「正在写一个词」或刚打完点号时弹，
+  // 空格、逗号、括号后不弹（那会儿弹出来只会挡住下一句 SQL）。
+  cm.on('inputRead', (c, change) => {
+    if (c.state.completionActive) return;
+    const typed = (change.text || []).join('');
+    if (!/[A-Za-z_.]/.test(typed.slice(-1))) return;
+    const cur = c.getCursor();
+    const before = c.getLine(cur.line).slice(0, cur.ch);
+    if (!/(^|[^\w$])[A-Za-z_][\w$]*$/.test(before) && !/\.$/.test(before)) return;
+    c.showHint();
+  });
+
+  // 补全要用当前库的真实表结构：每次现取，切库/建表后立刻生效
+  window.GodbHint.setSchemaProvider(() => schemaCache);
 }
 
 (function initEditorResize() {
@@ -971,7 +1057,14 @@ for (const chip of document.querySelectorAll('.chip')) {
   });
 }
 
-editor.addEventListener('keydown', ev => {
+// 编辑器变更后：跟随内容长高 + 记到本机（关掉浏览器再开还在）
+function onEditorChange() {
+  autoSize();
+  localStorage.setItem('godb.sql', editor.value);
+}
+
+// 原生 textarea 的兜底快捷键（CodeMirror 没起来时才用得上）
+editorEl.addEventListener('keydown', ev => {
   if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
     ev.preventDefault();
     run();
@@ -979,17 +1072,14 @@ editor.addEventListener('keydown', ev => {
   }
   if (ev.key === 'Tab') {
     ev.preventDefault();
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    editor.value = editor.value.slice(0, start) + '  ' + editor.value.slice(end);
-    editor.selectionStart = editor.selectionEnd = start + 2;
+    const start = editorEl.selectionStart;
+    const end = editorEl.selectionEnd;
+    editorEl.value = editorEl.value.slice(0, start) + '  ' + editorEl.value.slice(end);
+    editorEl.selectionStart = editorEl.selectionEnd = start + 2;
+    onEditorChange();
   }
 });
-
-editor.addEventListener('input', () => {
-  autoSize();
-  localStorage.setItem('godb.sql', editor.value);
-});
+editorEl.addEventListener('input', onEditorChange);
 
 
 /* ---------------- 设置（落盘节奏 / 端口 / 密码） ---------------- */
@@ -1250,6 +1340,7 @@ document.addEventListener('keydown', e => {
   } else {
     editor.value = EXAMPLES.select;
   }
+  initCodeMirror();
   loadEditorHeight();
   autoSize();
   loadSchema();

@@ -1650,3 +1650,84 @@ body.editor-resizing {
   -webkit-user-select: none;
 }
 body.editor-resizing * { cursor: ns-resize !important; }
+
+/* ---------------- CodeMirror（本地 vendor，不走 CDN） ---------------- */
+
+/* 高度由 JS（autoSize / 拖手）用 cm.setSize 控制，这里只给个初始值 */
+.CodeMirror {
+  height: 180px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: calc(13px * var(--fs));
+  line-height: 1.62;
+}
+
+.CodeMirror-lines { padding: 10px 0; }
+.CodeMirror pre.CodeMirror-line,
+.CodeMirror pre.CodeMirror-line-like { padding: 0 16px; }
+
+.CodeMirror-cursor { border-left: 2px solid var(--accent); }
+.CodeMirror-selected,
+.CodeMirror-focused .CodeMirror-selected { background: var(--accent-soft-bg) !important; }
+.CodeMirror-placeholder { color: var(--text-3); }
+
+/* 语法着色。类名来自 vendor/codemirror/mode/sql.js 的记号定义。 */
+.cm-s-godb .cm-keyword { color: var(--accent); }
+.cm-s-godb .cm-operator { color: var(--text-2); }
+.cm-s-godb .cm-string,
+.cm-s-godb .cm-string-2 { color: var(--ok-text); }
+.cm-s-godb .cm-number { color: var(--warn-text); }
+.cm-s-godb .cm-comment { color: var(--text-3); font-style: italic; }
+.cm-s-godb .cm-builtin { color: var(--accent-soft-text); }
+.cm-s-godb .cm-type { color: var(--warn-text); }
+.cm-s-godb .cm-variable,
+.cm-s-godb .cm-variable-2 { color: var(--text); }
+.cm-s-godb .cm-error {
+  color: var(--danger-text);
+  border-bottom: 1px dotted var(--danger);
+}
+.cm-s-godb .CodeMirror-matchingbracket { color: var(--ok-text); }
+
+/* 补全弹层：跟控制台其它弹窗同一套配色，别跳出一个系统默认的白框 */
+.CodeMirror-hints {
+  z-index: 90;
+  max-height: 264px;
+  /* 宽度别让它自己飘：太窄看不清签名，太宽挡住整行 SQL */
+  min-width: 208px;
+  max-width: 360px;
+  padding: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-hover);
+  border-radius: 7px;
+  box-shadow: 0 14px 34px var(--shadow-color);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--fs));
+}
+
+.CodeMirror-hint {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+li.CodeMirror-hint-active {
+  background: var(--accent-soft-bg);
+  color: var(--text);
+}
+
+/* 说明靠右（即使条目本身比内容宽也不会挤在中间） */
+.CodeMirror-hint .cm-hint-note { margin-left: auto; }
+
+/* 右侧的类型/签名说明 */
+.cm-hint-note {
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+}
+
+li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }

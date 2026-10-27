@@ -91,14 +91,17 @@ class CDP {
     check('执行按钮在工具栏左半边', pos.left < pos.mid,
       `按钮 x=${Math.round(pos.left)}，中线 x=${Math.round(pos.mid)}`);
 
-    await cdp.eval(`document.getElementById('editor').value = 'SELECT 4242 AS answer'`);
+    await cdp.eval(`cm.setValue('SELECT 4242 AS answer')`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
     await sleep(1200);
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
     // 0.5) 编辑器高度：默认够高、能拖、双击回自动
-    const eh0 = await cdp.eval(`Math.round(document.getElementById('editor').getBoundingClientRect().height)`);
+    check('CodeMirror 已接管编辑区（语法高亮 + 补全）',
+      await cdp.eval(`!!document.querySelector('.CodeMirror') && !!window.CodeMirror`),
+      await cdp.eval(`document.querySelector('.CodeMirror') ? document.querySelector('.CodeMirror').className : '无'`));
+    const eh0 = await cdp.eval(`Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height)`);
     check('编辑器默认高度够用（≥170px）', eh0 >= 170, `${eh0}px`);
 
     const er = await cdp.eval(`(() => {
@@ -110,7 +113,7 @@ class CDP {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: er.x, y: er.y + 80, button: 'left', buttons: 1 });
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: er.x, y: er.y + 80, button: 'left', buttons: 0, clickCount: 1 });
     await sleep(200);
-    const eh1 = await cdp.eval(`Math.round(document.getElementById('editor').getBoundingClientRect().height)`);
+    const eh1 = await cdp.eval(`Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height)`);
     check('拖编辑器底边能加高', Math.abs(eh1 - (eh0 + 80)) < 3, `${eh0}px → ${eh1}px`);
 
     // 高度应当被记住：刷新后还是这个高度（这是「拖完下次打开不用再拖」的承诺）
@@ -119,7 +122,7 @@ class CDP {
       await cdp.eval(`String(localStorage.getItem('godb.editorH'))`));
     await cdp.send('Page.reload');
     await sleep(2200);
-    const ehReload = await cdp.eval(`Math.round(document.getElementById('editor').getBoundingClientRect().height)`);
+    const ehReload = await cdp.eval(`Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height)`);
     check('刷新后仍保持拖过的高度', Math.abs(ehReload - eh1) < 3, `${eh1}px → ${ehReload}px`);
 
     // 双击拖手：回到自动高度并清掉记忆
@@ -134,19 +137,71 @@ class CDP {
     await sleep(250);
     check('双击拖手回到自动高度',
       await cdp.eval(`localStorage.getItem('godb.editorH') === null &&
-        Math.round(document.getElementById('editor').getBoundingClientRect().height) < ${eh1}`));
+        Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height) < ${eh1}`));
 
     // 自动模式下粘一大段 SQL：应该长高（封顶 55vh），而不是原地出滚动条
     const grow = await cdp.eval(`(() => {
-      const ed = document.getElementById('editor');
-      ed.value = Array.from({length: 40}, (_, i) => 'SELECT ' + i + ';').join('\\n');
-      ed.dispatchEvent(new Event('input', {bubbles: true}));
-      const h = ed.getBoundingClientRect().height;
+      cm.setValue(Array.from({length: 40}, (_, i) => 'SELECT ' + i + ';').join('\\n'));
+      const h = document.querySelector('.CodeMirror').getBoundingClientRect().height;
       return { h: Math.round(h), cap: Math.round(window.innerHeight * 0.55) + 2 };
     })()`);
     check('长 SQL 会自动长高（不超过 55vh）',
       grow.h > 300 && grow.h <= grow.cap, `${grow.h}px（上限 ${grow.cap}px）`);
-    await cdp.eval(`document.getElementById('editor').value = ''`);
+    await cdp.eval(`cm.setValue('')`);
+
+    // 0.6) 智能提示：库表列 + PG 关键字，全本地无 CDN
+    const assets = await cdp.eval(`[...document.querySelectorAll('script[src],link[rel=stylesheet]')]
+      .map(e => e.src || e.href)`);
+    check('前端资源全部本地（无 CDN）',
+      assets.length > 0 && assets.every(u => u.indexOf('127.0.0.1:8080') >= 0),
+      assets.length + ' 个资源');
+
+    // 别名点号：列名 + 类型（说明 FAR 列来自 /api/schema，不是写死的）
+    await cdp.eval(`cm.setValue('SELECT e. FROM employees e'); cm.setCursor({line:0, ch:9}); cm.showHint()`);
+    await sleep(500);
+    let hint = await cdp.eval(`(() => {
+      const ul = document.querySelector('.CodeMirror-hints');
+      if (!ul) return null;
+      return [...ul.querySelectorAll('li')].slice(0, 3).map(li => li.textContent.replace(/\s+/g, ' ').trim());
+    })()`);
+    check('别名点号只提示该表的列（带类型）',
+      !!hint && hint.length === 3 && hint[0].indexOf('id') === 0 && hint[0].indexOf('integer') > 0,
+      hint ? JSON.stringify(hint) : '没有弹层');
+
+    // 选中一条并插入：用真实鼠标点第一项
+    // （show-hit 的选中处理挂的是 mousedown 不是 click，JS 里 .click() 不生效）
+    const item = await cdp.eval(`(() => {
+      const li = document.querySelector('.CodeMirror-hints li');
+      const r = li.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: item.x, y: item.y, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: item.x, y: item.y, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(300);
+    check('点候选能把列名补进 SQL',
+      await cdp.eval(`cm.getValue()`).then(v => v.indexOf('SELECT e.id FROM employees e') === 0),
+      await cdp.eval(`cm.getValue()`));
+
+    // FROM 之后：表名排在最前
+    await cdp.eval(`cm.setValue('SELECT * FROM '); cm.setCursor({line:0, ch:14})`);
+    await sleep(150);
+    await cdp.send('Input.insertText', { text: 'emp' });
+    await sleep(600);
+    hint = await cdp.eval(`(() => {
+      const ul = document.querySelector('.CodeMirror-hints');
+      return ul ? ul.querySelector('li') && ul.querySelector('li').textContent.trim() : null;
+    })()`);
+    check('FROM 后按前缀提示表名', hint === 'employees表', String(hint));
+
+    // 关键字也在词表里（PG 10）
+    await cdp.eval(`cm.setValue('SEL'); cm.setCursor({line:0, ch:3}); cm.showHint()`);
+    await sleep(400);
+    hint = await cdp.eval(`(() => {
+      const ul = document.querySelector('.CodeMirror-hints');
+      return ul ? [...ul.querySelectorAll('li')].map(li => li.textContent.trim()).slice(0, 3) : null;
+    })()`);
+    check('PG 关键字能补全', !!hint && hint[0] === 'SELECT关键字', hint ? JSON.stringify(hint) : '没有弹层');
+    await cdp.eval(`cm.setValue('')`);
 
     // 1) 数据库面板：点遮罩不关闭，点 × 才关闭
     await cdp.eval(`openDBModal()`);

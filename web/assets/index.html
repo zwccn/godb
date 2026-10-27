@@ -22,6 +22,11 @@ try {
   }
 } catch (e) {}
 </script>
+<!-- CodeMirror 5 本地内嵌（不走 CDN）：发布时随 go:embed 一起进 exe。
+     顺序很重要：vendor 的 CSS 要在 style.css 之前，我们对 .CodeMirror 的
+     覆盖（内边距、配色）才能压过它自己的默认值。 -->
+<link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css">
+<link rel="stylesheet" href="/vendor/codemirror/addon/hint/show-hint.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -302,6 +307,11 @@ try {
 
 <div id="toast" class="toast hidden"></div>
 
+<script src="/vendor/codemirror/lib/codemirror.js"></script>
+<script src="/vendor/codemirror/mode/sql.js"></script>
+<script src="/vendor/codemirror/addon/hint/show-hint.js"></script>
+<script src="/vendor/codemirror/addon/display/placeholder.js"></script>
+<script src="/sql-hint.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

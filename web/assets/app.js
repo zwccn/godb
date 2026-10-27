@@ -35,6 +35,53 @@ for (const dot of document.querySelectorAll('.theme-dot')) {
 // 进入页面时按上次的选择点亮按钮（属性已经由 head 里的内联脚本设好了）
 applyTheme(document.documentElement.getAttribute('data-theme') || 'dark', false);
 
+// ---------- 字号 ----------
+// CSS 里所有 font-size 都是 calc(基准px * var(--fs))，所以这里只改一个变量。
+const FS_KEY = 'godb.fs';
+const FS_DEFAULT = 120;
+const FS_MIN = 85;
+const FS_MAX = 165;
+const FS_STEP = 5;
+
+const fsValueEl = document.getElementById('fsValue');
+const fsBtns = Array.from(document.querySelectorAll('.fs-btn'));
+
+function clampFs(pct) {
+  if (!Number.isFinite(pct)) return FS_DEFAULT;
+  // 对齐到 5% 的档位，避免链接参数带进奇怪的数字
+  const snapped = Math.round(pct / FS_STEP) * FS_STEP;
+  return Math.min(FS_MAX, Math.max(FS_MIN, snapped));
+}
+
+function applyFontScale(pct, save) {
+  const v = clampFs(pct);
+  document.documentElement.style.setProperty('--fs', (v / 100).toFixed(2));
+  if (fsValueEl) fsValueEl.textContent = v + '%';
+  for (const btn of fsBtns) {
+    const step = Number(btn.dataset.fsStep);
+    btn.disabled = step < 0 ? v <= FS_MIN : v >= FS_MAX;
+  }
+  if (save) {
+    try { localStorage.setItem(FS_KEY, String(v)); } catch (e) {}
+  }
+  return v;
+}
+
+for (const btn of fsBtns) {
+  btn.addEventListener('click', () => {
+    applyFontScale(clampFs(currentFsPct()) + Number(btn.dataset.fsStep) * FS_STEP, true);
+  });
+}
+
+// 当前生效的百分比（从 --fs 反推，这样链接参数 ?fs= 也算在内）
+function currentFsPct() {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--fs');
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? Math.round(n * 100) : FS_DEFAULT;
+}
+
+applyFontScale(currentFsPct(), false);
+
 // 最近一次 /api/schema 的结果，右键菜单和表设计器都从这里取，避免每次再请求。
 let schemaCache = [];
 // 当前会话是否有未提交的事务（DDL 不能在事务里执行）。

@@ -15,8 +15,9 @@
   --danger: #f0616d;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-  /* 字体缩放：所有 font-size 都是 calc(基准px * --fs)，想整体调大调这一个值 */
-  --fs: 1.1;
+  /* 字体缩放：所有 font-size 都是 calc(基准px * --fs)。
+     默认 1.2；用户在顶栏「字号」里调，JS 直接把 --fs 覆盖成 0.85~1.65。 */
+  --fs: 1.2;
 
   /* 语义色：正文里不再出现硬编码颜色，换皮肤只需要覆盖这一批变量 */
   --on-accent: #fff;
@@ -247,6 +248,40 @@ html[data-theme="mint"] {
 
 .theme-dot[aria-pressed="true"] {
   box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3.5px var(--accent);
+}
+
+.fs-ctl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+}
+
+.fs-btn {
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fs-btn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.fs-btn:disabled { opacity: .35; cursor: default; }
+
+.fs-value {
+  min-width: 40px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--text-2);
 }
 
 .theme-dot-dark { background: linear-gradient(135deg, #1c2530 45%, #4c9ef0 45%); }
@@ -753,6 +788,14 @@ table.grid td.bool { color: var(--warn-text); }
 @media (max-width: 860px) {
   .sidebar { flex-basis: 210px; }
   .tagline { display: none; }
+}
+
+/* 顶栏右侧现在多了皮肤圆点和字号控件，窗口窄（或者字号调到 150% 以上）
+   时先收起说明文字，别让按钮挤成两行 */
+@media (max-width: 1320px) {
+  .brand .tagline { display: none; }
+  .theme-switch-label { display: none; }
+  .theme-switch { padding: 3px 6px; }
 }
 
 

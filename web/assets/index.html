@@ -12,6 +12,15 @@ try {
   var t = q || localStorage.getItem('godb.theme');
   if (t && t !== 'dark') document.documentElement.setAttribute('data-theme', t);
 } catch (e) {}
+/* 字号同理：先设好 --fs，避免大字号先按默认画一帧。 */
+try {
+  var qfs = parseInt(new URLSearchParams(location.search).get('fs'), 10);
+  var fs = qfs || parseInt(localStorage.getItem('godb.fs'), 10);
+  if (fs) {
+    fs = Math.min(165, Math.max(85, fs));
+    document.documentElement.style.setProperty('--fs', (fs / 100).toFixed(2));
+  }
+} catch (e) {}
 </script>
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -41,6 +50,11 @@ try {
               title="芋紫" aria-label="芋紫" aria-pressed="false"></button>
       <button class="theme-dot theme-dot-mint" type="button" data-theme="mint"
               title="薄荷绿" aria-label="薄荷绿" aria-pressed="false"></button>
+    </div>
+    <div class="fs-ctl" role="group" aria-label="字号">
+      <button class="fs-btn" type="button" data-fs-step="-1" title="缩小字号" aria-label="缩小字号">A−</button>
+      <span id="fsValue" class="fs-value" title="当前字号">120%</span>
+      <button class="fs-btn" type="button" data-fs-step="1" title="放大字号" aria-label="放大字号">A+</button>
     </div>
     <span id="txPill" class="pill pill-idle">空闲</span>
     <button id="btnLocks" class="btn btn-ghost">锁状态<span id="lockBadge" class="badge hidden">0</span></button>

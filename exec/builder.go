@@ -265,7 +265,7 @@ func (p indexPlan) ranges() []storage.KeyRange {
 	return []storage.KeyRange{{Lo: k, Hi: k, HasLo: true, HasHi: true, LoInc: true, HiInc: true}}
 }
 
-// pickIndex 从 WHERE 里挑一条能用的索引：OR 合并 → 等值 → 首列区间。
+// pickIndex 从 WHERE 里挑一条能用的索引：OR 合并 → 等值 → IN 列表 → 首列区间。
 //
 // UPDATE / DELETE 也用同一套选择逻辑：它们的 WHERE 和 SELECT 是一回事，
 // 没道理查询能走索引、按主键改一行还要全表扫。
@@ -278,8 +278,92 @@ func pickIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) 
 	if p, ok := pickEqualityIndex(t, where, qual); ok {
 		return p, true
 	}
-	// 3) 首列的范围条件
+	// 3) IN 列表：一堆等值条件换个写法，合并成多区间
+	if p, ok := pickInIndex(t, where, qual); ok {
+		return p, true
+	}
+	// 4) 首列的范围条件
 	return pickRangeIndex(t, where, qual)
+}
+
+// pickInIndex 把 `col IN (v1, v2, ...)` 变成同一索引上的多个等值区间。
+//
+// 和 OR 合并走同一条路 —— IN 本来就是「等值条件的缩写」。每个值一个前缀区间
+// （`[enc(v), enc(v)+0xFF…]`），多列索引 `(a,b)` 上也能用（覆盖整个 a=v 的分组）。
+//
+// 三种情况不走索引，交给 filter：`NOT IN`（语义是「不在集合里」，索引帮不上）、
+// `IN (SELECT ...)`（子查询要先算出来，那是另一条路径）、列表里全是 NULL
+// （等于空集，扫不扫都一样，索性别为它绕开全表扫）。
+func pickInIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) {
+	for _, e := range splitConjuncts(where) {
+		in, ok := e.(*sql.In)
+		if !ok || in.Not || in.Sub != nil || len(in.List) == 0 {
+			continue
+		}
+		ref, ok := in.X.(*sql.ColumnRef)
+		if !ok {
+			continue
+		}
+		if ref.Table != "" && !strings.EqualFold(ref.Table, qual) {
+			continue
+		}
+		name := strings.ToLower(ref.Name)
+		ci, exists := t.ColumnIdx(name)
+		if !exists {
+			continue
+		}
+		ixName, ixCols, found := indexOnFirstColumn(t, ci)
+		if !found {
+			continue // 该列不是任何索引的首列，用不上
+		}
+		colType := t.Columns[ci].Type()
+		var rs []storage.KeyRange
+		bad := false
+		for _, item := range in.List {
+			cv, err := CompileConst(item)
+			if err != nil {
+				bad = true
+				break
+			}
+			cv, err = types.Cast(cv, colType)
+			if err != nil {
+				bad = true
+				break
+			}
+			if cv.IsNull() {
+				continue // `IN (1, NULL)` 里的 NULL 恒不成立，跳过
+			}
+			k := storage.OrderKey([]types.Value{cv})
+			rs = append(rs, storage.KeyRange{
+				Lo: k, Hi: k + keyTail, HasLo: true, HasHi: true, LoInc: true,
+			})
+		}
+		if bad || len(rs) == 0 {
+			continue
+		}
+		return indexPlan{ixName: ixName, cols: ixCols, ixCols: ixCols, rs: rs, isRange: true}, true
+	}
+	return indexPlan{}, false
+}
+
+// indexOnFirstColumn 找「首列是第 ci 列」的索引，主键优先。
+// 返回的列位置是索引的**完整**列（区间校验和排序都靠它）。
+func indexOnFirstColumn(t *catalog.Table, ci int) (string, []int, bool) {
+	if pk := t.PKIdxes(); len(pk) > 0 && pk[0] == ci {
+		return "", pk, true
+	}
+	want := strings.ToLower(t.Columns[ci].Name)
+	for _, ux := range t.Indexes {
+		if len(ux.Columns) == 0 || strings.ToLower(ux.Columns[0]) != want {
+			continue
+		}
+		cols := indexColIdxes(t, ux)
+		if len(cols) == 0 {
+			continue
+		}
+		return ux.Name, cols, true
+	}
+	return "", nil, false
 }
 
 // pickOrIndex 把顶层 OR 的每个分支翻译成键区间，合并成一次索引扫描。
@@ -318,7 +402,7 @@ func pickOrIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool
 	return plan, true
 }
 
-// pickBranchIndex 单个 OR 分支：只认完整键等值或单列区间。
+// pickBranchIndex 单个 OR 分支：只认完整键等值、IN 列表或单列区间。
 func pickBranchIndex(t *catalog.Table, e sql.Expr, qual string) (indexPlan, bool) {
 	if len(splitDisjuncts(e)) > 1 {
 		return indexPlan{}, false // 嵌套 OR：不处理
@@ -329,6 +413,10 @@ func pickBranchIndex(t *catalog.Table, e sql.Expr, qual string) (indexPlan, bool
 				return indexPlan{}, false // `col = NULL` 恒不成立，交给全表扫
 			}
 		}
+		return p, true
+	}
+	// `a IN (1,2) OR a = 3`：IN 分支本身就能展开成多段区间，由外层一起合并
+	if p, ok := pickInIndex(t, e, qual); ok {
 		return p, true
 	}
 	return pickRangeIndex(t, e, qual)

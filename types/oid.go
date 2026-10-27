@@ -151,9 +151,22 @@ func OIDByName(name string) int32 {
 		return OIDRecord
 	case "\"char\"":
 		return OIDChar
+	// information_schema 里的域（domain）名。客户端是按 OID 解析结果集的：
+	// 把 cardinal_number 当 text 发，Navicat 的长度/精度列就解析不出来，
+	// 表设计器里整列类型显示成 "(Type)"。这里给出与真实 PostgreSQL 一致的
+	// 底层类型 OID（实测：cardinal_number=int4，其余三个域=varchar）。
+	case "cardinal_number":
+		return OIDInt4
+	case "sql_identifier", "character_data", "yes_or_no":
+		return OIDVarchar
+	case "time_stamp":
+		return OIDTimestamptz
 	}
 	if strings.HasSuffix(n, "[]") {
-		// 数组类型的 OID 不重要，统一报 text[]，避免客户端误判成标量
+		if strings.HasPrefix(n, "aclitem") {
+			return 1034 // aclitem[]
+		}
+		// 其它数组类型的 OID 不重要，统一报 text[]，避免客户端误判成标量
 		return 1009
 	}
 	return OIDText

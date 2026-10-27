@@ -457,6 +457,9 @@ func (c *conn) handleParse(payload []byte) {
 			off += 4
 		}
 	}
+	// 预编译语句（扩展协议）也要进查询日志：客户端有的元数据查询走
+	// Parse/Bind/Execute 而不是简单查询，不记下来排查时会完全看不见。
+	c.srv.logQuery(query)
 	c.prepared[name] = &preparedStmt{query: query, paramOIDs: oids}
 	_ = c.write(encodeParseComplete())
 }

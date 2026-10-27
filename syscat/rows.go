@@ -131,7 +131,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 			"oid": iv(DbOID), "datname": sv(DatabaseName), "datdba": iv(OwnerOID),
 			"encoding": iv(6), "datcollate": sv("C"), "datctype": sv("C"),
 			"datistemplate": bv(false), "datallowconn": bv(true), "datconnlimit": iv(-1),
-			"datlastsysoid": iv(0), "datfrozenxid": iv(0), "datminmxid": iv(1),
+			"datlastsysoid": iv(LastSystemOID), "datfrozenxid": iv(0), "datminmxid": iv(1),
 			"dattablespace": iv(TablespaceDef),
 		})}
 

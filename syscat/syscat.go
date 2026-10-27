@@ -14,8 +14,12 @@ import (
 
 // 固定的对象编号，保证同一次运行内引用一致（客户端会拿 OID 互相关联）。
 const (
-	OwnerOID         = 10
-	DbOID            = 16384
+	OwnerOID = 10
+	DbOID    = 16384
+	// LastSystemOID 是 pg_database.datlastsysoid 的取值（= FirstNormalObjectId-1）。
+	// 客户端靠 oid <= datlastsysoid 判断「系统对象」，Navicat 表设计器就用它
+	// 把内置类型和用户类型分开；填 0 会让它在类型下拉里看不到 int4/text 这些。
+	LastSystemOID    = 16383
 	NamespaceCatalog = 11
 	NamespacePublic  = 2200
 	NamespaceInfo    = 13207

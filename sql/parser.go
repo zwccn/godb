@@ -372,6 +372,12 @@ func (p *parser) parseColumnDef() (*ColumnDef, error) {
 		return nil, err
 	}
 	col.TypeName, col.TypeArgs, col.Serial = tn, ta, serial
+	// COLLATE 只用来指定排序规则；我们只有一种（等价于 C/default），
+	// 接受但忽略。Navicat 导出的建表语句每列都带
+	// "pg_catalog"."default"，不认这个子句整条 CREATE 就失败。
+	if err := p.skipCollation(); err != nil {
+		return nil, err
+	}
 	for {
 		switch {
 		case p.atKw("not"):
@@ -499,6 +505,25 @@ func (p *parser) parseTypeRef() (string, []int, bool, error) {
 		name += "[]"
 	}
 	return name, args, serial, nil
+}
+
+// skipCollation 吃掉可选的 COLLATE [schema.]名字。
+//
+// 我们没有真正的排序规则实现（只有一种），所以这里只做语法兼容。
+func (p *parser) skipCollation() error {
+	if !p.acceptKw("collate") {
+		return nil
+	}
+	if _, err := p.ident(); err != nil {
+		return err
+	}
+	if p.atPunct(".") {
+		p.pos++
+		if _, err := p.ident(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *parser) parseDrop() (Statement, error) {

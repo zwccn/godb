@@ -94,6 +94,36 @@ func (p *parser) parseComparison() (Expr, error) {
 				continue
 			}
 		}
+		// PostgreSQL 的 OPERATOR(schema.op) 显式写法：psql 的 \d 会发
+		//   c.relname OPERATOR(pg_catalog.~) '^(employees)$'
+		// 我们只有一套内建操作符，忽略 schema 与 OPERATOR 外壳，
+		// 直接把最后那个符号当成普通二元操作符。
+		if t.Is("operator") {
+			p.pos++
+			if err := p.expectPunct("("); err != nil {
+				return nil, err
+			}
+			name := ""
+			for !p.atPunct(")") {
+				if !p.acceptPunct(".") {
+					name = p.peek().Text
+					p.pos++
+				}
+			}
+			if err := p.expectPunct(")"); err != nil {
+				return nil, err
+			}
+			right, err := p.parseBitwise()
+			if err != nil {
+				return nil, err
+			}
+			if name == "!=" {
+				name = "<>"
+			}
+			left = &Binary{Op: name, L: left, R: right}
+			continue
+		}
+
 		if t.Is("is") {
 			p.pos++
 			not := p.acceptKw("not")
@@ -278,6 +308,10 @@ func (p *parser) parsePrimary() (Expr, error) {
 			e = &Cast{X: e, TypeName: tn, TypeArgs: ta}
 			continue
 		}
+		// x COLLATE "C"：只是排序规则，忽略
+		if err := p.skipCollation(); err != nil {
+			return nil, err
+		}
 		// 数组下标 e[i]（PG 的下标从 1 开始）
 		if p.acceptPunct("[") {
 			idx, err := p.parseExpr()
@@ -412,16 +446,39 @@ func (p *parser) parseCallArgs(name string) (Expr, error) {
 	if p.acceptPunct("*") {
 		fc.Star = true
 	} else if !p.atPunct(")") {
-		for {
+		// SQL 标准的 substring 写法用关键字而非逗号：
+		//   substring(s FROM 2 FOR 3) / substring(s FOR 128)
+		// psql 的 \d、pg_dump 都这么写，按普通三参数函数归一化。
+		first, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		args := []Expr{first}
+		if p.acceptKw("from") {
+			b, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, b)
+		}
+		if p.acceptKw("for") {
+			c, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if len(args) == 1 {
+				// substring(x FOR n) 等价于从第 1 个字符起取 n 个
+				args = append(args, &Literal{Val: types.Int(1)})
+			}
+			args = append(args, c)
+		}
+		fc.Args = args
+		for p.acceptPunct(",") {
 			a, err := p.parseExpr()
 			if err != nil {
 				return nil, err
 			}
 			fc.Args = append(fc.Args, a)
-			if p.acceptPunct(",") {
-				continue
-			}
-			break
 		}
 	}
 	if err := p.expectPunct(")"); err != nil {
@@ -433,6 +490,32 @@ func (p *parser) parseCallArgs(name string) (Expr, error) {
 // parseArrayLiteral 解析 ARRAY[...]，内部表示成一个 array(...) 函数调用。
 func (p *parser) parseArrayLiteral() (Expr, error) {
 	p.pos++ // ARRAY
+	// SQL 标准的 ARRAY(SELECT ...)：把子查询的每一行收成数组。
+	// 和 ARRAY[...] 一样归一成 array(...) 调用，求值时按参数类型分辨。
+	if p.acceptPunct("(") {
+		if p.atKw("select") {
+			st, err := p.parseSelect()
+			if err != nil {
+				return nil, err
+			}
+			sel, ok := st.(*Select)
+			if !ok {
+				return nil, p.errAt(p.peek(), "expected SELECT")
+			}
+			if err := p.expectPunct(")"); err != nil {
+				return nil, err
+			}
+			return &FuncCall{Name: "array", Args: []Expr{&Subquery{Select: sel}}}, nil
+		}
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		return &FuncCall{Name: "array", Args: []Expr{e}}, nil
+	}
 	if err := p.expectPunct("["); err != nil {
 		return nil, err
 	}

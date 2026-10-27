@@ -285,6 +285,13 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		return compileCase(n, c)
 
 	case *sql.FuncCall:
+		// ARRAY(SELECT ...)：把子查询的每一行收成数组文本 "{a,b}"。
+		// psql 的 \d 会用它拼行级安全策略的角色列表。
+		if strings.EqualFold(n.Name, "array") && len(n.Args) == 1 {
+			if sq, ok := n.Args[0].(*sql.Subquery); ok {
+				return compileArraySubquery(sq, c)
+			}
+		}
 		if sql.IsAggregate(n.Name) {
 			if c.postAgg {
 				return nil, fmt.Errorf("aggregate %s used in an invalid context", n.Name)
@@ -1344,4 +1351,58 @@ func splitArrayElems(body string) []string {
 		}
 	}
 	return append(out, cur.String())
+}
+
+// arraySubqueryEval 求 ARRAY(SELECT ...)：收集所有行的第一列，拼成 PG 的
+// 数组文本 "{a,b,c}"（空结果给 "{}"，和 PostgreSQL 一致）。
+//
+// 标量子查询要求「最多一行」，这里正好相反，要的就是全部行。
+type arraySubqueryEval struct {
+	plan  Operator
+	outer types.Row
+}
+
+func (e *arraySubqueryEval) Type() types.Type {
+	return types.Type{Kind: types.KText, Name: "text"}
+}
+
+func (e *arraySubqueryEval) Eval(row types.Row) (types.Value, error) {
+	e.outer = row
+	if err := e.plan.Open(); err != nil {
+		return types.Null, err
+	}
+	defer e.plan.Close()
+
+	items := []string{}
+	for {
+		r, ok, err := e.plan.Next()
+		if err != nil {
+			return types.Null, err
+		}
+		if !ok {
+			break
+		}
+		if len(r) == 0 || r[0].IsNull() {
+			continue
+		}
+		items = append(items, r[0].TextForm())
+	}
+	return types.Text(arrayLiteral(items)), nil
+}
+
+// compileArraySubquery 编译 ARRAY(SELECT ...)。
+func compileArraySubquery(sq *sql.Subquery, c *compileCtx) (Eval, error) {
+	if c.planner == nil {
+		return nil, fmt.Errorf("subqueries are not supported in this context")
+	}
+	ie := &arraySubqueryEval{}
+	plan, err := c.planner.buildSubquery(sq.Select, c.sc, &ie.outer)
+	if err != nil {
+		return nil, err
+	}
+	if len(plan.Schema()) > 1 {
+		return nil, fmt.Errorf("ARRAY subquery must return only one column")
+	}
+	ie.plan = plan
+	return ie, nil
 }

@@ -534,3 +534,36 @@ func insertRows(t *testing.T, d *DB, sess, table string, n int) {
 		}
 	}
 }
+
+// 启动时重放完的 WAL 必须被轮转掉。
+// 空转优化（「没有脏表就不写 meta、不转 WAL」）曾经把它一起省掉，
+// 结果每次重启都要把上一轮的记录再重放一遍。
+func TestStartupRotatesWAL(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	run(t, d, "s", `CREATE TABLE wr (id int4 PRIMARY KEY, v text)`)
+	run(t, d, "s", `INSERT INTO wr VALUES (1,'a'),(2,'b')`)
+	// 不 Flush 直接关 WAL：WAL 里留着未落盘的记录，等价于进程被 kill
+	if err := d.Store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	walPath := filepath.Join(dir, "wal.log")
+	before, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if before.Size() == 0 {
+		t.Fatal("WAL 里应该有记录")
+	}
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	assertRows(t, run(t, d2, "s", `SELECT count(*) FROM wr`), []string{"2"})
+	after, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("启动后 WAL 该被轮转清空，实际 %d -> %d 字节", before.Size(), after.Size())
+	}
+}

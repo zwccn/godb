@@ -247,9 +247,10 @@ func (s *Store) checkpointWrite(job *snapshotJob) error {
 // checkpointFinishLocked 写盘成功后更新内存状态、清理孤儿文件、写 meta、轮转 WAL。
 // 调用方必须持有 CommitMu。
 func (s *Store) checkpointFinishLocked(job *snapshotJob) error {
-	// 一张表都不需要重写、WAL 也还小：这一轮纯属空转，别去动 meta 和 WAL。
-	// 写一次 meta 就是一次 tmp+fsync+rename，轮转 WAL 要删文件重建 —— 都是白做功。
-	if len(job.tables) == 0 && (s.wal == nil || s.wal.LiveBytes() < 1<<20) {
+	// 一张表都不需要重写说明数据早就在磁盘上了。这时只剩一件事值得做：把
+	// WAL 轮转掉（启动时重放完的那批记录就靠这一步清空）。WAL 本来就空的话，
+	// 写 meta 和轮转都是白做功 —— 一次 tmp+fsync+rename 加一次删文件重建。
+	if len(job.tables) == 0 && (s.wal == nil || s.wal.LiveBytes() == 0) {
 		s.commits = 0
 		s.snapBytes = 0 // 这一轮确实一个字节都没写，别把上一轮的数字留着
 		return nil

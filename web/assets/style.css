@@ -1394,6 +1394,20 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
 .db-pick {
   display: flex;
   align-items: center;
+  gap: 6px;
+}
+
+.db-pick-label {
+  font-size: calc(10.5px * var(--fs));
+  letter-spacing: .6px;
+  color: var(--text-3);
+}
+
+/* 顶栏「管理」按钮：和下拉同高，别把工具栏撑歪 */
+.db-pick .btn-sm {
+  height: 26px;
+  padding: 0 9px;
+  font-size: calc(11px * var(--fs));
 }
 
 .db-pick select {
@@ -1412,3 +1426,135 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
 
 .db-pick select:hover { background: var(--bg-3); }
 .db-pick select:focus { outline: none; box-shadow: 0 0 0 2px var(--accent-soft-bg); }
+
+/* ---------------- 库列表（表结构标题旁 + 管理弹窗） ---------------- */
+
+.sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* 当前库徽标：点开就是库管理。放这里是因为「我在哪个库里」是看表树时最想确认的事 */
+.db-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--accent-border, var(--border));
+  border-radius: 999px;
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  letter-spacing: 0;
+  text-transform: none;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.db-badge:hover { border-color: var(--accent); }
+
+.db-body { padding-top: 14px; }
+
+.db-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.db-create input {
+  flex: 1 1 auto;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--fs));
+}
+
+.db-create input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft-bg);
+}
+
+.dbt {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: calc(12px * var(--fs));
+}
+
+.dbt th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-weight: 500;
+  font-size: calc(11px * var(--fs));
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  text-align: left;
+}
+
+.dbt td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+
+.dbt tr.cur td { background: var(--accent-soft-bg); }
+
+.dbt .c-num {
+  width: 76px;
+  text-align: right;
+  font-family: var(--mono);
+  color: var(--text-2);
+}
+
+.dbt .c-act {
+  width: 132px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.dbt .c-act .btn + .btn { margin-left: 4px; }
+
+.db-name {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.db-tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-3);
+  font-size: calc(10px * var(--fs));
+}
+
+.db-tag-cur {
+  border-color: var(--accent-border, var(--border));
+  color: var(--accent);
+}
+
+/* 删除按钮：平时不抢眼，hover 才红 —— 免得误点 */
+.btn-danger-text { color: var(--danger-text); }
+.btn-danger-text:hover {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.dbt-empty {
+  padding: 18px 8px;
+  color: var(--text-3);
+  text-align: center;
+}
+
+.db-note {
+  margin-top: 12px;
+  color: var(--text-3);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.7;
+}

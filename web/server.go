@@ -137,22 +137,72 @@ func (s *Server) sessionOf(w http.ResponseWriter, r *http.Request, d *db.DB) *tx
 	return d.Session(id)
 }
 
-// handleDBs 列出所有库 + 当前库；POST 切换当前库。
+// handleDBs 是库列表与库管理接口。
+//
+//	GET  → { current, default, dbs: [{name, default, tables, rows, bytes, walBytes}] }
+//	POST { action: "switch", db }   切换当前库（写 cookie）
+//	POST { action: "create", name } 新建空库
+//	POST { action: "drop",  name }  删除（默认库和当前库会被拒）
+//
+// 不写 action 且带 db 的旧请求按 switch 处理，避免前端缓存版本对不上。
 func (s *Server) handleDBs(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.postDBs(w, r)
+		return
+	}
 	if s.DBs == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"dbs": []string{s.DB.Name}, "current": s.DB.Name,
+			"current": s.DB.Name,
+			"default": s.DB.Name,
+			"dbs": []map[string]interface{}{{
+				"name": s.DB.Name, "default": true,
+			}},
 		})
 		return
 	}
-	if r.Method == http.MethodPost {
-		var req struct {
-			DB string `json:"db"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法解析请求体"})
-			return
-		}
+	cur := s.currentDB(r)
+	stats := s.DBs.List()
+	dbs := make([]map[string]interface{}, 0, len(stats))
+	for _, st := range stats {
+		dbs = append(dbs, map[string]interface{}{
+			"name":     st.Name,
+			"default":  st.Default,
+			"current":  st.Name == cur.Name,
+			"tables":   st.Tables,
+			"rows":     st.Rows,
+			"bytes":    st.Bytes,
+			"walBytes": st.WALBytes,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"current": cur.Name,
+		"default": s.DBs.Default().Name,
+		"dbs":     dbs,
+	})
+}
+
+func (s *Server) postDBs(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"`
+		DB     string `json:"db"`
+		Name   string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法解析请求体"})
+		return
+	}
+	if s.DBs == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "当前是单库模式，不支持多库操作"})
+		return
+	}
+	// 库管理会建目录、删目录，只允许本机操作 —— 和控制台改配置同一个理由：
+	// 放开给远程等于把「删库」这个按钮摆到公网上。
+	if !isLocalRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "多库管理只允许在本机操作"})
+		return
+	}
+	switch req.Action {
+	case "", "switch":
 		d, err := s.DBs.Get(req.DB)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -162,12 +212,37 @@ func (s *Server) handleDBs(w http.ResponseWriter, r *http.Request) {
 			Name: "godb_db", Value: d.Name, Path: "/", SameSite: http.SameSiteLaxMode,
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "current": d.Name})
-		return
+	case "create":
+		d, err := s.DBs.Create(req.Name)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "name": d.Name})
+	case "drop":
+		cur := s.currentDB(r)
+		name := strings.ToLower(strings.TrimSpace(req.Name))
+		// 先判默认库：它同时也是当前库时，「默认库不能删」这个理由是更准确的那个。
+		if name == strings.ToLower(s.DBs.Default().Name) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "默认库不能删除（它就是数据目录根上的那一套，删了服务下次起不来）",
+			})
+			return
+		}
+		if name == cur.Name {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "不能删除当前正在使用的库，请先切换到别的库",
+			})
+			return
+		}
+		if err := s.DBs.Drop(req.Name); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未知操作：" + req.Action})
 	}
-	cur := s.currentDB(r)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"dbs": s.DBs.Names(), "current": cur.Name,
-	})
 }
 
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {

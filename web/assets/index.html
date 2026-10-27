@@ -40,9 +40,11 @@ try {
     </div>
   </div>
   <div class="top-actions">
-    <label class="db-pick" title="当前数据库">
+    <div class="db-pick" title="当前数据库">
+      <span class="db-pick-label">库</span>
       <select id="dbSelect" aria-label="数据库" title="切换数据库"></select>
-    </label>
+      <button id="btnDBs" class="btn btn-ghost btn-sm" type="button" title="管理数据库（新建 / 删除）">管理</button>
+    </div>
     <div class="theme-switch" role="group" aria-label="皮肤">
       <span class="theme-switch-label">皮肤</span>
       <button class="theme-dot theme-dot-dark" type="button" data-theme="dark"
@@ -70,7 +72,8 @@ try {
 <main class="layout">
   <aside class="sidebar">
     <div class="sidebar-head">
-      <span>表结构</span>
+      <span class="sidebar-title">表结构<button id="dbBadge" class="db-badge" type="button"
+        title="当前数据库（点击管理）">godb</button></span>
       <span class="sidebar-head-actions">
         <button id="btnNewTable" class="icon-btn" title="新建表">+</button>
         <button id="btnRefresh" class="icon-btn" title="刷新">⟳</button>
@@ -143,6 +146,44 @@ try {
   <div id="lockBody" class="drawer-body"></div>
   <div class="drawer-foot"><span id="lockMeta">—</span></div>
 </aside>
+
+<div id="dbModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="数据库">
+  <div class="modal-card mid">
+    <div class="modal-head">
+      <span>数据库</span>
+      <button id="btnDBClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="modal-body db-body">
+      <div class="db-create">
+        <input id="dbNewName" type="text" spellcheck="false" autocomplete="off"
+               placeholder="新库名（小写字母 / 数字 / 下划线）">
+        <button id="btnDBCreate" class="btn btn-primary btn-sm" type="button">新建库</button>
+      </div>
+      <table class="dbt">
+        <thead>
+          <tr>
+            <th class="c-name">库名</th>
+            <th class="c-num">表</th>
+            <th class="c-num">行数</th>
+            <th class="c-num">占用</th>
+            <th class="c-act"></th>
+          </tr>
+        </thead>
+        <tbody id="dbList"></tbody>
+      </table>
+      <div class="db-note">
+        每个库是独立的一套（自己的表、索引、WAL 与事务），库之间不能互相查询。
+        默认库不可删除；当前库需要先切走才能删；库内还有进行中的事务时也不能删。
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span id="dbHint" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="btnDBDone" class="btn btn-sm" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="设置">
   <div class="modal-card">

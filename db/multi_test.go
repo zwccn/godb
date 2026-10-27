@@ -228,3 +228,49 @@ func TestCreateDropDatabaseInTx(t *testing.T) {
 	}
 	run(t, def, "s", `ROLLBACK`)
 }
+
+// List 是控制台库列表的数据源：默认库排第一、带 Default 标记，
+// 统计要真实反映每个库自己的表与行（不能串到别的库）。
+func TestManagerListStats(t *testing.T) {
+	m := newTestManager(t)
+	def := m.Default()
+	run(t, def, "s", `CREATE TABLE a1 (id int4 PRIMARY KEY)`)
+	run(t, def, "s", `INSERT INTO a1 VALUES (1),(2),(3)`)
+
+	shop, err := m.Create("shop")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	run(t, shop, "s", `CREATE TABLE o1 (id int4 PRIMARY KEY, v text)`)
+	run(t, shop, "s", `INSERT INTO o1 VALUES (1,'x')`)
+
+	list := m.List()
+	if len(list) != 2 {
+		t.Fatalf("应有 2 个库，实际 %d", len(list))
+	}
+	if list[0].Name != "godb" || !list[0].Default {
+		t.Fatalf("默认库应排第一且标记 Default，实际 %+v", list[0])
+	}
+	if list[0].Tables != 1 || list[0].Rows != 3 {
+		t.Fatalf("默认库统计不对：%+v", list[0])
+	}
+	if list[1].Name != "shop" || list[1].Default {
+		t.Fatalf("第二个库不对：%+v", list[1])
+	}
+	if list[1].Tables != 1 || list[1].Rows != 1 {
+		t.Fatalf("shop 统计不对（不能串到默认库）：%+v", list[1])
+	}
+	// 刚插入的数据可能还在 WAL 里（没 checkpoint 过就没有快照文件），
+	// 所以「占用」要看数据文件 + WAL 之和
+	if list[1].Bytes+list[1].WALBytes <= 0 {
+		t.Fatalf("shop 的占用应大于 0：%+v", list[1])
+	}
+
+	// 删掉之后列表里就没有了
+	if err := m.Drop("shop"); err != nil {
+		t.Fatalf("Drop: %v", err)
+	}
+	if got := len(m.List()); got != 1 {
+		t.Fatalf("删库后应只剩 1 个，实际 %d", got)
+	}
+}

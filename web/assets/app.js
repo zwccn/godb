@@ -225,6 +225,11 @@ async function run(prefix) {
     if (ddl || (data.error && /table/i.test(data.error.message))) {
       await loadSchema();
     }
+    // 在编辑器里建/删库也要刷新库列表（否则下拉里看到的还是旧的）
+    const touchedDB = (data.results || []).some(r =>
+      /^(CREATE|DROP) DATABASE$/.test(r.tag || r.command || '')) ||
+      /^(create|drop)\s+database/i.test(sql);
+    if (touchedDB) await loadDBs();
   } catch (e) {
     resultsEl.innerHTML = '';
     resultsEl.appendChild(errorCard({ message: String(e.message || e) }));
@@ -710,7 +715,8 @@ document.getElementById('btnSample').addEventListener('click', async () => {
 });
 
 document.getElementById('btnReset').addEventListener('click', async () => {
-  if (!confirm('确定要删除所有表吗？此操作不可撤销。')) return;
+  const cur = (document.getElementById('dbBadge') || {}).textContent || '当前库';
+  if (!confirm(`确定要删除「${cur}」里的所有表吗？此操作不可撤销。`)) return;
   try {
     await api('/api/reset', {});
     await loadSchema();
@@ -862,9 +868,16 @@ function renderSettings() {
   stat('上次写入', fmtBytes(cp.bytesWritten || 0));
   stat('累计写入', fmtBytes(cp.bytesTotal || 0));
   stat('当前 WAL', fmtBytes(cp.walBytes || 0));
+  const dbN = rt.databases || 1;
+  stat('库数', dbN + ' 个');
   stat('数据文件', fmtBytes(rt.dataBytes || 0));
-  stat('表 / 行数', (rt.tables || 0) + ' / ' + (rt.rows || 0));
+  // 多库时这些是全部库的合计，得写清楚，否则会以为「数据丢了 / 变多了」
+  stat('表 / 行数', (rt.tables || 0) + ' / ' + (rt.rows || 0) + (dbN > 1 ? '（全部库合计）' : ''));
   settingsBody.appendChild(stats);
+  if (dbN > 1) {
+    settingsBody.appendChild(el('div', 'set-hint',
+      '以上表数、行数、数据文件都是 ' + dbN + ' 个库的合计。各库的明细在「表结构」标题旁的库名里。'));
+  }
 
   if ((d.warnings || []).length) {
     d.warnings.forEach(w => settingsBody.appendChild(el('div', 'set-warn', w)));
@@ -1737,46 +1750,178 @@ document.addEventListener('keydown', ev => {
   if (m && !m.classList.contains('hidden')) closeHistory();
 });
 
-/* ---------------- 数据库切换 ---------------- */
+/* ---------------- 数据库 ---------------- */
 
-// 库列表与当前库都存服务端（cookie godb_db），前端只负责展示与切换。
+// 库列表与当前库都存在服务端（cookie godb_db），前端只负责展示与切换。
 // 所有既有接口都不用改 URL —— cookie 自动带上。
+let dbData = null;
+
 async function loadDBs() {
   const sel = document.getElementById('dbSelect');
-  if (!sel) return;
   let data;
   try {
     data = await api('/api/dbs');
   } catch (e) {
-    sel.innerHTML = '';
+    if (sel) sel.innerHTML = '';
     return;
   }
-  const dbs = data.dbs || [];
-  sel.innerHTML = '';
-  for (const name of dbs) {
-    const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = name;
-    if (name === data.current) opt.selected = true;
-    sel.appendChild(opt);
+  dbData = data;
+  const badge = document.getElementById('dbBadge');
+  if (badge) badge.textContent = data.current || '';
+  if (sel) {
+    sel.innerHTML = '';
+    for (const d of data.dbs || []) {
+      const opt = document.createElement('option');
+      opt.value = d.name;
+      opt.textContent = d.name;
+      if (d.name === data.current) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.title = '当前数据库：' + (data.current || '');
   }
-  sel.title = '当前数据库：' + (data.current || '');
+  const modal = document.getElementById('dbModal');
+  if (modal && !modal.classList.contains('hidden')) renderDBList(data);
 }
 
-document.getElementById('dbSelect').addEventListener('change', async ev => {
-  const name = ev.target.value;
-  try {
-    const r = await api('/api/dbs', { db: name });
-    if (r.error) throw new Error(r.error);
-  } catch (e) {
-    alert('切换数据库失败：' + e.message);
-    await loadDBs();
+function dbHint(msg, kind) {
+  const n = document.getElementById('dbHint');
+  n.textContent = msg || '';
+  n.className = 'modal-hint' + (kind ? ' ' + kind : '');
+}
+
+function renderDBList(data) {
+  const body = document.getElementById('dbList');
+  body.innerHTML = '';
+  const dbs = data.dbs || [];
+  if (!dbs.length) {
+    const tr = el('tr');
+    const td = el('td', 'dbt-empty', '没有任何库');
+    td.colSpan = 5;
+    tr.appendChild(td);
+    body.appendChild(tr);
     return;
   }
-  // 换了库：表结构、结果区、事务状态都要重新拉
-  const out = document.getElementById('result');
-  if (out) out.innerHTML = '';
+  for (const d of dbs) {
+    const tr = el('tr');
+    if (d.name === data.current) tr.className = 'cur';
+
+    const nameCell = el('td', 'c-name');
+    nameCell.appendChild(el('span', 'db-name', d.name));
+    if (d.default) nameCell.appendChild(el('span', 'db-tag', '默认'));
+    if (d.name === data.current) nameCell.appendChild(el('span', 'db-tag db-tag-cur', '当前'));
+    tr.appendChild(nameCell);
+
+    tr.appendChild(el('td', 'c-num', String(d.tables || 0)));
+    tr.appendChild(el('td', 'c-num', (d.rows || 0).toLocaleString()));
+    // 占用 = 快照文件 + WAL。只显示快照会让人看到「有 3 行但 0 B」——
+    // 数据还在 WAL 里没 checkpoint 而已。
+    const used = (d.bytes || 0) + (d.walBytes || 0);
+    const usedCell = el('td', 'c-num', fmtBytes(used));
+    usedCell.title = `数据 ${fmtBytes(d.bytes || 0)} + WAL ${fmtBytes(d.walBytes || 0)}`;
+    tr.appendChild(usedCell);
+
+    const act = el('td', 'c-act');
+    if (d.name !== data.current) {
+      const sw = el('button', 'btn btn-ghost btn-sm', '切换');
+      sw.type = 'button';
+      sw.addEventListener('click', () => switchDB(d.name));
+      act.appendChild(sw);
+    }
+    if (!d.default && d.name !== data.current) {
+      const del = el('button', 'btn btn-ghost btn-sm btn-danger-text', '删除');
+      del.type = 'button';
+      del.title = `删除数据库 ${d.name}（连带全部数据）`;
+      del.addEventListener('click', () => dropDB(d.name, d.tables || 0));
+      act.appendChild(del);
+    }
+    tr.appendChild(act);
+    body.appendChild(tr);
+  }
+}
+
+async function switchDB(name) {
+  try {
+    const r = await api('/api/dbs', { action: 'switch', db: name });
+    if (r.error) throw new Error(r.error);
+  } catch (e) {
+    dbHint('切换失败：' + e.message, 'err');
+    return;
+  }
+  // 换了库：结果区清掉，表结构重新拉。**事务状态交给 loadSchema 同步** ——
+  // 会话是按库分开的，目标库里这个会话可能正开着事务，不能想当然置成空闲。
+  resultsEl.innerHTML = '';
+  await loadDBs();
   await loadSchema();
+  dbHint('已切换到 ' + name, 'ok');
+  const ed = document.getElementById('editor');
+  if (ed) ed.placeholder = `-- 当前库：${name}，Ctrl+Enter 执行\nSELECT * FROM …`;
+}
+
+async function createDB() {
+  const input = document.getElementById('dbNewName');
+  const name = input.value.trim();
+  if (!name) {
+    dbHint('请先填库名', 'err');
+    return;
+  }
+  const btn = document.getElementById('btnDBCreate');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/dbs', { action: 'create', name });
+    if (r.error) throw new Error(r.error);
+    input.value = '';
+    dbHint('已创建空库 ' + r.name, 'ok');
+    await loadDBs();
+  } catch (e) {
+    dbHint('新建失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function dropDB(name, tables) {
+  const extra = tables > 0 ? `\n该库有 ${tables} 张表，数据会被一起删除。` : '';
+  if (!confirm(`删除数据库 ${name}？${extra}\n\n此操作不可撤销。`)) return;
+  try {
+    const r = await api('/api/dbs', { action: 'drop', name });
+    if (r.error) throw new Error(r.error);
+    dbHint('已删除 ' + name, 'ok');
+    await loadDBs();
+  } catch (e) {
+    dbHint('删除失败：' + e.message, 'err');
+  }
+}
+
+function openDBModal() {
+  const modal = document.getElementById('dbModal');
+  modal.classList.remove('hidden');
+  dbHint('');
+  document.getElementById('dbNewName').value = '';
+  if (dbData) renderDBList(dbData);
+  loadDBs().then(() => document.getElementById('dbNewName').focus());
+}
+
+function closeDBModal() {
+  document.getElementById('dbModal').classList.add('hidden');
+}
+
+document.getElementById('dbSelect').addEventListener('change', ev => switchDB(ev.target.value));
+document.getElementById('btnDBs').addEventListener('click', openDBModal);
+document.getElementById('dbBadge').addEventListener('click', openDBModal);
+document.getElementById('btnDBClose').addEventListener('click', closeDBModal);
+document.getElementById('btnDBDone').addEventListener('click', closeDBModal);
+document.getElementById('btnDBCreate').addEventListener('click', createDB);
+document.getElementById('dbNewName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') createDB();
+});
+document.getElementById('dbModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('dbModal')) closeDBModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !document.getElementById('dbModal').classList.contains('hidden')) closeDBModal();
 });
 
-loadDBs();
+loadDBs().then(() => {
+  // #dbs 深链：直接打开库管理（分享链接或者刷新后停在同一个面板）
+  if (location.hash === '#dbs') openDBModal();
+});

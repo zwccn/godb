@@ -249,6 +249,50 @@ func (m *Manager) Close() error {
 	return first
 }
 
+// DBStat 是单个库的概况（控制台的库列表用）。
+type DBStat struct {
+	Name     string
+	Default  bool
+	Tables   int
+	Rows     int
+	Bytes    int64
+	WALBytes int64
+}
+
+// List 返回每个库的概况，顺序和 Names 一致（默认库在前）。
+//
+// 这里会读每个库的表目录来算磁盘占用，所以只给「打开库管理面板」这类低频操作
+// 用。顶栏那个下拉只要名字，走 Names() 就够了。
+func (m *Manager) List() []DBStat {
+	m.mu.RLock()
+	list := make([]*DB, 0, len(m.dbs))
+	for _, d := range m.dbs {
+		list = append(list, d)
+	}
+	m.mu.RUnlock()
+
+	def := strings.ToLower(syscat.DefaultDatabaseName)
+	out := make([]DBStat, 0, len(list))
+	for _, d := range list {
+		info := d.Store.Info()
+		out = append(out, DBStat{
+			Name:     d.Name,
+			Default:  strings.ToLower(d.Name) == def,
+			Tables:   info.Tables,
+			Rows:     info.Rows,
+			Bytes:    info.Bytes,
+			WALBytes: info.WALBytes,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Default != out[j].Default {
+			return out[i].Default
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
 // Stats 汇总所有库的存储情况（设置页展示用）。
 //
 // 逐个库取 Info() 会把每个库的全部表目录扫一遍，所以只在「打开设置页」时调，

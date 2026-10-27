@@ -60,7 +60,7 @@ go build -o godb.exe .
 | 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
-| 多库 | `CREATE DATABASE` / `DROP DATABASE`；每个库一套独立的 catalog / WAL / 锁，互不影响；`pg_database` 与 `\l` 能看到全部库 |
+| 多库 | `CREATE DATABASE` / `DROP DATABASE`；每个库一套独立的 catalog / WAL / 锁，互不影响；`pg_database` 与 `\l` 能看到全部库；控制台顶栏可切换，库管理面板能看每个库的表数/行数/占用并新建删除 |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：递归 CTE（`WITH RECURSIVE`）、窗口函数、
@@ -109,8 +109,29 @@ SELECT datname FROM pg_database ORDER BY datname;   -- 列出所有库（psql �
 psql "host=127.0.0.1 port=6432 user=u dbname=shop"   # 直接连到 shop
 ```
 
-Web 控制台顶栏左上角有库下拉，切换后表树、查询、事务都跟着切（库名存在 cookie
-`godb_db` 里，所以所有既有接口都不用改）。
+### 控制台里怎么用
+
+顶栏右边有「库 ▾ 管理」，左侧「表结构」标题旁也会显示当前库名（点一下同样能打开库
+管理）。库管理面板里能看到每个库的**表数、行数、磁盘占用**，可以新建、切换、删除：
+
+```
+┌ 数据库 ─────────────────────────────────────────┐
+│ [ 新库名（小写字母 / 数字 / 下划线）      ] 新建库 │
+│ 库名                  表    行数      占用        │
+│ godb  默认 当前        2      16    1.1 KB        │
+│ db1                          0       0   34 B     │
+│                                        切换  删除 │
+└─────────────────────────────────────────────────┘
+```
+
+- 「占用」= 表快照文件 + WAL。只算快照会让人看到「有 3 行但 0 B」——数据还在 WAL 里
+  没 checkpoint 而已，鼠标悬停能看到拆分。
+- 切换库只写一个 cookie（`godb_db`），所以查询、表结构、事务、导出这些**既有接口的
+  URL 一个都没改**；会话也是按库分开的，切库不会把 A 库没提交的事务带到 B 库。
+- 面板地址是 `/#dbs`，刷新或分享都会直接停在这个面板。
+- 在 SQL 编辑器里执行 `CREATE/DROP DATABASE` 之后，顶栏下拉会自动刷新。
+- 建库/删库会动磁盘，所以这几个操作**只接受本机请求**（和控制台改配置同一个理由：
+  放开给远程等于把「删库」按钮摆到公网上）。远程只能看列表。
 
 ### 规则与边界
 
@@ -121,6 +142,7 @@ Web 控制台顶栏左上角有库下拉，切换后表树、查询、事务都�
 | 有**进行中的事务**的库不能删 | 半截事务没法回滚到别处；空闲连接不挡（Web 会话关浏览器也不会消失，挡了就没法用） |
 | 库名只收小写字母/数字/下划线，≤63 字符，`template0/1` 保留 | 名字要直接当目录名用，这条也顺手挡住 `../` 这类路径穿越 |
 | `CREATE/DROP DATABASE` 不能在事务块里执行 | 和 PostgreSQL 一致 |
+| 控制台的建库/删库只接受本机请求 | 它们会建目录、删目录，不能摆到公网上 |
 
 库被删掉之后，还挂在旧对象上的连接不会写坏数据：下一次请求直接拿到
 `database "x" has been dropped`。

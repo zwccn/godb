@@ -98,12 +98,15 @@ try {
   <section class="main">
     <div class="editor-wrap">
       <div class="editor-bar">
-        <div class="editor-label">SQL 编辑器</div>
+        <!-- 执行放左边：写完 SQL 视线就在这一侧，回车前不用先把鼠标挪到屏幕另一头 -->
+        <div class="editor-lead">
+          <div class="editor-label">SQL 编辑器</div>
+          <button id="btnRun" class="btn btn-primary btn-sm">执行 <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
+        </div>
         <div class="editor-actions">
           <button id="btnHistory" class="btn btn-ghost btn-sm" title="最近执行过的 SQL">历史</button>
           <button id="btnExplain" class="btn btn-ghost btn-sm" title="加 EXPLAIN 前缀执行">执行计划</button>
           <button id="btnClear" class="btn btn-ghost btn-sm">清空</button>
-          <button id="btnRun" class="btn btn-primary btn-sm">执行 <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
         </div>
       </div>
       <textarea id="editor" spellcheck="false" placeholder="-- 在这里写 SQL，Ctrl+Enter 执行&#10;SELECT * FROM employees LIMIT 10;"></textarea>

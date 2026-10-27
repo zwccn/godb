@@ -82,6 +82,21 @@ class CDP {
       console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`);
     };
 
+    // 0) 执行按钮在工具栏左侧，而且点了真能执行
+    const pos = await cdp.eval(`(() => {
+      const b = document.getElementById('btnRun').getBoundingClientRect();
+      const bar = document.querySelector('.editor-bar').getBoundingClientRect();
+      return { left: b.left, mid: bar.left + bar.width / 2 };
+    })()`);
+    check('执行按钮在工具栏左半边', pos.left < pos.mid,
+      `按钮 x=${Math.round(pos.left)}，中线 x=${Math.round(pos.mid)}`);
+
+    await cdp.eval(`document.getElementById('editor').value = 'SELECT 4242 AS answer'`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(1200);
+    check('点「执行」能跑出结果',
+      await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
+
     // 1) 数据库面板：点遮罩不关闭，点 × 才关闭
     await cdp.eval(`openDBModal()`);
     await sleep(400);

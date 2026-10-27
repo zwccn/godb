@@ -539,11 +539,20 @@ body {
   padding: 7px 14px;
   border-bottom: 1px solid var(--border-soft);
 }
+/* 左边一组：标题 + 执行按钮 */
+.editor-lead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .editor-label {
   font-size: calc(11.5px * var(--fs));
   letter-spacing: .6px;
   text-transform: uppercase;
   color: var(--text-3);
+  white-space: nowrap;
 }
 .editor-actions { display: flex; gap: 7px; }
 

@@ -187,6 +187,22 @@ func (s *Store) ensureLoadedLocked(key string) {
 	s.Repaired += int64(repaired)
 	td.Rows = rows
 	s.tableRows[key] = len(rows)
+	// 必须重建主键索引：否则重启后第一次写入看不到已有行，
+	// 重复主键会被放过去（索引要等到下一次提交才重建）。
+	td.RebuildIndex(t)
+	// 自增序列也要恢复：快照里只存行，不存计数器，所以取现有数据的最大值。
+	// 不恢复的话重启后 SERIAL 从 1 重新发号，会撞上已有主键。
+	if si := t.SerialIdx(); si >= 0 {
+		var max int64
+		for _, r := range rows {
+			if si < len(r) && r[si].K == types.KInt && r[si].I > max {
+				max = r[si].I
+			}
+		}
+		if max > td.Seq {
+			td.Seq = max
+		}
+	}
 	s.loaded[key] = true
 }
 

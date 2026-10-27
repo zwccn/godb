@@ -287,7 +287,7 @@ func (p *parser) parseCreate() (Statement, error) {
 	}
 	colPK := 0
 	for {
-		if p.atKw("primary") || p.atKw("unique") || p.atKw("check") {
+		if p.atKw("primary") || p.atKw("unique") || p.atKw("check") || p.atKw("foreign") {
 			if err := p.parseTableConstraint(ct); err != nil {
 				return nil, err
 			}
@@ -314,6 +314,71 @@ func (p *parser) parseCreate() (Statement, error) {
 		return nil, err
 	}
 	return ct, nil
+}
+
+// parseReferences 解析 REFERENCES 后面的部分：表名 [(列)] [ON DELETE/UPDATE 动作]。
+func (p *parser) parseReferences() (*FKDef, error) {
+	name, err := p.tableName()
+	if err != nil {
+		return nil, err
+	}
+	fk := &FKDef{RefTable: name}
+	if p.atPunct("(") {
+		p.pos++
+		for {
+			c, err := p.ident()
+			if err != nil {
+				return nil, err
+			}
+			fk.RefCols = append(fk.RefCols, c)
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+	}
+	for p.acceptKw("on") {
+		isDelete := false
+		switch {
+		case p.acceptKw("delete"):
+			isDelete = true
+		case p.acceptKw("update"):
+		default:
+			return nil, p.errAt(p.peek(), "expected DELETE or UPDATE")
+		}
+		action := ""
+		switch {
+		case p.acceptKw("cascade"):
+			action = "cascade"
+		case p.acceptKw("restrict"):
+			action = "restrict"
+		case p.acceptKw("no"):
+			if err := p.expectKw("action"); err != nil {
+				return nil, err
+			}
+			action = "no action"
+		case p.acceptKw("set"):
+			switch {
+			case p.acceptKw("null"):
+				action = "set null"
+			case p.acceptKw("default"):
+				action = "set default"
+			default:
+				return nil, p.errAt(p.peek(), "expected NULL or DEFAULT")
+			}
+		default:
+			return nil, p.errAt(p.peek(), "unknown ON DELETE/UPDATE action")
+		}
+		if isDelete {
+			fk.OnDelete = action
+		} else {
+			fk.OnUpdate = action
+		}
+	}
+	return fk, nil
 }
 
 func (p *parser) parseTableConstraint(ct *CreateTable) error {
@@ -349,6 +414,25 @@ func (p *parser) parseTableConstraint(ct *CreateTable) error {
 			return p.errAt(p.peek(), "column %q named in key does not exist", cols[0])
 		}
 		col.Unique = true
+		return nil
+	}
+	if p.acceptKw("foreign") {
+		if err := p.expectKw("key"); err != nil {
+			return err
+		}
+		cols, err := p.parseIdentList()
+		if err != nil {
+			return err
+		}
+		if err := p.expectKw("references"); err != nil {
+			return err
+		}
+		ref, err := p.parseReferences()
+		if err != nil {
+			return err
+		}
+		ref.Cols = cols
+		ct.FKs = append(ct.FKs, ref)
 		return nil
 	}
 	if p.acceptKw("check") {
@@ -443,7 +527,17 @@ func (p *parser) parseColumnDef() (*ColumnDef, error) {
 			}
 			col.Default = e
 		case p.atKw("references"):
-			return nil, p.errAt(p.peek(), "foreign key constraints are not supported")
+			// 列级外键：REFERENCES t [(col)] [ON DELETE action] [ON UPDATE action]
+			p.pos++
+			ref, err := p.parseReferences()
+			if err != nil {
+				return nil, err
+			}
+			col.RefTable = ref.RefTable
+			if len(ref.RefCols) > 0 {
+				col.RefCol = ref.RefCols[0]
+			}
+			col.RefOnDel = ref.OnDelete
 		case p.atKw("check"):
 			// 列级 CHECK：只检查本行，求值时和其他列一样按表的一行来算。
 			// 表达式存成原文（catalog 里也存文本，重启后重新解析）。

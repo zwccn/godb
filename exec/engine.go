@@ -197,6 +197,9 @@ func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
 			t.Checks = append(t.Checks, c.Check)
 		}
 	}
+	if err := e.buildForeignKeys(t, s); err != nil {
+		return nil, err
+	}
 	if err := e.Cat.Add(t); err != nil {
 		return nil, err
 	}
@@ -214,6 +217,9 @@ func (e *Engine) execDropTable(s *sql.DropTable) (*Result, error) {
 				continue
 			}
 			return nil, fmt.Errorf("table %q does not exist", name)
+		}
+		if err := e.checkDropFK(name); err != nil {
+			return nil, err
 		}
 		if err := e.Cat.Drop(name); err != nil {
 			return nil, err
@@ -509,6 +515,9 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		if err := evalChecks(checks, row); err != nil {
 			return nil, err
 		}
+		if err := e.checkFKRow(tx, t, row); err != nil {
+			return nil, err
+		}
 		for gi, g := range groups {
 			vals, ok := groupValues(row, g)
 			if !ok {
@@ -769,6 +778,9 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		if err := evalChecks(checks, newRow); err != nil {
 			return nil, err
 		}
+		if err := e.checkFKRow(tx, t, newRow); err != nil {
+			return nil, err
+		}
 		self := refs[i]
 		for _, g := range groups {
 			vals, ok := groupValues(newRow, g)
@@ -867,17 +879,23 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 			}
 		}
 		refs = append(refs, ref)
-		if len(retEvals) > 0 {
-			// Scan 可能复用缓冲，拷一份留给 RETURNING
-			cp := make(types.Row, len(row))
-			copy(cp, row)
-			delRows = append(delRows, cp)
-		}
+		// Scan 可能复用缓冲，拷一份：外键检查与 RETURNING 都要用
+		cp := make(types.Row, len(row))
+		copy(cp, row)
+		delRows = append(delRows, cp)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	for _, ref := range refs {
+	for i, ref := range refs {
+		// 先看有没有子表引用这行；cascade 的在这里一并删掉（同一事务）
+		casc, err := e.checkFKDelete(tx, t, delRows[i])
+		if err != nil {
+			return nil, err
+		}
+		if err := e.applyCascades(tx, casc); err != nil {
+			return nil, err
+		}
 		if err := tx.Delete(t.Name, ref); err != nil {
 			return nil, err
 		}

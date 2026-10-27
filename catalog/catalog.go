@@ -23,6 +23,17 @@ type Column struct {
 	Default    string `json:"default,omitempty"`
 }
 
+// ForeignKey 是一条外键约束。
+type ForeignKey struct {
+	Name       string   `json:"name"`
+	Columns    []string `json:"columns"`
+	RefTable   string   `json:"ref_table"`
+	RefColumns []string `json:"ref_columns"`
+	// OnDelete 为空表示 NO ACTION（和 RESTRICT 一样报错，只是检查时机不同）
+	OnDelete string `json:"on_delete,omitempty"`
+	OnUpdate string `json:"on_update,omitempty"`
+}
+
 // NewColumn 由类型与约束构造列定义。
 func NewColumn(name string, t types.Type) *Column {
 	return &Column{
@@ -51,6 +62,9 @@ type Table struct {
 	// Checks 是 CHECK 约束的表达式原文（SQL 文本）。
 	// 存文本而不是 AST：catalog.json 要能跨进程重读，解析器改了也不会卡住老数据。
 	Checks []string `json:"checks,omitempty"`
+
+	// ForeignKeys 是外键约束。
+	ForeignKeys []*ForeignKey `json:"foreign_keys,omitempty"`
 
 	colIdx map[string]int
 }

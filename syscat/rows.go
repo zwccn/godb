@@ -274,6 +274,29 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"conkey": sv(constraintColList(ix)),
 				}))
 			}
+			// 外键：contype = 'f'，confrelid 指向父表，conkey/confkey 是两侧列号
+			for fi, fk := range tm.t.ForeignKeys {
+				parent, ok := m.byName[strings.ToLower(fk.RefTable)]
+				if !ok {
+					continue
+				}
+				ckey, err1 := refColNums(tm.t, fk.Columns)
+				fkey, err2 := refColNums(parent.t, fk.RefColumns)
+				if err1 != nil || err2 != nil {
+					continue
+				}
+				out = append(out, mk(def, map[string]types.Value{
+					"oid":          iv(fkOIDBase + int(tm.oid)*10 + fi),
+					"conname":      sv(fk.Name),
+					"connamespace": iv(NamespacePublic), "contype": sv("f"),
+					"condeferrable": bv(false), "condeferred": bv(false), "convalidated": bv(true),
+					"conrelid": iv(int(tm.oid)), "contypid": iv(0), "conindid": iv(0),
+					"conparentid": iv(0), "confrelid": iv(int(parent.oid)),
+					"confupdtype": sv(fkActionCode(fk.OnUpdate)), "confdeltype": sv(fkActionCode(fk.OnDelete)),
+					"confmatchtype": sv("s"), "conislocal": bv(true), "coninhcount": iv(0),
+					"connoinherit": bv(false), "conkey": sv(ckey), "confkey": sv(fkey),
+				}))
+			}
 		}
 		return out
 
@@ -1319,4 +1342,35 @@ var comparisonOperators = []struct {
 	{1755, "<=", 1700, "numeric_le"},
 	{1757, ">=", 1700, "numeric_ge"},
 	{1753, "<>", 1700, "numeric_ne"},
+}
+
+// fkOIDBase 是外键约束 OID 的起点，避开索引/唯一约束占用的区间。
+const fkOIDBase = 21000
+
+// refColNums 把列名列表转成 conkey/confkey 用的 "{1,2}" 形式。
+func refColNums(t *catalog.Table, cols []string) (string, error) {
+	parts := make([]string, 0, len(cols))
+	for _, name := range cols {
+		idx, ok := t.ColumnIdx(name)
+		if !ok {
+			return "", fmt.Errorf("column %q does not exist", name)
+		}
+		parts = append(parts, fmt.Sprintf("%d", idx+1))
+	}
+	return "{" + strings.Join(parts, ",") + "}", nil
+}
+
+// fkActionCode 把 ON DELETE / ON UPDATE 动作转成 pg_constraint 的单字符代码。
+func fkActionCode(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "cascade":
+		return "c"
+	case "restrict":
+		return "r"
+	case "set null":
+		return "n"
+	case "set default":
+		return "d"
+	}
+	return "a" // NO ACTION
 }

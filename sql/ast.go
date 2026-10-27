@@ -19,6 +19,9 @@ type CreateTable struct {
 	// Checks 是表级 CHECK 约束的表达式原文；列级 CHECK 在引擎里并进来。
 	Checks []string
 
+	// FKs 是外键定义（列级 REFERENCES 与表级 FOREIGN KEY 都收在这里）。
+	FKs []*FKDef
+
 	// As 非空表示 CREATE TABLE ... AS SELECT：列名与类型都来自这条查询。
 	As *Select
 }
@@ -37,6 +40,20 @@ type ColumnDef struct {
 	// Check 是列级 CHECK 约束的表达式原文（只在建表解析阶段用，
 	// 之后统一挪到 CreateTable.Checks / catalog.Table.Checks）。
 	Check string
+
+	// 列级 REFERENCES t(c)：解析后挪到 CreateTable.FKs。
+	RefTable string
+	RefCol   string
+	RefOnDel string
+}
+
+// FKDef 是一条外键定义。
+type FKDef struct {
+	Cols     []string
+	RefTable string
+	RefCols  []string
+	OnDelete string // "" / cascade / restrict / set null / no action
+	OnUpdate string
 }
 
 // DropTable 对应 DROP TABLE。

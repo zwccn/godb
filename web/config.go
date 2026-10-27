@@ -114,6 +114,8 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	next.Auth.User = req.Auth.User
 	if req.Auth.ClearPassword {
 		next.Auth.PasswordHash = ""
+		next.Auth.PasswordMD5 = ""
+		next.Auth.ScramVerifier = ""
 	}
 	if pw := req.Auth.Password; pw != "" {
 		h, err := config.HashPassword(pw)
@@ -122,6 +124,19 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		next.Auth.PasswordHash = h
+		// md5 与 SCRAM 的客户端认证需要各自的派生值，改密码时一起重算。
+		// 都从同一个明文算出，任何一项失败都当作设置失败。
+		user := next.Auth.User
+		if user == "" {
+			user = "godb"
+		}
+		next.Auth.PasswordMD5 = config.MD5Verifier(user, pw)
+		sv, err := config.ScramVerifier(pw)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "无法生成 SCRAM 验证串: " + err.Error()})
+			return
+		}
+		next.Auth.ScramVerifier = sv
 	}
 	if err := next.Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

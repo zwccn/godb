@@ -87,7 +87,11 @@ func (p *Planner) virtualTable(schema, name, qual string) (Operator, Schema, boo
 var compatFuncs = map[string]string{
 	// 文本
 	"version": "text", "current_database": "text", "current_schema": "name",
-	"current_user": "name", "session_user": "name", "user": "name",
+	// 不带括号写也能被解析成函数调用，这里给出真实返回
+	"current_date": "date", "current_time": "timetz", "current_timestamp": "timestamptz",
+	"localtime": "time", "localtimestamp": "timestamp", "current_role": "name",
+	"current_catalog": "name",
+	"current_user":    "name", "session_user": "name", "user": "name",
 	"current_schemas": "text", "pg_get_userbyid": "name", "format_type": "text",
 	"pg_get_expr": "text", "pg_get_indexdef": "text", "pg_get_constraintdef": "text",
 	"pg_get_serial_sequence": "text", "obj_description": "text", "col_description": "text",
@@ -226,6 +230,15 @@ func evalCompat(name string, vals []types.Value) (types.Value, bool, error) {
 	case "obj_description", "col_description", "shobj_description", "pg_collation_for",
 		"pg_tablespace_location":
 		return types.Null, true, nil
+	case "current_date":
+		now := time.Now()
+		return types.Text(now.Format("2006-01-02")), true, nil
+	case "current_time", "localtime":
+		return types.Text(time.Now().Format("15:04:05")), true, nil
+	case "current_timestamp", "localtimestamp":
+		return types.Time(time.Now()), true, nil
+	case "current_role", "current_catalog":
+		return types.Text("godb"), true, nil
 	case "current_setting":
 		return types.Text(settingValue(text(0))), true, nil
 	case "set_config":

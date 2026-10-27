@@ -3,6 +3,7 @@ package pgwire
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -52,6 +53,13 @@ type Server struct {
 	AuthRequired func() bool
 	// AuthVerify 校验用户名与密码。返回 false 会回 28P01 并断开连接。
 	AuthVerify func(user, password string) bool
+	// AuthMD5 返回该用户 md5 挑战应答用的验证值（md5(md5(pw+user))）。
+	// 非空则优先用 md5 认证，密码不落线。
+	AuthMD5 func(user string) (string, bool)
+	// AuthScram 返回 SCRAM-SHA-256 验证串。非空则优先用 SCRAM（最安全）。
+	AuthScram func(user string) (string, bool)
+	// TLSCert 非 nil 时接受 SSLRequest：回 'S' 并把连接升级成 TLS。
+	TLSCert *tls.Certificate
 }
 
 // authEnabled 判断当前连接是否需要密码认证。
@@ -208,8 +216,31 @@ func (c *conn) startup() error {
 		}
 		code := binary.BigEndian.Uint32(body[:4])
 		switch code {
-		case codeSSL, codeGSSENC:
-			// 不提供加密，让客户端回落到明文
+		case codeSSL:
+			if c.srv.TLSCert == nil {
+				// 没配证书：回 'N' 让客户端回落到明文
+				if _, err := c.nc.Write([]byte{'N'}); err != nil {
+					return err
+				}
+				continue
+			}
+			// 回 'S' 之后整条连接变成 TLS，后续握手都在加密通道里
+			if _, err := c.nc.Write([]byte{'S'}); err != nil {
+				return err
+			}
+			tlsConn := tls.Server(c.nc, &tls.Config{
+				Certificates: []tls.Certificate{*c.srv.TLSCert},
+				MinVersion:   tls.VersionTLS12,
+			})
+			if err := tlsConn.Handshake(); err != nil {
+				return err
+			}
+			c.nc = tlsConn
+			c.br = bufio.NewReaderSize(tlsConn, 16*1024)
+			c.bw = bufio.NewWriterSize(tlsConn, 16*1024)
+			continue
+		case codeGSSENC:
+			// 不支持 GSSAPI 加密，回 'N'
 			if _, err := c.nc.Write([]byte{'N'}); err != nil {
 				return err
 			}
@@ -282,6 +313,17 @@ func (c *conn) startup() error {
 // 客户端回 PasswordMessage（'p'），服务端再发 AuthenticationOk。
 // 密码错误时直接回 FATAL 28P01 并断开 —— 不做重试，客户端会自己重连。
 func (c *conn) authenticate() error {
+	// 优先 SCRAM（不传明文、不传可离线爆破的 md5），其次 md5，最后明文。
+	if c.srv.AuthScram != nil {
+		if enc, ok := c.srv.AuthScram(c.user); ok && enc != "" {
+			return c.authenticateScram(enc)
+		}
+	}
+	if c.srv.AuthMD5 != nil {
+		if v, ok := c.srv.AuthMD5(c.user); ok && v != "" {
+			return c.authenticateMD5(v)
+		}
+	}
 	if err := c.write(encodeAuthenticationCleartextPassword()); err != nil {
 		return err
 	}

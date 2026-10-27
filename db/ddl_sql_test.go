@@ -176,3 +176,20 @@ func TestCommonTableExpression(t *testing.T) {
 		t.Fatal("WITH RECURSIVE 应该报不支持")
 	}
 }
+
+// 不带括号的关键字常量（current_user 等）：psql 与客户端都会这么写。
+func TestBareKeywordFunctions(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	for _, q := range []string{
+		`SELECT current_user AS u`,
+		`SELECT current_schema AS s`,
+		`SELECT current_date AS d`,
+		`SELECT session_user AS u`,
+	} {
+		res := run(t, d, s, q)
+		if len(res[0].Rows) != 1 || res[0].Rows[0][0] == nil {
+			t.Fatalf("%s 应返回一行非 NULL，实际 %v", q, res[0].Rows)
+		}
+	}
+}

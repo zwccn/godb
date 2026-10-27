@@ -365,6 +365,17 @@ func (p *parser) parsePrimaryBase() (Expr, error) {
 		}
 		return &Exists{Sub: &Subquery{Select: sel}}, nil
 	}
+	// 不带括号的「关键字常量」：PostgreSQL 允许直接写 current_user、
+	// current_date 之类，它们等价于同名函数调用。
+	if t.Kind == Word && !p.peekN(1).IsPunct("(") {
+		switch strings.ToLower(t.Text) {
+		case "current_user", "session_user", "current_role", "current_catalog",
+			"current_schema", "current_date", "current_time", "current_timestamp",
+			"localtime", "localtimestamp", "user":
+			p.pos++
+			return &FuncCall{Name: strings.ToLower(t.Text)}, nil
+		}
+	}
 	switch t.Kind {
 	case NumberVal:
 		p.pos++

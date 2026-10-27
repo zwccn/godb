@@ -43,6 +43,12 @@ type Network struct {
 	PGEnabled  bool `json:"pgEnabled"`
 	PGPort     int  `json:"pgPort"`
 	PGRemote   bool `json:"pgRemote"`
+
+	// SSLEnabled 打开 PostgreSQL 协议的 TLS。证书留空时用数据目录里
+	// 自签的那张（首次启动自动生成）。
+	SSLEnabled  bool   `json:"sslEnabled"`
+	SSLCertFile string `json:"sslCertFile,omitempty"`
+	SSLKeyFile  string `json:"sslKeyFile,omitempty"`
 }
 
 // Auth 控制 PostgreSQL 协议的密码认证。
@@ -54,6 +60,10 @@ type Auth struct {
 	User            string `json:"user"`
 	// PasswordHash 是 PBKDF2 编码串，永不出现在任何 API 响应里。
 	PasswordHash string `json:"passwordHash,omitempty"`
+	// PasswordMD5 是 md5(md5(password+user))，供 md5 挑战应答使用（同样是秘密）。
+	PasswordMD5 string `json:"passwordMd5,omitempty"`
+	// ScramVerifier 是 SCRAM-SHA-256 的验证串（salt / StoredKey / ServerKey）。
+	ScramVerifier string `json:"scramVerifier,omitempty"`
 }
 
 // Config 是完整的配置文件内容。

@@ -7,6 +7,7 @@
 package netsrv
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,8 @@ type Manager struct {
 	pgSrv    *pgwire.Server
 	pgLns    []net.Listener
 	pgAddr   string
+	// tlsCert 是当前 PG 监听用的证书；nil 表示不加密
+	tlsCert *tls.Certificate
 }
 
 // New 创建监听管理器。handler 是 Web 控制台的路由，queryLog 可为 nil。
@@ -78,6 +81,14 @@ func (m *Manager) Apply(n config.Network) error {
 	wantHTTP, wantPG := n.HTTPAddr(), n.PGAddr()
 	oldHTTP, oldPG := m.httpAddr, m.pgAddr
 
+	// 证书变了要重绑 PG 监听（地址没变也一样），否则开关 SSL 不生效
+	cert, err := loadTLS(n)
+	if err != nil {
+		return err
+	}
+	tlsChanged := (cert == nil) != (m.tlsCert == nil)
+	m.tlsCert = cert
+
 	if wantHTTP != oldHTTP {
 		if err := m.rebindHTTP(wantHTTP); err != nil {
 			// 回滚：旧地址通常还空着（刚才已经关掉了旧 listener）
@@ -90,7 +101,7 @@ func (m *Manager) Apply(n config.Network) error {
 		}
 	}
 
-	if wantPG != oldPG {
+	if wantPG != oldPG || tlsChanged {
 		if err := m.rebindPG(wantPG); err != nil {
 			if oldPG != "" {
 				if err2 := m.rebindPG(oldPG); err2 != nil {
@@ -228,6 +239,27 @@ func (m *Manager) rebindPG(addr string) error {
 		QueryLog: m.queryLog,
 		// 认证开关走配置，改完立即生效（不需要重建 listener）
 		AuthRequired: func() bool { return m.cfg.Get().Auth.RequirePassword },
+		TLSCert:      m.tlsCert,
+		AuthScram: func(user string) (string, bool) {
+			c := m.cfg.Get()
+			if !c.Auth.RequirePassword {
+				return "", false
+			}
+			if c.Auth.User != "" && user != c.Auth.User {
+				return "", false
+			}
+			return c.Auth.ScramVerifier, c.Auth.ScramVerifier != ""
+		},
+		AuthMD5: func(user string) (string, bool) {
+			c := m.cfg.Get()
+			if !c.Auth.RequirePassword {
+				return "", false
+			}
+			if c.Auth.User != "" && user != c.Auth.User {
+				return "", false
+			}
+			return c.Auth.PasswordMD5, c.Auth.PasswordMD5 != ""
+		},
 		AuthVerify: func(user, password string) bool {
 			c := m.cfg.Get()
 			if !c.Auth.RequirePassword {

@@ -97,7 +97,8 @@ try {
           <button id="btnClear" class="btn btn-ghost btn-sm">清空</button>
         </div>
       </div>
-      <textarea id="editor" spellcheck="false" placeholder="-- 在这里写 SQL，Ctrl+Enter 执行&#10;SELECT * FROM employees LIMIT 10;"></textarea>
+      <textarea id="editor" spellcheck="false" inputmode="latin" autocapitalize="off"
+                autocorrect="off" placeholder="-- 在这里写 SQL，Ctrl+Enter 执行&#10;SELECT * FROM employees LIMIT 10;"></textarea>
       <!-- 拖这条改编辑器高度（双击回到跟随内容） -->
       <div id="editorResize" class="editor-resize" title="拖动改变高度，双击恢复自动"></div>
     </div>
@@ -241,7 +242,7 @@ try {
       <div class="set-sec">快捷键与小技巧</div>
       <div class="help-keys">
         <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 执行</span>
-        <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 唤出补全</span>
+        <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 唤出补全（中文输入法会抢这个键，直接打字也会自动弹）</span>
         <span><kbd>Esc</kbd> 关掉补全 / 弹窗</span>
         <span>拖编辑器底边改高度，双击恢复自动</span>
         <span>弹窗可拖标题栏移动、拖右下角改大小，双击标题栏复位</span>

@@ -293,6 +293,22 @@ function initCodeMirror() {
   });
   cm.on('change', onEditorChange);
 
+  // 输入法：网页**没法**替用户切换操作系统的中英文状态（老 IE 的 ime-mode 早在
+  // Chrome/Firefox 里被移除了），能做的只有这两件小事：
+  //   1. inputmode=latin：手机上弹英文键盘，不用每次先切一下；
+  //   2. 关掉自动大写/自动纠错/拼写检查：否则手机常把 select 悄悄改成 Select，
+  //      输错还会被"纠正"成别的词。
+  // 桌面端仍然要自己按 Shift 切英文 —— 这是浏览器安全模型决定的，绕不过去。
+  const inputField = cm.getInputField && cm.getInputField();
+  if (inputField) {
+    inputField.setAttribute('inputmode', 'latin');
+    inputField.setAttribute('autocapitalize', 'off');
+    inputField.setAttribute('autocorrect', 'off');
+    inputField.setAttribute('autocomplete', 'off');
+    inputField.setAttribute('spellcheck', 'false');
+    inputField.setAttribute('lang', 'en');
+  }
+
   // 打字时自动弹补全：只在「正在写一个词」或刚打完点号时弹，
   // 空格、逗号、括号后不弹（那会儿弹出来只会挡住下一句 SQL）。
   cm.on('inputRead', (c, change) => {

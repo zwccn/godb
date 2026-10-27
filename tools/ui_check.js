@@ -101,6 +101,24 @@ class CDP {
     check('CodeMirror 已接管编辑区（语法高亮 + 补全）',
       await cdp.eval(`!!document.querySelector('.CodeMirror') && !!window.CodeMirror`),
       await cdp.eval(`document.querySelector('.CodeMirror') ? document.querySelector('.CodeMirror').className : '无'`));
+
+    // 输入层（隐藏的 textarea / contenteditable）要声明成拉丁输入：
+    // 手机弹英文键盘，且别把 select 自动首字母大写成 Select
+    const ime = await cdp.eval(`(() => {
+      const f = cm.getInputField();
+      const g = k => f.getAttribute(k);
+      return {
+        tag: f.tagName.toLowerCase(),
+        inputmode: g('inputmode'),
+        autocap: g('autocapitalize'),
+        autocorrect: g('autocorrect'),
+        spell: g('spellcheck'),
+      };
+    })()`);
+    check('编辑器输入层声明为英文键盘、关掉自动大写/纠错',
+      ime.inputmode === 'latin' && ime.autocap === 'off' &&
+        ime.autocorrect === 'off' && ime.spell === 'false',
+      `<${ime.tag}> inputmode=${ime.inputmode} autocapitalize=${ime.autocap} autocorrect=${ime.autocorrect} spellcheck=${ime.spell}`);
     const eh0 = await cdp.eval(`Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height)`);
     check('编辑器默认高度够用（≥170px）', eh0 >= 170, `${eh0}px`);
 

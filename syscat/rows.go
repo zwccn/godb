@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"godb/catalog"
 	"godb/types"
@@ -420,13 +419,45 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 		}
 		return out
 
+	case "pg_operator":
+		// 常用类型的比较操作符（OID 与 oprcode 都取自真实 PostgreSQL）。
+		// 客户端的索引页/操作符页会拿它做 join，空表时那些面板是空的。
+		rows := make([]types.Row, 0, len(comparisonOperators))
+		for _, op := range comparisonOperators {
+			rows = append(rows, mk(def, map[string]types.Value{
+				"oid": iv(op.oid), "oprname": sv(op.name), "oprnamespace": iv(NamespaceCatalog),
+				"oprowner": iv(OwnerOID), "oprkind": sv("b"), "oprcanmerge": bv(false),
+				"oprcanhash": bv(false), "oprleft": iv(op.typ), "oprright": iv(op.typ),
+				"oprresult": iv(16), "oprcom": iv(0), "oprnegate": iv(0),
+				"oprcode": sv(op.code), "oprrest": sv("-"), "oprjoin": sv("-"),
+			}))
+		}
+		return rows
+
 	case "pg_stat_activity":
-		return []types.Row{mk(def, map[string]types.Value{
-			"datid": iv(DbOID), "datname": sv(DatabaseName), "pid": iv(1),
-			"usesysid": iv(OwnerOID), "usename": sv(OwnerName),
-			"backend_start": types.Time(time.Now()), "state": sv("active"),
-			"query": sv(""), "backend_type": sv("client backend"),
-		})}
+		// 真实连接列表（协议层登记，见 activity.go）。没有连接时返回空集，
+		// 和 PostgreSQL 一致：它不给自己伪造一行。
+		snap := ActivitySnapshot()
+		out := make([]types.Row, 0, len(snap))
+		for _, a := range snap {
+			usr := a.User
+			if usr == "" {
+				usr = OwnerName
+			}
+			state := a.State
+			if state == "" {
+				state = "idle"
+			}
+			out = append(out, mk(def, map[string]types.Value{
+				"datid": iv(DbOID), "datname": sv(DatabaseName), "pid": iv(int(a.PID)),
+				"usesysid": iv(OwnerOID), "usename": sv(usr),
+				"application_name": sv(a.AppName), "client_addr": sv(a.Addr),
+				"client_port": iv(int(a.Port)), "backend_start": types.Time(a.Started),
+				"query_start": types.Time(a.QueryTime), "state": sv(state),
+				"query": sv(a.Query), "backend_type": sv("client backend"),
+			}))
+		}
+		return out
 
 	case "pg_stat_database":
 		return []types.Row{mk(def, map[string]types.Value{
@@ -1230,4 +1261,62 @@ func opclassOf(atttypid int32) int32 {
 		}
 	}
 	return 0
+}
+
+// comparisonOperators 是常用类型上的比较操作符。
+// oid 与 oprcode 都照抄真实 PostgreSQL（pg_operator）。
+var comparisonOperators = []struct {
+	oid  int
+	name string
+	typ  int // 左右操作数类型 OID
+	code string
+}{
+	{91, "=", 16, "booleq"},
+	{58, "<", 16, "boollt"},
+	{59, ">", 16, "boolgt"},
+	{1694, "<=", 16, "boolle"},
+	{1695, ">=", 16, "boolge"},
+	{85, "<>", 16, "boolne"},
+	{410, "=", 20, "int8eq"},
+	{412, "<", 20, "int8lt"},
+	{413, ">", 20, "int8gt"},
+	{414, "<=", 20, "int8le"},
+	{415, ">=", 20, "int8ge"},
+	{411, "<>", 20, "int8ne"},
+	{96, "=", 23, "int4eq"},
+	{97, "<", 23, "int4lt"},
+	{521, ">", 23, "int4gt"},
+	{523, "<=", 23, "int4le"},
+	{525, ">=", 23, "int4ge"},
+	{518, "<>", 23, "int4ne"},
+	{98, "=", 25, "texteq"},
+	{664, "<", 25, "text_lt"},
+	{666, ">", 25, "text_gt"},
+	{665, "<=", 25, "text_le"},
+	{667, ">=", 25, "text_ge"},
+	{531, "<>", 25, "textne"},
+	{1093, "=", 1082, "date_eq"},
+	{1095, "<", 1082, "date_lt"},
+	{1097, ">", 1082, "date_gt"},
+	{1096, "<=", 1082, "date_le"},
+	{1098, ">=", 1082, "date_ge"},
+	{1094, "<>", 1082, "date_ne"},
+	{2060, "=", 1114, "timestamp_eq"},
+	{2062, "<", 1114, "timestamp_lt"},
+	{2064, ">", 1114, "timestamp_gt"},
+	{2063, "<=", 1114, "timestamp_le"},
+	{2065, ">=", 1114, "timestamp_ge"},
+	{2061, "<>", 1114, "timestamp_ne"},
+	{1320, "=", 1184, "timestamptz_eq"},
+	{1322, "<", 1184, "timestamptz_lt"},
+	{1324, ">", 1184, "timestamptz_gt"},
+	{1323, "<=", 1184, "timestamptz_le"},
+	{1325, ">=", 1184, "timestamptz_ge"},
+	{1321, "<>", 1184, "timestamptz_ne"},
+	{1752, "=", 1700, "numeric_eq"},
+	{1754, "<", 1700, "numeric_lt"},
+	{1756, ">", 1700, "numeric_gt"},
+	{1755, "<=", 1700, "numeric_le"},
+	{1757, ">=", 1700, "numeric_ge"},
+	{1753, "<>", 1700, "numeric_ne"},
 }

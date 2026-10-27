@@ -129,6 +129,10 @@ type conn struct {
 	prepared map[string]*preparedStmt
 	portals  map[string]*portal
 	skipSync bool // 出错后丢弃消息直到 Sync
+
+	// pid 是给 pg_stat_activity 用的后端编号；unregister 在连接结束时注销
+	pid        int32
+	unregister func()
 }
 
 func (s *Server) handle(nc net.Conn) {
@@ -145,12 +149,38 @@ func (s *Server) handle(nc net.Conn) {
 		return
 	}
 	c.sess = s.DB.Session("pg-" + randHex())
+	c.register()
 	defer func() {
 		if c.sess != nil && c.sess.InTx() {
 			c.sess.ForceRollback()
 		}
+		if c.unregister != nil {
+			c.unregister()
+		}
 	}()
 	c.loop()
+}
+
+// register 把这条连接登记到 pg_stat_activity。
+func (c *conn) register() {
+	addr, port := "", int32(0)
+	if host, p, err := net.SplitHostPort(c.nc.RemoteAddr().String()); err == nil {
+		addr = host
+		if n, err := strconv.Atoi(p); err == nil {
+			port = int32(n)
+		}
+	}
+	c.pid, c.unregister = syscat.RegisterActivity(syscat.Activity{
+		User: c.user, DB: "godb", Addr: addr, Port: port,
+		State: "idle", AppName: "godb client",
+	})
+}
+
+// setActivity 更新 pg_stat_activity 里的状态（查询执行前后各调一次）。
+func (c *conn) setActivity(state, query string) {
+	if c.pid != 0 {
+		syscat.SetActivityState(c.pid, state, query)
+	}
 }
 
 func randHex() string {
@@ -377,7 +407,9 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 	c.srv.logQuery(text)
 	// SET / SHOW 由 SQL 层处理（见 exec.ShowResult），这里不再拦一道，
 	// 免得网页控制台和 PG 协议两条路径的行为分叉。
+	c.setActivity("active", text)
 	results, err := c.srv.DB.Exec(c.sess, text)
+	defer c.setActivity("idle", "")
 	var out [][]byte
 	for _, r := range results {
 		out = append(out, encodeResult(r)...)

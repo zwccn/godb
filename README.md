@@ -3,7 +3,7 @@
 [![ci](https://github.com/zwccn/godb/actions/workflows/ci.yml/badge.svg)](https://github.com/zwccn/godb/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.20-00ADD8?logo=go)](https://go.dev/)
 
-用 Go 从零实现的教学级关系数据库：手写词法分析 → 递归下降语法分析 → 逻辑/物理计划 → 火山模型执行 → 内存行存 + WAL 持久化，并发控制采用**表级 S/X 两阶段封锁**，附带一个内嵌的 Web 控制台。
+用 Go 从零实现的教学级关系数据库：手写词法分析 → 递归下降语法分析 → 逻辑/物理计划 → 火山模型执行 → 内存行存 + B+Tree 索引 + 分表快照 + WAL 持久化，并发控制采用**表级 S/X 两阶段封锁**，支持多库，附带一个内嵌的 Web 控制台。
 
 ![控制台](docs/shot.png)
 
@@ -46,7 +46,7 @@ go build -o godb.exe .
 | 索引 | `CREATE [UNIQUE] INDEX name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验 |
 | 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
-| 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；三者都支持 `RETURNING`（含 `RETURNING *`、表达式与别名） |
+| 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` / `EXPLAIN ANALYZE` |
 | 约束 | `NOT NULL`、`UNIQUE`、`PRIMARY KEY`（复合）、`CHECK`、`FOREIGN KEY`（含 `ON DELETE CASCADE`） |
 | CTE | `WITH name [(cols)] AS (SELECT ...)`，可多个、可互相引用（物化一次） |
@@ -54,7 +54,6 @@ go build -o godb.exe .
 | 集合函数 | `FROM generate_series(a, b[, step])`、`FROM regexp_matches(text, pattern)`，可带列别名列表 |
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
 | 聚合 | `count(*)`、`count(x)`、`sum`、`avg`、`min`、`max`，支持 `DISTINCT` |
-| 增删改 | `INSERT ... VALUES`（多行、`DEFAULT`）、`UPDATE ... SET ... WHERE`、`DELETE ... WHERE` |
 | 表达式 | 算术 `+ - * / %`、位运算 `& \| #`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`（含 `information_schema.sql_identifier` 这类带 schema 的类型名）、数组下标 `a[i]`、`\|\|` |
 | 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches` |
 | 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
@@ -64,7 +63,8 @@ go build -o godb.exe .
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：递归 CTE（`WITH RECURSIVE`）、窗口函数、
-`FULL JOIN`、`NATURAL JOIN`、行级锁。
+`FULL JOIN`、`NATURAL JOIN`、行级锁，以及 `IN (...)` / `EXISTS (...)` 里的子查询
+（`FROM` 子查询和标量子查询是支持的，见下）。
 
 索引能处理：完整键等值、首列区间（`> < >= <= BETWEEN`、`LIKE 'x%'`）、
 `IN` 列表、`OR` 的多点/多区间合并、以及命中索引列前缀的 `ORDER BY`（免排序，可反向）。
@@ -161,7 +161,7 @@ Web 控制台左侧的表树支持右键菜单，照着 Navicat 的习惯做的�
 | 设计表 | 打开表设计器，保存时按差异生成下面几种 `ALTER` |
 | 新建表… | `CREATE TABLE`（表设计器，空表起步） |
 | 重命名… | `ALTER TABLE t RENAME TO t2` |
-| 复制表结构… | 用 `/api/schema` 反推 `CREATE TABLE`（**不复制数据**，引擎不支持 `INSERT ... SELECT`） |
+| 复制表结构… | 用 `/api/schema` 反推 `CREATE TABLE`（**只建结构、不搬数据**；要连数据一起复制，自己执行 `INSERT INTO 新表 SELECT * FROM 旧表`） |
 | 清空数据 | `TRUNCATE TABLE t` |
 | 删除表 | `DROP TABLE t` |
 | 刷新列表 | 重新拉 `/api/schema` |
@@ -220,6 +220,9 @@ Web 控制台左侧的表树支持右键菜单，照着 Navicat 的习惯做的�
 - 打字时自动弹；`Ctrl+Space` 手动唤出；`Esc` 关掉。
 - `↑` `↓` 选，`Tab` / `Enter` 确认，**鼠标单击也能直接插入**。
 - 前缀过滤是「前缀命中优先，其次包含命中」，所以打 `emp` 也能找到 `employees`。
+- 候选里**你已经打出来的那几个字会加粗标出**（打 `emp`，`employees` 的 `emp` 和 `TEMP` 的
+  `EMP` 都会亮），当前选中行是主题色底 + 左侧一条竖线。四套皮肤各有各的选中色，
+  换肤不会退化成「看不出来选了哪条」。
 
 ```
 SELECT e.            →  id / name / dept_id / title / salary / hired / active   （带类型）
@@ -391,13 +394,16 @@ Navicat / pgAdmin 里把「密码」填上即可（用户名要与设置页填�
 
 ```bash
 # psql
-psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
+psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 ```
 
 | 客户端 | 连接参数 |
 |---|---|
-| psql / pgcli | `-h 127.0.0.1 -p 6432 -U 任意用户名 -d godb` |
-| Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名随意，**密码留空** |
+| psql / pgcli | `-h 127.0.0.1 -p 6432 -U godb -d godb` |
+| Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名 `godb`，**没设密码时密码留空** |
+
+没启用密码时是 trust 认证，用户名填什么都行；在设置页设了密码之后，用户名必须和那里填的
+一致（默认 `godb`），密码不能空。
 
 `-d` 换成别的库名就连到那个库（见下面的「多库」）。不写库名或写 `postgres`
 都落到默认库 `godb` —— 客户端工具的输入框里默认就是 `postgres`，报「库不存在」
@@ -407,14 +413,15 @@ psql "host=127.0.0.1 port=6432 user=zwccn dbname=godb sslmode=disable"
 
 | 能力 | 状态 |
 |---|---|
-| 启动握手、`SSLRequest`（回 `N` 回落明文）、trust 认证（无密码） | ✅ |
+| 启动握手、`SSLRequest`（回 `N` 回落明文）、trust 认证（未启用密码时） | ✅ |
+| cleartext password 认证（设置页里设了密码就必须输，错了回 `28P01` 并断开） | ✅ |
+| md5 / SCRAM-SHA-256 认证 | ❌ |
 | 简单查询 `Q`（支持多语句，逐条返回结果集） | ✅ |
 | 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数 | ✅ |
 | `RowDescription` 带 PG 类型 OID（int4/int8/text/bool/float8/numeric/timestamp…） | ✅ |
 | 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |
 | 事务状态 `ReadyForQuery` 的 `I`/`T`/`E` | ✅ |
 | `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
-| 密码认证（md5 / SCRAM） | ❌ |
 | `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
 | 标量子查询 `(SELECT ...)` | ✅ 含相关子查询；多行会报 `more than one row` |
 | `FROM` 子查询、`UNION`/`INTERSECT`/`EXCEPT` | ✅ 客户端触发器页的查询需要 |
@@ -736,7 +743,7 @@ Project (count)
 
 1. 写操作先落到事务私有写集（overlay），提交时才应用。
 2. 提交：先把整批行变更写进 WAL（二进制帧），再按写集**增量**应用到内存（只碰改动的那几行和几个索引键），最后 `fsync`。客户端收到 `COMMIT` 成功时数据一定已经落盘。
-3. 恢复：启动时 `snapshot.json` + 重放 `wal.log` 中**带 commit 标记**的事务，未提交的直接丢弃 —— 这就是原子性。重放完立刻 checkpoint 并轮转 WAL。
+3. 恢复：启动时先读每张表的 `tables/t<表ID>.snp` 文件头，再重放 `wal.log` 里**代次大于该表快照代次、且带 commit 标记**的事务，未提交的直接丢弃 —— 这就是原子性。行数据等真正访问到那张表时才读（见「按需加载」）。重放完立刻 checkpoint 并轮转 WAL。
 4. 中毒事务：语句出错后会话进入 aborted 状态，后续语句一律被拒绝，只能 `ROLLBACK`（`COMMIT` 等价于回滚），与 PostgreSQL 一致。**但锁冲突是例外**：按“超时即放弃”的约定，直接回滚整个事务并释放锁。
 
 ### 为什么 DDL 不能在事务里执行
@@ -755,7 +762,9 @@ Project (count)
 | `wal.log` | 追加写的提交日志，二进制帧（`长度 + CRC32 + 负载`） |
 | `config.json` | **只在数据根目录**，全局配置（端口、密码、落盘节奏），不分库 |
 
-checkpoint 触发点：启动完成、每 128 次提交（还要看攒的改动够不够，见下）、需要重写快照的 DDL、`CHECKPOINT` 语句、进程退出。
+checkpoint 触发点：启动完成、落盘节奏到点（提交数 / 秒数 / WAL 大小，三条任一满足，
+见「设置页」，后台每秒检查一次，没有改动就只更新计时不写盘）、需要重写快照的 DDL、
+`CHECKPOINT` 语句、进程退出。
 
 #### 分表快照：只重写改过的表
 
@@ -859,6 +868,8 @@ CHECKPOINT;
 | `GET` | `/api/schema` | 表结构与行数 |
 | `GET` | `/api/locks` | 锁状态快照（表锁持有者、等待者、累计等待次数） |
 | `POST` | `/api/tx` | `{"action":"begin\|commit\|rollback"}` |
+| `GET` | `/api/dbs` | 每个库的表数 / 行数 / 占用 + 当前库；`POST` 支持 `switch` / `create` / `drop`（**写操作只接受本机请求**） |
+| `GET` / `POST` | `/api/config` | 读 / 改配置（端口、落盘节奏、PG 密码）；写操作同样**只接受本机请求** |
 | `POST` | `/api/sample` | 重建示例数据 |
 | `POST` | `/api/reset` | 清空所有表 |
 
@@ -867,13 +878,17 @@ CHECKPOINT;
 ## 测试
 
 ```bash
-go test ./...        # 26 个用例
+go test ./...        # 219 个用例
 go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 ```
 
+- `storage/`：B+Tree 插入/查找/范围扫描、重复键、删空后复用、反向游标；保序键编码的序与 `types.Compare` 一致（多列、NUL 字节、`-0.0` 归一）。
 - `lock/`：S-S 相容、S-X / X-X 冲突、批量申请原子性、释放唤醒、S→X 升级、等待图死锁（只让年轻者放弃）、快照。
 - `db/persistence_test.go`：增量 checkpoint（没改的表文件 mtime 不变）、按需加载（启动 0 张、查一张变 1 张）、旧 `snapshot.json` 自动迁移、快照与 WAL 重叠时不重复应用、catalog 与快照列数不一致时能打开、二进制 WAL 往返、旧版 JSON WAL 兼容、尾部截断帧容错、`CHECKPOINT` 语句、组提交 fsync 合并、`ADD COLUMN` 不重写快照。
 - `db/`：CRUD 与约束、NULL 三值逻辑、排序分页、分组聚合、四种 JOIN、DISTINCT、表达式与函数、事务提交回滚、中毒事务、WAL 崩溃恢复、ALTER 四种动作、错误路径；并发部分覆盖读读并行、跨表写并行、读写互斥、写挡读、保守预扫描消除升级、死锁检测、未提交不可见、20 次并发自增不丢更新。
+- `pgwire/`：简单查询（含多语句）、扩展查询与文本参数、事务状态、错误 SQLSTATE、密码认证（错密码 / 错用户 / 正确密码 / 未启用时 trust）、系统目录能查但只读且不加锁。
+- `web/`：`/api/dbs` 列表 / 建库 / 切库写 cookie / 删库规则 / **非本机写被拒**；`/api/config` 读取、保存、远程写被拒、非法值被拒。
+- `config/`：配置原子写与校验、`-http`/`-pg` 只作首次种子、密码哈希往返（PBKDF2），以及 SCRAM / MD5 的哈希工具。
 
 > `-race` 需要 cgo（`gcc`），本机未安装 C 编译器，因此本地跑不了；CI 里额外跑一遍
 > `go test ./... -race` 覆盖并发正确性。

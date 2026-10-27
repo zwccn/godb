@@ -58,7 +58,7 @@ go build -o godb.exe .
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
-**明确不支持**（会报清晰的错误）：`IN`/`EXISTS` 子查询、CTE、窗口函数、外键、`CHECK`、
+**明确不支持**（会报清晰的错误）：CTE、窗口函数、外键、
 `FULL JOIN`、`NATURAL JOIN`、多列主键、行级锁、二级索引。
 
 **支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。

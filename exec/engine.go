@@ -187,6 +187,13 @@ func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
 		return nil, err
 	}
 	t := &catalog.Table{Name: s.Table, Columns: cols}
+	// 表级 CHECK 在前、列级在后（和 PostgreSQL 的命名顺序一致）
+	t.Checks = append(t.Checks, s.Checks...)
+	for _, c := range s.Cols {
+		if c.Check != "" {
+			t.Checks = append(t.Checks, c.Check)
+		}
+	}
 	if err := e.Cat.Add(t); err != nil {
 		return nil, err
 	}
@@ -406,6 +413,10 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 	}
 
 	uniq := t.UniqueCols()
+	checks, err := e.compileChecks(t)
+	if err != nil {
+		return nil, err
+	}
 
 	// INSERT ... SELECT：先把查询跑出全部行，再折成字面量走同一条插入路径。
 	// 这样默认值、自增、NOT NULL 与唯一性校验只有一份实现，不会两边走偏。
@@ -490,6 +501,10 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 			if col.NotNull && row[i].IsNull() {
 				return nil, fmt.Errorf("null value in column %q violates not-null constraint", col.Name)
 			}
+		}
+		// CHECK 约束（INSERT 按行校验）
+		if err := evalChecks(checks, row); err != nil {
+			return nil, err
 		}
 		for _, ci := range uniq {
 			if row[ci].IsNull() {
@@ -672,6 +687,10 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		retEvals, retCols = ev, cols
 	}
 	var retRows []types.Row
+	checks, err := e.compileChecks(t)
+	if err != nil {
+		return nil, err
+	}
 
 	uniq := t.UniqueCols()
 	affected := 0
@@ -716,6 +735,9 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			if col.NotNull && newRow[ci].IsNull() {
 				return nil, fmt.Errorf("null value in column %q violates not-null constraint", col.Name)
 			}
+		}
+		if err := evalChecks(checks, newRow); err != nil {
+			return nil, err
 		}
 		self := refs[i]
 		for _, ci := range uniq {
@@ -834,4 +856,63 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 		}
 	}
 	return res, nil
+}
+
+// ---------- CHECK 约束 ----------
+
+// checkEval 是一条编译好的 CHECK 约束。
+type checkEval struct {
+	name  string
+	table string
+	ev    Eval
+}
+
+// compileChecks 把表上的 CHECK 约束编译成求值器。
+// 每条语句编译一次，不要放进逐行循环里（要重新解析 SQL 文本）。
+func (e *Engine) compileChecks(t *catalog.Table) ([]checkEval, error) {
+	if len(t.Checks) == 0 {
+		return nil, nil
+	}
+	sc := e.tableScope(t, "")
+	out := make([]checkEval, 0, len(t.Checks))
+	for i, src := range t.Checks {
+		ex, err := sql.ParseExpr(src)
+		if err != nil {
+			return nil, fmt.Errorf("check constraint on %q is invalid: %w", t.Name, err)
+		}
+		ev, err := Compile(ex, sc)
+		if err != nil {
+			return nil, fmt.Errorf("check constraint on %q: %w", t.Name, err)
+		}
+		out = append(out, checkEval{name: checkName(t.Name, i, len(t.Checks)), table: t.Name, ev: ev})
+	}
+	return out, nil
+}
+
+// checkName 造一个和 PostgreSQL 风格接近的约束名。
+func checkName(table string, i, n int) string {
+	if n == 1 {
+		return table + "_check"
+	}
+	return fmt.Sprintf("%s_check%d", table, i+1)
+}
+
+// evalChecks 按行求值所有 CHECK 约束，任一为 false 就报错。
+// 结果为 NULL 视为通过（SQL 里 CHECK 只拦 false）。
+func evalChecks(checks []checkEval, row types.Row) error {
+	for _, ck := range checks {
+		v, err := ck.ev.Eval(row)
+		if err != nil {
+			return err
+		}
+		b, isNull, err := asBool(v)
+		if err != nil {
+			return err
+		}
+		if isNull || b {
+			continue
+		}
+		return fmt.Errorf("new row for relation %q violates check constraint %q", ck.table, ck.name)
+	}
+	return nil
 }

@@ -15,6 +15,9 @@ type CreateTable struct {
 	Table       string
 	IfNotExists bool
 	Cols        []*ColumnDef
+
+	// Checks 是表级 CHECK 约束的表达式原文；列级 CHECK 在引擎里并进来。
+	Checks []string
 }
 
 // ColumnDef 是一列的定义。
@@ -27,6 +30,10 @@ type ColumnDef struct {
 	Unique     bool
 	Default    Expr
 	Serial     bool
+
+	// Check 是列级 CHECK 约束的表达式原文（只在建表解析阶段用，
+	// 之后统一挪到 CreateTable.Checks / catalog.Table.Checks）。
+	Check string
 }
 
 // DropTable 对应 DROP TABLE。
@@ -281,6 +288,15 @@ type In struct {
 	X    Expr
 	List []Expr
 	Not  bool
+
+	// Sub 非空表示 IN (SELECT ...)，此时 List 为空。
+	Sub *Subquery
+}
+
+// Exists 是 EXISTS (SELECT ...)。只关心子查询有没有行，不看具体列。
+type Exists struct {
+	Sub *Subquery
+	Not bool
 }
 
 // Subquery 是括号里的 SELECT，只能出现在表达式位置（标量子查询）。
@@ -336,6 +352,7 @@ func (*Case) exprNode()       {}
 func (*Cast) exprNode()       {}
 func (*IsNull) exprNode()     {}
 func (*In) exprNode()         {}
+func (*Exists) exprNode()     {}
 func (*AnyOp) exprNode()      {}
 func (*Subquery) exprNode()   {}
 func (*Between) exprNode()    {}

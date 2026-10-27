@@ -270,7 +270,7 @@ func (p *parser) parseCreate() (Statement, error) {
 		return nil, err
 	}
 	for {
-		if p.atKw("primary") || p.atKw("unique") {
+		if p.atKw("primary") || p.atKw("unique") || p.atKw("check") {
 			if err := p.parseTableConstraint(ct); err != nil {
 				return nil, err
 			}
@@ -325,6 +325,21 @@ func (p *parser) parseTableConstraint(ct *CreateTable) error {
 			return p.errAt(p.peek(), "column %q named in key does not exist", cols[0])
 		}
 		col.Unique = true
+		return nil
+	}
+	if p.acceptKw("check") {
+		// 表级 CHECK：按整行求值，可以引用任意列。
+		if err := p.expectPunct("("); err != nil {
+			return err
+		}
+		ce, err := p.parseExpr()
+		if err != nil {
+			return err
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return err
+		}
+		ct.Checks = append(ct.Checks, String(ce))
 		return nil
 	}
 	return p.errAt(p.peek(), "unsupported table constraint")
@@ -406,7 +421,20 @@ func (p *parser) parseColumnDef() (*ColumnDef, error) {
 		case p.atKw("references"):
 			return nil, p.errAt(p.peek(), "foreign key constraints are not supported")
 		case p.atKw("check"):
-			return nil, p.errAt(p.peek(), "check constraints are not supported")
+			// 列级 CHECK：只检查本行，求值时和其他列一样按表的一行来算。
+			// 表达式存成原文（catalog 里也存文本，重启后重新解析）。
+			p.pos++
+			if err := p.expectPunct("("); err != nil {
+				return nil, err
+			}
+			ce, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectPunct(")"); err != nil {
+				return nil, err
+			}
+			col.Check = String(ce)
 		default:
 			return col, nil
 		}

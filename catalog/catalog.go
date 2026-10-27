@@ -48,6 +48,10 @@ type Table struct {
 	Name    string    `json:"name"`
 	Columns []*Column `json:"columns"`
 
+	// Checks 是 CHECK 约束的表达式原文（SQL 文本）。
+	// 存文本而不是 AST：catalog.json 要能跨进程重读，解析器改了也不会卡住老数据。
+	Checks []string `json:"checks,omitempty"`
+
 	colIdx map[string]int
 }
 

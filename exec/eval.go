@@ -211,6 +211,23 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		if err != nil {
 			return nil, err
 		}
+		// IN (SELECT ...)：把子查询结果收成一个集合再做成员判断。
+		// 和标量子查询一样，每个外层行都要重新打开一次子计划（可能相关）。
+		if n.Sub != nil {
+			if c.planner == nil {
+				return nil, fmt.Errorf("subqueries are not supported in this context")
+			}
+			ie := &inSubEval{x: x, not: n.Not}
+			plan, err := c.planner.buildSubquery(n.Sub.Select, c.sc, &ie.outer)
+			if err != nil {
+				return nil, err
+			}
+			if len(plan.Schema()) != 1 {
+				return nil, fmt.Errorf("subquery has too many columns")
+			}
+			ie.plan = plan
+			return ie, nil
+		}
 		list := make([]Eval, 0, len(n.List))
 		for _, item := range n.List {
 			v, err := compile(item, c)
@@ -220,6 +237,18 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 			list = append(list, v)
 		}
 		return &inEval{x: x, list: list, not: n.Not}, nil
+
+	case *sql.Exists:
+		if c.planner == nil {
+			return nil, fmt.Errorf("subqueries are not supported in this context")
+		}
+		ee := &existsEval{not: n.Not}
+		plan, err := c.planner.buildSubquery(n.Sub.Select, c.sc, &ee.outer)
+		if err != nil {
+			return nil, err
+		}
+		ee.plan = plan
+		return ee, nil
 
 	case *sql.AnyOp:
 		x, err := compile(n.X, c)
@@ -1467,4 +1496,95 @@ func (e *regCastEval) Eval(row types.Row) (types.Value, error) {
 		return types.Int(int64(oid)), nil
 	}
 	return types.Null, fmt.Errorf("relation %q does not exist", name)
+}
+
+// ---------- IN (子查询) / EXISTS ----------
+
+// inSubEval 求 x IN (SELECT ...)。
+//
+// 子计划在编译期建好（外层行的指针固定），每个外层行重新 Open 一次，
+// 这样相关子查询（引用外层列）也能正确工作。
+type inSubEval struct {
+	x     Eval
+	plan  Operator
+	outer types.Row
+	not   bool
+}
+
+func (e *inSubEval) Type() types.Type {
+	return types.Type{Kind: types.KBool, Name: "boolean"}
+}
+
+func (e *inSubEval) Eval(row types.Row) (types.Value, error) {
+	v, err := e.x.Eval(row)
+	if err != nil {
+		return types.Null, err
+	}
+	// SQL 三值逻辑：左边的值是 NULL 时结果未知
+	if v.IsNull() {
+		return types.Null, nil
+	}
+	e.outer = row
+	if err := e.plan.Open(); err != nil {
+		return types.Null, err
+	}
+	defer e.plan.Close()
+
+	key := types.Key([]types.Value{v})
+	found, sawNull := false, false
+	for {
+		r, ok, err := e.plan.Next()
+		if err != nil {
+			return types.Null, err
+		}
+		if !ok {
+			break
+		}
+		if len(r) == 0 || r[0].IsNull() {
+			// 集合里出现 NULL 时，没匹配上就是「未知」而不是 false
+			sawNull = true
+			continue
+		}
+		if types.Key([]types.Value{r[0]}) == key {
+			found = true
+			break
+		}
+	}
+	switch {
+	case found:
+		return types.Bool(!e.not), nil
+	case sawNull:
+		return types.Null, nil
+	default:
+		// NOT IN 且没匹配上才是 true
+		return types.Bool(e.not), nil
+	}
+}
+
+// existsEval 求 EXISTS (SELECT ...)：只关心有没有行。
+type existsEval struct {
+	plan  Operator
+	outer types.Row
+	not   bool
+}
+
+func (e *existsEval) Type() types.Type {
+	return types.Type{Kind: types.KBool, Name: "boolean"}
+}
+
+func (e *existsEval) Eval(row types.Row) (types.Value, error) {
+	e.outer = row
+	if err := e.plan.Open(); err != nil {
+		return types.Null, err
+	}
+	defer e.plan.Close()
+
+	_, ok, err := e.plan.Next()
+	if err != nil {
+		return types.Null, err
+	}
+	if e.not {
+		return types.Bool(!ok), nil
+	}
+	return types.Bool(ok), nil
 }

@@ -125,13 +125,21 @@ func writeExpr(b *strings.Builder, e Expr) {
 			b.WriteString(" NOT")
 		}
 		b.WriteString(" IN (")
+		if n.Sub != nil {
+			b.WriteString("SELECT ...")
+		}
 		for i, a := range n.List {
-			if i > 0 {
+			if i > 0 || n.Sub != nil {
 				b.WriteString(", ")
 			}
 			writeExpr(b, a)
 		}
 		b.WriteString(")")
+	case *Exists:
+		if n.Not {
+			b.WriteString("NOT ")
+		}
+		b.WriteString("EXISTS (SELECT ...)")
 	case *Subquery:
 		// 不做完整反解析：子查询只用于内部计划与错误信息，
 		// 完整 SQL 文本对客户端查询没有意义。

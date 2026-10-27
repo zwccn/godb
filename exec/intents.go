@@ -96,7 +96,7 @@ func collectSelect(s *sql.Select, mode lock.Mode, out map[string]lock.Mode) {
 // collectExpr 找表达式里的标量子查询，把它们引用的表也算上。
 func collectExpr(e sql.Expr, mode lock.Mode, out map[string]lock.Mode) {
 	sql.Walk(e, func(n sql.Expr) bool {
-		if sq, ok := n.(*sql.Subquery); ok {
+		if sq, ok := n.(*sql.Subquery); ok && sq != nil {
 			collectSelect(sq.Select, mode, out)
 		}
 		return true

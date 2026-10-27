@@ -159,11 +159,25 @@ func (p *parser) parseComparison() (Expr, error) {
 		switch {
 		case t.Is("in"):
 			p.pos++
-			if p.atKw("select") {
-				return nil, p.errAt(p.peek(), "subqueries are not supported")
-			}
 			if err := p.expectPunct("("); err != nil {
 				return nil, err
+			}
+			// IN (SELECT ...)：子查询形式，和 IN (1, 2, 3) 靠括号内的
+			// 第一个词区分（startsQuery 会跳过嵌套括号）。
+			if p.startsQuery() {
+				st0, err := p.parseSelect()
+				if err != nil {
+					return nil, err
+				}
+				sel, ok := st0.(*Select)
+				if !ok {
+					return nil, p.errAt(p.peek(), "expected SELECT")
+				}
+				if err := p.expectPunct(")"); err != nil {
+					return nil, err
+				}
+				left = &In{X: left, Sub: &Subquery{Select: sel}, Not: not}
+				continue
 			}
 			var list []Expr
 			if !p.atPunct(")") {
@@ -331,6 +345,26 @@ func (p *parser) parsePrimary() (Expr, error) {
 
 func (p *parser) parsePrimaryBase() (Expr, error) {
 	t := p.peek()
+	// EXISTS (SELECT ...)：只看子查询有没有行。NOT EXISTS 由外层的
+	// NOT 包一层 Unary，这里只认 EXISTS 本身。
+	if t.Is("exists") {
+		p.pos++
+		if err := p.expectPunct("("); err != nil {
+			return nil, err
+		}
+		st0, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		sel, ok := st0.(*Select)
+		if !ok {
+			return nil, p.errAt(p.peek(), "expected SELECT")
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		return &Exists{Sub: &Subquery{Select: sel}}, nil
+	}
 	switch t.Kind {
 	case NumberVal:
 		p.pos++

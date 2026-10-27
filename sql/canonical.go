@@ -76,6 +76,13 @@ func Walk(e Expr, visit func(Expr) bool) {
 		for _, a := range n.List {
 			Walk(a, visit)
 		}
+		// Sub 可能为 nil（IN 列表形式），nil 指针装进接口后不等于 nil，
+		// 直接 Walk 会在下游解引用时炸掉
+		if n.Sub != nil {
+			Walk(n.Sub, visit)
+		}
+	case *Exists:
+		Walk(n.Sub, visit)
 	case *Between:
 		Walk(n.X, visit)
 		Walk(n.Lo, visit)
@@ -183,6 +190,14 @@ func canon(b *strings.Builder, e Expr) {
 			b.WriteString(",")
 			canon(b, a)
 		}
+		canon(b, n.Sub)
+		b.WriteByte(')')
+	case *Exists:
+		b.WriteString("E(")
+		if n.Not {
+			b.WriteString("!")
+		}
+		canon(b, n.Sub)
 		b.WriteByte(')')
 	case *Subquery:
 		// 同一次解析出来的 AST 指针稳定，足够作为分组/去重的 key

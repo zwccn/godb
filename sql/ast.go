@@ -56,6 +56,20 @@ type FKDef struct {
 	OnUpdate string
 }
 
+// CreateIndex 对应 CREATE [UNIQUE] INDEX name ON table (cols)。
+type CreateIndex struct {
+	Name   string
+	Table  string
+	Cols   []string
+	Unique bool
+}
+
+// DropIndex 对应 DROP INDEX [IF EXISTS] name。
+type DropIndex struct {
+	Name     string
+	IfExists bool
+}
+
 // Copy 对应 COPY ... FROM STDIN / TO STDOUT（只支持标准输入输出，不支持文件名）。
 type Copy struct {
 	Table string
@@ -264,6 +278,8 @@ func (*Show) stmtNode()        {}
 func (*SetStmt) stmtNode()     {}
 func (*Insert) stmtNode()      {}
 func (*Copy) stmtNode()        {}
+func (*CreateIndex) stmtNode() {}
+func (*DropIndex) stmtNode()   {}
 func (*Update) stmtNode()      {}
 func (*Delete) stmtNode()      {}
 func (*Select) stmtNode()      {}

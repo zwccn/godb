@@ -253,6 +253,14 @@ func (p *parser) parseStatement() (Statement, error) {
 // ---------- DDL ----------
 
 func (p *parser) parseCreate() (Statement, error) {
+	// CREATE [UNIQUE] INDEX name ON table (cols)
+	if p.atKw("index") || p.atKw("unique") {
+		uniq := p.acceptKw("unique")
+		if err := p.expectKw("index"); err != nil {
+			return nil, err
+		}
+		return p.parseCreateIndex(uniq)
+	}
 	if !p.acceptKw("table") {
 		return nil, p.errAt(p.peek(), "only CREATE TABLE is supported")
 	}
@@ -676,6 +684,22 @@ func (p *parser) skipCollation() error {
 }
 
 func (p *parser) parseDrop() (Statement, error) {
+	if p.acceptKw("index") {
+		st := &DropIndex{}
+		if p.atKw("if") {
+			p.pos++
+			if err := p.expectKw("exists"); err != nil {
+				return nil, err
+			}
+			st.IfExists = true
+		}
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		st.Name = name
+		return st, nil
+	}
 	if !p.acceptKw("table") {
 		return nil, p.errAt(p.peek(), "only DROP TABLE is supported")
 	}
@@ -858,6 +882,52 @@ func (p *parser) parseCopy() (Statement, error) {
 		return nil, p.errAt(p.peek(), "COPY from/to a file is not supported, use psql's \\copy")
 	}
 	return c, nil
+}
+
+// parseCreateIndex 解析 CREATE INDEX 的剩余部分。
+func (p *parser) parseCreateIndex(unique bool) (Statement, error) {
+	st := &CreateIndex{Unique: unique}
+	// 索引名可选（PostgreSQL 会自动取），为了简单要求显式给出
+	if p.atKw("on") {
+		return nil, p.errAt(p.peek(), "CREATE INDEX requires a name")
+	}
+	name, err := p.ident()
+	if err != nil {
+		return nil, err
+	}
+	st.Name = name
+	if err := p.expectKw("on"); err != nil {
+		return nil, err
+	}
+	tbl, err := p.tableName()
+	if err != nil {
+		return nil, err
+	}
+	st.Table = tbl
+	// 可选的 USING btree/hash：我们没有多种索引方法，忽略
+	if p.acceptKw("using") {
+		if _, err := p.ident(); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.expectPunct("("); err != nil {
+		return nil, err
+	}
+	for {
+		col, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		st.Cols = append(st.Cols, col)
+		if p.acceptPunct(",") {
+			continue
+		}
+		break
+	}
+	if err := p.expectPunct(")"); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 func (p *parser) parseInsert() (Statement, error) {

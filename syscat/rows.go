@@ -16,13 +16,17 @@ type colMeta struct {
 	attlen   int32
 }
 
-// idxMeta 描述一个由约束隐式创建的索引。
+// userIndexOIDBase 是用户 CREATE INDEX 的 OID 起点，避开约束索引占用的区间。
+const userIndexOIDBase = 60000
+
+// idxMeta 描述一个索引（约束隐式创建的，或用户 CREATE INDEX 建的）。
 type idxMeta struct {
 	oid     int32
 	name    string
 	cols    []int // 复合主键会有多列
 	colIdx  int   // 首列（只关心一列的旧代码用）
 	primary bool
+	uniq    bool // 唯一索引（主键/唯一约束/用户 CREATE UNIQUE INDEX）
 	conOid  int32
 	defOid  int32
 }
@@ -76,10 +80,31 @@ func buildMeta(src Source) *meta {
 				cols:    grp,
 				colIdx:  ci,
 				primary: prim,
+				uniq:    true,
 				conOid:  int32(constraintOIDBase + n*len(src.tables()) + i),
 				defOid:  int32(attrDefOIDBase + n*len(src.tables()) + i),
 			})
 			n++
+		}
+		// 用户 CREATE INDEX 建的索引：只登记与展示，不参与查询规划
+		for j, ux := range t.Indexes {
+			cols := make([]int, 0, len(ux.Columns))
+			for _, cn := range ux.Columns {
+				if ci, ok := t.ColumnIdx(cn); ok {
+					cols = append(cols, ci)
+				}
+			}
+			if len(cols) == 0 {
+				continue
+			}
+			tm.idx = append(tm.idx, idxMeta{
+				oid:     int32(userIndexOIDBase + i*100 + j),
+				name:    ux.Name,
+				cols:    cols,
+				colIdx:  cols[0],
+				primary: false,
+				uniq:    ux.Unique,
+			})
 		}
 		m.tables = append(m.tables, *tm)
 	}
@@ -242,7 +267,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 				out = append(out, mk(def, map[string]types.Value{
 					"indexrelid": iv(int(ix.oid)), "indrelid": iv(int(tm.oid)),
 					"indnatts": iv(1), "indnkeyatts": iv(1),
-					"indisunique": bv(true), "indisprimary": bv(ix.primary),
+					"indisunique": bv(ix.uniq), "indisprimary": bv(ix.primary),
 					"indisexclusion": bv(false), "indimmediate": bv(true),
 					"indisclustered": bv(false), "indisvalid": bv(true),
 					"indcheckxmin": bv(false), "indisready": bv(true), "indislive": bv(true),
@@ -259,6 +284,10 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 		var out []types.Row
 		for _, tm := range m.tables {
 			for _, ix := range tm.idx {
+				// 用户索引没有对应约束（conOid 为 0），不要凭空造一条
+				if ix.conOid == 0 {
+					continue
+				}
 				typ := "u"
 				if ix.primary {
 					typ = "p"

@@ -23,6 +23,13 @@ type Column struct {
 	Default    string `json:"default,omitempty"`
 }
 
+// Index 是一条用户建的二级索引。
+type Index struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
+	Unique  bool     `json:"unique,omitempty"`
+}
+
 // ForeignKey 是一条外键约束。
 type ForeignKey struct {
 	Name       string   `json:"name"`
@@ -65,6 +72,12 @@ type Table struct {
 
 	// ForeignKeys 是外键约束。
 	ForeignKeys []*ForeignKey `json:"foreign_keys,omitempty"`
+
+	// Indexes 是用户建的二级索引。
+	//
+	// 目前只做「登记 + 展示」：客户端能在索引页看到、能建能删，但查询规划
+	// 还不会用它加速（只有主键走哈希索引）。真正的二级索引属于后续工作。
+	Indexes []*Index `json:"indexes,omitempty"`
 
 	colIdx map[string]int
 }

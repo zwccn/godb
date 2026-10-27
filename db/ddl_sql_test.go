@@ -263,3 +263,118 @@ func TestCopyInOut(t *testing.T) {
 		t.Fatal("COPY 也要做唯一性校验")
 	}
 }
+
+// CREATE INDEX / DROP INDEX：登记式索引——能建能删、系统目录能看到，
+// 但不加速查询（只有主键走哈希索引）。
+func TestCreateDropIndex(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE ix_t (id int4 PRIMARY KEY, name text, qty int4)`)
+
+	res := run(t, d, s, `CREATE INDEX ix_t_name ON ix_t (name)`)
+	if res[0].Tag != "CREATE INDEX" {
+		t.Fatalf("tag = %q", res[0].Tag)
+	}
+	// 结果里要明确说明不加速，避免误解
+	if !strings.Contains(res[0].Message, "不会用它加速") {
+		t.Fatalf("应提示不加速，实际 %q", res[0].Message)
+	}
+
+	// 系统目录里能看到这条索引
+	res = run(t, d, s, `
+		SELECT i.indexrelid, c.relname, i.indisunique, i.indisprimary, i.indkey
+		FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+		JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+		WHERE t.relname = 'ix_t' AND NOT i.indisprimary`)
+	if len(res[0].Rows) != 1 {
+		t.Fatalf("应有 1 条用户索引，实际 %d", len(res[0].Rows))
+	}
+	r := res[0].Rows[0]
+	if fmt.Sprint(r[1]) != "ix_t_name" || fmt.Sprint(r[2]) != "false" || fmt.Sprint(r[3]) != "false" {
+		t.Fatalf("索引元数据不对: %v", r)
+	}
+	if fmt.Sprint(r[4]) != "2" {
+		t.Fatalf("indkey 应为 2（name 是第 2 列），实际 %v", r[4])
+	}
+
+	// 用户索引不该在 pg_constraint 里凭空出现
+	res = run(t, d, s, `
+		SELECT count(*) FROM pg_catalog.pg_constraint c
+		JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
+		WHERE t.relname = 'ix_t' AND c.conname = 'ix_t_name'`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "0" {
+		t.Fatalf("用户索引不该有约束行，实际 %s", got)
+	}
+
+	// UNIQUE 索引要标出来
+	run(t, d, s, `CREATE UNIQUE INDEX ix_t_qty ON ix_t (qty)`)
+	res = run(t, d, s, `
+		SELECT count(*) FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'ix_t_qty' AND i.indisunique`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "1" {
+		t.Fatalf("UNIQUE 索引应标记 indisunique")
+	}
+
+	// 重名 / 不存在的列 / 不存在的表都要报错
+	if err := runErr(t, d, s, `CREATE INDEX ix_t_name ON ix_t (qty)`); err == nil {
+		t.Fatal("索引重名应该报错")
+	}
+	if err := runErr(t, d, s, `CREATE INDEX bad ON ix_t (nope)`); err == nil {
+		t.Fatal("不存在的列应该报错")
+	}
+	if err := runErr(t, d, s, `CREATE INDEX bad2 ON nope (id)`); err == nil {
+		t.Fatal("不存在的表应该报错")
+	}
+
+	// 删除
+	run(t, d, s, `DROP INDEX ix_t_name`)
+	res = run(t, d, s, `
+		SELECT count(*) FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'ix_t_name'`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "0" {
+		t.Fatalf("索引应已删除")
+	}
+	run(t, d, s, `DROP INDEX IF EXISTS not_there`)
+	if err := runErr(t, d, s, `DROP INDEX not_there`); err == nil {
+		t.Fatal("删不存在的索引应该报错")
+	}
+}
+
+// 索引定义要能持久化（catalog.json）。
+func TestIndexSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sess := d.Session("s")
+	for _, q := range []string{
+		`CREATE TABLE ixs (id int4 PRIMARY KEY, name text)`,
+		`CREATE INDEX ixs_name ON ixs (name)`,
+	} {
+		if _, err := d.Exec(sess, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	d.Close()
+
+	d2, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+	s2 := d2.Session("s")
+	res, err := d2.Exec(s2, `
+		SELECT count(*) FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'ixs_name'`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "1" {
+		t.Fatalf("重启后索引应还在，实际 count=%s", got)
+	}
+}

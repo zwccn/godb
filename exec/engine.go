@@ -51,6 +51,10 @@ func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 		return e.execSelect(tx, sel, []string{})
 	case *sql.Insert:
 		return e.execInsert(tx, s)
+	case *sql.CreateIndex:
+		return e.execCreateIndex(s)
+	case *sql.DropIndex:
+		return e.execDropIndex(s)
 	case *sql.Copy:
 		// COPY 需要协议层的 CopyIn/CopyOut 数据流，SQL 层单独调不通
 		return nil, fmt.Errorf("COPY must be executed through the PostgreSQL protocol")
@@ -1036,4 +1040,65 @@ func (e *Engine) execCreateTableAs(s *sql.CreateTable) (*Result, error) {
 		Tag:      fmt.Sprintf("SELECT %d", len(rows)),
 		Affected: len(rows),
 	}, nil
+}
+
+// ---------- 二级索引（登记式） ----------
+
+// execCreateIndex 建一条索引。
+//
+// 只登记元数据：客户端能在索引页看到、能建能删，系统目录里也会出现对应行；
+// 但查询规划还没接入它（只有主键走哈希索引）。结果里会明确说明这一点，
+// 避免让人以为加了索引就变快了。
+func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
+	t, ok := e.Cat.Get(s.Table)
+	if !ok {
+		return nil, fmt.Errorf("relation %q does not exist", s.Table)
+	}
+	for _, idx := range e.Cat.Tables {
+		for _, ix := range idx.Indexes {
+			if strings.EqualFold(ix.Name, s.Name) {
+				return nil, fmt.Errorf("relation %q already exists", s.Name)
+			}
+		}
+	}
+	if len(s.Cols) == 0 {
+		return nil, fmt.Errorf("CREATE INDEX requires at least one column")
+	}
+	for _, name := range s.Cols {
+		if _, ok := t.ColumnIdx(name); !ok {
+			return nil, fmt.Errorf("column %q does not exist", name)
+		}
+	}
+	cols := make([]string, len(s.Cols))
+	for i, n := range s.Cols {
+		cols[i] = strings.ToLower(n)
+	}
+	t.Indexes = append(t.Indexes, &catalog.Index{Name: s.Name, Columns: cols, Unique: s.Unique})
+	if err := e.persistSchema(false); err != nil {
+		return nil, err
+	}
+	return &Result{
+		Command: "CREATE INDEX",
+		Tag:     "CREATE INDEX",
+		Message: "索引已登记，但当前版本不会用它加速查询（只有主键走索引）",
+	}, nil
+}
+
+// execDropIndex 删除一条索引（按名字找，索引名全库唯一）。
+func (e *Engine) execDropIndex(s *sql.DropIndex) (*Result, error) {
+	for _, t := range e.Cat.Tables {
+		for i, ix := range t.Indexes {
+			if strings.EqualFold(ix.Name, s.Name) {
+				t.Indexes = append(t.Indexes[:i], t.Indexes[i+1:]...)
+				if err := e.persistSchema(false); err != nil {
+					return nil, err
+				}
+				return &Result{Command: "DROP INDEX", Tag: "DROP INDEX"}, nil
+			}
+		}
+	}
+	if s.IfExists {
+		return &Result{Command: "DROP INDEX", Tag: "DROP INDEX", Message: "索引不存在，跳过"}, nil
+	}
+	return nil, fmt.Errorf("index %q does not exist", s.Name)
 }

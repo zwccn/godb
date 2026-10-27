@@ -13,7 +13,12 @@
   --ok: #3fb950;
   --warn: #d9a441;
   --danger: #f0616d;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  /* 等宽字体：SQL 编辑器、结果表、SQL 预览都用它。
+     装了 JetBrains Mono 就用它（IDEA 用户基本都有）；否则 Cascadia Mono
+     （Win10+ 自带，Windows Terminal 的默认字体，比 Consolas 更像编程字体）；
+     再兜底 Consolas。ui-monospace 放到最后 —— 它在各平台映射到哪个字体不固定，
+     放前面等于把选择权交出去。 */
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, SFMono-Regular, "SF Mono", "Liberation Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
   /* 字体缩放：所有 font-size 都是 calc(基准px * --fs)。
      默认 1.2；用户在顶栏「字号」里调，JS 直接把 --fs 覆盖成 0.85~1.65。 */

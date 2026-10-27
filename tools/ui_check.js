@@ -202,6 +202,32 @@ class CDP {
     })()`);
     check('PG 关键字能补全', !!hint && hint[0] === 'SELECT关键字', hint ? JSON.stringify(hint) : '没有弹层');
 
+    // 排序权重：高频关键字永远压最上面，然后才是表、字段（真实写 SQL 的顺序）
+    await cdp.eval(`cm.setValue('SELECT * FROM employees WHERE ');
+      cm.setCursor({line:0, ch: cm.getLine(0).length}); cm.showHint()`);
+    await sleep(500);
+    const order = await cdp.eval(`(() => {
+      const ul = document.querySelector('.CodeMirror-hints');
+      if (!ul) return null;
+      const items = [...ul.querySelectorAll('li')].map(li => {
+        const l = li.querySelector('.cm-hint-label');
+        return (l || li).textContent.trim();
+      });
+      return {
+        head: items.slice(0, 5).map(s => s.toLowerCase()),
+        hot: items.indexOf('SELECT'),
+        table: items.indexOf('employees'),
+        column: items.indexOf('id'),
+        total: items.length,
+      };
+    })()`);
+    check('无输入时高频关键字排最前',
+      order && order.head.join(',') === 'select,from,where,join,update',
+      order ? order.head.join(' / ') : '没有弹层');
+    check('排序档位：关键字 → 表 → 字段',
+      order && order.hot >= 0 && order.table > order.hot && order.column > order.table,
+      order ? `SELECT@${order.hot} employees@${order.table} id@${order.column}（共 ${order.total} 条）` : '');
+
     // 候选框的选中行要「一眼看得出来」：底色和弹层底色拉开一档 + 主题色左条 + 命中片段加粗。
     // 之前拿 accent-soft-bg 当选中色，深色皮肤下它和弹层底色几乎一样，等于没高亮。
     const hintLook = await cdp.eval(`(() => {

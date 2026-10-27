@@ -184,6 +184,42 @@
     return m ? m[1].toLowerCase() : '';
   }
 
+  // 补全列表的排序权重。
+  // 现实写法里一堆语句都是从 SELECT 起步的，所以高频关键字必须永远压在最上面，
+  // 哪怕当前语句里已经有表有列。档位之间留空隙，档内再按字母排。
+  //
+  //   0..   高频关键字（SELECT 单独第一，其余四个按常用度）
+  //   100   表名
+  //   200   字段
+  //   300   次高频关键字（INSERT / GROUP / ORDER / AND …）
+  //   400   其余关键字
+  //   500   函数
+  //   600   类型
+  const HOT_KEYWORDS = ['select', 'from', 'where', 'join', 'update'];
+  const WARM_KEYWORDS = [
+    'insert', 'into', 'values', 'delete', 'set', 'group', 'order', 'by', 'having',
+    'limit', 'offset', 'distinct', 'as', 'on', 'left', 'right', 'inner', 'cross',
+    'and', 'or', 'not', 'null', 'create', 'table', 'alter', 'drop', 'truncate',
+    'index', 'returning', 'begin', 'commit', 'rollback',
+  ];
+
+  // preferTable 用于「FROM / JOIN 之后」这种上下文：此时用户要的是表名，
+  // 不该被 SELECT 这类热词挤到后面去。
+  function rankOf(item, preferTable) {
+    var text = String(item.text || '').toLowerCase();
+    if (item.group === 2) return preferTable ? -10 : 100;
+    if (item.group === 3) {
+      var hot = HOT_KEYWORDS.indexOf(text);
+      if (hot >= 0) return preferTable ? 700 + hot : hot;
+      var warm = WARM_KEYWORDS.indexOf(text);
+      return warm >= 0 ? 300 + warm : 400;
+    }
+    if (item.group === 1) return 200;
+    if (item.group === 4) return 500;
+    if (item.group === 5) return 600;
+    return 900;
+  }
+
   function keywordItems(name) {
     // 已经写出来的名字就不要再提示一遍（大小写不敏感）
     var lower = name.toLowerCase();
@@ -339,9 +375,12 @@
       list.push(it);
     }
 
-    // 前缀完全匹配的排前面（CodeMirror 自己也会按前缀过滤，但我们要先排序）
+    // 按权重分档：高频关键字 → 表 → 字段 → 次高频词 → 其它。
+    // 「FROM 之后」这种场合例外，那时表名才是第一诉求（见 rankOf 的 preferTable）
     list.sort(function (a, b) {
-      return (a.group - b.group) || a.displayText.localeCompare(b.displayText);
+      return (rankOf(a, wantTable) - rankOf(b, wantTable)) ||
+        (a.group - b.group) ||
+        a.displayText.localeCompare(b.displayText);
     });
 
     return build(list, word, from, cur);

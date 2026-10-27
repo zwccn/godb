@@ -117,3 +117,62 @@ func TestDescribeTableShape(t *testing.T) {
 		t.Fatalf("列名 = %v", names)
 	}
 }
+
+// WITH（CTE）：物化一次、按名字引用，可以被子查询和后续 CTE 复用。
+func TestCommonTableExpression(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE ord (id int4 PRIMARY KEY, cust text, amt int4)`)
+	run(t, d, s, `INSERT INTO ord VALUES (1,'a',100), (2,'a',50), (3,'b',300), (4,'b',20)`)
+
+	// 基本 CTE + 聚合
+	res := run(t, d, s, `
+		WITH big AS (SELECT cust, amt FROM ord WHERE amt >= 100)
+		SELECT cust, sum(amt) AS total FROM big GROUP BY cust ORDER BY cust`)
+	if len(res[0].Rows) != 2 {
+		t.Fatalf("应有 2 组，实际 %d", len(res[0].Rows))
+	}
+	if fmt.Sprint(res[0].Rows[0][1]) != "100" || fmt.Sprint(res[0].Rows[1][1]) != "300" {
+		t.Fatalf("聚合结果不对: %v", res[0].Rows)
+	}
+
+	// 引用两次（物化后复用，不会算两遍）
+	res = run(t, d, s, `
+		WITH t AS (SELECT count(*) AS n FROM ord)
+		SELECT a.n, b.n FROM t a JOIN t b ON a.n = b.n`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "4" {
+		t.Fatalf("CTE 复用结果 = %s，期望 4", got)
+	}
+
+	// 列名列表：WITH t(x) AS (...)
+	res = run(t, d, s, `WITH t(x) AS (SELECT amt FROM ord) SELECT sum(x) FROM t`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "470" {
+		t.Fatalf("WITH t(x) 求和 = %s，期望 470", got)
+	}
+
+	// 多个 CTE，后面的能引用前面的
+	res = run(t, d, s, `
+		WITH a AS (SELECT cust, amt FROM ord),
+		     b AS (SELECT cust, sum(amt) AS total FROM a GROUP BY cust)
+		SELECT cust FROM b WHERE total > 200`)
+	if len(res[0].Rows) != 1 || fmt.Sprint(res[0].Rows[0][0]) != "b" {
+		t.Fatalf("链式 CTE 结果不对: %v", res[0].Rows)
+	}
+
+	// CTE 里的集合运算
+	res = run(t, d, s, `
+		WITH u AS (SELECT cust FROM ord WHERE amt > 200 UNION SELECT 'z')
+		SELECT count(*) FROM u`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "2" {
+		t.Fatalf("CTE 内 UNION 结果 = %s，期望 2", got)
+	}
+
+	// 引用不存在的 CTE 要报 relation does not exist
+	if err := runErr(t, d, s, `WITH a AS (SELECT 1) SELECT * FROM nope`); err == nil {
+		t.Fatal("引用不存在的表应该报错")
+	}
+	// 递归 CTE 明确不支持
+	if err := runErr(t, d, s, `WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r`); err == nil {
+		t.Fatal("WITH RECURSIVE 应该报不支持")
+	}
+}

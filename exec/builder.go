@@ -17,10 +17,27 @@ type Planner struct {
 
 	// outerScopes 是编译子查询时压入的外层作用域（见 buildSubquery）。
 	outerScopes []outerScope
+
+	// ctes 是 WITH 物化后的结果（名字 → 行集）。子查询与 FROM 子查询
+	// 复用同一个 Planner，所以 CTE 在内层也可见，和 PostgreSQL 一致。
+	ctes map[string]*cteData
+}
+
+// cteData 是一个物化好的 CTE。
+type cteData struct {
+	cols  []string
+	types []types.Type
+	rows  [][]types.Value
 }
 
 // BuildSelect 构建查询计划。
 func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
+	// WITH：先把 CTE 物化，后面的 FROM 才能按名字取到
+	if len(s.CTEs) > 0 {
+		if err := p.materializeCTEs(s.CTEs); err != nil {
+			return nil, err
+		}
+	}
 	// 集合运算节点是个空壳：SetLeft/SetRight 才是两个操作数。
 	if s.SetOp != "" {
 		return p.buildSetOp(s)
@@ -75,6 +92,14 @@ func (p *Planner) buildFrom(from []sql.TableRef) (Operator, Schema, error) {
 func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 	switch n := r.(type) {
 	case *sql.BaseTable:
+		if d := p.lookupCTE(n.Table); d != nil {
+			qual := n.Alias
+			if qual == "" {
+				qual = n.Table
+			}
+			op := newCTEScan(d, qual)
+			return op, op.Schema(), nil
+		}
 		t, ok := p.Cat.Get(n.Table)
 		if !ok {
 			// 不是业务表就看看是不是系统目录（pg_catalog / information_schema）
@@ -567,3 +592,108 @@ func (p *Planner) buildSubquery(s *sql.Select, outer Schema, outerRow *types.Row
 	}()
 	return p.BuildSelect(s)
 }
+
+// ---------- WITH（公用表表达式） ----------
+
+// materializeCTEs 依次物化 WITH 里的每个 CTE。
+//
+// 物化 = 完整跑一遍子查询把结果收进内存。后续按名字引用时不再重算，
+// 这与 PostgreSQL 默认的 MATERIALIZED 行为一致（也省掉了引用两次跑两遍）。
+func (p *Planner) materializeCTEs(list []*sql.CTE) error {
+	if p.ctes == nil {
+		p.ctes = map[string]*cteData{}
+	}
+	for _, c := range list {
+		plan, err := p.BuildSelect(c.Select)
+		if err != nil {
+			return err
+		}
+		if err := plan.Open(); err != nil {
+			return err
+		}
+		sc := plan.Schema()
+		d := &cteData{
+			cols:  make([]string, len(sc)),
+			types: make([]types.Type, len(sc)),
+		}
+		for i, ci := range sc {
+			// WITH x(a,b) 里给的名字优先，否则用查询的输出列名
+			if i < len(c.Cols) {
+				d.cols[i] = strings.ToLower(c.Cols[i])
+			} else {
+				d.cols[i] = strings.ToLower(ci.Name)
+			}
+			d.types[i] = ci.Type
+		}
+		for {
+			r, ok, err := plan.Next()
+			if err != nil {
+				plan.Close()
+				return err
+			}
+			if !ok {
+				break
+			}
+			cp := make([]types.Value, len(r))
+			copy(cp, r)
+			d.rows = append(d.rows, cp)
+		}
+		plan.Close()
+		p.ctes[strings.ToLower(c.Name)] = d
+	}
+	return nil
+}
+
+// lookupCTE 按名字找已物化的 CTE。
+func (p *Planner) lookupCTE(name string) *cteData {
+	if p.ctes == nil {
+		return nil
+	}
+	return p.ctes[strings.ToLower(name)]
+}
+
+// cteScan 把一个物化好的 CTE 当作表来读。
+type cteScan struct {
+	sc   Schema
+	rows []types.Row
+	i    int
+}
+
+func newCTEScan(d *cteData, qual string) *cteScan {
+	sc := make(Schema, len(d.cols))
+	for i := range d.cols {
+		sc[i] = ColInfo{Qualifier: strings.ToLower(qual), Name: d.cols[i], Type: d.types[i]}
+	}
+	rows := make([]types.Row, len(d.rows))
+	for i, r := range d.rows {
+		rows[i] = r
+	}
+	return &cteScan{sc: sc, rows: rows}
+}
+
+func (o *cteScan) Schema() Schema { return o.sc }
+
+func (o *cteScan) Open() error {
+	o.i = 0
+	return nil
+}
+
+func (o *cteScan) Next() (types.Row, bool, error) {
+	if o.i >= len(o.rows) {
+		return nil, false, nil
+	}
+	r := o.rows[o.i]
+	o.i++
+	return r, true, nil
+}
+
+func (o *cteScan) Close() error {
+	o.i = 0
+	return nil
+}
+
+func (o *cteScan) Describe() string {
+	return fmt.Sprintf("CTE Scan (%d rows)", len(o.rows))
+}
+
+func (o *cteScan) Children() []Operator { return nil }

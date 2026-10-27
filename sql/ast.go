@@ -118,6 +118,13 @@ type Delete struct {
 
 // ---------- DQL ----------
 
+// CTE 是 WITH 里的一个公用表表达式。
+type CTE struct {
+	Name   string
+	Cols   []string // 可选的列名列表
+	Select *Select
+}
+
 // Select 对应 SELECT。
 //
 // SetOp 非空表示这是一个集合运算（UNION / INTERSECT / EXCEPT）的左边，
@@ -132,6 +139,9 @@ type Select struct {
 	OrderBy  []*OrderItem
 	Limit    Expr
 	Offset   Expr
+
+	// CTEs 是本查询前面 WITH 定义的公用表表达式（按声明顺序）。
+	CTEs []*CTE
 
 	SetOp    string // "union" / "intersect" / "except"
 	SetAll   bool

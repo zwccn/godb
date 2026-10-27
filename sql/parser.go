@@ -165,6 +165,9 @@ func (p *parser) parseStatement() (Statement, error) {
 	switch strings.ToUpper(t.Text) {
 	case "SELECT":
 		return p.parseSelect()
+	case "WITH":
+		p.pos++
+		return p.parseWith()
 	case "CREATE":
 		p.pos++
 		return p.parseCreate()
@@ -883,6 +886,84 @@ func (p *parser) parseDelete() (Statement, error) {
 // ---------- SELECT ----------
 
 // parseSelect 解析一条完整查询：核心 SELECT + 集合运算 + ORDER BY/LIMIT。
+// parseWith 解析 WITH [RECURSIVE] name [(cols)] AS ( SELECT ) [, ...] <select>。
+//
+// 只支持非递归的 CTE：物化一次、按名字引用。递归 CTE（WITH RECURSIVE 里
+// 自引用）需要迭代求值，暂不支持，会给出明确错误。
+func (p *parser) parseWith() (Statement, error) {
+	if p.acceptKw("recursive") {
+		return nil, p.errAt(p.peek(), "WITH RECURSIVE is not supported")
+	}
+	var ctes []*CTE
+	for {
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		ct := &CTE{Name: name}
+		// 可选列名列表
+		if p.atPunct("(") {
+			p.pos++
+			for {
+				c, err := p.ident()
+				if err != nil {
+					return nil, err
+				}
+				ct.Cols = append(ct.Cols, c)
+				if p.acceptPunct(",") {
+					continue
+				}
+				break
+			}
+			if err := p.expectPunct(")"); err != nil {
+				return nil, err
+			}
+		}
+		if err := p.expectKw("as"); err != nil {
+			return nil, err
+		}
+		// MATERIALIZED / NOT MATERIALIZED 只是优化提示，忽略
+		if p.acceptKw("not") {
+			p.acceptKw("materialized")
+		} else {
+			p.acceptKw("materialized")
+		}
+		if err := p.expectPunct("("); err != nil {
+			return nil, err
+		}
+		st0, err := p.parseSelect()
+		if err != nil {
+			return nil, err
+		}
+		sel, ok := st0.(*Select)
+		if !ok {
+			return nil, p.errAt(p.peek(), "expected SELECT")
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		ct.Select = sel
+		ctes = append(ctes, ct)
+		if p.acceptPunct(",") {
+			continue
+		}
+		break
+	}
+	if !p.atKw("select") {
+		return nil, p.errAt(p.peek(), "only SELECT is supported after WITH")
+	}
+	st1, err := p.parseSelect()
+	if err != nil {
+		return nil, err
+	}
+	sel, ok := st1.(*Select)
+	if !ok {
+		return nil, p.errAt(p.peek(), "expected SELECT")
+	}
+	sel.CTEs = append(ctes, sel.CTEs...)
+	return sel, nil
+}
+
 func (p *parser) parseSelect() (Statement, error) {
 	s, err := p.parseSetExpr()
 	if err != nil {

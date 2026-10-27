@@ -80,6 +80,10 @@ func collectSelect(s *sql.Select, mode lock.Mode, out map[string]lock.Mode) {
 	if s.SetRight != nil {
 		collectSelect(s.SetRight, mode, out)
 	}
+	// WITH 里的子查询也读表，必须一起加锁
+	for _, c := range s.CTEs {
+		collectSelect(c.Select, mode, out)
+	}
 	for _, ref := range s.From {
 		collectRef(ref, mode, out)
 	}

@@ -46,6 +46,7 @@ go build -o godb.exe .
 | 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
 | 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；三者都支持 `RETURNING`（含 `RETURNING *`、表达式与别名） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` |
+| CTE | `WITH name [(cols)] AS (SELECT ...)`，可多个、可互相引用（物化一次） |
 | 集合运算 | `UNION [ALL]` / `INTERSECT` / `EXCEPT`；`FROM` 子查询（含 `AS t(a, b)` 列别名） |
 | 集合函数 | `FROM generate_series(a, b[, step])`、`FROM regexp_matches(text, pattern)`，可带列别名列表 |
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
@@ -58,7 +59,7 @@ go build -o godb.exe .
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
-**明确不支持**（会报清晰的错误）：CTE、窗口函数、外键、
+**明确不支持**（会报清晰的错误）：递归 CTE（`WITH RECURSIVE`）、窗口函数、外键、
 `FULL JOIN`、`NATURAL JOIN`、行级锁、二级索引。
 
 **支持标量子查询**（`(SELECT ...)` 出现在表达式位置，返回单列、可以引用外层列）。

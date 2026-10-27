@@ -343,7 +343,6 @@ body {
   font-weight: 600;
   letter-spacing: 0.2px;
 }
-.tagline { color: var(--text-3); font-size: calc(12px * var(--fs)); }
 
 .top-actions { display: flex; align-items: center; gap: 8px; }
 
@@ -801,13 +800,11 @@ table.grid td.bool { color: var(--warn-text); }
 
 @media (max-width: 860px) {
   .sidebar { flex-basis: 210px; }
-  .tagline { display: none; }
 }
 
 /* 顶栏右侧现在多了皮肤圆点和字号控件，窗口窄（或者字号调到 150% 以上）
-   时先收起说明文字，别让按钮挤成两行 */
+   时先收起皮肤/字号的文字标签，别让按钮挤成两行 */
 @media (max-width: 1320px) {
-  .brand .tagline { display: none; }
   .theme-switch-label { display: none; }
   .theme-switch { padding: 3px 6px; }
 }

@@ -163,8 +163,15 @@ func OIDByName(name string) int32 {
 		return OIDTimestamptz
 	}
 	if strings.HasSuffix(n, "[]") {
-		if strings.HasPrefix(n, "aclitem") {
-			return 1034 // aclitem[]
+		// 这两类数组在系统目录里很常见，客户端会按 OID 判断是数组还是标量；
+		// 统一报 text[] 会让 pg_constraint/pg_index 的列看起来不对劲。
+		switch strings.TrimSuffix(n, "[]") {
+		case "int2", "_int2":
+			return 1005
+		case "oid", "_oid":
+			return 1028
+		case "aclitem":
+			return 1034
 		}
 		// 其它数组类型的 OID 不重要，统一报 text[]，避免客户端误判成标量
 		return 1009

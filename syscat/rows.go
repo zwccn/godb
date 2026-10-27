@@ -88,7 +88,32 @@ func buildMeta(src Source) *meta {
 	return m
 }
 
+// RelationOID 返回一张表在 pg_class 里的 OID（与虚拟表 pg_class 的输出一致）。
+// "xxx"::regclass 要用它：catalog.Table.ID 是数据文件编号，
+// 和客户端看到的 OID 不是一回事。
+func RelationOID(cat *catalog.Catalog, name string) (int32, bool) {
+	if cat == nil {
+		return 0, false
+	}
+	m := buildMeta(Source{Cat: cat})
+	tm, ok := m.byName[strings.ToLower(strings.TrimSpace(name))]
+	if !ok {
+		return 0, false
+	}
+	return tm.oid, true
+}
+
 // userTables 返回业务表（不含系统表）。
+// colType 返回第 idx 列（从 0 开始）的类型 OID，找不到给 0。
+func (tm *tblMeta) colType(idx int) int32 {
+	for _, c := range tm.cols {
+		if c.idx == idx {
+			return c.atttypid
+		}
+	}
+	return 0
+}
+
 func (m *meta) userTables() []*tblMeta {
 	var out []*tblMeta
 	for i := range m.tables {
@@ -168,7 +193,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 			for _, ix := range tm.idx {
 				out = append(out, mk(def, map[string]types.Value{
 					"oid": iv(int(ix.oid)), "relname": sv(ix.name), "relnamespace": iv(int(ns)),
-					"relowner": iv(OwnerOID), "relam": iv(4031), "relfilenode": iv(int(ix.oid)),
+					"relowner": iv(OwnerOID), "relam": iv(403), "relfilenode": iv(int(ix.oid)),
 					"relpages": iv(1), "reltuples": types.Float(0), "relhasindex": bv(false),
 					"relhasoids": bv(false), "relisshared": bv(false),
 					"relpersistence": sv("p"), "relkind": sv("i"), "relnatts": iv(1),
@@ -221,7 +246,8 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"indcheckxmin": bv(false), "indisready": bv(true), "indislive": bv(true),
 					"indisreplident": bv(false),
 					"indkey":         sv(fmt.Sprintf("%d", ix.colIdx+1)),
-					"indcollation":   sv("0"), "indclass": sv("0"), "indoption": sv("0"),
+					"indcollation":   sv("0"), "indoption": sv("0"),
+					"indclass": sv(fmt.Sprintf("%d", opclassOf(tm.colType(ix.colIdx)))),
 				}))
 			}
 		}
@@ -243,7 +269,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"conparentid": iv(0), "confrelid": iv(0),
 					"confupdtype": sv(" "), "confdeltype": sv(" "), "confmatchtype": sv(" "),
 					"conislocal": bv(true), "coninhcount": iv(0), "connoinherit": bv(false),
-					"conkey": sv(fmt.Sprintf("%d", ix.colIdx+1)),
+					"conkey": sv(fmt.Sprintf("{%d}", ix.colIdx+1)),
 				}))
 			}
 		}
@@ -269,9 +295,23 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 	case "pg_am":
 		return []types.Row{
 			mk(def, map[string]types.Value{"oid": iv(2), "amname": sv("heap"), "amhandler": sv("heap_tableam_handler"), "amtype": sv("t")}),
-			mk(def, map[string]types.Value{"oid": iv(4031), "amname": sv("btree"), "amhandler": sv("bthandler"), "amtype": sv("i")}),
-			mk(def, map[string]types.Value{"oid": iv(4053), "amname": sv("hash"), "amhandler": sv("hashhandler"), "amtype": sv("i")}),
+			mk(def, map[string]types.Value{"oid": iv(403), "amname": sv("btree"), "amhandler": sv("bthandler"), "amtype": sv("i")}),
+			mk(def, map[string]types.Value{"oid": iv(405), "amname": sv("hash"), "amhandler": sv("hashhandler"), "amtype": sv("i")}),
 		}
+
+	case "pg_opclass":
+		// btree 的默认操作符类。客户端「索引」页要拿 indclass 去 join 这张表
+		// 显示操作符类；一条都没有的话那个下拉是空的。
+		rows := make([]types.Row, 0, len(btreeOpclasses))
+		for _, oc := range btreeOpclasses {
+			rows = append(rows, mk(def, map[string]types.Value{
+				"oid": iv(int(oc.oid)), "opcmethod": iv(BtreeAmOID),
+				"opcname": sv(oc.name), "opcnamespace": iv(NamespaceCatalog),
+				"opcowner": iv(OwnerOID), "opcfamily": iv(0),
+				"opcintype": iv(int(oc.intype)), "opcdefault": bv(true), "opckeytype": iv(0),
+			}))
+		}
+		return rows
 
 	case "pg_tablespace":
 		return []types.Row{
@@ -1110,4 +1150,42 @@ func sortedNames(m *meta) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// BtreeAmOID 是 pg_am 里 btree 的 OID（和 PostgreSQL 一致）。
+const BtreeAmOID = 403
+
+// btreeOpclasses 是各类型在 btree 上的默认操作符类，
+// OID 取自真实 PostgreSQL（pg_opclass WHERE opcdefault AND opcmethod=btree）。
+var btreeOpclasses = []struct {
+	oid    int32
+	name   string
+	intype int32 // 对应的类型 OID
+}{
+	{10011, "bool_ops", 16},
+	{10036, "name_ops", 19},
+	{3124, "int8_ops", 20},
+	{1979, "int2_ops", 21},
+	{1978, "int4_ops", 23},
+	{3126, "text_ops", 25},
+	{1981, "oid_ops", 26},
+	{10020, "float4_ops", 700},
+	{3123, "float8_ops", 701},
+	{10012, "bpchar_ops", 1042},
+	{3122, "date_ops", 1082},
+	{10045, "time_ops", 1083},
+	{3128, "timestamp_ops", 1114},
+	{3127, "timestamptz_ops", 1184},
+	{10030, "interval_ops", 1186},
+	{3125, "numeric_ops", 1700},
+}
+
+// opclassOf 返回该类型在 btree 上的默认操作符类 OID；未知类型给 0。
+func opclassOf(atttypid int32) int32 {
+	for _, oc := range btreeOpclasses {
+		if oc.intype == atttypid {
+			return oc.oid
+		}
+	}
+	return 0
 }

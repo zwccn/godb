@@ -20,6 +20,10 @@ func TestInformationSchemaDomainOIDs(t *testing.T) {
 		{"character_data", OIDVarchar}, // 1043
 		{"yes_or_no", OIDVarchar},      // 1043：is_nullable 之类
 		{"time_stamp", OIDTimestamptz}, // 1184
+		{"int2[]", 1005},               // pg_constraint.conkey
+		{"oid[]", 1028},                // pg_constraint.conexclop
+		{"int2vector", 22},             // pg_index.indkey / indoption
+		{"oidvector", 30},              // pg_index.indclass / indcollation
 		{"aclitem[]", 1034},            // 权限数组
 	}
 	for _, c := range cases {

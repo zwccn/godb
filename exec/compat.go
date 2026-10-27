@@ -86,9 +86,9 @@ func (p *Planner) virtualTable(schema, name, qual string) (Operator, Schema, boo
 // compatTypeName 记录兼容函数的返回类型关键字。
 var compatFuncs = map[string]string{
 	// 文本
-	"version": "text", "current_database": "text", "current_schema": "text",
-	"current_user": "text", "session_user": "text", "user": "text",
-	"current_schemas": "text", "pg_get_userbyid": "text", "format_type": "text",
+	"version": "text", "current_database": "text", "current_schema": "name",
+	"current_user": "name", "session_user": "name", "user": "name",
+	"current_schemas": "text", "pg_get_userbyid": "name", "format_type": "text",
 	"pg_get_expr": "text", "pg_get_indexdef": "text", "pg_get_constraintdef": "text",
 	"pg_get_serial_sequence": "text", "obj_description": "text", "col_description": "text",
 	"shobj_description": "text", "quote_ident": "text", "quote_literal": "text",
@@ -150,6 +150,9 @@ func compatFuncType(name string) (types.Type, bool) {
 		return types.Type{Kind: types.KInt, Name: "bigint"}, true
 	case "timestamp":
 		return types.Type{Kind: types.KTime, Name: "timestamp"}, true
+	case "name":
+		// PostgreSQL 里 current_user / pg_get_userbyid 这类返回 name（OID 19）
+		return types.Type{Kind: types.KText, Name: "name"}, true
 	}
 	return types.Type{Kind: types.KText, Name: "text"}, true
 }

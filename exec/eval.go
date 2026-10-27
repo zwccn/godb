@@ -9,7 +9,9 @@ import (
 	"time"
 	"unicode"
 
+	"godb/catalog"
 	"godb/sql"
+	"godb/syscat"
 	"godb/types"
 )
 
@@ -274,6 +276,12 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		x, err := compile(n.X, c)
 		if err != nil {
 			return nil, err
+		}
+		// regclass / regtype 要把对象名解析成 OID（整数）。否则
+		// 'employees'::regclass 还是文本，和 oid 列比较时报
+		// operator does not exist: integer = text。
+		if k := regKindOf(n.TypeName); k != regCastNone && c.planner != nil {
+			return &regCastEval{x: x, kind: k, cat: c.planner.Cat}, nil
 		}
 		t, err := types.ParseType(n.TypeName, n.TypeArgs)
 		if err != nil {
@@ -1405,4 +1413,58 @@ func compileArraySubquery(sq *sql.Subquery, c *compileCtx) (Eval, error) {
 	}
 	ie.plan = plan
 	return ie, nil
+}
+
+// ---------- regclass / regtype 转换 ----------
+type regCastKind int
+
+const (
+	regCastNone  regCastKind = iota
+	regCastClass             // regclass：表/视图/索引名 -> pg_class.oid
+	regCastType              // regtype：类型名 -> pg_type.oid
+)
+
+func regKindOf(name string) regCastKind {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "regclass":
+		return regCastClass
+	case "regtype":
+		return regCastType
+	}
+	return regCastNone
+}
+
+// regCastEval 求 x::regclass / x::regtype，结果是一个 OID。
+type regCastEval struct {
+	x    Eval
+	kind regCastKind
+	cat  *catalog.Catalog
+}
+
+func (e *regCastEval) Type() types.Type {
+	return types.Type{Kind: types.KInt, Name: "oid"}
+}
+
+func (e *regCastEval) Eval(row types.Row) (types.Value, error) {
+	v, err := e.x.Eval(row)
+	if err != nil {
+		return types.Null, err
+	}
+	if v.IsNull() {
+		return types.Null, nil
+	}
+	name := strings.TrimSpace(v.TextForm())
+	if e.kind == regCastType {
+		return types.Int(int64(types.OIDByName(name))), nil
+	}
+	// 去掉 schema 前缀与引号：public.employees / "public"."employees"
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.Trim(name, "\"")
+	// 返回 pg_class 里那个 OID（业务表和系统表都覆盖）
+	if oid, ok := syscat.RelationOID(e.cat, name); ok {
+		return types.Int(int64(oid)), nil
+	}
+	return types.Null, fmt.Errorf("relation %q does not exist", name)
 }

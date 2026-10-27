@@ -84,6 +84,7 @@ const (
 	tNodeTree = "pg_node_tree"
 	tXidArr   = "xid[]"
 	tVec      = "int2vector"
+	tOidVec   = "oidvector"
 	tTS       = "timestamptz"
 )
 
@@ -144,8 +145,8 @@ var specs = []tableSpec{
 		c("indisunique", tBool), c("indisprimary", tBool), c("indisexclusion", tBool),
 		c("indimmediate", tBool), c("indisclustered", tBool), c("indisvalid", tBool),
 		c("indcheckxmin", tBool), c("indisready", tBool), c("indislive", tBool),
-		c("indisreplident", tBool), c("indkey", tVec), c("indcollation", tOidArr),
-		c("indclass", tOidArr), c("indoption", tInt2Arr), c("indexprs", tNodeTree),
+		c("indisreplident", tBool), c("indkey", tVec), c("indcollation", tOidVec),
+		c("indclass", tOidVec), c("indoption", tVec), c("indexprs", tNodeTree),
 		c("indpred", tNodeTree),
 	}},
 	{"pg_catalog", "pg_constraint", []colSpec{

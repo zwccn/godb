@@ -97,6 +97,57 @@ class CDP {
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
+    // 0.5) 编辑器高度：默认够高、能拖、双击回自动
+    const eh0 = await cdp.eval(`Math.round(document.getElementById('editor').getBoundingClientRect().height)`);
+    check('编辑器默认高度够用（≥170px）', eh0 >= 170, `${eh0}px`);
+
+    const er = await cdp.eval(`(() => {
+      const g = document.getElementById('editorResize').getBoundingClientRect();
+      return { x: g.left + g.width / 2, y: g.top + g.height / 2 };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: er.x, y: er.y, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: er.x, y: er.y + 40, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: er.x, y: er.y + 80, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: er.x, y: er.y + 80, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(200);
+    const eh1 = await cdp.eval(`Math.round(document.getElementById('editor').getBoundingClientRect().height)`);
+    check('拖编辑器底边能加高', Math.abs(eh1 - (eh0 + 80)) < 3, `${eh0}px → ${eh1}px`);
+
+    // 高度应当被记住：刷新后还是这个高度（这是「拖完下次打开不用再拖」的承诺）
+    check('高度写进 localStorage',
+      await cdp.eval(`localStorage.getItem('godb.editorH') === '${eh1}'`),
+      await cdp.eval(`String(localStorage.getItem('godb.editorH'))`));
+    await cdp.send('Page.reload');
+    await sleep(2200);
+    const ehReload = await cdp.eval(`Math.round(document.getElementById('editor').getBoundingClientRect().height)`);
+    check('刷新后仍保持拖过的高度', Math.abs(ehReload - eh1) < 3, `${eh1}px → ${ehReload}px`);
+
+    // 双击拖手：回到自动高度并清掉记忆
+    const er2 = await cdp.eval(`(() => {
+      const g = document.getElementById('editorResize').getBoundingClientRect();
+      return { x: g.left + g.width / 2, y: g.top + g.height / 2 };
+    })()`);
+    for (const cc of [1, 2]) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: er2.x, y: er2.y, button: 'left', buttons: 1, clickCount: cc });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: er2.x, y: er2.y, button: 'left', buttons: 0, clickCount: cc });
+    }
+    await sleep(250);
+    check('双击拖手回到自动高度',
+      await cdp.eval(`localStorage.getItem('godb.editorH') === null &&
+        Math.round(document.getElementById('editor').getBoundingClientRect().height) < ${eh1}`));
+
+    // 自动模式下粘一大段 SQL：应该长高（封顶 55vh），而不是原地出滚动条
+    const grow = await cdp.eval(`(() => {
+      const ed = document.getElementById('editor');
+      ed.value = Array.from({length: 40}, (_, i) => 'SELECT ' + i + ';').join('\\n');
+      ed.dispatchEvent(new Event('input', {bubbles: true}));
+      const h = ed.getBoundingClientRect().height;
+      return { h: Math.round(h), cap: Math.round(window.innerHeight * 0.55) + 2 };
+    })()`);
+    check('长 SQL 会自动长高（不超过 55vh）',
+      grow.h > 300 && grow.h <= grow.cap, `${grow.h}px（上限 ${grow.cap}px）`);
+    await cdp.eval(`document.getElementById('editor').value = ''`);
+
     // 1) 数据库面板：点遮罩不关闭，点 × 才关闭
     await cdp.eval(`openDBModal()`);
     await sleep(400);

@@ -559,8 +559,8 @@ body {
 #editor {
   display: block;
   width: 100%;
-  min-height: 96px;
-  max-height: 38vh;
+  min-height: 180px; /* 大约 8 行，写一段多行 SQL 不用一上来就滚动 */
+  max-height: none;  /* 上限由 JS 控制：自动增长 55vh，手动拖动最多留 320px 给结果区 */
   padding: 12px 16px;
   border: none;
   outline: none;
@@ -1610,3 +1610,43 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
 
 /* 拖到边缘时留一点提示：位置被夹住了，不是卡死 */
 .modal-card.framed { will-change: left, top; }
+
+/* ---------------- 编辑器高度拖手 ---------------- */
+
+/* 放在 textarea 正下方：拖动改的是文本框高度，示例 chip 跟着下移，观感和
+   「拽着输入框底边」一致。7px 高但热区靠 padding 撑到 11px，好点中。 */
+.editor-resize {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 11px;
+  margin-top: -4px;
+  cursor: ns-resize;
+  background: transparent;
+  touch-action: none;
+  /* 一条极淡的分割线：让「编辑器到哪结束」有明确边界，中间的短条才是拖手 */
+  border-top: 1px solid var(--border-soft);
+}
+
+.editor-resize::after {
+  content: "";
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-hover);
+  transition: background .12s ease, width .12s ease;
+}
+
+.editor-resize:hover::after,
+.editor-resizing .editor-resize::after {
+  background: var(--accent);
+  width: 52px;
+}
+
+/* 拖动过程中锁住光标与文本选中，鼠标划过页面别变成选字 */
+body.editor-resizing {
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+body.editor-resizing * { cursor: ns-resize !important; }

@@ -178,10 +178,89 @@ function fmtTook(ns) {
   return fmtDur(ns);
 }
 
-function autoSize() {
-  editor.style.height = 'auto';
-  editor.style.height = Math.min(editor.scrollHeight + 2, window.innerHeight * 0.38) + 'px';
+// ---------------- 编辑器高度 ----------------
+//
+// 两种模式：
+//   自动（默认）—— 跟着内容长高，到 55vh 封顶，之后自己滚；
+//   手动（拖过底边）—— 固定高度，存在 localStorage，下次打开还是这么高。
+// 双击拖手回到自动模式。
+
+const EDITOR_MIN = 180;               // 约 8 行，也是 CSS 的 min-height
+const EDITOR_RESULT_ROOM = 320;       // 至少给下面的结果区留这么多
+const EDITOR_H_KEY = 'godb.editorH';
+
+let editorManualH = 0; // 0 表示自动
+
+function editorMaxH() {
+  return Math.max(EDITOR_MIN, window.innerHeight - EDITOR_RESULT_ROOM);
 }
+
+function setEditorHeight(h) {
+  editor.style.height = Math.round(h) + 'px';
+}
+
+function autoSize() {
+  if (editorManualH) {
+    // 手动定过高度就别再跟着内容跳了，否则刚拖好的框一打字又变回去
+    setEditorHeight(Math.min(editorManualH, editorMaxH()));
+    return;
+  }
+  editor.style.height = 'auto';
+  setEditorHeight(Math.min(editor.scrollHeight + 2, window.innerHeight * 0.55));
+}
+
+function loadEditorHeight() {
+  const n = parseInt(localStorage.getItem(EDITOR_H_KEY), 10);
+  if (n > 0) editorManualH = Math.max(EDITOR_MIN, n);
+}
+
+(function initEditorResize() {
+  const grip = document.getElementById('editorResize');
+  if (!grip) return;
+
+  grip.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const startY = ev.clientY;
+    const startH = editor.getBoundingClientRect().height;
+    document.body.classList.add('editor-resizing');
+    try { grip.setPointerCapture(ev.pointerId); } catch (e) {}
+
+    const move = e => {
+      const h = Math.max(EDITOR_MIN, Math.min(startH + (e.clientY - startY), editorMaxH()));
+      editorManualH = h;
+      setEditorHeight(h);
+    };
+    const up = () => {
+      document.body.classList.remove('editor-resizing');
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      try { grip.releasePointerCapture(ev.pointerId); } catch (e) {}
+      if (editorManualH) localStorage.setItem(EDITOR_H_KEY, String(Math.round(editorManualH)));
+    };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+  });
+
+  // 双击：回到自动高度（顺便清掉记忆，否则刷新又回来了）
+  grip.addEventListener('dblclick', () => {
+    editorManualH = 0;
+    localStorage.removeItem(EDITOR_H_KEY);
+    autoSize();
+  });
+})();
+
+// 窗口变矮时把编辑器夹回来，别把结果区挤成 0
+window.addEventListener('resize', () => {
+  if (editorManualH > editorMaxH()) {
+    editorManualH = editorMaxH();
+    setEditorHeight(editorManualH);
+  } else if (!editorManualH) {
+    autoSize();
+  }
+});
 
 /* ---------------- 请求 ---------------- */
 
@@ -1171,6 +1250,7 @@ document.addEventListener('keydown', e => {
   } else {
     editor.value = EXAMPLES.select;
   }
+  loadEditorHeight();
   autoSize();
   loadSchema();
   loadLocks();

@@ -248,6 +248,60 @@ class CDP {
       Object.keys(themeVars).every(k => themeVars[k]), JSON.stringify(themeVars));
     await cdp.eval(`cm.setValue('')`);
 
+    // 0.6) 帮助弹窗：原来的侧栏语法清单 + 编辑器下的示例行都搬到这里
+    const helpMoved = await cdp.eval(`(() => {
+      const b = document.getElementById('btnHelp');
+      const l = document.querySelector('.editor-label');
+      return {
+        leftInSidebar: !!document.querySelector('.sidebar-foot') || !!document.querySelector('.hint-list'),
+        chips: document.querySelectorAll('.examples, .chip').length,
+        hasBtn: !!b,
+        leftOfLabel: !!(b && l) && b.getBoundingClientRect().right <= l.getBoundingClientRect().left + 1,
+      };
+    })()`);
+    check('侧栏不再挂语法清单、编辑器下不再有示例行',
+      !helpMoved.leftInSidebar && helpMoved.chips === 0, `侧栏残留 ${helpMoved.leftInSidebar}，示例行 ${helpMoved.chips}`);
+    check('帮助按钮在「SQL 编辑器」左边', helpMoved.hasBtn && helpMoved.leftOfLabel);
+
+    await cdp.eval(`document.getElementById('btnHelp').click()`);
+    await sleep(300);
+    check('点问号能打开帮助弹窗',
+      await cdp.eval(`!document.getElementById('helpModal').classList.contains('hidden')`));
+    const helpUi = await cdp.eval(`(() => {
+      const m = document.getElementById('helpModal');
+      const ex = [...m.querySelectorAll('.help-ex-item')];
+      return {
+        ex: ex.length,
+        first: ex.length ? ex[0].querySelector('.help-ex-name').textContent.trim() : '',
+        allHaveNote: ex.every(b => (b.querySelector('.help-ex-note') || {}).textContent.trim().length > 4),
+        groups: [...m.querySelectorAll('.help-group-title')].map(g => g.textContent.trim()),
+        keys: m.querySelectorAll('.help-keys kbd').length,
+        fits: m.querySelector('.modal-body').scrollWidth <= m.querySelector('.modal-body').clientWidth + 1,
+      };
+    })()`);
+    check('帮助里有 7 个示例、每个都带一句说明',
+      helpUi.ex === 7 && helpUi.allHaveNote, `${helpUi.ex} 个，第一个是「${helpUi.first}」`);
+    check('帮助里有四组语法（含「明确不支持」）',
+      helpUi.groups.length === 4 && helpUi.groups.indexOf('明确不支持') >= 0, helpUi.groups.join(' / '));
+    check('帮助里有快捷键说明', helpUi.keys >= 3, helpUi.keys + ' 个按键');
+    check('帮助内容没有被挤破（不横向溢出）', helpUi.fits);
+
+    // 点示例只填进编辑器、不自动执行
+    await cdp.eval(`[...document.querySelectorAll('.help-ex-item')].find(b => b.dataset.ex === 'join').click()`);
+    await sleep(400);
+    check('点示例填进编辑器并关掉帮助',
+      await cdp.eval(`cm.getValue().indexOf('LEFT JOIN departments d') > 0 &&
+        document.getElementById('helpModal').classList.contains('hidden')`));
+
+    // Esc 能关
+    await cdp.eval(`document.getElementById('btnHelp').click()`);
+    await sleep(250);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(200);
+    check('帮助弹窗 Esc 能关',
+      await cdp.eval(`document.getElementById('helpModal').classList.contains('hidden')`));
+    await cdp.eval(`cm.setValue('')`);
+
     // 1) 数据库面板：点遮罩不关闭，点 × 才关闭
     await cdp.eval(`openDBModal()`);
     await sleep(400);

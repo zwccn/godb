@@ -1061,13 +1061,59 @@ async function resetDatabase() {
   }
 }
 
-for (const chip of document.querySelectorAll('.chip')) {
-  chip.addEventListener('click', () => {
-    editor.value = EXAMPLES[chip.dataset.ex] || '';
-    autoSize();
-    editor.focus();
-  });
+/* ---------------- 帮助（示例查询 / 支持的语法 / 快捷键） ---------------- */
+
+const helpModal = document.getElementById('helpModal');
+const helpExamples = document.getElementById('helpExamples');
+
+// 示例的标题和一句说明。SQL 本体仍然只在 EXAMPLES 里存一份，别抄两遍。
+const EXAMPLE_META = [
+  ['select', '全部员工', '最简单的 SELECT，先看清表里有什么'],
+  ['group', '部门统计', 'GROUP BY + 聚合，LEFT JOIN 把没有人的部门也带上'],
+  ['join', '左连接', '没有部门的员工也会出现（部门列为 NULL）'],
+  ['tx', '事务演示', 'BEGIN 后改数据，先看效果再决定提交还是回滚'],
+  ['ddl', '新建表', 'SERIAL 主键、UNIQUE、DEFAULT now() 一次看全'],
+  ['explain', '看执行计划', 'EXPLAIN 看优化器走索引还是全表扫'],
+  ['alter', '改表结构', '加列再删列，DDL 立即生效'],
+];
+
+function renderHelpExamples() {
+  helpExamples.innerHTML = '';
+  for (const [key, name, note] of EXAMPLE_META) {
+    const b = el('button', 'help-ex-item');
+    b.type = 'button';
+    b.dataset.ex = key;
+    b.appendChild(el('span', 'help-ex-name', name));
+    b.appendChild(el('span', 'help-ex-note', note));
+    helpExamples.appendChild(b);
+  }
 }
+
+function openHelp() {
+  renderHelpExamples();
+  helpModal.classList.remove('hidden');
+}
+
+function closeHelp() {
+  helpModal.classList.add('hidden');
+}
+
+document.getElementById('btnHelp').addEventListener('click', openHelp);
+document.getElementById('btnHelpClose').addEventListener('click', closeHelp);
+document.getElementById('btnHelpDone').addEventListener('click', closeHelp);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !helpModal.classList.contains('hidden')) closeHelp();
+});
+
+// 点示例只填进编辑器、不自动执行：避免手一滑就把库改了
+helpExamples.addEventListener('click', ev => {
+  const item = ev.target.closest('.help-ex-item');
+  if (!item) return;
+  editor.value = EXAMPLES[item.dataset.ex] || '';
+  autoSize();
+  closeHelp();
+  editor.focus();
+});
 
 // 编辑器变更后：跟随内容长高 + 记到本机（关掉浏览器再开还在）
 function onEditorChange() {
@@ -1413,9 +1459,10 @@ document.addEventListener('keydown', e => {
   loadSchema();
   loadLocks();
   setInterval(loadLocks, 3000);
-  // 支持 #locks / #settings 直接打开对应面板
+  // 支持 #locks / #settings / #help 直接打开对应面板
   if (location.hash === '#locks') toggleLocks(true);
   if (location.hash === '#settings') openSettings();
+  if (location.hash === '#help') openHelp();
 })();
 
 /* ---------------- 表管理：标识符 / 类型 / 提示 ---------------- */

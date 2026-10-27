@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,10 +38,10 @@ type Manager struct {
 
 	mu       sync.Mutex
 	httpSrv  *http.Server
-	httpLn   net.Listener
+	httpLns  []net.Listener
 	httpAddr string
 	pgSrv    *pgwire.Server
-	pgLn     net.Listener
+	pgLns    []net.Listener
 	pgAddr   string
 }
 
@@ -113,17 +114,70 @@ func (m *Manager) State() State {
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.httpLn != nil {
-		m.httpLn.Close()
-		m.httpLn = nil
-	}
-	if m.pgLn != nil {
-		m.pgLn.Close()
-		m.pgLn = nil
+	closeAll(m.httpLns)
+	m.httpLns = nil
+	closeAll(m.pgLns)
+	m.pgLns = nil
+}
+
+func closeAll(lns []net.Listener) {
+	for _, ln := range lns {
+		ln.Close()
 	}
 }
 
 // ---------- 内部 ----------
+
+// listenLoopback 在 addr 上监听；如果 addr 是本机回环地址，就把 IPv4 和
+// IPv6 两个回环都占上。
+//
+// 为什么必须双栈：客户端（Navicat、psql -h localhost）会把 localhost 解析成
+// ::1 先试。只监听 127.0.0.1 时，这次尝试会先失败再回落到 IPv4 —— 在 Windows
+// 上要等约 2 秒。客户端每个操作都新开连接，于是「每个操作都慢 2~3 秒」，
+// 而服务端日志里每条 SQL 都只有 1~5 毫秒，根本看不出问题。
+func listenLoopback(addr string) ([]net.Listener, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// 端口写成纯数字之类，交给 net.Listen 自己报错
+		ln, lerr := net.Listen("tcp", addr)
+		if lerr != nil {
+			return nil, lerr
+		}
+		return []net.Listener{ln}, nil
+	}
+
+	primary, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	lns := []net.Listener{primary}
+
+	if !isLoopbackHost(host) {
+		return lns, nil
+	}
+
+	// 补上另一族回环；失败不影响主监听（有些机器关了 IPv6）
+	other := "::1"
+	if strings.Contains(host, ":") {
+		other = "127.0.0.1"
+	}
+	if second, serr := net.Listen("tcp", net.JoinHostPort(other, port)); serr == nil {
+		lns = append(lns, second)
+	}
+	return lns, nil
+}
+
+// isLoopbackHost 判断监听地址是不是「本机回环」。
+//
+// 空主机（":8080" / "0.0.0.0"）表示所有网卡，Go 的 tcp 监听本身就是双栈的，
+// 不需要也不应该再补一个。
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return strings.HasPrefix(host, "127.")
+}
 
 // rebindHTTP 关闭旧 listener 并在 addr 上重建。
 //
@@ -131,40 +185,39 @@ func (m *Manager) Close() {
 // 而配置保存这个请求本身就跑在这个 server 上。关 listener 只影响新连接，
 // 已经建立的连接会自然结束。
 func (m *Manager) rebindHTTP(addr string) error {
-	if m.httpLn != nil {
-		m.httpLn.Close()
-		m.httpLn = nil
-	}
+	closeAll(m.httpLns)
+	m.httpLns = nil
 	m.httpAddr = ""
 	if addr == "" {
 		return nil
 	}
-	ln, err := net.Listen("tcp", addr)
+	lns, err := listenLoopback(addr)
 	if err != nil {
 		return err
 	}
 	srv := &http.Server{Handler: m.handler, ReadHeaderTimeout: 10 * time.Second}
-	m.httpSrv, m.httpLn, m.httpAddr = srv, ln, addr
-	go func() {
-		if err := srv.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-			m.logf("HTTP 服务结束: %v", err)
-		}
-	}()
+	m.httpSrv, m.httpLns, m.httpAddr = srv, lns, addr
+	for _, ln := range lns {
+		ln := ln
+		go func() {
+			if err := srv.Serve(ln); err != nil &&
+				!errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+				m.logf("HTTP 服务结束: %v", err)
+			}
+		}()
+	}
 	return nil
 }
 
 // rebindPG 关闭旧 PG listener 并在 addr 上重建；addr 为空表示关闭 PG 协议。
 func (m *Manager) rebindPG(addr string) error {
-	if m.pgLn != nil {
-		m.pgLn.Close()
-		m.pgLn = nil
-	}
+	closeAll(m.pgLns)
+	m.pgLns = nil
 	m.pgAddr = ""
 	if addr == "" {
 		return nil
 	}
-	ln, err := net.Listen("tcp", addr)
+	lns, err := listenLoopback(addr)
 	if err != nil {
 		return err
 	}
@@ -186,11 +239,14 @@ func (m *Manager) rebindPG(addr string) error {
 			return config.VerifyPassword(c.Auth.PasswordHash, password)
 		},
 	}
-	m.pgSrv, m.pgLn, m.pgAddr = srv, ln, addr
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) {
-			m.logf("PostgreSQL 协议服务结束: %v", err)
-		}
-	}()
+	m.pgSrv, m.pgLns, m.pgAddr = srv, lns, addr
+	for _, ln := range lns {
+		ln := ln
+		go func() {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) {
+				m.logf("PostgreSQL 协议服务结束: %v", err)
+			}
+		}()
+	}
 	return nil
 }

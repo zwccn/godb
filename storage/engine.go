@@ -586,8 +586,8 @@ func (tx *Tx) IndexLookup(t *catalog.Table, ixName string, cols []int, key strin
 	var out []IndexHit
 	// seen 记录「已经按堆索引处理过」的行号，避免 upd 分支重复产出。
 	seen := make(map[int]bool, 4)
-	if m := td.Second[cleanName(ixName)]; m != nil {
-		for _, slot := range m[key] {
+	if tree := td.IndexTree(ixName); tree != nil {
+		for _, slot := range tree.Get(key) {
 			seen[slot] = true
 			row, ok := tx.Get(t.Name, Ref{Slot: slot})
 			if !ok {
@@ -648,7 +648,7 @@ func (tx *Tx) PKLookup(t *catalog.Table, key string) (IndexHit, bool) {
 	if td == nil {
 		return IndexHit{}, false
 	}
-	if slot, ok := td.Index[key]; ok {
+	for _, slot := range td.pk.Get(key) {
 		if row, exists := tx.Get(t.Name, Ref{Slot: slot}); exists && groupKeyEqual(row, cols, key) {
 			return IndexHit{Ref: Ref{Slot: slot}, Row: row}, true
 		}
@@ -697,7 +697,7 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 			return false, nil
 		}
 	}
-	key := types.Key(vals)
+	key := OrderKey(vals)
 	td := tx.st.Table(t.Name)
 	if td == nil {
 		return false, fmt.Errorf("relation %q does not exist", t.Name)
@@ -706,24 +706,20 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 	isPK := sameCols(cols, t.PKIdxes())
 
 	if isPK {
-		if idx, ok := td.Index[key]; ok {
+		for _, idx := range td.pk.Get(key) {
 			deleted := o != nil && o.del[idx]
-			if !deleted {
-				conflict := true
-				if o != nil {
-					if nr, isUpd := o.upd[idx]; isUpd {
-						if !groupKeyEqual(nr, cols, key) {
-							conflict = false
-						}
-					}
-				}
-				if self != nil && !self.New && self.Slot == idx {
-					conflict = false
-				}
-				if conflict {
-					return true, nil
+			if deleted {
+				continue
+			}
+			if self != nil && !self.New && self.Slot == idx {
+				continue
+			}
+			if o != nil {
+				if nr, isUpd := o.upd[idx]; isUpd && !groupKeyEqual(nr, cols, key) {
+					continue
 				}
 			}
+			return true, nil
 		}
 	}
 	// 本事务的写集里也可能藏着冲突。注意这里不能提前返回：事务外的一条
@@ -760,8 +756,8 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 	// 非主键的唯一组合：查 UNIQUE 列的哈希索引（已提交态）。
 	// 本事务自己的插入/更新上面已经处理过，这里只补「已提交行」这一边。
 	if !isPK {
-		if m := td.UniqueKeys[colsSig(cols)]; m != nil {
-			for _, slot := range m[key] {
+		if tree := td.UniqueTree(colsSig(cols)); tree != nil {
+			for _, slot := range tree.Get(key) {
 				if o != nil && o.del[slot] {
 					continue
 				}
@@ -811,7 +807,7 @@ func groupKeyEqual(row types.Row, cols []int, key string) bool {
 			return false
 		}
 	}
-	return types.Key(vals) == key
+	return OrderKey(vals) == key
 }
 
 // sameCols 判断两个列位置列表是否相同（顺序敏感）。

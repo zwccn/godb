@@ -132,7 +132,7 @@ func (o *indexScanOp) Open() error {
 			return nil
 		}
 	}
-	key := types.Key(o.vals)
+	key := storage.OrderKey(o.vals)
 	if o.ixName == "" {
 		if hit, ok := o.tx.PKLookup(o.tbl, key); ok {
 			o.rows = append(o.rows, hit.Row)

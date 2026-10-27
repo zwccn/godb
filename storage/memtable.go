@@ -22,18 +22,20 @@ type TableData struct {
 	// 仍然占着槽位（它只是被标记成删了），所以事务内插入不会复用自己刚删的槽。
 	free []int
 
-	Index map[string]int // 主键编码 → 槽位
-	Seq   int64          // 自增列当前值
+	// pk 是主键索引：保序键 → 槽位。用 B+Tree 而不是哈希表，这样主键也能走
+	// 范围扫描（`id BETWEEN`、`ORDER BY id`、`min/max`），而且键天然有序。
+	pk  *btree
+	Seq int64 // 自增列当前值
 
-	// Second 是用户建的二级索引：索引名（小写）→ 键 → 槽位列表。
-	Second map[string]map[string][]int
+	// second 是用户建的二级索引：索引名（小写）→ B+Tree。
+	second map[string]*btree
 
-	// UniqueKeys 是非主键 UNIQUE 列组的哈希索引：列组签名（"1,3"）→ 键 → 槽位。
-	UniqueKeys map[string]map[string][]int
+	// unique 是非主键 UNIQUE 列组的索引：列组签名（"1,3"）→ B+Tree。
+	unique map[string]*btree
 }
 
 func newTableData(name string) *TableData {
-	return &TableData{Name: name, Index: map[string]int{}}
+	return &TableData{Name: name, pk: newBTree()}
 }
 
 // alloc 分配一个槽位（优先复用空槽）。
@@ -47,7 +49,7 @@ func (td *TableData) alloc() int {
 	return len(td.Rows) - 1
 }
 
-// release 释放槽位（必须是当前最后一个或进入 free 列表）。
+// release 释放槽位（末尾且无其它空槽时直接截断数组）。
 func (td *TableData) release(slot int) {
 	if slot == len(td.Rows)-1 && len(td.free) == 0 {
 		td.Rows = td.Rows[:slot]
@@ -97,60 +99,29 @@ func (td *TableData) CompactRows() {
 	td.Live = len(rows)
 }
 
-// RebuildIndex 重建所有哈希索引（主键 + 用户二级索引 + UNIQUE 列组）。
+// RebuildIndex 重建所有索引（主键 + 用户二级索引 + UNIQUE 列组）。
 //
 // 只在「行号整体变了」的时候调用：加载表、重放 WAL、ALTER TABLE、建索引、
 // Compact。正常提交走增量维护（IndexInsert / IndexDelete / IndexUpdate）。
 func (td *TableData) RebuildIndex(t *catalog.Table) {
 	td.Recompute()
 	pk := t.PKIdxes()
-	idx := make(map[string]int, td.Live)
-	buf := make([]types.Value, len(pk))
+	tree := newBTree()
+	buf := make([]byte, 0, 32)
 	for i, r := range td.Rows {
 		if r == nil {
 			continue
 		}
-		if k, ok := appendKeyInto(buf, r, pk); ok {
-			idx[k] = i
+		var ok bool
+		buf, ok = AppendOrderKeyInto(buf[:0], r, pk)
+		if !ok {
+			continue
 		}
+		tree.Insert(string(buf), i)
 	}
-	td.Index = idx
+	td.pk = tree
 	td.RebuildSecond(t)
 	td.RebuildUniqueKeys(t)
-}
-
-// RebuildSecond 重建全部用户二级索引。
-//
-// 含 NULL 的行不进索引：和 PostgreSQL 一致（`col = NULL` 永远不成立，
-// 键里塞个 NULL 只会让等值查找命中一堆不该命中的行）。
-func (td *TableData) RebuildSecond(t *catalog.Table) {
-	names, colsOf := secondIndexCols(t)
-	if len(names) == 0 {
-		td.Second = nil
-		return
-	}
-	next := make(map[string]map[string][]int, len(names))
-	for _, n := range names {
-		next[n] = make(map[string][]int, td.Live)
-	}
-	bufs := make([][]types.Value, len(names))
-	for j := range names {
-		bufs[j] = make([]types.Value, len(colsOf[j]))
-	}
-	for i, r := range td.Rows {
-		if r == nil {
-			continue
-		}
-		for j := range names {
-			k, ok := appendKeyInto(bufs[j], r, colsOf[j])
-			if !ok {
-				continue
-			}
-			m := next[names[j]]
-			m[k] = append(m[k], i)
-		}
-	}
-	td.Second = next
 }
 
 // secondIndexCols 解析出每个用户索引的名字与列位置；解析不出列名的索引整条跳过
@@ -181,95 +152,124 @@ func secondIndexCols(t *catalog.Table) ([]string, [][]int) {
 	return names, colsOf
 }
 
-// RebuildUniqueKeys 重建非主键 UNIQUE 列的哈希索引。
+// RebuildSecond 重建全部用户二级索引。
+//
+// 含 NULL 的行不进索引：和 PostgreSQL 一致（`col = NULL` 永远不成立，
+// 键里塞个 NULL 只会让等值查找命中一堆不该命中的行）。
+func (td *TableData) RebuildSecond(t *catalog.Table) {
+	names, colsOf := secondIndexCols(t)
+	if len(names) == 0 {
+		td.second = nil
+		return
+	}
+	next := make(map[string]*btree, len(names))
+	for _, n := range names {
+		next[n] = newBTree()
+	}
+	buf := make([]byte, 0, 32)
+	for i, r := range td.Rows {
+		if r == nil {
+			continue
+		}
+		for j, name := range names {
+			var ok bool
+			buf, ok = AppendOrderKeyInto(buf[:0], r, colsOf[j])
+			if !ok {
+				continue
+			}
+			next[name].Insert(string(buf), i)
+		}
+	}
+	td.second = next
+}
+
+// RebuildUniqueKeys 重建非主键 UNIQUE 列的索引。
 func (td *TableData) RebuildUniqueKeys(t *catalog.Table) {
 	pk := t.PKIdxes()
 	var groups [][]int
 	for _, g := range t.UniqueGroups() {
 		if sameCols(g, pk) {
-			continue // 主键已经走 td.Index 了
+			continue // 主键已经走 td.pk 了
 		}
 		groups = append(groups, g)
 	}
 	if len(groups) == 0 {
-		td.UniqueKeys = nil
+		td.unique = nil
 		return
 	}
-	next := make(map[string]map[string][]int, len(groups))
+	next := make(map[string]*btree, len(groups))
 	for _, g := range groups {
-		next[colsSig(g)] = make(map[string][]int, td.Live)
+		next[colsSig(g)] = newBTree()
 	}
-	bufs := make([][]types.Value, len(groups))
-	for j, g := range groups {
-		bufs[j] = make([]types.Value, len(g))
-	}
+	buf := make([]byte, 0, 32)
 	for i, r := range td.Rows {
 		if r == nil {
 			continue
 		}
-		for j, g := range groups {
-			k, ok := appendKeyInto(bufs[j], r, g)
+		for _, g := range groups {
+			var ok bool
+			buf, ok = AppendOrderKeyInto(buf[:0], r, g)
 			if !ok {
 				continue
 			}
-			m := next[colsSig(g)]
-			m[k] = append(m[k], i)
+			next[colsSig(g)].Insert(string(buf), i)
 		}
 	}
-	td.UniqueKeys = next
+	td.unique = next
 }
 
 // ---------- 索引的增量维护 ----------
 
 // IndexInsert 把一行的所有键加进索引。
 func (td *TableData) IndexInsert(t *catalog.Table, slot int, row types.Row) {
-	if row == nil {
+	if row == nil || t == nil {
 		return
 	}
-	if k, ok := rowKey(row, t.PKIdxes()); ok {
-		td.Index[k] = slot
+	if k, ok := OrderKeyOfRow(row, t.PKIdxes()); ok {
+		td.pk.Insert(k, slot)
 	}
-	if len(td.Second) > 0 {
+	if len(td.second) > 0 {
 		names, colsOf := secondIndexCols(t)
-		for j := range names {
-			m := td.Second[names[j]]
-			if m == nil {
+		for j, name := range names {
+			tree := td.second[name]
+			if tree == nil {
 				continue
 			}
-			if k, ok := rowKey(row, colsOf[j]); ok {
-				m[k] = append(m[k], slot)
+			if k, ok := OrderKeyOfRow(row, colsOf[j]); ok {
+				tree.Insert(k, slot)
 			}
 		}
 	}
-	for sig, m := range td.UniqueKeys {
-		if k, ok := rowKey(row, colsFromSig(t, sig)); ok {
-			m[k] = append(m[k], slot)
+	for sig, tree := range td.unique {
+		if k, ok := OrderKeyOfRow(row, colsFromSig(sig)); ok {
+			tree.Insert(k, slot)
 		}
 	}
 }
 
 // IndexDelete 把一行的所有键从索引里摘掉。
 func (td *TableData) IndexDelete(t *catalog.Table, slot int, row types.Row) {
-	if row == nil {
+	if row == nil || t == nil {
 		return
 	}
-	if k, ok := rowKey(row, t.PKIdxes()); ok {
-		// 只删指向自己的那一项：防止「同键已改指向新槽位」时误删别人的
-		if cur, exists := td.Index[k]; exists && cur == slot {
-			delete(td.Index, k)
-		}
+	if k, ok := OrderKeyOfRow(row, t.PKIdxes()); ok {
+		td.pk.Delete(k, slot)
 	}
-	if len(td.Second) > 0 {
+	if len(td.second) > 0 {
 		names, colsOf := secondIndexCols(t)
-		for j := range names {
-			if k, ok := rowKey(row, colsOf[j]); ok {
-				dropSlot(td.Second[names[j]], k, slot)
+		for j, name := range names {
+			tree := td.second[name]
+			if tree == nil {
+				continue
+			}
+			if k, ok := OrderKeyOfRow(row, colsOf[j]); ok {
+				tree.Delete(k, slot)
 			}
 		}
 	}
-	for sig, m := range td.UniqueKeys {
-		if k, ok := rowKey(row, colsFromSig(t, sig)); ok {
-			dropSlot(m, k, slot)
+	for sig, tree := range td.unique {
+		if k, ok := OrderKeyOfRow(row, colsFromSig(sig)); ok {
+			tree.Delete(k, slot)
 		}
 	}
 }
@@ -279,109 +279,79 @@ func (td *TableData) IndexUpdate(t *catalog.Table, slot int, oldRow, newRow type
 	if t == nil || oldRow == nil || newRow == nil {
 		return
 	}
-	pk := t.PKIdxes()
-	k1, ok1 := rowKey(oldRow, pk)
-	k2, ok2 := rowKey(newRow, pk)
-	if ok1 && (!ok2 || k1 != k2) {
-		if cur, exists := td.Index[k1]; exists && cur == slot {
-			delete(td.Index, k1)
-		}
-	}
-	if ok2 {
-		td.Index[k2] = slot
-	}
-	if len(td.Second) > 0 {
+	swapKey(td.pk, slot, oldRow, newRow, t.PKIdxes())
+	if len(td.second) > 0 {
 		names, colsOf := secondIndexCols(t)
-		for j := range names {
-			m := td.Second[names[j]]
-			if m == nil {
+		for j, name := range names {
+			tree := td.second[name]
+			if tree == nil {
 				continue
 			}
-			swapKey(m, slot, oldRow, newRow, colsOf[j])
+			swapKey(tree, slot, oldRow, newRow, colsOf[j])
 		}
 	}
-	for sig, m := range td.UniqueKeys {
-		swapKey(m, slot, oldRow, newRow, colsFromSig(t, sig))
+	for sig, tree := range td.unique {
+		swapKey(tree, slot, oldRow, newRow, colsFromSig(sig))
 	}
 }
 
-// swapKey 在「键 → 槽位列表」里把老键换成新键（键相同就什么都不做）。
-func swapKey(m map[string][]int, slot int, oldRow, newRow types.Row, cols []int) {
-	k1, ok1 := rowKey(oldRow, cols)
-	k2, ok2 := rowKey(newRow, cols)
-	same := ok1 && ok2 && k1 == k2
-	if same {
+// swapKey 在树上把老键换成新键（键相同就什么都不做）。
+func swapKey(tree *btree, slot int, oldRow, newRow types.Row, cols []int) {
+	k1, ok1 := OrderKeyOfRow(oldRow, cols)
+	k2, ok2 := OrderKeyOfRow(newRow, cols)
+	if ok1 && ok2 && k1 == k2 {
 		return
 	}
 	if ok1 {
-		dropSlot(m, k1, slot)
+		tree.Delete(k1, slot)
 	}
 	if ok2 {
-		m[k2] = append(m[k2], slot)
+		tree.Insert(k2, slot)
 	}
 }
 
-// dropSlot 从「键 → 槽位列表」里摘掉一个槽位。
-//
-// 用 swap-remove：同一键下的行数通常很少（唯一索引就 1 个），最坏情况
-// 是低基数列（所有行同值），那时这里是 O(k) —— 仍远好于整表重建的 O(n)。
-func dropSlot(m map[string][]int, key string, slot int) {
-	if m == nil {
-		return
+// PKTree 返回主键索引树。
+func (td *TableData) PKTree() *btree { return td.pk }
+
+// IndexTree 返回某条用户索引的树（没有则 nil）。
+func (td *TableData) IndexTree(name string) *btree {
+	if td.second == nil {
+		return nil
 	}
-	list, ok := m[key]
-	if !ok {
-		return
-	}
-	for i, s := range list {
-		if s == slot {
-			list[i] = list[len(list)-1]
-			list = list[:len(list)-1]
-			if len(list) == 0 {
-				delete(m, key)
-			} else {
-				m[key] = list
-			}
-			return
-		}
-	}
+	return td.second[cleanName(name)]
 }
 
-// appendKeyInto 复用外部 buf 计算键，避免整表重建时每行都分配一个切片。
-func appendKeyInto(buf []types.Value, row types.Row, cols []int) (string, bool) {
-	if len(cols) == 0 {
-		return "", false
+// UniqueTree 返回某个 UNIQUE 列组的树（没有则 nil）。
+func (td *TableData) UniqueTree(sig string) *btree {
+	if td.unique == nil {
+		return nil
 	}
-	for i, ci := range cols {
-		if ci >= len(row) || row[ci].IsNull() {
-			return "", false
-		}
-		if i < len(buf) {
-			buf[i] = row[ci]
-		} else {
-			buf = append(buf, row[ci])
-		}
-	}
-	return types.Key(buf[:len(cols)]), true
+	return td.unique[sig]
 }
 
-// rowKey 返回行在给定列组上的编码键；含 NULL 或缺列时 ok=false（不入索引）。
-func rowKey(row types.Row, cols []int) (string, bool) {
-	if len(cols) == 0 {
-		return "", false
+// IndexFragmented 判断索引是否因为大量删除而碎片化（延迟合并的兜底）。
+func (td *TableData) IndexFragmented() bool {
+	if td.pk != nil && td.pk.NeedRebuild() {
+		return true
 	}
-	vals := make([]types.Value, len(cols))
-	for i, ci := range cols {
-		if ci >= len(row) || row[ci].IsNull() {
-			return "", false
+	for _, tree := range td.second {
+		if tree.NeedRebuild() {
+			return true
 		}
-		vals[i] = row[ci]
 	}
-	return types.Key(vals), true
+	for _, tree := range td.unique {
+		if tree.NeedRebuild() {
+			return true
+		}
+	}
+	return false
 }
 
-// colsFromSig 把 UniqueKeys 的签名（"1,3"）还原成列位置。
-func colsFromSig(t *catalog.Table, sig string) []int {
+// ColsSig 把列位置列表渲染成签名（UNIQUE 列组的 map 键）。
+func ColsSig(cols []int) string { return colsSig(cols) }
+
+// colsFromSig 把 UNIQUE 列组的签名（"1,3"）还原成列位置。
+func colsFromSig(sig string) []int {
 	parts := strings.Split(sig, ",")
 	cols := make([]int, 0, len(parts))
 	for _, p := range parts {
@@ -397,7 +367,7 @@ func colsFromSig(t *catalog.Table, sig string) []int {
 // cleanName 统一用小写做内部键。
 func cleanName(n string) string { return strings.ToLower(n) }
 
-// colsSig 把列位置列表渲染成稳定签名，用作 UniqueKeys 的 map 键。
+// colsSig 把列位置列表渲染成稳定签名，用作 UNIQUE 索引的 map 键。
 func colsSig(cols []int) string {
 	var b strings.Builder
 	for i, ci := range cols {

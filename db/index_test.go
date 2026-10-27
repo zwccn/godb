@@ -58,7 +58,8 @@ func TestIndexScanForEquality(t *testing.T) {
 	if strings.Contains(plan, "ixq_name_score") {
 		t.Fatalf("只约束首列时不该用需要完整键的复合索引，实际计划: %s", plan)
 	}
-	assertRows(t, run(t, d, s, `SELECT id FROM ixq WHERE name = 'n42'`), []string{"42", "500"})
+	// 没有 ORDER BY 就不该依赖顺序：索引返回同一键下多行的次序不保证
+	assertRows(t, run(t, d, s, `SELECT id FROM ixq WHERE name = 'n42' ORDER BY id`), []string{"42", "500"})
 }
 
 // UNIQUE 索引必须真的拦住重复：之前它只写进 catalog 和系统目录，插重复值照样成功。

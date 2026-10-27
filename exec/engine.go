@@ -588,7 +588,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 			if !ok {
 				continue
 			}
-			k := types.Key(vals)
+			k := storage.OrderKey(vals) // 和树里的键同一套编码
 			cm := seenKeys(seen, "i"+ux.name)
 			if cm[k] {
 				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
@@ -779,7 +779,7 @@ func collectByIndex(tx *storage.Tx, t *catalog.Table, where sql.Expr) ([]storage
 			return nil, nil, true // 键里有 NULL：恒不匹配
 		}
 	}
-	key := types.Key(vals)
+	key := storage.OrderKey(vals) // 索引键用保序编码，和树里的键一致
 	if ixName == "" {
 		if hit, ok := tx.PKLookup(t, key); ok {
 			return []storage.Ref{hit.Ref}, []types.Row{hit.Row}, true
@@ -953,7 +953,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 				continue // 没动这一组，不必查重
 			}
 			dup := false
-			for _, hit := range tx.IndexLookup(t, ux.name, ux.cols, types.Key(vals)) {
+			for _, hit := range tx.IndexLookup(t, ux.name, ux.cols, storage.OrderKey(vals)) {
 				if hit.Ref == self {
 					continue
 				}

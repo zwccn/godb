@@ -88,6 +88,8 @@ func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 	case *sql.Copy:
 		// COPY 需要协议层的 CopyIn/CopyOut 数据流，SQL 层单独调不通
 		return nil, fmt.Errorf("COPY must be executed through the PostgreSQL protocol")
+	case *sql.CommentOn:
+		return e.execCommentOn(s)
 	case *sql.Update:
 		return e.execUpdate(tx, s)
 	case *sql.Delete:
@@ -201,7 +203,12 @@ func (e *Engine) buildColumns(defs []*sql.ColumnDef) ([]*catalog.Column, error) 
 		c.Serial = d.Serial
 		if d.Serial {
 			c.NotNull = true
-			c.Unique = true
+			// 老式 SERIAL 在 godb 里一直是隐含唯一的（历史行为，保持兼容）。
+			// IDENTITY 按 SQL 标准只保证 NOT NULL，唯一性由列级 PRIMARY KEY /
+			// UNIQUE 显式给，这样和 PostgreSQL 的语义一致。
+			if !d.Identity {
+				c.Unique = true
+			}
 		}
 		if d.Default != nil {
 			c.Default = sql.String(d.Default)
@@ -1269,6 +1276,43 @@ func (e *Engine) execCreateTableAs(s *sql.CreateTable) (*Result, error) {
 // 只登记元数据：客户端能在索引页看到、能建能删，系统目录里也会出现对应行；
 // 但查询规划还没接入它（只有主键走哈希索引）。结果里会明确说明这一点，
 // 避免让人以为加了索引就变快了。
+// execCommentOn 实现 COMMENT ON：表/列注释写进 catalog（并落到 pg_description），
+// 其它对象（索引、schema、库、视图、约束）接受即忽略。
+//
+// ORM 的 CodeFirst 建完表会连着发一串 COMMENT ON，任何一条报错都会被当成
+// 「建表失败」；而注释本身对查询没有任何影响，所以这里宁宽不严。
+func (e *Engine) execCommentOn(s *sql.CommentOn) (*Result, error) {
+	text := s.Comment
+	if s.IsNull {
+		text = ""
+	}
+	switch s.Object {
+	case "table":
+		t, ok := e.Cat.Get(s.Table)
+		if !ok {
+			return nil, fmt.Errorf("relation %q does not exist", s.Table)
+		}
+		t.Comment = text
+	case "column":
+		t, ok := e.Cat.Get(s.Table)
+		if !ok {
+			return nil, fmt.Errorf("relation %q does not exist", s.Table)
+		}
+		col, _, ok := t.Col(s.Column)
+		if !ok {
+			return nil, fmt.Errorf("column %q of relation %q does not exist", s.Column, t.Name)
+		}
+		col.Comment = text
+	default:
+		// 索引 / schema / 库 / 视图 / 约束：没有对应行为，直接确认。
+		return &Result{Command: "COMMENT", Tag: "COMMENT"}, nil
+	}
+	if err := e.persistSchema(false); err != nil {
+		return nil, err
+	}
+	return &Result{Command: "COMMENT", Tag: "COMMENT"}, nil
+}
+
 func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
 	t, ok := e.Cat.Get(s.Table)
 	if !ok {

@@ -200,24 +200,34 @@ func (p *parser) parseStatement() (Statement, error) {
 		if !p.acceptKw("transaction") {
 			p.acceptKw("work")
 		}
-		return &TxStmt{Kind: "begin"}, nil
+		ts := &TxStmt{Kind: "begin"}
+		if err := p.parseTxModes(ts); err != nil {
+			return nil, err
+		}
+		return ts, nil
 	case "START":
 		p.pos++
 		if err := p.expectKw("transaction"); err != nil {
 			return nil, err
 		}
-		return &TxStmt{Kind: "begin"}, nil
+		ts := &TxStmt{Kind: "begin"}
+		if err := p.parseTxModes(ts); err != nil {
+			return nil, err
+		}
+		return ts, nil
 	case "COMMIT", "END":
 		p.pos++
 		if !p.acceptKw("transaction") {
 			p.acceptKw("work")
 		}
+		p.skipTxChain() // COMMIT AND [NO] CHAIN
 		return &TxStmt{Kind: "commit"}, nil
 	case "ROLLBACK", "ABORT":
 		p.pos++
 		if !p.acceptKw("transaction") {
 			p.acceptKw("work")
 		}
+		p.skipTxChain() // ROLLBACK AND [NO] CHAIN
 		return &TxStmt{Kind: "rollback"}, nil
 	case "EXPLAIN":
 		p.pos++
@@ -228,6 +238,12 @@ func (p *parser) parseStatement() (Statement, error) {
 			return nil, err
 		}
 		return &Explain{Stmt: st, Analyze: analyze}, nil
+	case "COMMENT":
+		p.pos++
+		if err := p.expectKw("on"); err != nil {
+			return nil, err
+		}
+		return p.parseCommentOn()
 	case "SHOW":
 		p.pos++
 		// 参数名原样收下：可能是保留字或带空格（SHOW time zone、SHOW ALL）。
@@ -272,10 +288,247 @@ func (p *parser) parseStatement() (Statement, error) {
 	return nil, p.errAt(t, "syntax error at or near %q", t.String())
 }
 
+// parseCommentOn 解析 COMMENT ON <对象> <名字> IS {'文本' | NULL}。
+//
+//	COMMENT ON TABLE  t IS '…'
+//	COMMENT ON COLUMN t.c IS '…'        （也可以写 schema.t.c）
+//	COMMENT ON INDEX / SCHEMA / DATABASE / VIEW / CONSTRAINT …
+//
+// 名字先按 [a [. b [. c]]] 收齐，再按对象类型解释——不能直接用 tableName()，
+// 它会把 COLUMN t.c 里的 t 当成 schema 吃掉。
+func (p *parser) parseCommentOn() (Statement, error) {
+	st := &CommentOn{}
+	switch {
+	case p.acceptKw("table"):
+		st.Object = "table"
+	case p.acceptKw("column"):
+		st.Object = "column"
+	case p.acceptKw("index"):
+		st.Object = "index"
+	case p.acceptKw("schema"):
+		st.Object = "schema"
+	case p.acceptKw("database"):
+		st.Object = "database"
+	case p.acceptKw("view"):
+		st.Object = "view"
+	case p.atKw("materialized"):
+		p.pos++
+		if err := p.expectKw("view"); err != nil {
+			return nil, err
+		}
+		st.Object = "view"
+	case p.acceptKw("constraint"):
+		st.Object = "constraint"
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		st.Name = name
+		if err := p.expectKw("on"); err != nil {
+			return nil, err
+		}
+		tbl, err := p.tableName()
+		if err != nil {
+			return nil, err
+		}
+		st.Table = tbl
+	default:
+		return nil, p.errAt(p.peek(), "unsupported COMMENT ON object %q", p.peek().String())
+	}
+
+	if st.Object != "constraint" {
+		var parts []string
+		for {
+			id, err := p.ident()
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, id)
+			if !p.acceptPunct(".") {
+				break
+			}
+		}
+		switch st.Object {
+		case "column":
+			// [schema.]table.column：最后一段是列，倒数第二段是表
+			if len(parts) < 2 {
+				return nil, p.errAt(p.peek(),
+					"COMMENT ON COLUMN needs a table name: COLUMN <table>.<column>")
+			}
+			st.Column = parts[len(parts)-1]
+			st.Table = parts[len(parts)-2]
+		default:
+			// schema.table 时丢掉 schema（我们只有 public）
+			st.Table = parts[len(parts)-1]
+			st.Name = st.Table
+		}
+	}
+
+	if err := p.expectKw("is"); err != nil {
+		return nil, err
+	}
+	if p.acceptKw("null") {
+		st.IsNull = true
+		return st, nil
+	}
+	t := p.peek()
+	if t.Kind != StringVal {
+		return nil, p.errAt(t, "COMMENT ON … IS needs a string literal or NULL")
+	}
+	p.pos++
+	st.Comment = t.Text
+	return st, nil
+}
+
+// parseTxModes 解析 BEGIN / START TRANSACTION 后面的可选事务模式列表：
+//
+//	ISOLATION LEVEL { SERIALIZABLE | REPEATABLE READ | READ COMMITTED | READ UNCOMMITTED }
+//	READ WRITE | READ ONLY
+//	[ NOT ] DEFERRABLE
+//
+// 多个模式用逗号分隔、顺序不限。godb 恒为 SERIALIZABLE（表级 S/X 两阶段封锁，
+// 锁持到提交），所以这里只记录客户端请求的模式，不做降级也不报错——
+// 更强的隔离保证总是安全的，报错反而会让 Npgsql / Dapper 连不上。
+func (p *parser) parseTxModes(ts *TxStmt) error {
+	for {
+		switch {
+		case p.acceptKw("isolation"):
+			if err := p.expectKw("level"); err != nil {
+				return err
+			}
+			switch {
+			case p.acceptKw("serializable"):
+				ts.Isolation = "serializable"
+			case p.atKw("repeatable"):
+				p.pos++
+				if err := p.expectKw("read"); err != nil {
+					return err
+				}
+				ts.Isolation = "repeatable read"
+			case p.acceptKw("read"):
+				switch {
+				case p.acceptKw("committed"):
+					ts.Isolation = "read committed"
+				case p.acceptKw("uncommitted"):
+					ts.Isolation = "read uncommitted"
+				default:
+					return p.errAt(p.peek(), "expected COMMITTED or UNCOMMITTED")
+				}
+			default:
+				return p.errAt(p.peek(),
+					"expected SERIALIZABLE, REPEATABLE READ, READ COMMITTED or READ UNCOMMITTED")
+			}
+		case p.acceptKw("read"):
+			switch {
+			case p.acceptKw("only"):
+				ts.ReadOnly = true
+			case p.acceptKw("write"):
+				ts.ReadOnly = false
+			default:
+				return p.errAt(p.peek(), "expected ONLY or WRITE")
+			}
+		case p.acceptKw("not"):
+			if err := p.expectKw("deferrable"); err != nil {
+				return err
+			}
+		case p.acceptKw("deferrable"):
+			// DEFERRABLE 只影响 SET CONSTRAINTS 的默认时机，接受即忽略。
+		default:
+			return nil
+		}
+		// 模式之间的逗号可省：BEGIN READ ONLY DEFERRABLE 和
+		// BEGIN READ ONLY, DEFERRABLE 都合法（PG 的 gram 允许连续写）。
+		if p.acceptPunct(",") {
+			continue
+		}
+		if !(p.atKw("isolation") || p.atKw("read") || p.atKw("not") || p.atKw("deferrable")) {
+			return nil
+		}
+	}
+}
+
+// skipTxChain 吃掉 COMMIT / ROLLBACK 后面的 AND [NO] CHAIN
+// （表示提交/回滚后立刻开新事务）。godb 不链式开启，客户端也不依赖。
+func (p *parser) skipTxChain() {
+	if !p.atKw("and") {
+		return
+	}
+	p.pos++
+	p.acceptKw("no")
+	p.acceptKw("chain")
+}
+
 // ---------- DDL ----------
 
+// parseDatabaseOptions 解析 CREATE DATABASE 尾部的选项列表（WITH 可省略）：
+//
+//	OWNER [=] u / TEMPLATE [=] t / ENCODING [=] e / STRATEGY [=] s
+//	LOCALE [=] l / LC_COLLATE [=] c / LC_CTYPE [=] c / ICU_LOCALE [=] l
+//	LOCALE_PROVIDER [=] p / COLLATION_VERSION [=] v / TABLESPACE [=] t
+//	ALLOW_CONNECTIONS [=] b / CONNECTION LIMIT [=] n / IS_TEMPLATE [=] b
+//
+// 这些选项在 godb 里都没有对应的行为：每个库都是同一套 UTF-8 存储、
+// 同一套权限模型、同一个数据目录。认得出、不报错就够了——各种 ORM 的
+// CodeFirst 建库时都会带上 ENCODING / OWNER。
+func (p *parser) parseDatabaseOptions(st *CreateDatabase) error {
+	p.acceptKw("with")
+	for {
+		t := p.peek()
+		if t.Kind == EOF || t.IsPunct(";") {
+			return nil
+		}
+		var key string
+		switch {
+		case p.acceptKw("owner"):
+			key = "owner"
+		case p.acceptKw("template"):
+			key = "template"
+		case p.acceptKw("encoding"):
+			key = "encoding"
+		case p.acceptKw("strategy"):
+			key = "strategy"
+		case p.acceptKw("locale"):
+			key = "locale"
+		case p.acceptKw("lc_collate"):
+			key = "lc_collate"
+		case p.acceptKw("lc_ctype"):
+			key = "lc_ctype"
+		case p.acceptKw("icu_locale"):
+			key = "icu_locale"
+		case p.acceptKw("locale_provider"):
+			key = "locale_provider"
+		case p.acceptKw("collation_version"):
+			key = "collation_version"
+		case p.acceptKw("tablespace"):
+			key = "tablespace"
+		case p.acceptKw("allow_connections"):
+			key = "allow_connections"
+		case p.acceptKw("connection"):
+			if err := p.expectKw("limit"); err != nil {
+				return err
+			}
+			key = "connection_limit"
+		case p.acceptKw("is_template"):
+			key = "is_template"
+		default:
+			return p.errAt(t, "unrecognized CREATE DATABASE option %q", t.String())
+		}
+		p.acceptPunct("=")
+		v := p.peek()
+		if v.Kind != Word && v.Kind != QIdent && v.Kind != StringVal && v.Kind != NumberVal {
+			return p.errAt(v, "expected a value for CREATE DATABASE option %s", strings.ToUpper(key))
+		}
+		p.pos++
+		if st.Options == nil {
+			st.Options = map[string]string{}
+		}
+		st.Options[key] = v.Text
+		p.acceptPunct(",")
+	}
+}
+
 func (p *parser) parseCreate() (Statement, error) {
-	// CREATE DATABASE name
+	// CREATE DATABASE name [ [ WITH ] option [ ... ] ]
 	if p.acceptKw("database") {
 		if p.atKw("if") {
 			// CREATE DATABASE IF NOT EXISTS 不是 PostgreSQL 语法，直接拒绝
@@ -285,7 +538,11 @@ func (p *parser) parseCreate() (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &CreateDatabase{Name: name}, nil
+		st := &CreateDatabase{Name: name}
+		if err := p.parseDatabaseOptions(st); err != nil {
+			return nil, err
+		}
+		return st, nil
 	}
 	// CREATE [UNIQUE] INDEX name ON table (cols)
 	if p.atKw("index") || p.atKw("unique") {
@@ -598,10 +855,73 @@ func (p *parser) parseColumnDef() (*ColumnDef, error) {
 				return nil, err
 			}
 			col.Check = String(ce)
+		case p.atKw("generated"):
+			if err := p.parseGenerated(col); err != nil {
+				return nil, err
+			}
 		default:
 			return col, nil
 		}
 	}
+}
+
+// parseGenerated 解析列定义里的 GENERATED 子句：
+//
+//	GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [ ( sequence_options ) ]
+//	GENERATED ALWAYS AS ( expr ) STORED        —— 真正的生成列，未实现
+//
+// IDENTITY 按 SERIAL 执行（整数自增列），序列参数（START WITH / INCREMENT BY /
+// NO MINVALUE / CACHE …）接受即忽略：godb 每张表一个计数器，语义上等价于
+// 一个从 1 开始、步长 1 的序列。
+func (p *parser) parseGenerated(col *ColumnDef) error {
+	p.pos++ // GENERATED
+	switch {
+	case p.acceptKw("always"):
+	case p.atKw("by"):
+		p.pos++
+		if err := p.expectKw("default"); err != nil {
+			return err
+		}
+	default:
+		return p.errAt(p.peek(), "expected ALWAYS or BY DEFAULT")
+	}
+	if err := p.expectKw("as"); err != nil {
+		return err
+	}
+	if !p.atKw("identity") {
+		// 走到这里说明是 GENERATED ALWAYS AS (expr) STORED（生成列）。
+		return p.errAt(p.peek(), "generated columns (GENERATED ALWAYS AS (expr) STORED) are not supported")
+	}
+	p.pos++
+	// 序列参数括号：整段吃掉，只跳过平衡括号，不求值。
+	if p.atPunct("(") {
+		depth := 0
+		for {
+			t := p.peek()
+			if t.Kind == EOF {
+				return p.errAt(t, "unterminated sequence options")
+			}
+			p.pos++
+			if t.IsPunct("(") {
+				depth++
+			} else if t.IsPunct(")") {
+				depth--
+				if depth == 0 {
+					break
+				}
+			}
+		}
+	}
+	switch col.TypeName {
+	case "smallint", "int", "int2", "int4", "integer", "bigint", "int8":
+	default:
+		return p.errAt(p.peek(),
+			"identity column %q must be of type smallint, integer or bigint, not %q", col.Name, col.TypeName)
+	}
+	col.Serial = true
+	col.Identity = true
+	col.NotNull = true
+	return nil
 }
 
 // parseTypeRef 解析类型名（可能带括号参数），返回 serial 标记。

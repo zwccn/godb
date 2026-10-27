@@ -36,6 +36,10 @@ type ColumnDef struct {
 	Unique     bool
 	Default    Expr
 	Serial     bool
+	// Identity 表示该列是 GENERATED ... AS IDENTITY（SQL 标准的写法）。
+	// 自增行为和 Serial 一样，区别只在语义：IDENTITY 只保证 NOT NULL，
+	// 不像老式 SERIAL 那样顺手加个唯一约束。
+	Identity bool
 
 	// Check 是列级 CHECK 约束的表达式原文（只在建表解析阶段用，
 	// 之后统一挪到 CreateTable.Checks / catalog.Table.Checks）。
@@ -68,6 +72,21 @@ type CreateIndex struct {
 type DropIndex struct {
 	Name     string
 	IfExists bool
+}
+
+// CommentOn 对应 COMMENT ON <对象> ... IS '文本' | NULL。
+//
+// 只有 TABLE / COLUMN 的注释会真的存下来（catalog 里带注释字段，
+// pg_description 和 obj_description/col_description 能查到）；INDEX /
+// SCHEMA / DATABASE / VIEW 的注释接受即忽略——ORM 的 CodeFirst 会连着
+// 发一堆，报错会让它误判整次建表失败。
+type CommentOn struct {
+	Object  string // table / column / index / schema / database / view / constraint
+	Table   string // 表名；object=column 时是列所在的表
+	Column  string // object=column 时有效
+	Name    string // index / schema / database 的名字
+	Comment string // 文本；IsNull 为 true 时表示删除注释
+	IsNull  bool
 }
 
 // Copy 对应 COPY ... FROM STDIN / TO STDOUT（只支持标准输入输出，不支持文件名）。
@@ -273,7 +292,15 @@ func (*FuncTable) tableRef() {}
 // ---------- 事务 ----------
 
 // TxStmt 对应 BEGIN / COMMIT / ROLLBACK。
-type TxStmt struct{ Kind string }
+//
+// Isolation / ReadOnly 只是把客户端请求的事务模式记下来：godb 的隔离级别
+// 恒为 SERIALIZABLE（表级 S/X 两阶段封锁，锁持到提交），请求更弱的级别
+// 不会真的降级——更强的保证总是安全的，客户端也不会因此出错。
+type TxStmt struct {
+	Kind      string
+	Isolation string // serializable / repeatable read / read committed / read uncommitted
+	ReadOnly  bool
+}
 
 // Explain 对应 EXPLAIN。
 type Explain struct {
@@ -295,6 +322,7 @@ func (*Insert) stmtNode()         {}
 func (*Copy) stmtNode()           {}
 func (*CreateIndex) stmtNode()    {}
 func (*DropIndex) stmtNode()      {}
+func (*CommentOn) stmtNode()      {}
 func (*Update) stmtNode()         {}
 func (*Delete) stmtNode()         {}
 func (*Select) stmtNode()         {}
@@ -433,6 +461,10 @@ func (*DefaultVal) exprNode() {}
 // 不支持跨库查询（PostgreSQL 也要 dblink/FDW 才能做到）。
 type CreateDatabase struct {
 	Name string
+	// Options 是 WITH 后面的选项（OWNER / TEMPLATE / ENCODING / LC_COLLATE …）。
+	// godb 每个库都是同一套 UTF-8 存储和权限模型，所以除了 ENCODING 会校验
+	// 一下，其余只做语法兼容。
+	Options map[string]string
 }
 
 // DropDatabase 是 DROP DATABASE [IF EXISTS] name。

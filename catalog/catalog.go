@@ -21,6 +21,8 @@ type Column struct {
 	PrimaryKey bool   `json:"primary_key,omitempty"`
 	Serial     bool   `json:"serial,omitempty"`
 	Default    string `json:"default,omitempty"`
+	// Comment 是 COMMENT ON COLUMN 写的注释（落到 pg_description.objsubid）。
+	Comment string `json:"comment,omitempty"`
 }
 
 // Index 是一条用户建的二级索引。
@@ -78,6 +80,9 @@ type Table struct {
 	// 目前只做「登记 + 展示」：客户端能在索引页看到、能建能删，但查询规划
 	// 还不会用它加速（只有主键走哈希索引）。真正的二级索引属于后续工作。
 	Indexes []*Index `json:"indexes,omitempty"`
+
+	// Comment 是 COMMENT ON TABLE 写的注释（落到 pg_description.objsubid=0）。
+	Comment string `json:"comment,omitempty"`
 
 	colIdx map[string]int
 }

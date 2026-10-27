@@ -251,8 +251,19 @@ func evalCompat(cat *catalog.Catalog, dbName, name string, vals []types.Value) (
 		return types.Text(""), true, nil
 	case "pg_get_serial_sequence":
 		return types.Null, true, nil
-	case "obj_description", "col_description", "shobj_description", "pg_collation_for",
-		"pg_tablespace_location":
+	case "obj_description":
+		// obj_description(oid [, 目录名]) 返回表/库的注释。
+		if v, ok := syscat.RelationComment(cat, int32(integer(0)), 0); ok && v != "" {
+			return types.Text(v), true, nil
+		}
+		return types.Null, true, nil
+	case "col_description":
+		// col_description(表oid, 列序号) 返回列注释。
+		if v, ok := syscat.RelationComment(cat, int32(integer(0)), int(integer(1))); ok && v != "" {
+			return types.Text(v), true, nil
+		}
+		return types.Null, true, nil
+	case "shobj_description", "pg_collation_for", "pg_tablespace_location":
 		return types.Null, true, nil
 	case "current_date":
 		now := time.Now()

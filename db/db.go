@@ -356,7 +356,13 @@ func (d *DB) execTxControl(sess *txn.Session, ts *sql.TxStmt, pre map[string]loc
 		if err := sess.Begin(pre); err != nil {
 			return nil, err
 		}
-		return &exec.Result{Command: "BEGIN", Tag: "BEGIN"}, nil
+		// 客户端请求的事务模式只是记下来：godb 恒为 SERIALIZABLE（表级 S/X
+		// 两阶段封锁），不降级。回显一下让客户端知道实际生效的级别。
+		msg := ""
+		if ts.Isolation != "" && ts.Isolation != "serializable" {
+			msg = fmt.Sprintf("requested %s isolation, godb always runs SERIALIZABLE", ts.Isolation)
+		}
+		return &exec.Result{Command: "BEGIN", Tag: "BEGIN", Message: msg}, nil
 
 	case "commit":
 		if !sess.InTx() {
@@ -389,7 +395,7 @@ func (d *DB) execTxControl(sess *txn.Session, ts *sql.TxStmt, pre map[string]loc
 
 func isDDL(st sql.Statement) bool {
 	switch st.(type) {
-	case *sql.CreateTable, *sql.DropTable, *sql.AlterTable:
+	case *sql.CreateTable, *sql.DropTable, *sql.AlterTable, *sql.CommentOn:
 		return true
 	}
 	return false

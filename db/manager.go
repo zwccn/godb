@@ -363,6 +363,12 @@ func (d *DB) createDatabase(sess *txn.Session, s *sql.CreateDatabase) (*exec.Res
 	if d.mgr == nil {
 		return nil, fmt.Errorf("CREATE DATABASE 需要多库模式（单库测试环境不支持）")
 	}
+	// ENCODING 只有一种是能真的建出来的（UTF-8）。SQL_ASCII 之类也接受，
+	// 但得让客户端知道实际编码，不然它会把字节当别的编码解释。
+	if enc := strings.ToUpper(s.Options["encoding"]); enc != "" &&
+		enc != "UTF8" && enc != "UTF-8" && enc != "UNICODE" && enc != "SQL_ASCII" {
+		return nil, fmt.Errorf("encoding %q is not supported; godb only stores UTF-8", enc)
+	}
 	if _, err := d.mgr.Create(s.Name); err != nil {
 		return nil, err
 	}

@@ -422,10 +422,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 		return settingRows(def)
 
 	case "pg_description", "pg_shdescription":
-		return []types.Row{mk(def, map[string]types.Value{
-			"objoid": iv(DbOID), "classoid": iv(1262), "objsubid": iv(0),
-			"description": sv("godb - a from-scratch SQL database in Go"),
-		})}
+		return commentRows(def, src)
 
 	case "pg_collation":
 		return []types.Row{
@@ -1495,4 +1492,57 @@ func fkActionCode(action string) string {
 		return "d"
 	}
 	return "a" // NO ACTION
+}
+
+// commentRows 生成 pg_description / pg_shdescription 的行。
+//
+// 一行一条注释：objoid = 表或库的 OID，classoid = 1259（pg_class）或
+// 1262（pg_database），objsubid = 0 表示对象本身、1..n 表示第几列。
+// 客户端（Navicat / psql \d+ / ORM 的元数据读取）都靠这个显示注释。
+func commentRows(def *catalog.Table, src Source) []types.Row {
+	add := func(out []types.Row, objoid, classoid int32, subid int, text string) []types.Row {
+		return append(out, mk(def, map[string]types.Value{
+			"objoid": iv(int(objoid)), "classoid": iv(int(classoid)),
+			"objsubid": iv(subid), "description": sv(text),
+		}))
+	}
+	var out []types.Row
+	// 库自身的描述（pg_shdescription 只有 objoid/classoid/description 三列，
+	// mk 会忽略多余字段，所以两个表共用同一份行生成）。
+	out = add(out, DbOID, 1262, 0, "godb - a from-scratch SQL database in Go")
+	for _, tm := range buildMeta(src).tables {
+		if tm.sys {
+			continue
+		}
+		if tm.t.Comment != "" {
+			out = add(out, tm.oid, 1259, 0, tm.t.Comment)
+		}
+		for i, c := range tm.t.Columns {
+			if c.Comment != "" {
+				out = add(out, tm.oid, 1259, i+1, c.Comment)
+			}
+		}
+	}
+	return out
+}
+
+// RelationComment 按 (表 OID, 列序号) 查注释，subid=0 表示表本身。
+// obj_description() / col_description() 用它。
+func RelationComment(cat *catalog.Catalog, oid int32, subid int) (string, bool) {
+	if cat == nil {
+		return "", false
+	}
+	for _, tm := range buildMeta(Source{Cat: cat}).tables {
+		if tm.oid != oid {
+			continue
+		}
+		if subid <= 0 {
+			return tm.t.Comment, true
+		}
+		if subid <= len(tm.t.Columns) {
+			return tm.t.Columns[subid-1].Comment, true
+		}
+		return "", true
+	}
+	return "", false
 }

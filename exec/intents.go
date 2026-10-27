@@ -34,6 +34,17 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 		}
 	case *sql.AlterTable:
 		addIntent(out, s.Table, lock.Exclusive)
+	case *sql.CreateIndex:
+		addIntent(out, s.Table, lock.Exclusive)
+	case *sql.CommentOn:
+		// 表/列/约束的注释改的是 catalog，要 X 锁；INDEX / SCHEMA / DATABASE /
+		// VIEW 的注释接受即忽略，不碰任何表（不然会给一个叫 public 的表加锁）。
+		switch s.Object {
+		case "table", "column", "constraint":
+			if s.Table != "" {
+				addIntent(out, s.Table, lock.Exclusive)
+			}
+		}
 	case *sql.TxStmt, *sql.Checkpoint, *sql.Show, *sql.SetStmt, *sql.SessionCleanup:
 		// 事务控制、CHECKPOINT、SHOW/SET、DISCARD/RESET/DEALLOCATE 都不需要表锁
 	}

@@ -443,9 +443,17 @@ main.go        启动装配、参数解析
 - **`ORDER BY` 免排序**：索引顺序扫描 + `ORDER BY` 正好是索引列的**前缀**且方向一致时，
   不建 `Sort` 节点。`DESC` 靠反向遍历同一批行实现（不是另一棵树）。三个前提：
   隔着 `filter` 看下去是索引扫描、排序列是索引列前缀且顺序一致、所有排序列同方向
-  （索引只能整体正扫或反扫，`a ASC, b DESC` 做不到）。`LIMIT` 因此能提前收工。
+  （索引只能整体正扫或反扫，`a ASC, b DESC` 做不到）。
   **没有 `WHERE` 时不走这条路**：索引里不含 NULL 键，拿索引当「全表顺序」会漏掉
   该列为 NULL 的行。
+- **区间扫描是流式的**：`indexRangeScanOp` 持一个游标（`storage.IndexScanner`），
+  上层要一行才走一步，**不是先把整个区间物化再吐**。所以 `ORDER BY ... LIMIT 10`
+  只碰前面几个叶子：20 万行的区间取前 10 行是亚微秒级，而不是先扫完 20 万行。
+  叶子链是**双向**的（`next` + `prev`），`DESC` 从右端往回走，同样能提前停。
+  事务里有写集时退回物化（要和本事务插入/改键的行归并），代价只落在真正写过数据的会话上。
+
+  这条不只对 `LIMIT` 有用：`UPDATE`/`DELETE` 走的是同一套索引选择，但它们本来就要
+  扫完整个候选集，没有提前停的余地。
 - **和 DDL 的关系**：`CREATE INDEX` 建完会立刻把已有数据灌进索引；`DROP COLUMN`
   连带删掉引用该列的索引；`RENAME COLUMN` 同步改索引里的列名；其他 `ALTER`
   统一重建一次（列位置或类型变了，旧键就失效了）。
@@ -466,12 +474,25 @@ main.go        启动装配、参数解析
 
 | 查询 | 耗时 | 说明 |
 |---|---|---|
-| `WHERE a BETWEEN 100 AND 199 ORDER BY a, b`（2 万行） | 9.83 ms | 索引序，无 `Sort` |
-| 同上但 `ORDER BY b` | 23.67 ms | 排序列用不上索引，多花 14 ms 排序 |
-| 同上 + `LIMIT 10` | 2.59 ms | 免排序后 `LIMIT` 提前收工 |
+| `WHERE a BETWEEN 100 AND 199 ORDER BY a, b`（2 万行） | 8.77 ms | 索引序，无 `Sort` |
+| 同上但 `ORDER BY b` | 23.11 ms | 排序列用不上索引，多花 14 ms 排序 |
+| 同上 + `LIMIT 10` | 低于计时精度 | 游标只走前几个叶子 |
 | `WHERE id = 3 OR id = 7 OR id = 11` | 低于计时精度 | `Index Union Scan`（3 ranges） |
 | `WHERE id < 50 OR id > 199950` | 低于计时精度 | 两段区间一次扫 |
 | `WHERE id = 3 OR note = 'n5'` | 22.51 ms | 有分支没索引 → 退回全表扫 |
+
+区间命中 20 万行时，取多少行就干多少活（`(a,b)` 索引上 `ORDER BY a, id`）：
+
+| 查询 | 耗时 |
+|---|---|
+| `... ORDER BY a, id LIMIT 1` / `LIMIT 10` / `LIMIT 100` | 低于计时精度 |
+| `... ORDER BY a DESC, id DESC LIMIT 10`（反向游标） | 低于计时精度 |
+| `... ORDER BY a DESC, id DESC LIMIT 100000` | 34.9 ms |
+| `... LIMIT 200000`（全取） | 56.5 ms |
+| `... ORDER BY code LIMIT 10`（`code` 无索引，要全取再排） | 334 ms |
+
+最后一行是对照：排序必须看到全部行才能给出前 10 条，那是 `Sort` 的固有成本，
+和索引扫描没关系。想让这种查询也快，得把 `code` 建进索引。
 
 换成 B+Tree 之后，20 万行上的区间查询也不再有全表扫的份：
 

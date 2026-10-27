@@ -37,8 +37,10 @@ type bnode struct {
 	slots []int
 	// 内部节点：len(kids) == len(keys)+1
 	kids []*bnode
-	// next 只对叶子有效：范围扫描沿它顺序走
+	// next / prev 只对叶子有效：范围扫描沿它们正反走。
+	// 反序要 prev 是因为「按时间倒序取最新 N 条」必须从右端开始，不能先物化再倒读。
 	next *bnode
+	prev *bnode
 }
 
 func newBTree() *btree {
@@ -97,8 +99,12 @@ func (n *bnode) splitLeaf() (string, *bnode) {
 	right.slots = append([]int(nil), n.slots[mid:]...)
 	n.keys = n.keys[:mid]
 	n.slots = n.slots[:mid]
-	// 维护叶子链：范围扫描完全依赖它
+	// 维护叶子链（双向）：范围扫描正反两个方向都依赖它
 	right.next = n.next
+	if n.next != nil {
+		n.next.prev = right
+	}
+	right.prev = n
 	n.next = right
 	return right.keys[0], right
 }
@@ -113,6 +119,87 @@ func (n *bnode) splitInner() (string, *bnode) {
 	n.keys = n.keys[:mid]
 	n.kids = n.kids[:mid+1]
 	return up, right
+}
+
+// btreeCursor 是只进游标：从某个键开始按键升序逐个走，随时可以停下。
+//
+// 范围扫描有两种消费方式：`Range` 是「推」（回调，一次走完），游标是「拉」
+// （调用方决定什么时候取下一行）。带 LIMIT 的查询必须用「拉」—— 取够 10 行就
+// 不再碰后面的叶子，不然两万行的结果全物化出来只为了扔掉 19990 行。
+type btreeCursor struct {
+	n *bnode
+	i int
+}
+
+// cursor 定位到第一个 >= key 的条目。
+func (t *btree) cursor(key string) *btreeCursor {
+	n, i := t.seek(key)
+	return &btreeCursor{n: n, i: i}
+}
+
+// first 定位到最小的键。
+func (t *btree) first() *btreeCursor {
+	return &btreeCursor{n: t.leftmost()}
+}
+
+// last 定位到最大的键。
+func (t *btree) last() *btreeCursor {
+	n := t.root
+	for !n.leaf {
+		n = n.kids[len(n.kids)-1]
+	}
+	return &btreeCursor{n: n, i: len(n.keys) - 1}
+}
+
+// revCursorLe 定位到最后一个 `<= key` 的条目（含等于）。
+//
+// 不能直接用 seek 再退一格：seek 给的是**第一个** >= key，同键有多条时
+// 退一格会退到键外面去，反序扫描就漏掉后面那些同键条目。这里用 upper bound
+// （第一个 > key）再退一格，天然落在所有同键条目之后。
+func (t *btree) revCursorLe(key string) *btreeCursor {
+	n := t.root
+	for !n.leaf {
+		i := sort.Search(len(n.keys), func(j int) bool { return n.keys[j] > key })
+		n = n.kids[i]
+	}
+	i := sort.Search(len(n.keys), func(j int) bool { return n.keys[j] > key })
+	return &btreeCursor{n: n, i: i - 1}
+}
+
+// revCursorLt 定位到最后一个 `< key` 的条目（不含等于）。
+func (t *btree) revCursorLt(key string) *btreeCursor {
+	n, i := t.seek(key) // 第一个 >= key
+	return &btreeCursor{n: n, i: i - 1}
+}
+
+// prev 反向走一格。走过头（比最小键还小）后返回 ok=false。
+func (c *btreeCursor) prev() (string, int, bool) {
+	for c.n != nil {
+		if c.i >= 0 && c.i < len(c.n.keys) {
+			k, s := c.n.keys[c.i], c.n.slots[c.i]
+			c.i--
+			return k, s, true
+		}
+		c.n = c.n.prev
+		if c.n != nil {
+			c.i = len(c.n.keys) - 1
+		}
+	}
+	return "", 0, false
+}
+
+// next 前进一格。走到叶子链末尾后返回 ok=false，之后再调也一直是 false。
+func (c *btreeCursor) next() (string, int, bool) {
+	for c.n != nil {
+		if c.i < len(c.n.keys) {
+			k, s := c.n.keys[c.i], c.n.slots[c.i]
+			c.i++
+			return k, s, true
+		}
+		c.n = c.n.next
+		c.i = 0
+	}
+	return "", 0, false
 }
 
 // seek 定位到「第一个 >= key 的条目」所在的叶子与下标。

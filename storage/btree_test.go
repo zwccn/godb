@@ -278,3 +278,71 @@ func TestBTreeDeleteAllAndReuse(t *testing.T) {
 		t.Fatalf("Reset 后插入取不到: %v", got)
 	}
 }
+
+// 反向遍历必须等于正向遍历的镜像 —— 叶子链的 prev 指针是在分裂时维护的，
+// 漏一处就会在某个分裂点之后反序漏行（而且正向完全正常，极难发现）。
+func TestBTreeReverseWalk(t *testing.T) {
+	for _, n := range []int{1, 2, 255, 256, 257, 1000, 3000} {
+		tr := newBTree()
+		for i := 0; i < n; i++ {
+			tr.Insert(fmt.Sprintf("k%06d", i), i)
+		}
+		var fwd, rev []string
+		tr.Walk(func(k string, s int) { fwd = append(fwd, k) })
+		for c := tr.last(); ; {
+			k, _, ok := c.prev()
+			if !ok {
+				break
+			}
+			rev = append(rev, k)
+		}
+		if len(rev) != len(fwd) {
+			t.Fatalf("n=%d：反序 %d 条、正序 %d 条", n, len(rev), len(fwd))
+		}
+		for i := range fwd {
+			if rev[i] != fwd[len(fwd)-1-i] {
+				t.Fatalf("n=%d：第 %d 条反序为 %q，应为 %q", n, i, rev[i], fwd[len(fwd)-1-i])
+			}
+		}
+	}
+}
+
+// 反向定位：revCursorLe 取 <= key 的最后一条（同键多条时不能漏），revCursorLt 不含等于。
+func TestBTreeReverseSeek(t *testing.T) {
+	tr := newBTree()
+	// 键 a 有 5 条，b、c 各 1 条
+	for i := 0; i < 5; i++ {
+		tr.Insert("a", i)
+	}
+	tr.Insert("b", 10)
+	tr.Insert("c", 11)
+
+	collect := func(c *btreeCursor, n int) []string {
+		var out []string
+		for i := 0; i < n; i++ {
+			k, _, ok := c.prev()
+			if !ok {
+				break
+			}
+			out = append(out, k)
+		}
+		return out
+	}
+
+	// <= b：应从 b 开始往左
+	if got := collect(tr.revCursorLe("b"), 3); fmt.Sprint(got) != "[b a a]" {
+		t.Fatalf("revCursorLe(b) = %v，应为 [b a a]", got)
+	}
+	// < b：跳过 b
+	if got := collect(tr.revCursorLt("b"), 2); fmt.Sprint(got) != "[a a]" {
+		t.Fatalf("revCursorLt(b) = %v，应为 [a a]", got)
+	}
+	// <= a：5 个 a 要全拿到（这是 seek 退一格会漏的地方）
+	if got := collect(tr.revCursorLe("a"), 10); len(got) != 5 {
+		t.Fatalf("revCursorLe(a) 应拿到 5 条，实际 %v", got)
+	}
+	// 比最小键还小：立刻结束
+	if _, _, ok := tr.revCursorLt("a").prev(); ok {
+		t.Fatal("比最小键小时不该有结果")
+	}
+}

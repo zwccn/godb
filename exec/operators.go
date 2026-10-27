@@ -193,6 +193,9 @@ func (o *indexScanOp) Children() []Operator { return nil }
 // 和等值扫描一样，它只负责缩小候选集，WHERE 仍由上层 filterOp 再判一遍。
 // 输出按索引键升序（存储层保证），所以 `ORDER BY` 命中索引前缀时可以省掉排序；
 // desc 只影响遍历方向，扫描的仍是同一批行。
+//
+// 正反两个方向都走**游标**：上层要一行才走一步，所以 `LIMIT 10` 只碰前面（或者
+// 最后面）几个叶子。叶子链是双向的，反序从右端往回走，不需要先物化。
 type indexRangeScanOp struct {
 	tx      *storage.Tx
 	tbl     *catalog.Table
@@ -202,8 +205,7 @@ type indexRangeScanOp struct {
 	rs      []storage.KeyRange
 	desc    bool
 	sc      Schema
-	rows    []types.Row
-	i       int
+	scanner *storage.IndexScanner
 	ixNames []string // 同上，换成列名
 }
 
@@ -218,31 +220,26 @@ func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ix
 func (o *indexRangeScanOp) Schema() Schema { return o.sc }
 
 func (o *indexRangeScanOp) Open() error {
-	o.rows = o.rows[:0]
-	o.i = 0
-	for _, h := range o.tx.IndexRanges(o.tbl, o.ixName, o.cols, o.ixCols, o.rs) {
-		o.rows = append(o.rows, h.Row)
-	}
-	if o.desc {
-		for i, j := 0, len(o.rows)-1; i < j; i, j = i+1, j-1 {
-			o.rows[i], o.rows[j] = o.rows[j], o.rows[i]
-		}
-	}
+	o.scanner = o.tx.ScanIndex(o.tbl, o.ixName, o.cols, o.ixCols, o.rs, o.desc)
 	return nil
 }
 
 func (o *indexRangeScanOp) Next() (types.Row, bool, error) {
-	if o.i >= len(o.rows) {
+	if o.scanner == nil {
 		return nil, false, nil
 	}
-	r := o.rows[o.i]
-	o.i++
-	return r, true, nil
+	h, ok := o.scanner.Next()
+	if !ok {
+		return nil, false, nil
+	}
+	return h.Row, true, nil
 }
 
 func (o *indexRangeScanOp) Close() error {
-	o.rows = nil
-	o.i = 0
+	if o.scanner != nil {
+		o.scanner.Close()
+		o.scanner = nil
+	}
 	return nil
 }
 
@@ -500,6 +497,9 @@ func (o *sortOp) Open() error {
 					return false
 				}
 				c = cmp
+			}
+			if c == 0 {
+				continue // 这一列相等，看下一列；别在这里就 return false
 			}
 			if k.desc {
 				return c > 0

@@ -384,3 +384,170 @@ func TestOrUnionEqualsSeparateQueries(t *testing.T) {
 		}
 	}
 }
+
+// 多列 ORDER BY 的**排序**路径（不走索引序）：第一列相等时必须继续比第二列。
+// 这里曾经直接 return，导致「第一列都相等」时完全不排序 —— 索引输出什么顺序就什么顺序。
+func TestMultiColumnSortFallback(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE ms (id int4 PRIMARY KEY, g int4, v int4)`)
+	// 同一组 g 里故意倒着插 v，索引/插入顺序是 9,8,7...；正确结果要按 v 升序
+	run(t, d, s, `INSERT INTO ms VALUES (1,1,5),(2,1,4),(3,1,3),(4,2,9),(5,2,1),(6,3,7)`)
+	run(t, d, s, `CREATE INDEX ms_g ON ms (g)`)
+
+	rows := rowsOf(t, run(t, d, s, `SELECT id, g, v FROM ms WHERE g >= 0 ORDER BY g, v`))
+	// g=1: v 3,4,5；g=2: v 1,9；g=3: v 7
+	want := [][2]int{{1, 3}, {1, 4}, {1, 5}, {2, 1}, {2, 9}, {3, 7}}
+	if len(rows) != len(want) {
+		t.Fatalf("应 %d 行，实际 %d", len(want), len(rows))
+	}
+	for i, w := range want {
+		g, v := intOf(t, rows[i][1]), intOf(t, rows[i][2])
+		if g != w[0] || v != w[1] {
+			t.Fatalf("第 %d 行应为 (g=%d,v=%d)，实际 (g=%d,v=%d)", i, w[0], w[1], g, v)
+		}
+	}
+
+	// 混合方向：第一列升、第二列降
+	rows = rowsOf(t, run(t, d, s, `SELECT g, v FROM ms WHERE g >= 0 ORDER BY g, v DESC`))
+	want2 := [][2]int{{1, 5}, {1, 4}, {1, 3}, {2, 9}, {2, 1}, {3, 7}}
+	for i, w := range want2 {
+		g, v := intOf(t, rows[i][0]), intOf(t, rows[i][1])
+		if g != w[0] || v != w[1] {
+			t.Fatalf("混合方向第 %d 行应为 (g=%d,v=%d)，实际 (g=%d,v=%d)", i, w[0], w[1], g, v)
+		}
+	}
+}
+
+// 第一列有 NULL 时也要能排到第二列（NULL 分组内部仍按第二列排）。
+func TestMultiColumnSortWithNulls(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE mn (id int4 PRIMARY KEY, g int4, v int4)`)
+	run(t, d, s, `INSERT INTO mn VALUES (1,NULL,3),(2,NULL,1),(3,1,2),(4,1,1)`)
+	rows := rowsOf(t, run(t, d, s, `SELECT id FROM mn ORDER BY g, v`))
+	// ASC 默认 NULLS LAST：g=1 的两行按 v 升序在前，g=NULL 的两行按 v 升序在后
+	want := []string{"4", "3", "2", "1"}
+	for i, w := range want {
+		if got := fmt.Sprint(rows[i][0]); got != w {
+			t.Fatalf("第 %d 行应为 id=%s，实际 %s（全部：%v）", i, w, got, rows)
+		}
+	}
+}
+
+// DESC 走反向游标（不是物化再倒读），LIMIT 因此也能提前停。
+// 拿「ASC 全量结果反转取前 N」当基准，比硬编码期望值更能覆盖边界。
+func TestOrderByDescBackwardScan(t *testing.T) {
+	d := setupOrderTable(t)
+	s := "s"
+	// 一律写成默认方向（ASC），再机械地翻成 DESC 做对照
+	bases := []string{
+		`SELECT id, a, b FROM ob WHERE a BETWEEN 0 AND 3 ORDER BY a, b`,
+		`SELECT id, a, b FROM ob WHERE a >= 5 ORDER BY a`,
+		`SELECT id, a, b FROM ob WHERE id BETWEEN 20 AND 60 ORDER BY id`,
+	}
+	for _, ascSQL := range bases {
+		asc := rowsOf(t, run(t, d, s, ascSQL))
+		dSQL := reverseOrder(ascSQL)
+		plan := explainPlan(t, d, s, dSQL)
+		if strings.Contains(plan, "Sort") {
+			t.Errorf("%s\n  反序也该走索引，不该排序: %s", dSQL, plan)
+		}
+		if !strings.Contains(plan, "backward") {
+			t.Errorf("%s\n  计划应标出反向扫描: %s", dSQL, plan)
+		}
+		desc := rowsOf(t, run(t, d, s, dSQL))
+		if len(desc) != len(asc) {
+			t.Fatalf("%s 行数 %d != %d", dSQL, len(desc), len(asc))
+		}
+		for i := range asc {
+			want := asc[len(asc)-1-i]
+			for c := range want {
+				if fmt.Sprint(desc[i][c]) != fmt.Sprint(want[c]) {
+					t.Fatalf("%s 第 %d 行应为 %v，实际 %v", dSQL, i, want, desc[i])
+				}
+			}
+		}
+
+		// LIMIT 5 应该等于全量结果的前 5 行
+		lim := rowsOf(t, run(t, d, s, dSQL+" LIMIT 5"))
+		n := 5
+		if len(desc) < n {
+			n = len(desc)
+		}
+		if len(lim) != n {
+			t.Fatalf("%s LIMIT 5 应 %d 行，实际 %d", dSQL, n, len(lim))
+		}
+		for i := 0; i < n; i++ {
+			if fmt.Sprint(lim[i][0]) != fmt.Sprint(desc[i][0]) {
+				t.Fatalf("%s LIMIT 5 第 %d 行应为 %v，实际 %v", dSQL, i, desc[i], lim[i])
+			}
+		}
+	}
+}
+
+// reverseOrder 把 ORDER BY 里的 ASC 翻成 DESC、DESC 翻成 ASC（没写方向的补 DESC）。
+func reverseOrder(sql string) string {
+	i := strings.Index(sql, "ORDER BY ")
+	if i < 0 {
+		return sql
+	}
+	head, tail := sql[:i+len("ORDER BY ")], sql[i+len("ORDER BY "):]
+	parts := strings.Split(tail, ",")
+	for j, p := range parts {
+		p = strings.TrimSpace(p)
+		switch {
+		case strings.HasSuffix(p, " DESC"):
+			p = strings.TrimSuffix(p, " DESC")
+		case strings.HasSuffix(p, " ASC"):
+			p = strings.TrimSuffix(p, " ASC") + " DESC"
+		default:
+			p += " DESC"
+		}
+		parts[j] = p
+	}
+	return head + strings.Join(parts, ", ")
+}
+
+// 事务里有写集时反序走物化路径，结果必须和正序一致（只是倒过来）。
+func TestOrderByDescInsideTransaction(t *testing.T) {
+	d := setupOrderTable(t)
+	s := "s"
+	run(t, d, s, `BEGIN`)
+	run(t, d, s, `UPDATE ob SET a = 9 WHERE id = 2`)   // 移进 a=9 组
+	run(t, d, s, `UPDATE ob SET a = 0 WHERE id = 100`) // 移进 a=0 组
+	run(t, d, s, `INSERT INTO ob VALUES (9998, 5, 99, 'c9', 'n')`)
+	run(t, d, s, `DELETE FROM ob WHERE id = 50`)
+
+	asc := rowsOf(t, run(t, d, s, `SELECT id, a, b FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY a, b`))
+	desc := rowsOf(t, run(t, d, s, `SELECT id, a, b FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY a DESC, b DESC`))
+	run(t, d, s, `COMMIT`)
+
+	if len(asc) != len(desc) {
+		t.Fatalf("行数不一致：%d vs %d", len(asc), len(desc))
+	}
+	for i := range asc {
+		want := asc[len(asc)-1-i]
+		for c := range want {
+			if fmt.Sprint(desc[i][c]) != fmt.Sprint(want[c]) {
+				t.Fatalf("事务内反序第 %d 行应为 %v，实际 %v", i, want, desc[i])
+			}
+		}
+	}
+}
+
+// OR 合并出的多段区间在反序下也要去重、不重不漏。
+func TestOrderByDescWithOrUnion(t *testing.T) {
+	d := setupOrderTable(t)
+	s := "s"
+	asc := rowsOf(t, run(t, d, s, `SELECT id FROM ob WHERE a = 1 OR a = 3 ORDER BY a, b`))
+	desc := rowsOf(t, run(t, d, s, `SELECT id FROM ob WHERE a = 1 OR a = 3 ORDER BY a DESC, b DESC`))
+	if len(asc) != 40 || len(desc) != 40 {
+		t.Fatalf("应各 40 行，实际 %d / %d", len(asc), len(desc))
+	}
+	for i := range asc {
+		if fmt.Sprint(desc[i][0]) != fmt.Sprint(asc[len(asc)-1-i][0]) {
+			t.Fatalf("第 %d 行不对称：desc=%v asc=%v", i, desc[i], asc[len(asc)-1-i])
+		}
+	}
+}

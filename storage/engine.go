@@ -643,6 +643,173 @@ func (tx *Tx) IndexRange(t *catalog.Table, ixName string, cols []int, r KeyRange
 	return tx.IndexRanges(t, ixName, cols, nil, []KeyRange{r})
 }
 
+// IndexScanner 是索引区间扫描的**游标**：按索引键升序逐行返回事务视角的行。
+//
+// 和 IndexRanges 的区别只在「什么时候算」：IndexRanges 一次把整个区间扫完塞进切片，
+// 游标是调用方要一行才走一步。带 LIMIT 的查询必须用游标 —— 取够 10 行就撒手，
+// 两万行的区间只碰前面几个叶子，而不是全物化出来扔掉 19990 行。
+//
+// 事务里有写集时退回物化：本事务插入/改键的行要和树结果归并，边扫边归并的
+// 状态机不值得为「很少发生的场景」写。自动提交的查询（绝大多数）没有写集，
+// 走的是纯游标路径。
+type IndexScanner struct {
+	tx   *Tx
+	tbl  *catalog.Table
+	cols []int
+	rs   []KeyRange
+	ri   int // 当前区间下标
+	desc bool
+	cur  *btreeCursor
+	cr   KeyRange // 当前区间的副本（cur 换区间时要跟着换）
+	seen map[int]bool
+	tree *btree
+	fini bool
+
+	// 物化路径（事务有写集）：一次取完，逐行吐
+	hits []IndexHit
+	hi   int
+}
+
+// ScanIndex 打开一个游标，desc 决定方向。调用方用完要 Close（只是释放引用）。
+func (tx *Tx) ScanIndex(t *catalog.Table, ixName string, cols, orderCols []int, rs []KeyRange, desc bool) *IndexScanner {
+	s := &IndexScanner{tx: tx, tbl: t, cols: cols, desc: desc}
+	if desc {
+		s.rs = orderedRangesDesc(rs)
+	} else {
+		s.rs = orderedRanges(rs)
+	}
+	st := tx.st
+	td := st.Table(t.Name)
+	if td == nil || len(rs) == 0 {
+		s.fini = true
+		return s
+	}
+	s.tree = td.pk
+	if ixName != "" {
+		s.tree = td.IndexTree(ixName)
+	}
+	if s.tree == nil {
+		s.fini = true
+		return s
+	}
+	if tx.ov[cleanName(t.Name)] != nil {
+		// 事务里有写集：物化一次（要归并本事务插入/改键的行），反序时倒过来
+		s.hits = tx.IndexRanges(t, ixName, cols, orderCols, rs)
+		if desc {
+			for i, j := 0, len(s.hits)-1; i < j; i, j = i+1, j-1 {
+				s.hits[i], s.hits[j] = s.hits[j], s.hits[i]
+			}
+		}
+		s.tree = nil
+		return s
+	}
+	if len(s.rs) > 1 {
+		s.seen = make(map[int]bool, 16) // 多区间可能重叠，同一个槽位只出一次
+	}
+	return s
+}
+
+// Next 取下一行。返回 ok=false 表示扫完了（之后再调也还是 false）。
+func (s *IndexScanner) Next() (IndexHit, bool) {
+	if s.hits != nil {
+		if s.hi >= len(s.hits) {
+			return IndexHit{}, false
+		}
+		h := s.hits[s.hi]
+		s.hi++
+		return h, true
+	}
+	for !s.fini {
+		_, slot, ok := s.nextEntry()
+		if !ok {
+			s.fini = true
+			break
+		}
+		if s.seen != nil {
+			if s.seen[slot] {
+				continue
+			}
+			s.seen[slot] = true
+		}
+		row, exists := s.tx.Get(s.tbl.Name, Ref{Slot: slot})
+		if !exists {
+			continue // 槽位已空：本事务删掉的行，或延迟合并留下的空槽
+		}
+		return IndexHit{Ref: Ref{Slot: slot}, Row: row}, true
+	}
+	return IndexHit{}, false
+}
+
+// nextEntry 在树上走一步（按 desc 决定方向），跨区间时自动切到下一段。
+func (s *IndexScanner) nextEntry() (string, int, bool) {
+	for {
+		if s.cur == nil {
+			if s.ri >= len(s.rs) {
+				return "", 0, false
+			}
+			s.cr = s.rs[s.ri]
+			switch {
+			case s.desc && s.cr.HasHi:
+				// 从区间右端开始：闭区间取最后一个 <= hi，开区间取最后一个 < hi
+				if s.cr.HiInc {
+					s.cur = s.tree.revCursorLe(s.cr.Hi)
+				} else {
+					s.cur = s.tree.revCursorLt(s.cr.Hi)
+				}
+			case s.desc:
+				s.cur = s.tree.last()
+			case s.cr.HasLo:
+				s.cur = s.tree.cursor(s.cr.Lo)
+			default:
+				s.cur = s.tree.first()
+			}
+		}
+		var key string
+		var slot int
+		var ok bool
+		if s.desc {
+			key, slot, ok = s.cur.prev()
+		} else {
+			key, slot, ok = s.cur.next()
+		}
+		if !ok {
+			s.cur = nil
+			s.ri++
+			continue
+		}
+		if s.desc {
+			if s.cr.HasLo && (key < s.cr.Lo || (!s.cr.LoInc && key == s.cr.Lo)) {
+				s.cur = nil // 过了本区间左端：换下一段
+				s.ri++
+				continue
+			}
+			if s.cr.HasHi && !s.cr.HiInc && key >= s.cr.Hi {
+				continue // 开区间上界：等于 hi 的条目不要
+			}
+			return key, slot, true
+		}
+		if s.cr.HasLo && !s.cr.LoInc && key == s.cr.Lo {
+			continue // 开区间下界：等于 lo 的条目不要
+		}
+		if s.cr.HasHi && (key > s.cr.Hi || (!s.cr.HiInc && key == s.cr.Hi)) {
+			// 越过本区间上界：换下一段（重新定位，因为中间那段用不上）
+			s.cur = nil
+			s.ri++
+			continue
+		}
+		return key, slot, true
+	}
+}
+
+// Close 释放游标持有的引用。
+func (s *IndexScanner) Close() {
+	s.cur = nil
+	s.tree = nil
+	s.hits = nil
+	s.seen = nil
+	s.fini = true
+}
+
 // IndexRanges 一次扫多个键区间，返回**按索引键升序**、按槽位去重的行。
 //
 // 多个区间是给 OR 用的：`WHERE a = 1 OR a = 2` 拆成两个精确区间，一次查完。
@@ -769,6 +936,28 @@ func orderedRanges(rs []KeyRange) []KeyRange {
 			return a.Lo < b.Lo
 		}
 		return !a.LoInc && b.LoInc
+	})
+	return out
+}
+
+// orderedRangesDesc 按区间**右端**从大到小排序（反序扫描用）。
+//
+// 和正序同理：排好序逐段扫、重叠靠去重，剩下的输出仍然全局递减。
+func orderedRangesDesc(rs []KeyRange) []KeyRange {
+	if len(rs) < 2 {
+		return rs
+	}
+	out := make([]KeyRange, len(rs))
+	copy(out, rs)
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.HasHi != b.HasHi {
+			return !a.HasHi // 没有上界 = 从最大开始
+		}
+		if a.Hi != b.Hi {
+			return a.Hi > b.Hi
+		}
+		return a.HiInc && !b.HiInc // 闭区间覆盖更广，先扫
 	})
 	return out
 }

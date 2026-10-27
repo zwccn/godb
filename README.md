@@ -492,7 +492,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 | cleartext password 认证（设置页里设了密码就必须输，错了回 `28P01` 并断开） | ✅ |
 | md5 / SCRAM-SHA-256 认证 | ❌ |
 | 简单查询 `Q`（支持多语句，逐条返回结果集） | ✅ |
-| 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数 | ✅ |
+| 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数 | ✅ 二进制支持 int2/4/8、float4/8、bool、numeric、timestamp[tz]、date、time、uuid、bytea、jsonb、文本类 |
 | `RowDescription` 带 PG 类型 OID（int4/int8/text/bool/float8/numeric/timestamp…） | ✅ |
 | `RowDescription` 的 `tableOID` / `attnum`（列的真实来源，客户端靠它判断结果集能否回写） | ✅ 表达式列按 PG 规矩给 0 |
 | 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |

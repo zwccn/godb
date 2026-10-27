@@ -1351,6 +1351,11 @@ func (p *parser) parseInsert() (Statement, error) {
 			return nil, p.errAt(p.peek(), "expected SELECT")
 		}
 		st.Select = sel
+		oc, err := p.parseOnConflict()
+		if err != nil {
+			return nil, err
+		}
+		st.OnConflict = oc
 		ret, err := p.parseReturning()
 		if err != nil {
 			return nil, err
@@ -1386,12 +1391,99 @@ func (p *parser) parseInsert() (Statement, error) {
 		}
 		break
 	}
+	oc, err := p.parseOnConflict()
+	if err != nil {
+		return nil, err
+	}
+	st.OnConflict = oc
 	ret, err := p.parseReturning()
 	if err != nil {
 		return nil, err
 	}
 	st.Returning = ret
 	return st, nil
+}
+
+// parseAssignments 解析 `col = expr [, col = expr ...]`（UPDATE SET 与
+// INSERT ... ON CONFLICT DO UPDATE SET 共用）。
+func (p *parser) parseAssignments() ([]*Assignment, error) {
+	var out []*Assignment
+	for {
+		col, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectPunct("="); err != nil {
+			return nil, err
+		}
+		v, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &Assignment{Col: col, Value: v})
+		if !p.acceptPunct(",") {
+			return out, nil
+		}
+	}
+}
+
+// parseOnConflict 解析 INSERT 的 ON CONFLICT 子句（可省略）。
+//
+//	ON CONFLICT [(col, ...)] DO NOTHING
+//	ON CONFLICT [(col, ...)] DO UPDATE SET a = excluded.a [, ...] [WHERE ...]
+//	ON CONFLICT ON CONSTRAINT 名字 DO NOTHING
+//
+// 没写目标列时表示「任何唯一冲突都按这个策略处理」。
+func (p *parser) parseOnConflict() (*OnConflict, error) {
+	if !p.acceptKw("on") {
+		return nil, nil
+	}
+	if err := p.expectKw("conflict"); err != nil {
+		return nil, err
+	}
+	oc := &OnConflict{}
+	if p.atPunct("(") {
+		cols, err := p.parseIdentList()
+		if err != nil {
+			return nil, err
+		}
+		oc.Target = cols
+	} else if p.acceptKw("on") {
+		if err := p.expectKw("constraint"); err != nil {
+			return nil, err
+		}
+		name, err := p.ident()
+		if err != nil {
+			return nil, err
+		}
+		oc.Constraint = name
+	}
+	if err := p.expectKw("do"); err != nil {
+		return nil, err
+	}
+	switch {
+	case p.acceptKw("nothing"):
+		oc.DoNothing = true
+	case p.acceptKw("update"):
+		if err := p.expectKw("set"); err != nil {
+			return nil, err
+		}
+		sets, err := p.parseAssignments()
+		if err != nil {
+			return nil, err
+		}
+		oc.Updates = sets
+		if p.acceptKw("where") {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			oc.UpdateWhere = e
+		}
+	default:
+		return nil, p.errAt(p.peek(), "expected NOTHING or UPDATE after ON CONFLICT DO")
+	}
+	return oc, nil
 }
 
 // parseReturning 解析可选的 RETURNING 输出项列表。
@@ -1428,23 +1520,23 @@ func (p *parser) parseUpdate() (Statement, error) {
 	if err := p.expectKw("set"); err != nil {
 		return nil, err
 	}
-	for {
-		col, err := p.ident()
+	sets, err := p.parseAssignments()
+	if err != nil {
+		return nil, err
+	}
+	st.Sets = sets
+	// UPDATE ... FROM 另一张表（关联更新）
+	if p.acceptKw("from") {
+		ft, err := p.tableName()
 		if err != nil {
 			return nil, err
 		}
-		if err := p.expectPunct("="); err != nil {
+		st.From = &BaseTable{Table: ft}
+		if alias, ok, err := p.parseOptAlias(); err != nil {
 			return nil, err
+		} else if ok {
+			st.From.Alias = alias
 		}
-		v, err := p.parseExpr()
-		if err != nil {
-			return nil, err
-		}
-		st.Sets = append(st.Sets, &Assignment{Col: col, Value: v})
-		if p.acceptPunct(",") {
-			continue
-		}
-		break
 	}
 	if p.acceptKw("where") {
 		e, err := p.parseExpr()
@@ -1474,6 +1566,19 @@ func (p *parser) parseDelete() (Statement, error) {
 		return nil, err
 	} else if ok {
 		st.Alias = alias
+	}
+	// DELETE ... USING 另一张表（按关联条件删行）
+	if p.acceptKw("using") {
+		ut, err := p.tableName()
+		if err != nil {
+			return nil, err
+		}
+		st.Using = &BaseTable{Table: ut}
+		if alias, ok, err := p.parseOptAlias(); err != nil {
+			return nil, err
+		} else if ok {
+			st.Using.Alias = alias
+		}
 	}
 	if p.acceptKw("where") {
 		e, err := p.parseExpr()

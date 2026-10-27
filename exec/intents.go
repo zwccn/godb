@@ -22,8 +22,16 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 		addIntent(out, s.Table, lock.Exclusive)
 	case *sql.Update:
 		addIntent(out, s.Table, lock.Exclusive)
+		// UPDATE ... FROM：关联表只读，S 锁
+		if s.From != nil {
+			collectRef(s.From, lock.Shared, out)
+		}
 	case *sql.Delete:
 		addIntent(out, s.Table, lock.Exclusive)
+		// DELETE ... USING：关联表只读，S 锁
+		if s.Using != nil {
+			collectRef(s.Using, lock.Shared, out)
+		}
 	case *sql.Truncate:
 		addIntent(out, s.Table, lock.Exclusive)
 	case *sql.CreateTable:

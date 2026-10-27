@@ -155,6 +155,22 @@ type Insert struct {
 
 	// Returning 是 RETURNING 后面那串输出项。
 	Returning []*SelectItem
+
+	// OnConflict 是 ON CONFLICT 子句（upsert），nil 表示没有。
+	OnConflict *OnConflict
+}
+
+// OnConflict 是 INSERT 的 ON CONFLICT 子句。
+type OnConflict struct {
+	// Target 是 ON CONFLICT (col, ...) 指定的列；空表示「任意唯一冲突都算」。
+	Target []string
+	// Constraint 是 ON CONFLICT ON CONSTRAINT 名字 的写法。
+	Constraint string
+	DoNothing  bool
+	// Updates 是 DO UPDATE SET 的赋值列表；表达式里可以用 excluded 引用待插入行的值。
+	Updates []*Assignment
+	// UpdateWhere 是 DO UPDATE 的 WHERE（只对冲突行求值）。
+	UpdateWhere Expr
 }
 
 // Assignment 是 UPDATE 的一个 SET 项。
@@ -170,6 +186,10 @@ type Update struct {
 	Sets  []*Assignment
 	Where Expr
 
+	// From 是 UPDATE ... FROM 里的额外表（PostgreSQL 的关联更新）。
+	// 只支持一张表，够 ORM 用；多表可以用 EXISTS/标量子查询绕。
+	From *BaseTable
+
 	Returning []*SelectItem
 }
 
@@ -178,6 +198,9 @@ type Delete struct {
 	Table string
 	Alias string
 	Where Expr
+
+	// Using 是 DELETE ... USING 里的额外表（按另一张表的匹配条件删行）。
+	Using *BaseTable
 
 	Returning []*SelectItem
 }

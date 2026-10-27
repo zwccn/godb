@@ -1126,20 +1126,28 @@ func (tx *Tx) PKLookup(t *catalog.Table, key string) (IndexHit, bool) {
 //
 // 复合主键必须按「整组」判重：(a,b) 主键下 a 单独重复是合法的。
 // 主键组走内存哈希索引；非主键的 UNIQUE 组只能全表扫描。
+// FindUniqueGroup 判断这组值是否与已有行冲突（唯一约束校验用）。
 func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, self *Ref, scanTo int) (bool, error) {
+	_, ok, err := tx.FindUniqueGroupRef(t, cols, vals, self, scanTo)
+	return ok, err
+}
+
+// FindUniqueGroupRef 和 FindUniqueGroup 一样，但顺带返回冲突行的引用。
+// INSERT ... ON CONFLICT DO UPDATE 要靠它定位要被覆盖的那一行。
+func (tx *Tx) FindUniqueGroupRef(t *catalog.Table, cols []int, vals []types.Value, self *Ref, scanTo int) (Ref, bool, error) {
 	if len(cols) == 0 || len(cols) != len(vals) {
-		return false, nil
+		return Ref{}, false, nil
 	}
 	// 含 NULL 的组合不参与唯一性判断（和 SQL 一致）
 	for _, v := range vals {
 		if v.IsNull() {
-			return false, nil
+			return Ref{}, false, nil
 		}
 	}
 	key := OrderKey(vals)
 	td := tx.st.Table(t.Name)
 	if td == nil {
-		return false, fmt.Errorf("relation %q does not exist", t.Name)
+		return Ref{}, false, fmt.Errorf("relation %q does not exist", t.Name)
 	}
 	o := tx.ov[cleanName(t.Name)]
 	isPK := sameCols(cols, t.PKIdxes())
@@ -1158,7 +1166,7 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 					continue
 				}
 			}
-			return true, nil
+			return Ref{Slot: idx}, true, nil
 		}
 	}
 	// 本事务的写集里也可能藏着冲突。注意这里不能提前返回：事务外的一条
@@ -1180,7 +1188,7 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 			if self != nil && self.New && self.Slot == i {
 				continue
 			}
-			return true, nil
+			return Ref{New: true, Slot: i}, true, nil
 		}
 		for idx, row := range o.upd {
 			if o.del[idx] || !groupKeyEqual(row, cols, key) {
@@ -1189,7 +1197,7 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 			if self != nil && !self.New && self.Slot == idx {
 				continue
 			}
-			return true, nil
+			return Ref{Slot: idx}, true, nil
 		}
 	}
 	// 非主键的唯一组合：查 UNIQUE 列的哈希索引（已提交态）。
@@ -1209,29 +1217,30 @@ func (tx *Tx) FindUniqueGroup(t *catalog.Table, cols []int, vals []types.Value, 
 						continue
 					}
 				}
-				return true, nil
+				return Ref{Slot: slot}, true, nil
 			}
-			return false, nil
+			return Ref{}, false, nil
 		}
 		// 兜底：表结构刚变、哈希表还没重建时照样全表扫一遍，不能漏判
+		var found Ref
 		var conflict bool
 		err := tx.Scan(t.Name, func(ref Ref, row types.Row) error {
 			if self != nil && ref.New == self.New && ref.Slot == self.Slot {
 				return nil
 			}
 			if groupKeyEqual(row, cols, key) {
-				conflict = true
+				found, conflict = ref, true
 			}
 			return nil
 		})
 		if err != nil {
-			return false, err
+			return Ref{}, false, err
 		}
 		if conflict {
-			return true, nil
+			return found, true, nil
 		}
 	}
-	return false, nil
+	return Ref{}, false, nil
 }
 
 // groupKeyEqual 判断某行的这组列编码后是否等于 key。

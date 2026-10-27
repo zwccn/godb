@@ -2,6 +2,7 @@ package exec
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"godb/catalog"
@@ -568,6 +569,8 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 	// 语句内已出现过的唯一键（避免 O(n²) 的 overlay 扫描）
 	seen := map[string]map[string]bool{}
 	baseIns := tx.OverlayInsLen(t.Name)
+	// skipped 是 ON CONFLICT DO NOTHING 跳过的行数，updated 是 DO UPDATE 改的行数。
+	var skipped, updated int
 
 	for _, exprs := range rows {
 		if len(exprs) != len(targets) {
@@ -622,42 +625,59 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		if err := e.checkFKRow(tx, t, row); err != nil {
 			return nil, err
 		}
-		for gi, g := range groups {
-			vals, ok := groupValues(row, g)
+		conflict, hasConflict, err := e.insertConflict(tx, t, row, groups, uixs, seen, baseIns, nil, s.OnConflict)
+		if err != nil {
+			return nil, err
+		}
+		if hasConflict {
+			if s.OnConflict == nil {
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", conflict.name)
+			}
+			if s.OnConflict.DoNothing {
+				skipped++
+				continue
+			}
+			// DO UPDATE：把冲突行按 SET 列表改掉，而不是插入新行。
+			// 同一条语句里出现两次相同键时 PostgreSQL 会拒绝（否则「改两次」
+			// 的结果取决于顺序），这里照做。
+			if conflict.fromStmt {
+				return nil, fmt.Errorf("ON CONFLICT DO UPDATE command cannot affect row a second time")
+			}
+			oldRow, ok := tx.Get(t.Name, conflict.ref)
 			if !ok {
-				continue // 含 NULL 的组合不参与唯一性判断
+				return nil, fmt.Errorf("failed to fetch the conflicting row")
 			}
-			k := types.Key(vals)
-			cm := seenKeys(seen, fmt.Sprintf("g%d", gi))
-			if cm[k] {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
-			}
-			cm[k] = true
-			// 只扫本语句之前插入的行；本语句内重复已由 seen 拦住
-			dup, err := tx.FindUniqueGroup(t, g, vals, nil, baseIns)
+			nr, doUpdate, err := e.buildConflictUpdate(tx, t, oldRow, row, s.OnConflict)
 			if err != nil {
 				return nil, err
 			}
-			if dup {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", groupName(t, g))
-			}
-		}
-		for _, ux := range uixs {
-			vals, ok := groupValues(row, ux.cols)
-			if !ok {
+			if !doUpdate {
+				skipped++
 				continue
 			}
-			k := storage.OrderKey(vals) // 和树里的键同一套编码
-			cm := seenKeys(seen, "i"+ux.name)
-			if cm[k] {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
+			if err := evalChecks(checks, nr); err != nil {
+				return nil, err
 			}
-			cm[k] = true
-			// 唯一索引自带哈希表，判重是 O(1)：命中任何一行都算重复。
-			// 本语句刚插入的行也在结果里，但同语句重复已经被上面的 seen 拦住了。
-			if hits := tx.IndexLookup(t, ux.name, ux.cols, k); len(hits) > 0 {
-				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
+			if err := e.checkFKRow(tx, t, nr); err != nil {
+				return nil, err
 			}
+			// 改完可能撞上别的唯一键（比如把 name 改成了别人已有的值）。
+			// 用全新的 seen 复检，并排除被改的这一行自身。
+			if again, dup, err := e.insertConflict(tx, t, nr, groups, uixs,
+				map[string]map[string]bool{}, baseIns, &conflict.ref, s.OnConflict); err != nil {
+				return nil, err
+			} else if dup {
+				return nil, fmt.Errorf("duplicate key value violates unique constraint %q", again.name)
+			}
+			if err := tx.Update(t.Name, conflict.ref, nr); err != nil {
+				return nil, err
+			}
+			updated++
+			if len(retEvals) > 0 {
+				// DO UPDATE 的 RETURNING 看到的是更新后的行
+				inserted = append(inserted, nr)
+			}
+			continue
 		}
 		if _, err := tx.Insert(t.Name, row); err != nil {
 			return nil, err
@@ -666,10 +686,12 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 			inserted = append(inserted, row)
 		}
 	}
+	// PostgreSQL 的 INSERT 标签报的是真正写进去的行数：ON CONFLICT 跳过的
+	// 那部分不算，DO UPDATE 的那部分算（它确实改了行）。
 	res := &Result{
 		Command:  "INSERT",
-		Tag:      fmt.Sprintf("INSERT 0 %d", len(rows)),
-		Affected: len(rows),
+		Tag:      fmt.Sprintf("INSERT 0 %d", len(rows)-skipped),
+		Affected: len(rows) - skipped,
 	}
 	if len(retEvals) > 0 {
 		res.Columns = retCols
@@ -687,6 +709,210 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		res.RowCount = len(res.Rows)
 	}
 	return res, nil
+}
+
+// relatedRows 把 UPDATE ... FROM / DELETE ... USING 的关联表整表读进内存。
+// 返回它的作用域（要拼在目标表后面）和行数据。
+//
+// 关联表通常很小（字典表、临时表），整表读进来比逐行回表简单得多，
+// 也避免在事务扫描过程里再嵌套一次扫描。
+func (e *Engine) relatedRows(tx *storage.Tx, ref *sql.BaseTable) (Schema, [][]types.Value, error) {
+	t, ok := e.Cat.Get(ref.Table)
+	if !ok {
+		if _, sys := syscat.Lookup(ref.Schema, ref.Table); sys {
+			return nil, nil, fmt.Errorf("permission denied: %q is a system catalog", ref.Table)
+		}
+		return nil, nil, fmt.Errorf("relation %q does not exist", ref.Table)
+	}
+	sc := e.tableScope(t, ref.Alias)
+	var rows [][]types.Value
+	err := tx.Scan(t.Name, func(_ storage.Ref, row types.Row) error {
+		cp := make(types.Row, len(row))
+		copy(cp, row)
+		rows = append(rows, cp)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return sc, rows, nil
+}
+
+// conflictInfo 描述一次唯一约束冲突。
+type conflictInfo struct {
+	name string // 约束名，报错和 ON CONFLICT 都用它
+	ref  storage.Ref
+	// fromStmt 为 true 表示冲突来自同一条 INSERT 里前面的行（ref 无效）。
+	fromStmt bool
+}
+
+// insertConflict 检查一行是否与已有数据、或本语句前面插入的行冲突。
+// self 非 nil 时排除这一行自身（ON CONFLICT DO UPDATE 复检用）。
+func (e *Engine) insertConflict(tx *storage.Tx, t *catalog.Table, row types.Row,
+	groups [][]int, uixs []uxGroup, seen map[string]map[string]bool,
+	baseIns int, self *storage.Ref, oc *sql.OnConflict) (conflictInfo, bool, error) {
+
+	for gi, g := range groups {
+		vals, ok := groupValues(row, g)
+		if !ok {
+			continue // 含 NULL 的组合不参与唯一性判断
+		}
+		name := groupName(t, g)
+		handled := conflictHandled(t, oc, g, name)
+		k := types.Key(vals)
+		cm := seenKeys(seen, fmt.Sprintf("g%d", gi))
+		if cm[k] {
+			if !handled {
+				return conflictInfo{}, false, fmt.Errorf("duplicate key value violates unique constraint %q", name)
+			}
+			return conflictInfo{name: name, fromStmt: true}, true, nil
+		}
+		cm[k] = true
+		// 只扫本语句之前插入的行；本语句内重复已由 seen 拦住
+		ref, dup, err := tx.FindUniqueGroupRef(t, g, vals, self, baseIns)
+		if err != nil {
+			return conflictInfo{}, false, err
+		}
+		if dup {
+			if !handled {
+				return conflictInfo{}, false, fmt.Errorf("duplicate key value violates unique constraint %q", name)
+			}
+			return conflictInfo{name: name, ref: ref}, true, nil
+		}
+	}
+	for _, ux := range uixs {
+		vals, ok := groupValues(row, ux.cols)
+		if !ok {
+			continue
+		}
+		k := storage.OrderKey(vals) // 和树里的键同一套编码
+		handled := conflictHandled(t, oc, ux.cols, ux.name)
+		cm := seenKeys(seen, "i"+ux.name)
+		if cm[k] {
+			if !handled {
+				return conflictInfo{}, false, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
+			}
+			return conflictInfo{name: ux.name, fromStmt: true}, true, nil
+		}
+		cm[k] = true
+		// 唯一索引自带哈希表，判重是 O(1)：命中任何一行都算重复。
+		for _, h := range tx.IndexLookup(t, ux.name, ux.cols, k) {
+			if self != nil && h.Ref.New == self.New && h.Ref.Slot == self.Slot {
+				continue
+			}
+			if !handled {
+				return conflictInfo{}, false, fmt.Errorf("duplicate key value violates unique constraint %q", ux.name)
+			}
+			return conflictInfo{name: ux.name, ref: h.Ref}, true, nil
+		}
+	}
+	return conflictInfo{}, false, nil
+}
+
+// conflictHandled 判断某个唯一约束上的冲突是否归 ON CONFLICT 处理。
+//
+// 不带目标列的 ON CONFLICT 管所有唯一冲突；带了 (col, ...) 或 ON CONSTRAINT
+// 名字时只管对应的那一个，别的约束冲突照常报错 —— PostgreSQL 就是这个语义。
+func conflictHandled(t *catalog.Table, oc *sql.OnConflict, cols []int, name string) bool {
+	if oc == nil {
+		return false
+	}
+	if oc.Constraint != "" {
+		return strings.EqualFold(oc.Constraint, name)
+	}
+	if len(oc.Target) == 0 {
+		return true
+	}
+	if len(oc.Target) != len(cols) {
+		return false
+	}
+	want := make([]int, 0, len(oc.Target))
+	for _, cn := range oc.Target {
+		idx, ok := t.ColumnIdx(cn)
+		if !ok {
+			return false
+		}
+		want = append(want, idx)
+	}
+	sort.Ints(want)
+	got := append([]int(nil), cols...)
+	sort.Ints(got)
+	for i := range want {
+		if want[i] != got[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// buildConflictUpdate 按 ON CONFLICT DO UPDATE SET 生成更新后的行。
+// 第二个返回值是 false 表示 DO UPDATE 的 WHERE 不成立，等价于 DO NOTHING。
+//
+// excluded 不是真表：把目标表的列复制一份、限定符换成 "excluded"，挂在
+// scope 后面，求值时行也拼成「旧行 + 新行」。这样 excluded.col 就是待插入
+// 行的值，裸写 col 则因为两列同名而报 ambiguous —— 和 PostgreSQL 一致。
+func (e *Engine) buildConflictUpdate(tx *storage.Tx, t *catalog.Table,
+	oldRow, newRow types.Row, oc *sql.OnConflict) (types.Row, bool, error) {
+
+	sc := e.tableScope(t, "")
+	excluded := make(Schema, len(sc))
+	for i, ci := range sc {
+		excluded[i] = ci
+		excluded[i].Qualifier = "excluded"
+	}
+	combined := append(append(Schema{}, sc...), excluded...)
+	row := make(types.Row, 0, len(oldRow)+len(newRow))
+	row = append(row, oldRow...)
+	row = append(row, newRow...)
+
+	ctx := &compileCtx{sc: combined, planner: e.planner(tx)}
+
+	if oc.UpdateWhere != nil {
+		ev, err := compile(oc.UpdateWhere, ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		v, err := ev.Eval(row)
+		if err != nil {
+			return nil, false, err
+		}
+		if v.IsNull() || !v.Bool() {
+			return nil, false, nil
+		}
+	}
+
+	out := make(types.Row, len(oldRow))
+	copy(out, oldRow)
+	assigned := map[int]bool{}
+	for _, a := range oc.Updates {
+		idx, ok := t.ColumnIdx(a.Col)
+		if !ok {
+			return nil, false, fmt.Errorf("column %q of relation %q does not exist", a.Col, t.Name)
+		}
+		if assigned[idx] {
+			return nil, false, fmt.Errorf("column %q specified more than once", a.Col)
+		}
+		assigned[idx] = true
+		ev, err := compile(a.Value, ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		v, err := ev.Eval(row)
+		if err != nil {
+			return nil, false, err
+		}
+		cv, err := types.Cast(v, t.Columns[idx].Type())
+		if err != nil {
+			return nil, false, fmt.Errorf("column %q: %w", a.Col, err)
+		}
+		out[idx] = cv
+	}
+	for i, col := range t.Columns {
+		if col.NotNull && out[i].IsNull() {
+			return nil, false, fmt.Errorf("null value in column %q violates not-null constraint", col.Name)
+		}
+	}
+	return out, true, nil
 }
 
 // selectRows 跑一条查询，返回原始值行（不受客户端格式影响）。
@@ -879,7 +1105,18 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		}
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
+	ncol := len(t.Columns)
 	sc := e.tableScope(t, s.Alias)
+	// UPDATE ... FROM：把关联表整表读进来，scope 拼在目标表后面。
+	var fromRows [][]types.Value
+	if s.From != nil {
+		fs, fr, err := e.relatedRows(tx, s.From)
+		if err != nil {
+			return nil, err
+		}
+		fromRows = fr
+		sc = append(append(Schema{}, sc...), fs...)
+	}
 
 	type setItem struct {
 		idx int
@@ -934,38 +1171,74 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 	affected := 0
 	var refs []storage.Ref
 	var rows []types.Row
-	collect := func(ref storage.Ref, row types.Row) error {
-		if pred != nil {
-			v, err := pred.Eval(row)
-			if err != nil {
-				return err
-			}
-			b, isNull, err := asBool(v)
-			if err != nil {
-				return err
-			}
-			if isNull || !b {
-				return nil
-			}
+	// matchRow 判断一行（可能已拼上关联表的值）是否满足 WHERE。
+	matchRow := func(row types.Row) (bool, error) {
+		if pred == nil {
+			return true, nil
 		}
-		refs = append(refs, ref)
-		rows = append(rows, row)
+		v, err := pred.Eval(row)
+		if err != nil {
+			return false, err
+		}
+		b, isNull, err := asBool(v)
+		if err != nil {
+			return false, err
+		}
+		return !isNull && b, nil
+	}
+	joinRow := func(row types.Row, fr types.Row) types.Row {
+		out := make(types.Row, 0, len(row)+len(fr))
+		out = append(out, row...)
+		return append(out, fr...)
+	}
+	collect := func(ref storage.Ref, row types.Row) error {
+		if s.From == nil {
+			ok, err := matchRow(row)
+			if err != nil || !ok {
+				return err
+			}
+			refs = append(refs, ref)
+			rows = append(rows, row)
+			return nil
+		}
+		// 有关联表时逐行配对；命中第一条匹配的关联行就够（和 PG 的非确定语义
+		// 一致：只保证用的是一条匹配行）。
+		for _, fr := range fromRows {
+			combined := joinRow(row, fr)
+			ok, err := matchRow(combined)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			refs = append(refs, ref)
+			rows = append(rows, combined)
+			return nil
+		}
 		return nil
 	}
 	// WHERE 能完整匹配某个索引时就不全表扫（多数 UPDATE 都是按主键改一行）。
-	if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
-		for i := range irefs {
-			if err := collect(irefs[i], irows[i]); err != nil {
-				return nil, err
+	// 带 FROM 时不能走索引路径：WHERE 还引用了关联表的列。
+	if s.From == nil {
+		if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
+			for i := range irefs {
+				if err := collect(irefs[i], irows[i]); err != nil {
+					return nil, err
+				}
 			}
+		} else if err := tx.Scan(t.Name, collect); err != nil {
+			return nil, err
 		}
 	} else if err := tx.Scan(t.Name, collect); err != nil {
 		return nil, err
 	}
 
 	for i, row := range rows {
-		newRow := make(types.Row, len(row))
-		copy(newRow, row)
+		// row 可能是「目标行 + 关联表行」拼起来的，写回去的只有前 ncol 列。
+		base := row[:ncol]
+		newRow := make(types.Row, ncol)
+		copy(newRow, base)
 		for _, st := range sets {
 			v, err := st.ev.Eval(row)
 			if err != nil {
@@ -994,7 +1267,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			if !ok {
 				continue
 			}
-			if groupUnchanged(row, newRow, g) {
+			if groupUnchanged(base, newRow, g) {
 				continue // 没动这一组，不必查重
 			}
 			dup, err := tx.FindUniqueGroup(t, g, vals, &self, -1)
@@ -1010,7 +1283,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			if !ok {
 				continue
 			}
-			if groupUnchanged(row, newRow, ux.cols) {
+			if groupUnchanged(base, newRow, ux.cols) {
 				continue // 没动这一组，不必查重
 			}
 			dup := false
@@ -1069,6 +1342,16 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	sc := e.tableScope(t, s.Alias)
+	// DELETE ... USING：把关联表整表读进来，scope 拼在目标表后面。
+	var usingRows [][]types.Value
+	if s.Using != nil {
+		us, ur, err := e.relatedRows(tx, s.Using)
+		if err != nil {
+			return nil, err
+		}
+		usingRows = ur
+		sc = append(append(Schema{}, sc...), us...)
+	}
 	var pred Eval
 	if s.Where != nil {
 		p, err := Compile(s.Where, sc)
@@ -1091,19 +1374,48 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 
 	var refs []storage.Ref
 	var delRows []types.Row
-	collect := func(ref storage.Ref, row types.Row) error {
-		if pred != nil {
+	// matchUsing 判断目标行是否与 USING 表里的某一行共同满足 WHERE。
+	// 命中任意一行即可（删不删是布尔结论，不需要挑具体是哪一行）。
+	matchUsing := func(row types.Row) (bool, error) {
+		if s.Using == nil {
+			if pred == nil {
+				return true, nil
+			}
 			v, err := pred.Eval(row)
 			if err != nil {
-				return err
+				return false, err
 			}
 			b, isNull, err := asBool(v)
 			if err != nil {
-				return err
+				return false, err
 			}
-			if isNull || !b {
-				return nil
+			return !isNull && b, nil
+		}
+		for _, ur := range usingRows {
+			combined := make(types.Row, 0, len(row)+len(ur))
+			combined = append(combined, row...)
+			combined = append(combined, ur...)
+			if pred == nil {
+				return true, nil
 			}
+			v, err := pred.Eval(combined)
+			if err != nil {
+				return false, err
+			}
+			b, isNull, err := asBool(v)
+			if err != nil {
+				return false, err
+			}
+			if !isNull && b {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	collect := func(ref storage.Ref, row types.Row) error {
+		ok, err := matchUsing(row)
+		if err != nil || !ok {
+			return err
 		}
 		refs = append(refs, ref)
 		// Scan 可能复用缓冲，拷一份：外键检查与 RETURNING 都要用
@@ -1112,15 +1424,21 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 		delRows = append(delRows, cp)
 		return nil
 	}
-	if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
-		for i := range irefs {
-			if err := collect(irefs[i], irows[i]); err != nil {
-				return nil, err
+	// 带 USING 时不能走索引路径：WHERE 还引用了 USING 表的列。
+	if s.Using == nil {
+		if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
+			for i := range irefs {
+				if err := collect(irefs[i], irows[i]); err != nil {
+					return nil, err
+				}
 			}
+			goto deleteRows
 		}
-	} else if err := tx.Scan(t.Name, collect); err != nil {
+	}
+	if err := tx.Scan(t.Name, collect); err != nil {
 		return nil, err
 	}
+deleteRows:
 	for i, ref := range refs {
 		// 先看有没有子表引用这行；cascade 的在这里一并删掉（同一事务）
 		casc, err := e.checkFKDelete(tx, t, delRows[i])

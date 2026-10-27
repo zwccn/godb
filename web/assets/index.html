@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>godb · Go 迷你数据库</title>
+<script>
+/* 皮肤要在样式表之前定下来，否则先按深色画一帧再跳成浅色，会闪。
+   ?theme=sky 这种链接参数只对本次生效，不写进本机偏好。 */
+try {
+  var q = new URLSearchParams(location.search).get('theme');
+  var t = q || localStorage.getItem('godb.theme');
+  if (t && t !== 'dark') document.documentElement.setAttribute('data-theme', t);
+} catch (e) {}
+</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -22,6 +31,17 @@
     </div>
   </div>
   <div class="top-actions">
+    <div class="theme-switch" role="group" aria-label="皮肤">
+      <span class="theme-switch-label">皮肤</span>
+      <button class="theme-dot theme-dot-dark" type="button" data-theme="dark"
+              title="深色" aria-label="深色" aria-pressed="true"></button>
+      <button class="theme-dot theme-dot-sky" type="button" data-theme="sky"
+              title="淡蓝" aria-label="淡蓝" aria-pressed="false"></button>
+      <button class="theme-dot theme-dot-taro" type="button" data-theme="taro"
+              title="芋紫" aria-label="芋紫" aria-pressed="false"></button>
+      <button class="theme-dot theme-dot-mint" type="button" data-theme="mint"
+              title="薄荷绿" aria-label="薄荷绿" aria-pressed="false"></button>
+    </div>
     <span id="txPill" class="pill pill-idle">空闲</span>
     <button id="btnLocks" class="btn btn-ghost">锁状态<span id="lockBadge" class="badge hidden">0</span></button>
     <button id="btnSettings" class="btn btn-ghost">设置</button>

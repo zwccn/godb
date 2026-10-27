@@ -7,6 +7,34 @@ const txBar = document.getElementById('txBar');
 const txText = document.getElementById('txText');
 const txPill = document.getElementById('txPill');
 
+// ---------- 皮肤 ----------
+// 颜色全在 CSS 变量里，这里只负责切 html[data-theme]，并把选择记在本机。
+const THEME_KEY = 'godb.theme';
+const THEMES = ['dark', 'sky', 'taro', 'mint'];
+
+function applyTheme(name, save) {
+  if (!THEMES.includes(name)) name = 'dark';
+  // 深色是默认值，挂在 :root 上，所以不加属性即可
+  if (name === 'dark') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.setAttribute('data-theme', name);
+  }
+  for (const dot of document.querySelectorAll('.theme-dot')) {
+    dot.setAttribute('aria-pressed', String(dot.dataset.theme === name));
+  }
+  // 只有用户点按钮时才记为偏好；链接参数（?theme=）只是当次预览
+  if (save) {
+    try { localStorage.setItem(THEME_KEY, name); } catch (e) {}
+  }
+}
+
+for (const dot of document.querySelectorAll('.theme-dot')) {
+  dot.addEventListener('click', () => applyTheme(dot.dataset.theme, true));
+}
+// 进入页面时按上次的选择点亮按钮（属性已经由 head 里的内联脚本设好了）
+applyTheme(document.documentElement.getAttribute('data-theme') || 'dark', false);
+
 // 最近一次 /api/schema 的结果，右键菜单和表设计器都从这里取，避免每次再请求。
 let schemaCache = [];
 // 当前会话是否有未提交的事务（DDL 不能在事务里执行）。

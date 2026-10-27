@@ -29,6 +29,8 @@
   --accent-soft-bg: #14293c;
   --accent-soft-border: #22425c;
   --accent-soft-text: #9ecbff;
+  /* 补全候选的选中行：必须明显亮于弹层底色（--bg-2），否则看不出来选了哪条 */
+  --hint-active-bg: #24425f;
   --ok-bg: #1c4429;
   --ok-bg-hover: #22502f;
   --ok-border: #2c6b3f;
@@ -85,6 +87,7 @@ html[data-theme="sky"] {
   --accent-soft-bg: #dceafa;
   --accent-soft-border: #a9cbee;
   --accent-soft-text: #1e5f9e;
+  --hint-active-bg: #bcd8f4;
   --ok-bg: #d9f0e2;
   --ok-bg-hover: #caeada;
   --ok-border: #9ed3b3;
@@ -137,6 +140,7 @@ html[data-theme="taro"] {
   --accent-soft-bg: #e8ddfa;
   --accent-soft-border: #c0a9ee;
   --accent-soft-text: #5b3cb8;
+  --hint-active-bg: #d0bbf4;
   --ok-bg: #dcf0e6;
   --ok-bg-hover: #cdeade;
   --ok-border: #a3d3ba;
@@ -189,6 +193,7 @@ html[data-theme="mint"] {
   --accent-soft-bg: #dcf3e9;
   --accent-soft-border: #a6dcc8;
   --accent-soft-text: #14775a;
+  --hint-active-bg: #b4e4cd;
   --ok-bg: #d6f1e3;
   --ok-bg-hover: #c6ebd9;
   --ok-border: #98d5b8;
@@ -1710,15 +1715,44 @@ body.editor-resizing * { cursor: ns-resize !important; }
   align-items: baseline;
   justify-content: space-between;
   gap: 18px;
-  padding: 3px 8px;
+  /* 左侧留 3px 给选中条：非选中用透明占位，选中时文字才不会整体右移 */
+  padding: 3px 8px 3px 9px;
   border-radius: 4px;
   color: var(--text-2);
   white-space: nowrap;
+  box-shadow: inset 3px 0 0 transparent;
 }
 
+/* 选中行：底色由各皮肤单独给（--hint-active-bg），必须和弹层底色拉开一档，
+   再加一条主题色左条 + 文字提亮，三层叠加才够醒目 */
 li.CodeMirror-hint-active {
-  background: var(--accent-soft-bg);
+  background: var(--hint-active-bg);
   color: var(--text);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* 候选里命中的「已输入片段」：跟类型说明同色系但加粗，扫一眼就知道匹配到哪几个字 */
+.cm-hint-hit {
+  color: var(--accent-soft-text);
+  font-weight: 700;
+}
+
+/* 左侧候选词要能被右侧签名挤窄，否则长函数签名会把弹层撑破（min-width:auto 是 flex 默认的坑） */
+.cm-hint-label {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 真挤的时候压签名、别压候选词本身：函数名被截成 rege… 就看不出要选哪个了 */
+.CodeMirror-hint .cm-hint-note {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 /* 说明靠右（即使条目本身比内容宽也不会挤在中间） */

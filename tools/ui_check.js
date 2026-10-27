@@ -201,6 +201,51 @@ class CDP {
       return ul ? [...ul.querySelectorAll('li')].map(li => li.textContent.trim()).slice(0, 3) : null;
     })()`);
     check('PG 关键字能补全', !!hint && hint[0] === 'SELECT关键字', hint ? JSON.stringify(hint) : '没有弹层');
+
+    // 候选框的选中行要「一眼看得出来」：底色和弹层底色拉开一档 + 主题色左条 + 命中片段加粗。
+    // 之前拿 accent-soft-bg 当选中色，深色皮肤下它和弹层底色几乎一样，等于没高亮。
+    const hintLook = await cdp.eval(`(() => {
+      cm.setValue('SELECT emp'); cm.setCursor({line:0, ch:10}); cm.focus();
+      cm.execCommand('autocomplete');
+      const ul = document.querySelector('.CodeMirror-hints');
+      if (!ul) return { err: '没有弹层' };
+      const act = ul.querySelector('li.CodeMirror-hint-active');
+      if (!act) return { err: '没有选中行' };
+      const rgb = s => (s.match(/\\d+/g) || []).slice(0, 3).map(Number);
+      const bg = rgb(getComputedStyle(ul).backgroundColor);
+      const ab = rgb(getComputedStyle(act).backgroundColor);
+      const hit = ul.querySelector('.cm-hint-hit');
+      return {
+        delta: Math.abs(bg[0]-ab[0]) + Math.abs(bg[1]-ab[1]) + Math.abs(bg[2]-ab[2]),
+        bar: getComputedStyle(act).boxShadow,
+        hit: hit ? hit.textContent : '',
+        weight: hit ? getComputedStyle(hit).fontWeight : '',
+        fits: ul.scrollWidth <= ul.clientWidth + 1,
+      };
+    })()`);
+    check('候选选中行与弹层底色明显区分', hintLook && hintLook.delta >= 40,
+      hintLook ? `色差 ${hintLook.delta}` : String(hintLook && hintLook.err));
+    check('候选选中行有主题色左条', !!(hintLook && /inset/.test(hintLook.bar || '')),
+      (hintLook && hintLook.bar) || '');
+    check('已输入片段在候选中被标出（加粗）',
+      !!(hintLook && /emp/i.test(hintLook.hit || '')) && Number(hintLook.weight) >= 700,
+      hintLook ? `命中「${hintLook.hit}」，字重 ${hintLook.weight}` : '');
+    check('候选弹层没被长签名撑破', !!(hintLook && hintLook.fits));
+
+    // 换皮肤不能把选中色弄丢（四套都要有 --hint-active-bg，否则退回透明 = 又看不见了）
+    const themeVars = await cdp.eval(`(() => {
+      const out = {};
+      const html = document.documentElement;
+      const keep = html.getAttribute('data-theme');
+      for (const t of ['dark', 'sky', 'taro', 'mint']) {
+        html.setAttribute('data-theme', t);
+        out[t] = getComputedStyle(html).getPropertyValue('--hint-active-bg').trim();
+      }
+      html.setAttribute('data-theme', keep || 'sky');
+      return out;
+    })()`);
+    check('四套皮肤都定义了候选选中色',
+      Object.keys(themeVars).every(k => themeVars[k]), JSON.stringify(themeVars));
     await cdp.eval(`cm.setValue('')`);
 
     // 1) 数据库面板：点遮罩不关闭，点 × 才关闭

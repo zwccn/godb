@@ -270,10 +270,12 @@
     list = filterByWord(list, word || '');
     if (!list.length) return null;
     if (!word && list.length > 60) list = list.slice(0, 60);
+    // 同一个 word 共用一个渲染函数，顺便把命中的字符标出来
+    var render = makeRender(word || '');
     for (var i = 0; i < list.length; i++) {
       // 注意字段叫 note 不叫 hint：show-hint 把 item.hint 当「插入回调函数」，
       // 同名会让它把字符串当函数调用（TypeError，表现为点了候选没反应）
-      if (list[i].note) list[i].render = renderHint;
+      list[i].render = render;
     }
     return { list: list, from: from, to: cur };
   }
@@ -345,6 +347,18 @@
     return build(list, word, from, cur);
   }
 
+  // noteText 收拾右侧说明：函数签名自带函数名（`regexp_replace(text, pattern, repl)`），
+  // 左边已经显示了名字，这里只留 `(text, pattern, repl)`，省宽度也更好读。
+  function noteText(cur) {
+    var note = (cur && cur.note) || '';
+    var name = (cur && (cur.displayText || cur.text)) || '';
+    if (name && note.toLowerCase().indexOf(name.toLowerCase()) === 0) {
+      var rest = note.slice(name.length).trim();
+      if (rest) return rest;
+    }
+    return note;
+  }
+
   // 给每条候选加右侧说明（列类型 / 函数签名 / 关键字标记）。
   // 注意 show-hint 是「每条自己 render」：cur.render(elt, data, cur)，
   // 所以这个函数要挂到每个 item 上，而不是写在 hintOptions 里。
@@ -356,9 +370,45 @@
     if (cur && cur.note) {
       var right = document.createElement('span');
       right.className = 'cm-hint-note';
-      right.textContent = cur.note;
+      right.textContent = noteText(cur);
       el.appendChild(right);
     }
+  }
+
+  // appendLabel 把候选文字按「命中的已输入片段」拆成三段，命中段套 .cm-hint-hit
+  // （加粗 + 主题色）。一律用 textContent 拼，别拼 innerHTML —— 表名是用户起的。
+  function appendLabel(box, label, word) {
+    var w = (word || '').toLowerCase();
+    var at = w ? label.toLowerCase().indexOf(w) : -1;
+    if (at < 0) {
+      box.textContent = label;
+      return;
+    }
+    if (at > 0) box.appendChild(document.createTextNode(label.slice(0, at)));
+    var hit = document.createElement('span');
+    hit.className = 'cm-hint-hit';
+    hit.textContent = label.slice(at, at + w.length);
+    box.appendChild(hit);
+    box.appendChild(document.createTextNode(label.slice(at + w.length)));
+  }
+
+  // makeRender 闭包住当前输入的片段，交给 show-hint 逐条渲染。
+  // 左侧必须整体包在一个 span 里：flex 容器会把零散文本节点当成多个 item，
+  // 中间那条 gap 就会插进候选词内部。
+  function makeRender(word) {
+    return function (el, _data, cur) {
+      el.textContent = '';
+      var left = document.createElement('span');
+      left.className = 'cm-hint-label';
+      appendLabel(left, cur.displayText || cur.text || '', word);
+      el.appendChild(left);
+      if (cur && cur.note) {
+        var right = document.createElement('span');
+        right.className = 'cm-hint-note';
+        right.textContent = noteText(cur);
+        el.appendChild(right);
+      }
+    };
   }
 
   global.GodbHint = {

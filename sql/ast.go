@@ -114,6 +114,15 @@ type Show struct{ Name string }
 // 整条语句识别出来直接确认（客户端连上来时几乎都会先发 SET）。
 type SetStmt struct{ Raw string }
 
+// SessionCleanup 对应 DISCARD / RESET / DEALLOCATE 这三类「清理会话」的语句。
+// godb 没有计划缓存、临时表、sequence 和会话参数，所以识别出来直接确认（no-op）——
+// 关键是**别报语法错**：Npgsql 把连接还回池之前会发 DISCARD ALL，一报错整条
+// 连接池就用不了（只能 Pooling=false 或 No Reset On Close=true 绕）。
+type SessionCleanup struct {
+	Command string // DISCARD / RESET / DEALLOCATE
+	Tag     string // CommandComplete 里回给客户端的标签，如 "DISCARD ALL"
+}
+
 // ---------- DML ----------
 
 // Insert 对应 INSERT INTO ... VALUES。
@@ -274,22 +283,23 @@ type Explain struct {
 	Analyze bool
 }
 
-func (*CreateTable) stmtNode() {}
-func (*DropTable) stmtNode()   {}
-func (*AlterTable) stmtNode()  {}
-func (*Truncate) stmtNode()    {}
-func (*Checkpoint) stmtNode()  {}
-func (*Show) stmtNode()        {}
-func (*SetStmt) stmtNode()     {}
-func (*Insert) stmtNode()      {}
-func (*Copy) stmtNode()        {}
-func (*CreateIndex) stmtNode() {}
-func (*DropIndex) stmtNode()   {}
-func (*Update) stmtNode()      {}
-func (*Delete) stmtNode()      {}
-func (*Select) stmtNode()      {}
-func (*TxStmt) stmtNode()      {}
-func (*Explain) stmtNode()     {}
+func (*CreateTable) stmtNode()    {}
+func (*DropTable) stmtNode()      {}
+func (*AlterTable) stmtNode()     {}
+func (*Truncate) stmtNode()       {}
+func (*Checkpoint) stmtNode()     {}
+func (*Show) stmtNode()           {}
+func (*SetStmt) stmtNode()        {}
+func (*SessionCleanup) stmtNode() {}
+func (*Insert) stmtNode()         {}
+func (*Copy) stmtNode()           {}
+func (*CreateIndex) stmtNode()    {}
+func (*DropIndex) stmtNode()      {}
+func (*Update) stmtNode()         {}
+func (*Delete) stmtNode()         {}
+func (*Select) stmtNode()         {}
+func (*TxStmt) stmtNode()         {}
+func (*Explain) stmtNode()        {}
 
 // ---------- 表达式 ----------
 

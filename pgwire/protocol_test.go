@@ -474,7 +474,7 @@ func TestEmptyQuery(t *testing.T) {
 
 // 列来源：RowDescription 里每列的 tableOID / attnum 必须指向真实的表和列。
 // Navicat 这类客户端靠它判断结果集能不能回写 —— 全 0 时数据网格是只读的
-//（能看不能改），而 psql 完全不看这两个字段，所以以前没暴露。
+// （能看不能改），而 psql 完全不看这两个字段，所以以前没暴露。
 func TestRowDescriptionCarriesColumnOrigin(t *testing.T) {
 	d, addr := startServer(t)
 	c := dial(t, addr)
@@ -542,5 +542,30 @@ func TestRowDescriptionCarriesColumnOrigin(t *testing.T) {
 	}
 	if cols[3].oid != 0 || cols[3].attnum != 0 {
 		t.Fatalf("字面量列不该带来源: %+v", cols[3])
+	}
+}
+
+// 连接池：Npgsql 还连接回池前发 DISCARD ALL 重置会话。以前 godb 报
+// 42601 syntax error at or near "DISCARD"，连接池整个用不了。
+// 这里守住「走协议也能过，且回的是 CommandComplete 而不是 ErrorResponse」。
+func TestSessionCleanupOverWire(t *testing.T) {
+	_, addr := startServer(t)
+	c := dial(t, addr)
+	defer c.close()
+
+	for _, tc := range []struct{ sql, tag string }{
+		{"DISCARD ALL", "DISCARD ALL"},
+		{"RESET ALL", "RESET"},
+		{"DEALLOCATE ALL", "DEALLOCATE"},
+	} {
+		msgs := c.query(tc.sql)
+		for _, m := range msgs {
+			if m.typ == 'E' {
+				t.Fatalf("%s 返回了 ErrorResponse: %s", tc.sql, m.body)
+			}
+		}
+		if got := cmdTag(msgs); got != tc.tag {
+			t.Fatalf("%s 的 CommandComplete = %q, want %q", tc.sql, got, tc.tag)
+		}
 	}
 }

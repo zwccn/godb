@@ -475,7 +475,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 |---|---|
 | psql / pgcli | `-h 127.0.0.1 -p 6432 -U godb -d godb` |
 | Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名 `godb`，**没设密码时密码留空** |
-| .NET（Npgsql / FreeSql / EF Core / Dapper） | 直接连即可（trust 下 `Username` 随便填，调试期建议 `Pooling=false`），见下面「.NET / Npgsql」小节 |
+| .NET（Npgsql / FreeSql / EF Core / Dapper） | 直接连即可（trust 下 `Username` 随便填，连接池也能用），见下面「.NET / Npgsql」小节 |
 
 没启用密码时是 trust 认证，用户名填什么都行；在设置页设了密码之后，用户名必须和那里填的
 一致（默认 `godb`），密码不能空。
@@ -498,6 +498,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 | 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |
 | 事务状态 `ReadyForQuery` 的 `I`/`T`/`E` | ✅ |
 | `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
+| `DISCARD` / `RESET` / `DEALLOCATE`（连接池还连接前发的清理语句） | ✅ no-op 确认，tag 与 PG 一致 |
 | `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
 | 标量子查询 `(SELECT ...)` | ✅ 含相关子查询；多行会报 `more than one row` |
 | `FROM` 子查询、`UNION`/`INTERSECT`/`EXCEPT` | ✅ 客户端触发器页的查询需要 |
@@ -532,7 +533,7 @@ godb 以前只按来源列解析，两张表都有 `oid` → 报 `column referen
 等 6 个用例），现在直接连就行：
 
 ```
-Host=127.0.0.1;Port=6432;Database=godb;Username=godb;Pooling=false
+Host=127.0.0.1;Port=6432;Database=godb;Username=godb
 ```
 
 `Username` 必须有值（trust 认证下随便填）。另外 `NoTypeLoading` 这个枚举值只能写成
@@ -544,6 +545,12 @@ Host=127.0.0.1;Port=6432;Database=godb;Username=godb;Pooling=false
 `encodeResult` 时会多回一帧，**2026-10-27 已修**（`encodeResult(r, withRowDesc bool)`，简单查询传
 `true`、`Execute` 传 `false`；回归测试 `TestExtendedExecuteNoDuplicateRowDesc`）。
 排查这类问题：开 `-pg-log` 能把客户端发来的每条 SQL 落到文件，帧序列用 `tools/pg_extended.py` 打一遍最直观。
+
+**3. 连接池要 `DISCARD ALL`**。Npgsql 把连接**还回池**之前会发一条 `DISCARD ALL` 重置会话
+（清 prepared statement、会话级 `SET`、临时表）。godb 没有这些东西，所以 `DISCARD` / `RESET` /
+`DEALLOCATE` 都按 no-op 确认，回 `CommandComplete`、tag 与 PG 一致（`DISCARD ALL` / `RESET` /
+`DEALLOCATE`）—— 以前这三条直接报 `42601 syntax error at or near "DISCARD"`，连接池整个不可用，
+只能 `Pooling=false` 或 `No Reset On Close=true` 绕。**2026-10-27 已支持**，`Pooling` 留默认值即可。
 
 配 FreeSql 还有两个坑：`FreeSql.Provider.PostgreSQL` 要用 3.5.x（3.2.x 在 .NET 9+ 上 `Build()` 时会因
 `TimeSpan.FromSeconds` 重载歧义崩在 `FreeSql.Internal.Utils` 的静态构造）；实体列名显式标

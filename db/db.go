@@ -283,6 +283,11 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	if _, ok := st.(*sql.SetStmt); ok {
 		return exec.SetResult(), nil
 	}
+	// DISCARD / RESET / DEALLOCATE：同样是会话级清理，不碰表、不需要锁。
+	// 放在中毒事务检查之前，跟 SHOW / SET 一个待遇（客户端断开或还池时会发）。
+	if sc, ok := st.(*sql.SessionCleanup); ok {
+		return exec.CleanupResult(sc), nil
+	}
 
 	if sess.InTx() && sess.Aborted() {
 		return nil, ErrAborted

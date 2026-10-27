@@ -34,8 +34,8 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 		}
 	case *sql.AlterTable:
 		addIntent(out, s.Table, lock.Exclusive)
-	case *sql.TxStmt, *sql.Checkpoint, *sql.Show, *sql.SetStmt:
-		// 事务控制、CHECKPOINT、SHOW/SET 不需要表锁
+	case *sql.TxStmt, *sql.Checkpoint, *sql.Show, *sql.SetStmt, *sql.SessionCleanup:
+		// 事务控制、CHECKPOINT、SHOW/SET、DISCARD/RESET/DEALLOCATE 都不需要表锁
 	}
 	return out, nil
 }

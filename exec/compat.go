@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"godb/catalog"
+	"godb/sql"
 	"godb/syscat"
 	"godb/types"
 )
@@ -384,6 +385,12 @@ func ShowResult(name string) *Result {
 // SetResult 是 SET 的确认结果（godb 不保存会话参数）。
 func SetResult() *Result {
 	return &Result{Command: "SET", Tag: "SET"}
+}
+
+// CleanupResult 是 DISCARD / RESET / DEALLOCATE 的确认结果：没有结果集，只回标签。
+// 这三条在 godb 里没有任何实际清理动作，客户端要的也只是「别报错」。
+func CleanupResult(sc *sql.SessionCleanup) *Result {
+	return &Result{Command: sc.Command, Tag: sc.Tag}
 }
 
 // formatType 把 atttypid + atttypmod 还原成客户端看到的类型写法。

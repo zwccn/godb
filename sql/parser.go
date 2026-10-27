@@ -247,6 +247,27 @@ func (p *parser) parseStatement() (Statement, error) {
 			parts = append(parts, p.advance().Text)
 		}
 		return &SetStmt{Raw: "SET " + strings.Join(parts, " ")}, nil
+	case "DISCARD", "RESET", "DEALLOCATE":
+		// DISCARD { ALL | PLANS | SEQUENCES | TEMPORARY | TEMP }
+		// RESET   { ALL | 参数名 }
+		// DEALLOCATE [PREPARE] { ALL | 语句名 }
+		// 三类都是清理会话用的，godb 没有可清的东西，解析出来当 no-op 确认。
+		cmd := strings.ToUpper(t.Text)
+		p.pos++
+		if cmd == "DEALLOCATE" {
+			p.acceptKw("prepare")
+		}
+		arg := ""
+		if p.peek().Kind == Word {
+			arg = strings.ToUpper(p.advance().Text)
+		}
+		// 命令标签跟 PG 保持一致：DISCARD 带参数（DISCARD ALL），
+		// RESET / DEALLOCATE 只回动词本身（psql 里看到的就是 RESET / DEALLOCATE）
+		tag := cmd
+		if cmd == "DISCARD" && arg != "" {
+			tag = cmd + " " + arg
+		}
+		return &SessionCleanup{Command: cmd, Tag: tag}, nil
 	}
 	return nil, p.errAt(t, "syntax error at or near %q", t.String())
 }

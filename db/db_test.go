@@ -106,6 +106,47 @@ func TestShowAndSet(t *testing.T) {
 	run(t, d, s, `ROLLBACK`)
 }
 
+// DISCARD / RESET / DEALLOCATE：Npgsql 把连接还回池之前会发 DISCARD ALL，
+// 以前报 42601 语法错 → 整个连接池不可用（只能 Pooling=false 绕）。
+// godb 没有计划缓存/临时表/会话参数，这三条就是 no-op，但必须回成功 + 正确 tag。
+func TestSessionCleanup(t *testing.T) {
+	d := newTestDB(t)
+	s := "c"
+
+	cases := []struct{ sql, command, tag string }{
+		{`DISCARD ALL`, "DISCARD", "DISCARD ALL"},
+		{`discard all;`, "DISCARD", "DISCARD ALL"},
+		{`DISCARD PLANS`, "DISCARD", "DISCARD PLANS"},
+		{`DISCARD SEQUENCES`, "DISCARD", "DISCARD SEQUENCES"},
+		{`DISCARD TEMPORARY`, "DISCARD", "DISCARD TEMPORARY"},
+		{`DISCARD TEMP`, "DISCARD", "DISCARD TEMP"},
+		{`RESET ALL`, "RESET", "RESET"},
+		{`RESET search_path`, "RESET", "RESET"},
+		{`DEALLOCATE ALL`, "DEALLOCATE", "DEALLOCATE"},
+		{`DEALLOCATE PREPARE stmt1`, "DEALLOCATE", "DEALLOCATE"},
+	}
+	for _, c := range cases {
+		res := run(t, d, s, c.sql)
+		if len(res) != 1 || res[0].Command != c.command || res[0].Tag != c.tag {
+			t.Fatalf("%s → %+v, want command=%s tag=%s", c.sql, res, c.command, c.tag)
+		}
+		if len(res[0].Rows) != 0 {
+			t.Fatalf("%s 不该有结果集: %v", c.sql, res[0].Rows)
+		}
+	}
+
+	// 事务里、中毒事务里都不能报错（客户端可能在任意状态下发它，和 SHOW/SET 同待遇）
+	run(t, d, s, `BEGIN`)
+	run(t, d, s, `DISCARD ALL`)
+	run(t, d, s, `ROLLBACK`)
+
+	run(t, d, s, `BEGIN`)
+	runErr(t, d, s, `SELECT * FROM 没有这张表`)
+	run(t, d, s, `DISCARD ALL`)
+	run(t, d, s, `RESET ALL`)
+	run(t, d, s, `ROLLBACK`)
+}
+
 func TestBasicCRUD(t *testing.T) {
 	d := newTestDB(t)
 	s := "s1"

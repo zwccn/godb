@@ -198,7 +198,11 @@ func (d *DB) Session(id string) *txn.Session {
 
 // Exec 执行一段 SQL（可含多条语句），返回每条语句的结果。
 // 出错时返回已成功语句的结果 + 错误。
-func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
+//
+// panic 一律在这里兜住并转成普通错误：执行过程中已经拿到的表锁、已经开好的
+// 事务必须回滚掉，否则一个 bug 会让整个库的服务被一把锁吊死。上层（PG 协议的
+// 消息循环）只需要把错误回给客户端，连接和进程都还能继续用。
+func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error) {
 	if d.closed.Load() {
 		return nil, fmt.Errorf("database %q has been dropped", d.Name)
 	}
@@ -222,7 +226,16 @@ func (d *DB) Exec(sess *txn.Session, text string) ([]*exec.Result, error) {
 	defer sess.Unlock()
 	sess.ResetLastWait()
 
-	var out []*exec.Result
+	defer func() {
+		if r := recover(); r != nil {
+			if sess.InTx() {
+				sess.ForceRollback()
+			}
+			out = nil
+			err = fmt.Errorf("internal error: %v", r)
+		}
+	}()
+
 	for _, st := range stmts {
 		var res *exec.Result
 		var err error

@@ -788,6 +788,7 @@ func typeRows(def *catalog.Table) []types.Row {
 			"typalign": sv(td.align), "typstorage": sv(td.store),
 			"typnotnull": bv(false), "typbasetype": iv(0), "typtypmod": iv(-1),
 			"typndims": iv(0), "typcollation": iv(attCollationOf(td.typ)),
+			"typsubscript": sv("raw_array_subscript_handler"),
 		}))
 		if td.array == 0 {
 			continue
@@ -804,6 +805,7 @@ func typeRows(def *catalog.Table) []types.Row {
 			"typalign": sv("i"), "typstorage": sv("x"),
 			"typnotnull": bv(false), "typbasetype": iv(0), "typtypmod": iv(-1),
 			"typndims": iv(0), "typcollation": iv(0),
+			"typsubscript": sv("array_subscript_handler"),
 		}))
 	}
 	return out

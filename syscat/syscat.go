@@ -139,6 +139,9 @@ var specs = []tableSpec{
 		c("typrelid", tOid), c("typelem", tOid), c("typarray", tOid), c("typinput", tRegproc),
 		c("typoutput", tRegproc), c("typreceive", tRegproc), c("typsend", tRegproc),
 		c("typmodin", tRegproc), c("typmodout", tRegproc), c("typanalyze", tRegproc),
+		// PG14 才加的列，但 Npgsql 6/7 的类型加载 SQL 会 SELECT 它，
+		// 缺列整条查询就失败 → 客户端把所有类型当 unknown。
+		c("typsubscript", tRegproc),
 		c("typalign", tChar), c("typstorage", tChar), c("typnotnull", tBool),
 		c("typbasetype", tOid), c("typtypmod", tInt4), c("typndims", tInt4),
 		c("typcollation", tOid), c("typdefaultbin", tText), c("typdefault", tText),

@@ -861,22 +861,7 @@ func collectByIndex(tx *storage.Tx, t *catalog.Table, where sql.Expr) ([]storage
 // ---------- UPDATE / DELETE ----------
 
 func (e *Engine) tableScope(t *catalog.Table, alias string) Schema {
-	qual := alias
-	if qual == "" {
-		qual = t.Name
-	}
-	sc := make(Schema, len(t.Columns))
-	oid, _ := syscat.RelationOID(e.Cat, t.Name)
-	for i, c := range t.Columns {
-		sc[i] = ColInfo{
-			Qualifier: strings.ToLower(qual),
-			Name:      strings.ToLower(c.Name),
-			Type:      c.Type(),
-			TableOID:  oid,
-			AttNum:    int16(i + 1),
-		}
-	}
-	return sc
+	return tableScopeOf(e.Cat, t, alias)
 }
 
 func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {

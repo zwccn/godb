@@ -49,6 +49,11 @@ func newScan(tx *storage.Tx, t *catalog.Table, qual string, cat *catalog.Catalog
 func (o *scanOp) Schema() Schema { return o.sc }
 
 func (o *scanOp) Open() error {
+	// 没有事务就扫表说明调用方在「只编译」的模式下真去执行了计划。
+	// 直接报错，别让空指针把整个进程带走（Describe 阶段的 CTE 踩过这个坑）。
+	if o.tx == nil {
+		return fmt.Errorf("internal error: table scan %q requires a transaction (plan was opened without one)", o.table)
+	}
 	t := o.begin()
 	o.rows = o.rows[:0]
 	o.i = 0

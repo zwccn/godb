@@ -15,6 +15,10 @@ type Planner struct {
 	Tx  *storage.Tx
 	Cat *catalog.Catalog
 
+	// compileOnly 表示「只编译、不执行」，供 PG 协议的 Describe 使用。
+	// 唯一的差别是 CTE 不物化（不碰存储），只登记列名与类型。
+	compileOnly bool
+
 	// Info 是当前库的名字与库列表；nil 表示单库模式（pg_database 只报默认库）。
 	// 只影响系统目录与 current_database()，不影响查询计划。
 	Info *DBInfo
@@ -1683,9 +1687,6 @@ func (p *Planner) materializeCTEs(list []*sql.CTE) error {
 		if err != nil {
 			return err
 		}
-		if err := plan.Open(); err != nil {
-			return err
-		}
 		sc := plan.Schema()
 		d := &cteData{
 			cols:  make([]string, len(sc)),
@@ -1699,6 +1700,14 @@ func (p *Planner) materializeCTEs(list []*sql.CTE) error {
 				d.cols[i] = strings.ToLower(ci.Name)
 			}
 			d.types[i] = ci.Type
+		}
+		// Describe 阶段只关心输出列，跑一遍 CTE 既慢又会崩（那时没有事务）。
+		if p.compileOnly {
+			p.ctes[strings.ToLower(c.Name)] = d
+			continue
+		}
+		if err := plan.Open(); err != nil {
+			return err
 		}
 		for {
 			r, ok, err := plan.Next()

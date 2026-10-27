@@ -128,6 +128,10 @@ type preparedStmt struct {
 type portal struct {
 	stmt *preparedStmt
 	sql  string
+	// resultFormats 是 Bind 里客户端要求的结果格式：0=文本、1=二进制。
+	// 空表示全文本；1 个值表示所有列同一个格式；否则按列一一对应。
+	// 不能忽略：Npgsql（及其上的 EFCore/Dapper）默认要二进制。
+	resultFormats []int16
 }
 
 type conn struct {
@@ -453,30 +457,51 @@ func (c *conn) loop() {
 		if c.skipSync && typ != 'S' && typ != 'X' {
 			continue
 		}
-		switch typ {
-		case 'Q':
-			c.handleSimpleQuery(payload)
-		case 'P':
-			c.handleParse(payload)
-		case 'B':
-			c.handleBind(payload)
-		case 'D':
-			c.handleDescribe(payload)
-		case 'E':
-			c.handleExecute(payload)
-		case 'S':
-			c.skipSync = false
-			_ = c.write(encodeReadyForQuery(c.txStatus()))
-		case 'H': // Flush
-			_ = c.bw.Flush()
-		case 'C':
-			c.handleClose(payload)
-		case 'X':
+		if !c.dispatch(typ, payload) {
 			return
-		default:
-			// 忽略不认识的类型（如 COPY 相关）
 		}
 	}
+}
+
+// dispatch 处理一条前端消息，返回 false 表示连接该结束了。
+//
+// 每条消息都套一层 recover：一个 bug 不能让整个进程退出（以前一条带表的 CTE
+// 就能把库打死，所有连接一起断）。panic 之后把写缓冲清掉（里面可能留着半条
+// 消息），回一个 XX000，然后照常等 Sync —— 客户端会看到一条普通报错。
+func (c *conn) dispatch(typ byte, payload []byte) (keep bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.bw.Reset(c.nc)
+			c.srv.logf("PG 连接内 panic（消息 %q）: %v", typ, r)
+			_ = c.write(encodeError("ERROR", "XX000", fmt.Sprintf("internal error: %v", r)))
+			c.skipSync = true
+			keep = true
+		}
+	}()
+	switch typ {
+	case 'Q':
+		c.handleSimpleQuery(payload)
+	case 'P':
+		c.handleParse(payload)
+	case 'B':
+		c.handleBind(payload)
+	case 'D':
+		c.handleDescribe(payload)
+	case 'E':
+		c.handleExecute(payload)
+	case 'S':
+		c.skipSync = false
+		_ = c.write(encodeReadyForQuery(c.txStatus()))
+	case 'H': // Flush
+		_ = c.bw.Flush()
+	case 'C':
+		c.handleClose(payload)
+	case 'X':
+		return false
+	default:
+		// 忽略不认识的类型（如 COPY 相关）
+	}
+	return true
 }
 
 // ---------- 简单查询 ----------
@@ -511,7 +536,21 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 	_ = c.write(out...)
 }
 
+// encodeResult 用全文本格式编码一条结果（简单查询用）。
 func encodeResult(r *exec.Result, withRowDesc bool) [][]byte {
+	out, err := encodeResultFormats(r, withRowDesc, nil)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// encodeResultFormats 按客户端在 Bind 里要求的格式编码结果行。
+//
+// formats 为空表示全文本；长度 1 表示所有列同一格式；否则逐列对应。
+// 二进制编码失败时返回错误（调用方还没写出任何字节，可以干净地改成 ErrorResponse）——
+// 半行二进制半行文本比报错更糟，客户端会一直读到错位的数据。
+func encodeResultFormats(r *exec.Result, withRowDesc bool, formats []int16) ([][]byte, error) {
 	var out [][]byte
 	if len(r.Columns) > 0 {
 		// 扩展协议里 RowDescription 已经由 Describe 发过一次了，Execute 只补 DataRow；
@@ -527,9 +566,27 @@ func encodeResult(r *exec.Result, withRowDesc bool) [][]byte {
 			}
 			out = append(out, encodeRowDescription(fields))
 		}
+		oids := make([]int32, len(r.Columns))
+		for i, col := range r.Columns {
+			oids[i], _ = typeOID(col.Type)
+		}
+		// 逐列对应时数量必须一致：数量对不上说明客户端和我们的列数认知不同，
+		// 这时候按文本硬发会让它把 4 字节当 2 字节读，干脆报错。
+		if len(formats) > 1 && len(formats) != len(r.Columns) {
+			return nil, fmt.Errorf("client requested %d result formats for %d columns",
+				len(formats), len(r.Columns))
+		}
 		for _, row := range r.Rows {
 			vals := make([][]byte, len(row))
 			for i, v := range row {
+				if resultFormatAt(formats, i) == 1 && i < len(oids) {
+					b, err := encodeBinaryValue(v, oids[i])
+					if err != nil {
+						return nil, err
+					}
+					vals[i] = b
+					continue
+				}
 				colType := ""
 				if i < len(r.Columns) {
 					colType = r.Columns[i].Type
@@ -546,7 +603,7 @@ func encodeResult(r *exec.Result, withRowDesc bool) [][]byte {
 	if tag != "" {
 		out = append(out, encodeCommandComplete(tag))
 	}
-	return out
+	return out, nil
 }
 
 func (c *conn) errorResponse(err error) [][]byte {
@@ -639,7 +696,17 @@ func (c *conn) handleBind(payload []byte) {
 		c.fail(err)
 		return
 	}
-	c.portals[portalName] = &portal{stmt: stmt, sql: sqlText}
+	// 结果格式：客户端要求文本还是二进制，逐列给。
+	var resultFormats []int16
+	if off+2 <= len(payload) {
+		n := int(int16(binary.BigEndian.Uint16(payload[off:])))
+		off += 2
+		for i := 0; i < n && off+2 <= len(payload); i++ {
+			resultFormats = append(resultFormats, int16(binary.BigEndian.Uint16(payload[off:])))
+			off += 2
+		}
+	}
+	c.portals[portalName] = &portal{stmt: stmt, sql: sqlText, resultFormats: resultFormats}
 	_ = c.write(encodeBindComplete())
 }
 
@@ -678,12 +745,38 @@ func (c *conn) handleDescribe(payload []byte) {
 		out = append(out, encodeParameterDescription(stmt.paramOIDs))
 	}
 	fields, hasRows := c.fieldsFor(sqlText)
+	if kind == 'P' && hasRows {
+		// Describe(portal) 的 RowDescription 必须回**实际要发的格式**（Bind 里指定的）。
+		// Postgres 就是这么做的：statement 一律报 text，portal 报 Bind 决定的格式。
+		// 我们以前一律报 0，Npgsql 于是把二进制列当文本读 —— 后果是类型处理器
+		// 退化成 UnknownTypeHandler（ResolveHandler 里 text 格式就不查类型表），
+		// GetInt32 报 "Can't cast database type .<unknown>"。
+		if p := c.portals[name]; p != nil {
+			for i := range fields {
+				fields[i].Format = resultFormatAt(p.resultFormats, i)
+			}
+		}
+	}
 	if !hasRows {
 		out = append(out, encodeNoData())
 	} else {
 		out = append(out, encodeRowDescription(fields))
 	}
 	_ = c.write(out...)
+}
+
+// resultFormatAt 取第 i 列的结果格式：0=文本，1=二进制。
+// 空表示全文本；1 个表示所有列同一格式；否则逐列对应。
+func resultFormatAt(formats []int16, i int) int16 {
+	switch {
+	case len(formats) == 0:
+		return 0
+	case len(formats) == 1:
+		return formats[0]
+	case i < len(formats):
+		return formats[i]
+	}
+	return 0
 }
 
 func (c *conn) handleExecute(payload []byte) {
@@ -703,7 +796,14 @@ func (c *conn) handleExecute(payload []byte) {
 	for _, r := range results {
 		// false：Execute 阶段不再重复 RowDescription（Describe 已经发过），
 		// 否则 Npgsql 等严格客户端会认为报文顺序非法。
-		out = append(out, encodeResult(r, false)...)
+		msgs, eerr := encodeResultFormats(r, false, p.resultFormats)
+		if eerr != nil {
+			// 一条行都还没发出去，可以整个换成错误响应
+			out = nil
+			err = eerr
+			break
+		}
+		out = append(out, msgs...)
 	}
 	if err != nil {
 		out = append(out, c.errorResponse(err)...)

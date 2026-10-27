@@ -550,12 +550,20 @@ func (s *Store) applyRec(rec walRec) error {
 		row, rep := castRow(t, rec.New)
 		s.Repaired += int64(rep)
 		td.Rows = append(td.Rows, row)
+		td.Live++
 	case opDel:
 		row, rep := castRow(t, rec.Old)
 		s.Repaired += int64(rep)
 		for i := range td.Rows {
+			if td.Rows[i] == nil {
+				continue
+			}
 			if types.RowSame(td.Rows[i], row) {
-				td.Rows = append(td.Rows[:i], td.Rows[i+1:]...)
+				// 置空而不是搬移：重放一条删除就是 O(1)，
+				// 搬移会让「重放 N 条删除」退化成 O(n²)。收尾的 RebuildIndex
+				// 会顺手把空槽登记进 free。
+				td.Rows[i] = nil
+				td.Live--
 				break
 			}
 		}
@@ -565,6 +573,9 @@ func (s *Store) applyRec(rec walRec) error {
 		newRow, rep2 := castRow(t, rec.New)
 		s.Repaired += int64(rep2)
 		for i := range td.Rows {
+			if td.Rows[i] == nil {
+				continue
+			}
 			if types.RowSame(td.Rows[i], oldRow) {
 				td.Rows[i] = newRow
 				break

@@ -273,6 +273,9 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	td := e.Store.Table(t.Name)
+	// ALTER 会按下标重写每一行，先压实空槽：否则空槽会被当成
+	// 「全默认值的一行」写回去，行数凭空多出来。
+	td.CompactRows()
 	act := s.Action
 	note := ""
 	switch act.Kind {

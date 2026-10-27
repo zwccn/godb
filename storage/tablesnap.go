@@ -67,6 +67,9 @@ func readTableSnapHeader(path string) (tableSnapHeaderInfo, error) {
 }
 
 // writeTableSnap 原子写入一张表的全部行（tmp + fsync + rename）。
+//
+// 空槽（被删除、还没被复用的槽位）不写进文件：磁盘上永远是紧凑的，
+// 加载回来直接就是连续行号，不需要再压一次。
 func writeTableSnap(dir string, id int64, gen int64, rows []types.Row) (int64, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "tables"), 0o755); err != nil {
 		return 0, err
@@ -74,20 +77,22 @@ func writeTableSnap(dir string, id int64, gen int64, rows []types.Row) (int64, e
 	path := tableFileName(dir, id)
 	tmp := path + ".tmp"
 
-	buf := make([]byte, tableSnapHeader, tableSnapHeader+len(rows)*64)
-	for i := range buf[:tableSnapHeader] {
-		buf[i] = 0
+	payload := make([]byte, 0, len(rows)*64)
+	n := 0
+	for _, r := range rows {
+		if r == nil {
+			continue
+		}
+		payload = appendRow(payload, r)
+		n++
 	}
+
+	buf := make([]byte, tableSnapHeader+len(payload))
 	copy(buf[:8], tableSnapMagic)
 	binary.LittleEndian.PutUint64(buf[8:], uint64(gen))
-	binary.LittleEndian.PutUint32(buf[16:], uint32(len(rows)))
-	// 先占位，算完 CRC 再回填
-	payload := make([]byte, 0, len(rows)*64)
-	for _, r := range rows {
-		payload = appendRow(payload, r)
-	}
-	buf = append(buf, payload...)
+	binary.LittleEndian.PutUint32(buf[16:], uint32(n))
 	binary.LittleEndian.PutUint32(buf[20:], crc32.Checksum(payload, crcTable))
+	copy(buf[tableSnapHeader:], payload)
 
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {

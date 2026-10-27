@@ -132,3 +132,27 @@ func BenchmarkUpdateDifferentTables(b *testing.B) {
 	})
 	_ = n
 }
+
+// 单行 UPDATE 的提交成本。
+//
+// 改造前它是 O(表大小)：每次提交都要重组整个行切片并重建所有索引，
+// 20 万行的表一次约 40 ms（带两个二级索引是 158 ms）。现在只碰写集里的那一行，
+// 应该和表大小无关。
+func BenchmarkUpdateOneRow200k(b *testing.B) {
+	d := setupBench(b, txn.TableLock, 200000)
+	sess := d.Session("s")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		mustExec(b, d, sess, fmt.Sprintf("UPDATE bench SET v = %d WHERE id = %d", i, i%2000+1))
+	}
+}
+
+// 同一条语句插一行（分配槽位 + 增量索引）。
+func BenchmarkInsertOneRow200k(b *testing.B) {
+	d := setupBench(b, txn.TableLock, 200000)
+	sess := d.Session("s")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		mustExec(b, d, sess, fmt.Sprintf("INSERT INTO bench (v, t) VALUES (%d,'x')", i))
+	}
+}

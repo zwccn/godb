@@ -204,14 +204,19 @@ type snapshotJob struct {
 }
 
 type snapshotTable struct {
-	id       int64
-	key      string
-	rows     []types.Row
-	dirtyCnt int64 // 拍快照时这张表的累计脏行数，收尾时用来判断期间有没有新改动
+	id   int64
+	key  string
+	rows []types.Row // 槽位数组的拷贝（提交会原地替换槽位，不能直接引用）
+	live int
+	// dirtyCnt 是拍快照时这张表的累计脏行数，收尾时用来判断期间有没有新改动
+	dirtyCnt int64
 }
 
-// checkpointStartLocked 拍快照：只拷切片头，不做序列化、不碰磁盘。
-// 调用方必须持有 CommitMu。
+// checkpointStartLocked 拍快照。调用方必须持有 CommitMu。
+//
+// 这里必须**拷一份槽位数组**：提交是原地替换 `td.Rows[slot]`（而不是整片换掉），
+// 所以直接引用 td.Rows 会让写盘过程读到「半新半旧」的行。拷贝只是指针数组，
+// 20 万行约 3 ms，而且只在需要写盘的脏表上做。
 func (s *Store) checkpointStartLocked() *snapshotJob {
 	job := &snapshotJob{gen: s.appliedGen}
 	for _, t := range s.Cat.Tables {
@@ -223,8 +228,10 @@ func (s *Store) checkpointStartLocked() *snapshotJob {
 		if !s.dirty[key] && s.hasSnap[key] {
 			continue // 没改动就跳过
 		}
+		rows := make([]types.Row, len(td.Rows))
+		copy(rows, td.Rows)
 		job.tables = append(job.tables, snapshotTable{
-			id: t.ID, key: key, rows: td.Rows, dirtyCnt: s.dirtyRows[key],
+			id: t.ID, key: key, rows: rows, live: td.Live, dirtyCnt: s.dirtyRows[key],
 		})
 	}
 	return job
@@ -264,7 +271,7 @@ func (s *Store) checkpointFinishLocked(job *snapshotJob) error {
 		}
 		s.hasSnap[t.key] = true
 		s.tableGen[t.key] = job.gen
-		s.tableRows[t.key] = len(t.rows)
+		s.tableRows[t.key] = t.live
 	}
 
 	// 清理已 DROP 的表留下的数据文件
@@ -388,7 +395,7 @@ func (s *Store) Info() SnapshotInfo {
 	for key, td := range s.Data {
 		if s.loaded[key] {
 			info.Loaded++
-			info.Rows += len(td.Rows)
+			info.Rows += td.Live // 槽位数组可能带空洞，Live 才是真实行数
 		} else {
 			info.Rows += s.tableRows[key]
 		}

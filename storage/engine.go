@@ -329,7 +329,7 @@ func (s *Store) RowCount(name string) int {
 	defer s.loadMu.RUnlock()
 	if s.loaded[key] {
 		if td := s.Data[key]; td != nil {
-			return len(td.Rows)
+			return td.Live // 槽位数组可能带空洞，Live 才是真实行数
 		}
 		return 0
 	}
@@ -417,6 +417,9 @@ func (tx *Tx) Scan(table string, fn func(ref Ref, row types.Row) error) error {
 	}
 	o := tx.ov[cleanName(table)]
 	for i, row := range td.Rows {
+		if row == nil {
+			continue // 空槽（被删除后还没被复用）
+		}
 		if o != nil {
 			if o.del[i] {
 				continue
@@ -463,6 +466,9 @@ func (tx *Tx) Get(table string, ref Ref) (types.Row, bool) {
 	}
 	if ref.Slot >= len(td.Rows) {
 		return nil, false
+	}
+	if td.Rows[ref.Slot] == nil {
+		return nil, false // 已删除的空槽
 	}
 	if o != nil {
 		if o.del[ref.Slot] {
@@ -859,11 +865,14 @@ func (tx *Tx) commitLocked() (int64, error) {
 	sort.Strings(names)
 
 	type change struct {
-		table  string
-		rows   []types.Row
-		dirty  int64
-		seq    int64
-		seqSet bool
+		table   string
+		del     []int       // 要删除的槽位
+		upd     []int       // 要原地替换的槽位
+		updRows []types.Row // 与 upd 对齐的新行
+		ins     []types.Row // 要分配新槽位的行
+		dirty   int64
+		seq     int64
+		seqSet  bool
 	}
 	var (
 		changes []*change
@@ -875,21 +884,34 @@ func (tx *Tx) commitLocked() (int64, error) {
 		if td == nil {
 			return 0, fmt.Errorf("relation %q does not exist", name)
 		}
-		newRows := make([]types.Row, 0, len(td.Rows)+len(o.ins))
-		dirty := 0
-		for i, row := range td.Rows {
-			if o.del[i] {
-				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Old: row})
-				dirty++
-				continue
+		c := &change{table: name}
+		// 只遍历写集，不再扫全表：这是「提交成本与表大小无关」的关键。
+		if len(o.del) > 0 {
+			for slot := range o.del {
+				if slot < 0 || slot >= len(td.Rows) || td.Rows[slot] == nil {
+					continue
+				}
+				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Old: td.Rows[slot]})
+				c.del = append(c.del, slot)
 			}
-			if nr, ok := o.upd[i]; ok {
-				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Old: row, New: nr})
-				newRows = append(newRows, nr)
-				dirty++
-				continue
+			sort.Ints(c.del) // map 遍历无序，排一下让 WAL 记录可复现
+		}
+		if len(o.upd) > 0 {
+			slots := make([]int, 0, len(o.upd))
+			for slot := range o.upd {
+				slots = append(slots, slot)
 			}
-			newRows = append(newRows, row)
+			sort.Ints(slots)
+			for _, slot := range slots {
+				// 既删又改：删优先（否则会给一个马上要消失的槽位换行）
+				if o.del[slot] || slot < 0 || slot >= len(td.Rows) || td.Rows[slot] == nil {
+					continue
+				}
+				nr := o.upd[slot]
+				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Old: td.Rows[slot], New: nr})
+				c.upd = append(c.upd, slot)
+				c.updRows = append(c.updRows, nr)
+			}
 		}
 		for i, row := range o.ins {
 			if o.insDel[i] {
@@ -899,10 +921,9 @@ func (tx *Tx) commitLocked() (int64, error) {
 				row = nr
 			}
 			recs = append(recs, walRec{Tx: tx.ID, Op: opIns, Table: td.Name, New: row})
-			newRows = append(newRows, row)
-			dirty++
+			c.ins = append(c.ins, row)
 		}
-		c := &change{table: name, rows: newRows, dirty: int64(dirty)}
+		c.dirty = int64(len(c.del) + len(c.upd) + len(c.ins))
 		if v, ok := tx.seq[name]; ok {
 			c.seq, c.seqSet = v, true
 		}
@@ -925,7 +946,41 @@ func (tx *Tx) commitLocked() (int64, error) {
 		if td == nil {
 			continue
 		}
-		td.Rows = c.rows
+		t, ok := tx.st.Cat.Get(c.table)
+		if !ok {
+			t = nil
+		}
+		// 增量应用：只碰写集里那几行，索引也只动那几个键。
+		// 换行（原地替换）不改变槽位，所以索引里的槽位号一直有效 ——
+		// 这是「提交成本与表大小无关」的另一半。
+		for _, slot := range c.del {
+			if slot >= len(td.Rows) || td.Rows[slot] == nil {
+				continue
+			}
+			td.IndexDelete(t, slot, td.Rows[slot])
+			td.Rows[slot] = nil
+			td.Live--
+			td.release(slot)
+		}
+		for i, slot := range c.upd {
+			if slot >= len(td.Rows) || td.Rows[slot] == nil {
+				continue
+			}
+			td.IndexUpdate(t, slot, td.Rows[slot], c.updRows[i])
+			td.Rows[slot] = c.updRows[i]
+		}
+		for _, row := range c.ins {
+			slot := td.alloc()
+			td.IndexInsert(t, slot, row)
+			td.Rows[slot] = row
+			td.Live++
+		}
+		// 整表清空（TRUNCATE / 全表 DELETE）后把槽位数组一起放掉：
+		// 否则空数组会一直占着 len(Rows) 那么大的指针空间，扫描也白跑一遍。
+		if td.Live == 0 && len(td.Rows) > 0 {
+			td.Rows = nil
+			td.free = nil
+		}
 		if c.seqSet {
 			if c.seq == 0 {
 				td.Seq = 0
@@ -933,14 +988,11 @@ func (tx *Tx) commitLocked() (int64, error) {
 				td.Seq = c.seq
 			}
 		}
-		if t, ok := tx.st.Cat.Get(c.table); ok {
-			td.RebuildIndex(t)
-		}
 		key := cleanName(c.table)
 		tx.st.loadMu.Lock()
 		tx.st.dirty[key] = true
 		tx.st.dirtyRows[key] += c.dirty
-		tx.st.tableRows[key] = len(c.rows)
+		tx.st.tableRows[key] = td.Live
 		tx.st.loadMu.Unlock()
 	}
 

@@ -942,6 +942,9 @@ body.locks-open .layout { margin-right: 350px; }
 }
 
 .modal-card {
+  /* 绝对定位 + 默认 auto inset = 仍然居中（网格对齐对 abspos 子项同样生效）；
+     拖动时才有 left/top 可写，否则 transform 居中会盖掉一切位移。 */
+  position: absolute;
   width: 640px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 80px);
@@ -956,6 +959,10 @@ body.locks-open .layout { margin-right: 350px; }
 
 .modal-head {
   flex: 0 0 auto;
+  cursor: move;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none; /* 触屏上拖动不要被滚动抢走 */
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1567,3 +1574,39 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
   font-size: calc(11.5px * var(--fs));
   line-height: 1.7;
 }
+
+/* ---------------- 弹窗：拖动与缩放 ---------------- */
+
+/* 拖动/缩放过程中禁止选中文字，否则鼠标移出卡片会变成划词 */
+.modal-card.dragging,
+.modal-card.resizing {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.modal-card.dragging { box-shadow: 0 26px 64px var(--shadow-color); }
+
+/* 右下角的缩放手柄。不用 CSS 的 resize:both —— 它给的原生把手在深色皮肤下
+   几乎看不见，尺寸也不可控；自己画一个 16px 的角标更稳。 */
+.win-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  opacity: .55;
+  touch-action: none;
+  /* 斜纹三角：窗口右下角最经典的可拖拽信号，比画两道折角显眼得多 */
+  background-image: repeating-linear-gradient(-45deg,
+    var(--text-3) 0 1px, transparent 1px 4px);
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  border-bottom-right-radius: 10px;
+}
+
+.modal-card:hover .win-grip { opacity: .85; }
+.win-grip:hover { opacity: 1; }
+
+/* 拖到边缘时留一点提示：位置被夹住了，不是卡死 */
+.modal-card.framed { will-change: left, top; }

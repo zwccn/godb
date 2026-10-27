@@ -209,6 +209,153 @@ async function api(path, body) {
 // 以前设置/数据库/历史三个弹窗各自挂了「点遮罩关闭」，删掉时一并集中到这里说明，
 // 免得后加的弹窗又照着旧代码抄回去。抽屉（锁状态）本来就不吃遮罩点击，无需处理。
 
+/* ---------------- 弹窗：拖动与缩放 ---------------- */
+
+// 所有弹窗都能拖着走、拽右下角改大小，双击标题栏回居中。
+//
+// 实现上有个前提：卡片平时靠 `.modal { place-items:center }` 居中，没有任何
+// left/top。第一次拖动/缩放时才把当前视觉位置「冻结」成显式的 left/top
+// （frameCard），之后才动得起来 —— 否则 transform/居中会一直覆盖位移。
+//
+// 不用 CSS 的 resize:both：原生把手在深色皮肤下看不清，而且会撞上
+// max-height: calc(100vh - 80px)，拽到一半尺寸不动，手感像卡住。
+
+const WIN_MIN_W = 320;  // 再窄表头和按钮就挤成一团了
+const WIN_MIN_H = 180;
+const WIN_EDGE = 56;    // 最多允许拖出屏幕，但要留这么多在屏幕内，免得拽丢
+const WIN_MARGIN = 8;   // 缩放时与视口边缘的间隙
+
+function winClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// frameCard 把「居中」换成绝对坐标。只做一次（dataset.framed 标记）。
+function frameCard(card) {
+  if (card.dataset.framed === '1') return;
+  const r = card.getBoundingClientRect();
+  card.style.transform = 'none';
+  card.style.margin = '0';
+  card.style.width = r.width + 'px';
+  // 不清掉 max-*：拖出去以后卡片可能比视口还高，得让它在屏幕内能滚
+  card.style.left = winClamp(r.left, -(r.width - WIN_EDGE), window.innerWidth - WIN_EDGE) + 'px';
+  card.style.top = winClamp(r.top, 0, Math.max(0, window.innerHeight - WIN_EDGE)) + 'px';
+  card.dataset.framed = '1';
+  card.classList.add('framed');
+}
+
+// resetCard 双击标题栏：回到默认居中、默认尺寸。
+function resetCard(card) {
+  for (const p of ['left', 'top', 'width', 'height', 'transform', 'margin', 'maxWidth', 'maxHeight']) {
+    card.style.removeProperty(p);
+  }
+  card.dataset.framed = '0';
+  card.classList.remove('framed', 'dragging', 'resizing');
+}
+
+// startDrag 抓标题栏拖动。用 pointer 事件 + setPointerCapture：
+// 鼠标移到卡片外面也照样跟随，不会「甩掉」。
+function startDrag(card, ev) {
+  if (ev.button !== 0) return;
+  // 标题栏里的按钮（×）和输入框不该触发拖动
+  if (ev.target.closest('button, input, select, textarea, a')) return;
+  ev.preventDefault();
+  frameCard(card);
+  const r = card.getBoundingClientRect();
+  const offX = ev.clientX - r.left;
+  const offY = ev.clientY - r.top;
+  const head = ev.currentTarget;
+  card.classList.add('dragging');
+  try { head.setPointerCapture(ev.pointerId); } catch (e) {}
+
+  const move = e => {
+    const left = winClamp(e.clientX - offX, -(r.width - WIN_EDGE), window.innerWidth - WIN_EDGE);
+    const top = winClamp(e.clientY - offY, 0, Math.max(0, window.innerHeight - WIN_EDGE));
+    card.style.left = left + 'px';
+    card.style.top = top + 'px';
+  };
+  const up = () => {
+    card.classList.remove('dragging');
+    head.removeEventListener('pointermove', move);
+    head.removeEventListener('pointerup', up);
+    head.removeEventListener('pointercancel', up);
+    try { head.releasePointerCapture(ev.pointerId); } catch (e) {}
+  };
+  head.addEventListener('pointermove', move);
+  head.addEventListener('pointerup', up);
+  head.addEventListener('pointercancel', up);
+}
+
+// startResize 拽右下角改大小。左上角固定，符合「抓角落」的直觉。
+function startResize(card, ev) {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  frameCard(card);
+  const r = card.getBoundingClientRect();
+  // 一旦手动改尺寸，就必须放掉 CSS 的 max-width/max-height，
+  // 否则拽到上限后尺寸不动、只有鼠标在动。
+  card.style.width = r.width + 'px';
+  card.style.height = r.height + 'px';
+  card.style.maxWidth = 'none';
+  card.style.maxHeight = 'none';
+  const grip = ev.currentTarget;
+  card.classList.add('resizing');
+  try { grip.setPointerCapture(ev.pointerId); } catch (e) {}
+
+  const move = e => {
+    const maxW = Math.max(WIN_MIN_W, window.innerWidth - r.left - WIN_MARGIN);
+    const maxH = Math.max(WIN_MIN_H, window.innerHeight - r.top - WIN_MARGIN);
+    card.style.width = winClamp(e.clientX - r.left, WIN_MIN_W, maxW) + 'px';
+    card.style.height = winClamp(e.clientY - r.top, WIN_MIN_H, maxH) + 'px';
+  };
+  const up = () => {
+    card.classList.remove('resizing');
+    grip.removeEventListener('pointermove', move);
+    grip.removeEventListener('pointerup', up);
+    grip.removeEventListener('pointercancel', up);
+    try { grip.releasePointerCapture(ev.pointerId); } catch (e) {}
+  };
+  grip.addEventListener('pointermove', move);
+  grip.addEventListener('pointerup', up);
+  grip.addEventListener('pointercancel', up);
+}
+
+function initWindow(modal) {
+  const card = modal.querySelector('.modal-card');
+  if (!card || card.dataset.win === '1') return;
+  card.dataset.win = '1';
+
+  const head = card.querySelector('.modal-head');
+  if (head) {
+    head.addEventListener('pointerdown', ev => startDrag(card, ev));
+    head.addEventListener('dblclick', ev => {
+      if (ev.target.closest('button')) return; // 双击 × 不该复位
+      resetCard(card);
+    });
+  }
+  const grip = document.createElement('div');
+  grip.className = 'win-grip';
+  grip.title = '拖动调整大小（双击标题栏复位）';
+  grip.addEventListener('pointerdown', ev => startResize(card, ev));
+  card.appendChild(grip);
+}
+
+document.querySelectorAll('.modal').forEach(initWindow);
+
+// 视口变小（换显示器、缩小窗口）时把窗口夹回可见范围，别让它飘到屏幕外找不回来
+window.addEventListener('resize', () => {
+  document.querySelectorAll('.modal-card[data-framed="1"]').forEach(card => {
+    const r = card.getBoundingClientRect();
+    card.style.left = winClamp(r.left, -(r.width - WIN_EDGE), window.innerWidth - WIN_EDGE) + 'px';
+    card.style.top = winClamp(r.top, 0, Math.max(0, window.innerHeight - WIN_EDGE)) + 'px';
+    // 尺寸也别超出新视口
+    if (card.style.width) {
+      card.style.width = Math.min(r.width, window.innerWidth - r.left - WIN_MARGIN) + 'px';
+    }
+    if (card.style.height) {
+      card.style.height = Math.min(r.height, window.innerHeight - r.top - WIN_MARGIN) + 'px';
+    }
+  });
+});
+
 /* ---------------- 执行 ---------------- */
 
 let busy = false;

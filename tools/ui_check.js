@@ -116,6 +116,86 @@ class CDP {
     await sleep(200);
     check('库管理：点「关闭」能关掉', await cdp.eval(`document.getElementById('dbModal').classList.contains('hidden')`));
 
+    // 1.5) 拖动 / 缩放 / 双击复位
+    await cdp.eval(`openDBModal()`);
+    await sleep(400);
+    const geo = await cdp.eval(`(() => {
+      const card = document.querySelector('#dbModal .modal-card');
+      const head = card.querySelector('.modal-head').getBoundingClientRect();
+      const r = card.getBoundingClientRect();
+      return { x: r.left, y: r.top, w: r.width, h: r.height,
+               hx: head.left + 40, hy: head.top + head.height / 2 };
+    })()`);
+
+    // 抓标题栏往右下拖 (100, 50)
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: geo.hx, y: geo.hy, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: geo.hx + 50, y: geo.hy + 25, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: geo.hx + 100, y: geo.hy + 50, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: geo.hx + 100, y: geo.hy + 50, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(250);
+    const moved = await cdp.eval(`(() => {
+      const r = document.querySelector('#dbModal .modal-card').getBoundingClientRect();
+      return { x: r.left, y: r.top };
+    })()`);
+    check('拖动标题栏能移动窗口',
+      Math.abs(moved.x - (geo.x + 100)) < 3 && Math.abs(moved.y - (geo.y + 50)) < 3,
+      `(${Math.round(geo.x)},${Math.round(geo.y)}) → (${Math.round(moved.x)},${Math.round(moved.y)})`);
+
+    // 拽右下角手柄放大 (120, 60)
+    const gripPos = await cdp.eval(`(() => {
+      const g = document.querySelector('#dbModal .win-grip').getBoundingClientRect();
+      return { x: g.left + g.width / 2, y: g.top + g.height / 2 };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: gripPos.x, y: gripPos.y, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gripPos.x + 60, y: gripPos.y + 30, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gripPos.x + 120, y: gripPos.y + 60, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: gripPos.x + 120, y: gripPos.y + 60, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(250);
+    const sized = await cdp.eval(`(() => {
+      const r = document.querySelector('#dbModal .modal-card').getBoundingClientRect();
+      return { w: r.width, h: r.height, x: r.left, y: r.top };
+    })()`);
+    // 期望尺寸按「指针落点 - 左上角」算：手柄中心比卡片边缘内缩 8px，
+    // 直接用 w+120 会差那 8px（不是实现问题，是断言算法问题）
+    const expW = gripPos.x + 120 - sized.x;
+    const expH = gripPos.y + 60 - sized.y;
+    check('拽右下角能改大小（尺寸跟手）',
+      Math.abs(sized.w - expW) < 3 && Math.abs(sized.h - expH) < 3,
+      `${Math.round(geo.w)}x${Math.round(geo.h)} → ${Math.round(sized.w)}x${Math.round(sized.h)}` +
+      `（指针期望 ${Math.round(expW)}x${Math.round(expH)}）`);
+
+    // 拖动之后 × 仍然能关（拖拽不能把点击吃掉）
+    await cdp.eval(`document.getElementById('btnDBDone').click()`);
+    await sleep(200);
+    check('拖动/缩放后仍能正常关闭',
+      await cdp.eval(`document.getElementById('dbModal').classList.contains('hidden')`));
+
+    // 双击标题栏复位
+    await cdp.eval(`openDBModal()`);
+    await sleep(400);
+    const before = await cdp.eval(`(() => {
+      const card = document.querySelector('#dbModal .modal-card');
+      const head = card.querySelector('.modal-head').getBoundingClientRect();
+      return { x: card.getBoundingClientRect().left, hy: head.top + head.height / 2, hx: head.left + 40 };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: before.hx, y: before.hy, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: before.hx + 120, y: before.hy + 80, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: before.hx + 120, y: before.hy + 80, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(200);
+    // 双击标题栏（两次 clickCount=1 会被识别成 dblclick 需要 clickCount=2）
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: before.hx + 120, y: before.hy + 80, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: before.hx + 120, y: before.hy + 80, button: 'left', buttons: 0, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: before.hx + 120, y: before.hy + 80, button: 'left', buttons: 1, clickCount: 2 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: before.hx + 120, y: before.hy + 80, button: 'left', buttons: 0, clickCount: 2 });
+    await sleep(250);
+    check('双击标题栏回到居中',
+      await cdp.eval(`(() => {
+        const c = document.querySelector('#dbModal .modal-card');
+        return c.dataset.framed === '0' && !c.style.left && !c.style.width;
+      })()`));
+    await cdp.eval(`document.getElementById('btnDBDone').click()`);
+    await sleep(200);
+
     // 2) 设置面板
     await cdp.eval(`openSettings()`);
     await sleep(900);

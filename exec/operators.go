@@ -24,35 +24,21 @@ type planNode interface {
 	Children() []Operator
 }
 
-// ExplainPlan 把算子树渲染成文本。
-func ExplainPlan(op Operator) []string {
-	var out []string
-	var walk func(o Operator, depth int)
-	walk = func(o Operator, depth int) {
-		label := fmt.Sprintf("%T", o)
-		var kids []Operator
-		if pn, ok := o.(planNode); ok {
-			label = pn.Describe()
-			kids = pn.Children()
-		}
-		out = append(out, strings.Repeat("  ", depth)+label)
-		for _, k := range kids {
-			walk(k, depth+1)
-		}
-	}
-	walk(op, 0)
-	return out
-}
-
 // ---------- 全表扫描 ----------
 
 type scanOp struct {
+	OpProfile
 	tx    *storage.Tx
 	table string
 	qual  string
 	sc    Schema
 	rows  []types.Row
 	i     int
+	// scanned 是 Open 时从堆表读进来的行数。它和 Profile 里的「输出行数」
+	// 是两回事：一次全表扫可能只往上吐一行。
+	scanned int
+	// notes 是规划器留下的解释（为什么没走索引、下推了什么条件）。
+	notes []string
 }
 
 func newScan(tx *storage.Tx, t *catalog.Table, qual string) *scanOp {
@@ -62,21 +48,37 @@ func newScan(tx *storage.Tx, t *catalog.Table, qual string) *scanOp {
 func (o *scanOp) Schema() Schema { return o.sc }
 
 func (o *scanOp) Open() error {
+	t := o.begin()
 	o.rows = o.rows[:0]
 	o.i = 0
-	return o.tx.Scan(o.table, func(_ storage.Ref, row types.Row) error {
+	err := o.tx.Scan(o.table, func(_ storage.Ref, row types.Row) error {
 		o.rows = append(o.rows, row)
 		return nil
 	})
+	o.scanned = len(o.rows)
+	t.done(false)
+	return err
 }
 
 func (o *scanOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.rows[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
+}
+
+// ExplainDetail 说明这次扫描读了多少行 —— 「扫 20 万行只出 1 行」一眼就能看出来。
+func (o *scanOp) ExplainDetail() []string {
+	out := []string{fmt.Sprintf("全表读入 %d 行", o.scanned)}
+	if len(o.notes) > 0 {
+		out = append(out, o.notes...)
+	}
+	return out
 }
 
 func (o *scanOp) Close() error { o.rows = nil; return nil }
@@ -104,6 +106,7 @@ func tableSchema(t *catalog.Table, qual string) Schema {
 // 假设有偏差，也不会返回不该出现的行（漏行则由下面的选索引规则兜住 ——
 // 只有常量能安全 Cast 到列类型时才会用索引）。
 type indexScanOp struct {
+	OpProfile
 	tx      *storage.Tx
 	tbl     *catalog.Table
 	ixName  string // 空表示走主键索引
@@ -114,6 +117,7 @@ type indexScanOp struct {
 	sc      Schema
 	rows    []types.Row
 	i       int
+	fetched int // Open 时从索引取回的行数（EXPLAIN 用）
 }
 
 func newIndexScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, vals []types.Value, qual string) *indexScanOp {
@@ -142,6 +146,8 @@ func colNames(t *catalog.Table, idxes []int) []string {
 func (o *indexScanOp) Schema() Schema { return o.sc }
 
 func (o *indexScanOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
 	o.rows = o.rows[:0]
 	o.i = 0
 	// 键里有 NULL 就不可能等值命中（`col = NULL` 恒为未知）
@@ -155,21 +161,29 @@ func (o *indexScanOp) Open() error {
 		if hit, ok := o.tx.PKLookup(o.tbl, key); ok {
 			o.rows = append(o.rows, hit.Row)
 		}
-		return nil
+	} else {
+		for _, hit := range o.tx.IndexLookup(o.tbl, o.ixName, o.cols, key) {
+			o.rows = append(o.rows, hit.Row)
+		}
 	}
-	for _, hit := range o.tx.IndexLookup(o.tbl, o.ixName, o.cols, key) {
-		o.rows = append(o.rows, hit.Row)
-	}
+	o.fetched = len(o.rows)
 	return nil
 }
 
 func (o *indexScanOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.rows[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
+}
+
+func (o *indexScanOp) ExplainDetail() []string {
+	return []string{fmt.Sprintf("索引取回 %d 行（键 = %s）", o.fetched, keyDigest(o.vals))}
 }
 
 func (o *indexScanOp) Close() error {
@@ -197,6 +211,7 @@ func (o *indexScanOp) Children() []Operator { return nil }
 // 正反两个方向都走**游标**：上层要一行才走一步，所以 `LIMIT 10` 只碰前面（或者
 // 最后面）几个叶子。叶子链是双向的，反序从右端往回走，不需要先物化。
 type indexRangeScanOp struct {
+	OpProfile
 	tx      *storage.Tx
 	tbl     *catalog.Table
 	ixName  string // 空表示主键
@@ -220,18 +235,24 @@ func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ix
 func (o *indexRangeScanOp) Schema() Schema { return o.sc }
 
 func (o *indexRangeScanOp) Open() error {
+	t := o.begin()
 	o.scanner = o.tx.ScanIndex(o.tbl, o.ixName, o.cols, o.ixCols, o.rs, o.desc)
+	t.done(false)
 	return nil
 }
 
 func (o *indexRangeScanOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.scanner == nil {
+		t.done(false)
 		return nil, false, nil
 	}
 	h, ok := o.scanner.Next()
 	if !ok {
+		t.done(false)
 		return nil, false, nil
 	}
+	t.done(true)
 	return h.Row, true, nil
 }
 

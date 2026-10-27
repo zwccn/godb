@@ -267,7 +267,12 @@ func (*FuncTable) tableRef() {}
 type TxStmt struct{ Kind string }
 
 // Explain 对应 EXPLAIN。
-type Explain struct{ Stmt Statement }
+type Explain struct {
+	Stmt Statement
+	// Analyze 对应 EXPLAIN ANALYZE：真的执行一遍，并带上每个算子的实际
+	// 行数与耗时 —— 判断「为什么慢」靠的就是它。
+	Analyze bool
+}
 
 func (*CreateTable) stmtNode() {}
 func (*DropTable) stmtNode()   {}

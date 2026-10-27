@@ -4,13 +4,16 @@ import (
 	"fmt"
 	"strings"
 
+	"godb/catalog"
 	"godb/sql"
+	"godb/storage"
 	"godb/types"
 )
 
 // joinOp 实现 INNER / LEFT / RIGHT / CROSS 连接。
 // 实现方式是“物化两侧 + 哈希连接/嵌套循环”，对这个规模的库来说足够快。
 type joinOp struct {
+	OpProfile
 	left  Operator
 	right Operator
 	typ   sql.JoinType
@@ -28,6 +31,9 @@ type joinOp struct {
 	rightRows []types.Row
 	out       []types.Row
 	i         int
+
+	// details 是规划器写下的决策说明（为什么用/不用索引连接、谁做构建侧）。
+	details []string
 }
 
 const maxJoinOutput = 2000000
@@ -63,6 +69,8 @@ func (o *joinOp) Close() error {
 }
 
 func (o *joinOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
 	if err := o.left.Open(); err != nil {
 		return err
 	}
@@ -96,12 +104,22 @@ func (o *joinOp) Open() error {
 }
 
 func (o *joinOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.out) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.out[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
+}
+
+func (o *joinOp) ExplainDetail() []string {
+	out := append([]string{}, o.details...)
+	out = append(out,
+		fmt.Sprintf("左 %d 行 / 右 %d 行 → 输出 %d 行", len(o.leftRows), len(o.rightRows), len(o.out)))
+	return out
 }
 
 func (o *joinOp) nullLeft() types.Row  { return make(types.Row, len(o.lsc)) }
@@ -378,4 +396,181 @@ func joinCondText(conjuncts []sql.Expr) string {
 		parts = append(parts, sql.String(c))
 	}
 	return strings.Join(parts, " AND ")
+}
+
+// ---------- 索引连接（索引嵌套循环） ----------
+
+// indexJoinOp：外表逐行驱动，内表按索引点查。
+//
+// 和 joinOp 的区别在「内表要不要物化」。哈希连接必须把两侧都读进来；索引连接
+// 只读外表，内表每行按索引取。所以「外表很小、内表很大且有索引」时差一个数量级
+// —— 典型的就是按主键过滤维表、再拿它去捞事实表。
+//
+// 内表的连接列必须是**某个索引的完整列**（顺序一致）。部分前缀也能做（键区间），
+// 但那要多一条代码路径，而 99% 的关联条件都是完整主键/唯一键，先只做这一种。
+type indexJoinOp struct {
+	OpProfile
+	tx    *storage.Tx
+	outer Operator
+	inner *catalog.Table
+	typ   sql.JoinType
+	osc   Schema
+	isc   Schema
+	sc    Schema
+	// swap 为 true 表示内表是左表（外表是右表）：拼行时顺序要反过来，
+	// 因为输出的列顺序永远是 left++right。只有 INNER 会交换。
+	swap bool
+
+	// outerKeys 在外表行上求值，结果就是内表的索引键
+	outerKeys []Eval
+	ixName    string
+	ixCols    []int
+	ixNames   []string
+	residual  Eval
+	cond      string
+	details   []string
+
+	outerRows []types.Row
+	oi        int
+	matched   []types.Row
+	mi        int
+	vals      []types.Value // 键值缓冲，按行复用
+}
+
+func (o *indexJoinOp) Schema() Schema { return o.sc }
+
+func (o *indexJoinOp) Children() []Operator { return []Operator{o.outer} }
+
+func (o *indexJoinOp) Describe() string {
+	kind := "Inner"
+	if o.typ == sql.JoinLeft {
+		kind = "Left"
+	}
+	name := o.ixName
+	if name == "" {
+		name = o.inner.Name + "_pkey"
+	}
+	s := fmt.Sprintf("Index %s Join using %s on %s", kind, name, o.inner.Name)
+	if o.cond != "" {
+		s += " (on: " + o.cond + ")"
+	}
+	return s
+}
+
+func (o *indexJoinOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
+	if err := o.outer.Open(); err != nil {
+		return err
+	}
+	o.outerRows = o.outerRows[:0]
+	for {
+		r, ok, err := o.outer.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		o.outerRows = append(o.outerRows, r)
+	}
+	o.oi, o.mi = 0, 0
+	o.matched = o.matched[:0]
+	return nil
+}
+
+func (o *indexJoinOp) Next() (types.Row, bool, error) {
+	t := o.begin()
+	for {
+		if o.mi < len(o.matched) {
+			r := o.matched[o.mi]
+			o.mi++
+			t.done(true)
+			return r, true, nil
+		}
+		if o.oi >= len(o.outerRows) {
+			t.done(false)
+			return nil, false, nil
+		}
+		orow := o.outerRows[o.oi]
+		o.oi++
+		if err := o.fetch(orow); err != nil {
+			t.done(false)
+			return nil, false, err
+		}
+		if len(o.matched) == 0 && o.typ == sql.JoinLeft {
+			o.matched = append(o.matched, o.join(o.nullInner(), orow))
+		}
+	}
+}
+
+func (o *indexJoinOp) Close() error { return o.outer.Close() }
+
+func (o *indexJoinOp) join(irow, orow types.Row) types.Row {
+	if o.swap {
+		return combine(irow, orow)
+	}
+	return combine(orow, irow)
+}
+
+func (o *indexJoinOp) nullInner() types.Row { return make(types.Row, len(o.isc)) }
+
+// fetch 用当前外行去查内表索引，把命中的行填进 matched。
+func (o *indexJoinOp) fetch(orow types.Row) error {
+	o.matched = o.matched[:0]
+	o.mi = 0
+	if o.vals == nil || len(o.vals) != len(o.outerKeys) {
+		o.vals = make([]types.Value, len(o.outerKeys))
+	}
+	for i, e := range o.outerKeys {
+		v, err := e.Eval(orow)
+		if err != nil {
+			return err
+		}
+		if v.IsNull() {
+			return nil // NULL 不参与等值连接
+		}
+		// 连接两侧的列类型可能不同（int4 对 int8），键要和索引里存的一致
+		cv, err := types.Cast(v, o.inner.Columns[o.ixCols[i]].Type())
+		if err != nil {
+			return nil
+		}
+		o.vals[i] = cv
+	}
+	key := storage.OrderKey(o.vals)
+	if o.ixName == "" {
+		if hit, ok := o.tx.PKLookup(o.inner, key); ok {
+			o.push(hit.Row, orow)
+		}
+		return nil
+	}
+	for _, hit := range o.tx.IndexLookup(o.inner, o.ixName, o.ixCols, key) {
+		o.push(hit.Row, orow)
+	}
+	return nil
+}
+
+func (o *indexJoinOp) push(irow, orow types.Row) {
+	row := o.join(irow, orow)
+	if o.residual != nil {
+		v, err := o.residual.Eval(row)
+		if err != nil {
+			return
+		}
+		b, isNull, err := asBool(v)
+		if err != nil || isNull || !b {
+			return
+		}
+	}
+	o.matched = append(o.matched, row)
+}
+
+func (o *indexJoinOp) ExplainDetail() []string {
+	out := append([]string{}, o.details...)
+	side := "右"
+	if o.swap {
+		side = "左"
+	}
+	out = append(out, fmt.Sprintf("驱动 %d 行，内表（%s）按索引点查", len(o.outerRows), side))
+	return out
 }

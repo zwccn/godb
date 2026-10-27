@@ -221,12 +221,13 @@ func (p *parser) parseStatement() (Statement, error) {
 		return &TxStmt{Kind: "rollback"}, nil
 	case "EXPLAIN":
 		p.pos++
-		p.acceptKw("analyze")
+		analyze := p.acceptKw("analyze") // ANALYZE 可选：带上就真的跑一遍
+		p.acceptKw("verbose")            // VERBOSE 接受即忽略
 		st, err := p.parseStatement()
 		if err != nil {
 			return nil, err
 		}
-		return &Explain{Stmt: st}, nil
+		return &Explain{Stmt: st, Analyze: analyze}, nil
 	case "SHOW":
 		p.pos++
 		// 参数名原样收下：可能是保留字或带空格（SHOW time zone、SHOW ALL）。

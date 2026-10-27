@@ -62,13 +62,17 @@ func (e *Engine) planner(tx *storage.Tx) *Planner {
 func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 	switch s := stmt.(type) {
 	case *sql.Select:
-		return e.execSelect(tx, s, nil)
+		return e.execSelect(tx, s, explainOff)
 	case *sql.Explain:
 		sel, ok := s.Stmt.(*sql.Select)
 		if !ok {
 			return nil, fmt.Errorf("EXPLAIN only supports SELECT")
 		}
-		return e.execSelect(tx, sel, []string{})
+		mode := explainPlan
+		if s.Analyze {
+			mode = explainAnalyze
+		}
+		return e.execSelect(tx, sel, mode)
 	case *sql.Insert:
 		return e.execInsert(tx, s)
 	case *sql.CreateIndex:
@@ -96,21 +100,43 @@ func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 
 // ---------- SELECT ----------
 
-func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, explainTag []string) (*Result, error) {
+// explainMode 决定 execSelect 是普通执行还是只出计划。
+type explainMode int
+
+const (
+	explainOff explainMode = iota
+	explainPlan
+	explainAnalyze
+)
+
+func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*Result, error) {
 	plan, err := e.planner(tx).BuildSelect(s)
 	if err != nil {
 		return nil, err
 	}
-	planText := ExplainPlan(plan)
 
-	if explainTag != nil {
+	if mode != explainOff {
+		var planText []string
+		if mode == explainAnalyze {
+			// 真跑一遍：结果丢掉，只留每个算子的行数与耗时
+			planText, err = ExplainAnalyze(plan)
+		} else {
+			planText = ExplainPlan(plan)
+		}
+		if err != nil {
+			return nil, err
+		}
 		rows := make([][]interface{}, 0, len(planText))
 		for _, line := range planText {
 			rows = append(rows, []interface{}{line})
 		}
+		tag := "EXPLAIN"
+		if mode == explainAnalyze {
+			tag = "EXPLAIN ANALYZE"
+		}
 		return &Result{
-			Command:  "EXPLAIN",
-			Tag:      "EXPLAIN",
+			Command:  tag,
+			Tag:      tag,
 			Columns:  []Column{{Name: "QUERY PLAN", Type: "text"}},
 			Rows:     rows,
 			RowCount: len(rows),
@@ -149,7 +175,7 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, explainTag []string) 
 		Columns:  cols,
 		Rows:     rows,
 		RowCount: len(rows),
-		Plan:     planText,
+		Plan:     ExplainPlan(plan),
 	}, nil
 }
 

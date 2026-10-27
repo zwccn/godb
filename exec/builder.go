@@ -19,6 +19,11 @@ type Planner struct {
 	// 只影响系统目录与 current_database()，不影响查询计划。
 	Info *DBInfo
 
+	// pushdown 是「只涉及单张表的 WHERE 条件」，按表的限定符分组。
+	// 多表查询时由 BuildSelect 算好，buildTableRef 里在扫表时就先用它过滤
+	// （能走索引就走），避免把整张表灌进连接。nil 表示没有可下推的条件。
+	pushdown map[string][]sql.Expr
+
 	// outerScopes 是编译子查询时压入的外层作用域（见 buildSubquery）。
 	outerScopes []outerScope
 
@@ -46,6 +51,10 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 	if s.SetOp != "" {
 		return p.buildSetOp(s)
 	}
+	// 多表连接：先把「只涉及一张表」的条件下推下去，让连接之前就把行数降下来。
+	// 不这么做的话，join 的两侧都会被完整物化，WHERE 只能在最后过滤。
+	p.planPushdown(s.From, s.Where)
+
 	op, sc, err := p.buildFrom(s.From)
 	if err != nil {
 		return nil, err
@@ -94,6 +103,348 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 	return p.buildSimple(s, items, op, sc)
 }
 
+// columnIndexOf 把「纯列引用」翻成它在某个 schema 里的位置。
+// 不是列引用（表达式、常量）就返回 -1，调用方据此放弃索引连接。
+func columnIndexOf(e sql.Expr, sc Schema) (int, bool) {
+	ref, ok := e.(*sql.ColumnRef)
+	if !ok {
+		return -1, false
+	}
+	for i, c := range sc {
+		if !strings.EqualFold(c.Name, ref.Name) {
+			continue
+		}
+		if ref.Table != "" && !strings.EqualFold(c.Qualifier, ref.Table) {
+			continue
+		}
+		return i, true
+	}
+	return -1, false
+}
+
+// indexForJoinCols 找「连接列恰好是索引全部列」的索引（顺序也要一致）。
+//
+// 为什么要求完整列：IndexLookup 用的是完整键，只给前缀查不出来。前缀形式
+// 要走键区间（另一条路径），而实际关联 99% 是完整主键/唯一键，先不做。
+func indexForJoinCols(t *catalog.Table, cols []int) (string, []int, bool) {
+	if len(cols) == 0 {
+		return "", nil, false
+	}
+	same := func(ix []int) bool {
+		if len(ix) != len(cols) {
+			return false
+		}
+		for i := range cols {
+			if ix[i] != cols[i] {
+				return false
+			}
+		}
+		return true
+	}
+	if pk := t.PKIdxes(); same(pk) {
+		return "", pk, true
+	}
+	for _, ux := range t.Indexes {
+		ix := indexColIdxes(t, ux)
+		if same(ix) {
+			return ux.Name, ix, true
+		}
+	}
+	return "", nil, false
+}
+
+// tryIndexJoin 决定要不要把哈希连接换成索引连接，能换就返回新算子。
+//
+// 判断依据（都是估算，没有统计信息）：
+//   - 「有下推条件」的那侧算小（条件已经把行数压下来了），score 记 0；
+//     没有下推条件的一侧 score = 表行数。
+//   - 内表取 score 更大的那侧 —— 大表按索引点查才有意义，小表直接哈希更省。
+//   - LEFT JOIN 不能交换（内表必须是右表），INNER 可以。
+//
+// 判断不了或者没有合适的索引，就返回 nil 让它老实用哈希连接。
+func (p *Planner) tryIndexJoin(n *sql.Join, j *joinOp, lop, rop Operator, lcols, rcols []int) Operator {
+	if p.Tx == nil || len(lcols) == 0 || len(lcols) != len(rcols) {
+		return nil
+	}
+	if j.typ != sql.JoinInner && j.typ != sql.JoinLeft {
+		return nil
+	}
+	if j.residual == nil && len(j.leftKeys) != len(lcols) {
+		return nil
+	}
+	if p.hasNonColumns(j.leftKeys) || p.hasNonColumns(j.rightKeys) {
+		return nil
+	}
+	lt := p.baseTableOf(n.Left)
+	rt := p.baseTableOf(n.Right)
+	if lt == nil || rt == nil {
+		return nil // 有一侧是子查询/CTE/连接组，估算不了
+	}
+
+	lscore := p.joinSideScore(lt.Name, n.Left)
+	rscore := p.joinSideScore(rt.Name, n.Right)
+
+	// 内表取「更重」的那侧
+	if rscore >= lscore {
+		// 内表 = 右表，左表驱动（LEFT JOIN 也只能这样）
+		if ixName, ixCols, ok := indexForJoinCols(rt, rcols); ok {
+			return p.newIndexJoin(j, lop, rop, rt, ixName, ixCols, rcols, false)
+		}
+		return nil
+	}
+	if j.typ == sql.JoinLeft {
+		// 左表更重，但 LEFT JOIN 的内表只能是右表；换不了就回去哈希
+		return nil
+	}
+	// 内表 = 左表，右表驱动（交换）
+	if ixName, ixCols, ok := indexForJoinCols(lt, lcols); ok {
+		return p.newIndexJoin(j, lop, rop, lt, ixName, ixCols, lcols, true)
+	}
+	return nil
+}
+
+// hasNonColumns 判断连接键里有没有「不是纯列引用」的表达式。
+// 有的话拿不到列位置，也做不了索引查找。
+func (p *Planner) hasNonColumns(keys []Eval) bool {
+	for _, k := range keys {
+		if _, ok := k.(*colEval); !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// baseTableOf 从 FROM 项里取出实体表；子查询 / CTE / 函数表返回 nil。
+func (p *Planner) baseTableOf(r sql.TableRef) *catalog.Table {
+	bt, ok := r.(*sql.BaseTable)
+	if !ok {
+		return nil
+	}
+	if p.lookupCTE(bt.Table) != nil {
+		return nil
+	}
+	t, ok := p.Cat.Get(bt.Table)
+	if !ok {
+		return nil
+	}
+	return t
+}
+
+// joinSideScore 估算一侧的「体量」：有下推条件的算 0（已经被压小了），
+// 否则用表行数。没有统计信息，只能这么粗估 —— 决策理由会写进 EXPLAIN。
+func (p *Planner) joinSideScore(table string, ref sql.TableRef) int {
+	if bt, ok := ref.(*sql.BaseTable); ok {
+		qual := bt.Alias
+		if qual == "" {
+			qual = table
+		}
+		if len(p.pushdown[strings.ToLower(qual)]) > 0 {
+			return 0
+		}
+	}
+	if st := p.Tx.Store(); st != nil {
+		return st.RowCount(table)
+	}
+	return 0
+}
+
+func (p *Planner) newIndexJoin(j *joinOp, lop, rop Operator, inner *catalog.Table,
+	ixName string, ixCols, innerCols []int, swap bool) Operator {
+	o := &indexJoinOp{
+		tx: p.Tx, inner: inner, typ: j.typ,
+		osc: j.rsc, isc: j.lsc, sc: j.sc, swap: swap,
+		ixName: ixName, ixCols: ixCols, ixNames: colNames(inner, ixCols),
+		residual: j.residual, cond: j.cond,
+		details: []string{fmt.Sprintf("选索引连接：内表 %s 的 %s 有完整匹配索引",
+			inner.Name, ixNameOrPkey(ixName))},
+	}
+	if swap {
+		o.outer, o.osc, o.isc = rop, j.rsc, j.lsc
+		o.outerKeys = j.rightKeys // 在右表行上求值，值就是左表的键
+	} else {
+		o.outer, o.osc, o.isc = lop, j.lsc, j.rsc
+		o.outerKeys = j.leftKeys
+	}
+	return o
+}
+
+func ixNameOrPkey(name string) string {
+	if name == "" {
+		return "主键"
+	}
+	return name
+}
+
+// pushFilter 在扫描之上就地过滤（能走索引就走）。
+//
+// 上层的 WHERE **仍然保留**，会再判一遍。所以这里即使判断失误，最多是「没省到」，
+// 不会返回错的行 —— 和索引扫描那条既有设计是同一个取舍。
+func (p *Planner) pushFilter(t *catalog.Table, qual string, sc Schema, base Operator, conds []sql.Expr) Operator {
+	where := andAll(conds)
+	pred, err := p.compile(where, sc)
+	if err != nil {
+		return base // 编译不了就老实走原路
+	}
+	op := base
+	if p.Tx != nil {
+		bt := &sql.BaseTable{Table: t.Name, Alias: qual}
+		if is, ok := p.tryIndexScan(bt, where); ok {
+			op = is
+		} else if so, ok := base.(*scanOp); ok {
+			so.notes = append(so.notes, "下推条件没走索引："+indexHint(t))
+		}
+	}
+	return &filterOp{child: op, pred: pred, label: "pushed: " + sql.String(where)}
+}
+
+// indexHint 说清这张表有哪些索引 —— 查「为什么没走索引」时第一件要看的东西。
+func indexHint(t *catalog.Table) string {
+	var parts []string
+	if pk := t.PKIdxes(); len(pk) > 0 {
+		names := make([]string, len(pk))
+		for i, ci := range pk {
+			names[i] = t.Columns[ci].Name
+		}
+		parts = append(parts, "主键("+strings.Join(names, ",")+")")
+	}
+	for _, ix := range t.Indexes {
+		parts = append(parts, ix.Name+"("+strings.Join(ix.Columns, ",")+")")
+	}
+	if len(parts) == 0 {
+		return "该表没有任何索引"
+	}
+	return "现有索引 " + strings.Join(parts, "、") + "，条件不在索引首列的等值/区间形式上"
+}
+
+// pushdownTarget 是一张可以独立下推条件的基表。
+type pushdownTarget struct {
+	qual  string
+	table *catalog.Table
+}
+
+// planPushdown 把 WHERE 里「只碰一张表」的条件挑出来，按表分组。
+//
+// 关键点是**外连接的可空侧不参与下推**：`a LEFT JOIN b ON … WHERE b.x IS NULL`
+// 里如果把 b.x IS NULL 推到 b 上，会先滤掉 b 再把不匹配的 a 补 NULL，语义就变了。
+// 所以只会沿着 INNER / CROSS 的两侧、LEFT 的左侧、RIGHT 的右侧往下走。
+//
+// 判断归属时也保守：条件里只要出现子查询、或者列名在两张表里都有（有歧义），
+// 就整条不下推。漏下推只是慢一点，下推错了是结果不对。
+func (p *Planner) planPushdown(from []sql.TableRef, where sql.Expr) {
+	p.pushdown = nil
+	if where == nil || len(from) == 0 {
+		return
+	}
+	if _, ok := from[0].(*sql.Join); !ok {
+		return // 单表查询走既有的 tryIndexScan，不需要这套
+	}
+	var targets []pushdownTarget
+	p.collectPushdownTargets(from[0], &targets)
+	if len(targets) == 0 {
+		return
+	}
+	// 注意这里**不要求** targets >= 2：LEFT JOIN 只有左侧可下推，右侧为空，
+	// 但左侧的条件照样应该推下去。condOwner 会拒掉指不到任何目标的条件。
+	out := map[string][]sql.Expr{}
+	for _, c := range splitConjuncts(where) {
+		if q, ok := condOwner(c, targets); ok {
+			out[q] = append(out[q], c)
+		}
+	}
+	if len(out) > 0 {
+		p.pushdown = out
+	}
+}
+
+func (p *Planner) collectPushdownTargets(ref sql.TableRef, out *[]pushdownTarget) {
+	switch n := ref.(type) {
+	case *sql.BaseTable:
+		if p.lookupCTE(n.Table) != nil {
+			return // CTE 是物化好的结果集，条件推不进去
+		}
+		t, ok := p.Cat.Get(n.Table)
+		if !ok {
+			return // 系统目录的虚拟表
+		}
+		qual := n.Alias
+		if qual == "" {
+			qual = t.Name
+		}
+		*out = append(*out, pushdownTarget{qual: strings.ToLower(qual), table: t})
+	case *sql.Join:
+		switch n.Type {
+		case sql.JoinLeft:
+			p.collectPushdownTargets(n.Left, out)
+		case sql.JoinRight:
+			p.collectPushdownTargets(n.Right, out)
+		default:
+			p.collectPushdownTargets(n.Left, out)
+			p.collectPushdownTargets(n.Right, out)
+		}
+	}
+	// ParenJoin / SubTable / FuncTable 一律不下推：前者的别名会覆盖内部限定符，
+	// 后两者不是实体表。
+}
+
+// condOwner 判断一个条件能不能整块下推到某一张表，返回那张表的限定符。
+func condOwner(e sql.Expr, targets []pushdownTarget) (string, bool) {
+	owner := ""
+	ok := true
+	sql.Walk(e, func(x sql.Expr) bool {
+		if !ok {
+			return false
+		}
+		switch n := x.(type) {
+		case *sql.Subquery:
+			ok = false // 子查询里的列可能是外表的，判断不了就别推
+			return false
+		case *sql.ColumnRef:
+			q := strings.ToLower(n.Table)
+			if q == "" {
+				// 没写限定符：列名必须只属于一张表，否则有歧义
+				name := strings.ToLower(n.Name)
+				for _, t := range targets {
+					if _, has := t.table.ColumnIdx(name); has {
+						if q != "" && q != t.qual {
+							ok = false
+							return false
+						}
+						q = t.qual
+					}
+				}
+				if q == "" {
+					ok = false
+					return false
+				}
+			} else {
+				found := false
+				for _, t := range targets {
+					if t.qual == q {
+						found = true
+						break
+					}
+				}
+				if !found {
+					ok = false
+					return false
+				}
+			}
+			switch {
+			case owner == "":
+				owner = q
+			case owner != q:
+				ok = false
+				return false
+			}
+		}
+		return true
+	})
+	if !ok || owner == "" {
+		return "", false
+	}
+	return owner, true
+}
+
 // buildFrom 构建 FROM 子树。
 func (p *Planner) buildFrom(from []sql.TableRef) (Operator, Schema, error) {
 	if len(from) == 0 || from[0] == nil {
@@ -125,8 +476,13 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		if qual == "" {
 			qual = t.Name
 		}
-		op := newScan(p.Tx, t, qual)
-		return op, op.Schema(), nil
+		var op Operator = newScan(p.Tx, t, qual)
+		sc := op.Schema()
+		// 多表查询：这张表上的条件就地过滤掉，别整表灌进连接
+		if conds := p.pushdown[strings.ToLower(qual)]; len(conds) > 0 {
+			op = p.pushFilter(t, qual, sc, op, conds)
+		}
+		return op, sc, nil
 
 	case *sql.SubTable:
 		return p.buildSubTable(n)
@@ -164,6 +520,8 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		sc = append(sc, lsc...)
 		sc = append(sc, rsc...)
 		j := &joinOp{left: lop, right: rop, typ: n.Type, lsc: lsc, rsc: rsc, sc: sc}
+		// 连接键的列位置：索引连接要靠它判断「内表的哪几列被等值约束」
+		var lcols, rcols []int
 		if n.On != nil {
 			j.cond = sql.String(n.On)
 			conjuncts := splitConjuncts(n.On)
@@ -185,6 +543,10 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 							}
 							j.leftKeys = append(j.leftKeys, le)
 							j.rightKeys = append(j.rightKeys, re)
+							lc, _ := columnIndexOf(b.L, lsc)
+							rc, _ := columnIndexOf(b.R, rsc)
+							lcols = append(lcols, lc)
+							rcols = append(rcols, rc)
 							matched = true
 						} else if rl && lr {
 							le, err := p.compile(b.R, lsc)
@@ -197,6 +559,10 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 							}
 							j.leftKeys = append(j.leftKeys, le)
 							j.rightKeys = append(j.rightKeys, re)
+							lc, _ := columnIndexOf(b.L, rsc)
+							rc, _ := columnIndexOf(b.R, lsc)
+							lcols = append(lcols, rc)
+							rcols = append(rcols, lc)
 							matched = true
 						}
 					}
@@ -212,6 +578,11 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 				}
 				j.residual = re
 			}
+		}
+		// 索引连接：把「大表」当内表按索引点查，小表驱动。
+		// 走不了就还是原来的「物化两侧 + 哈希连接」。
+		if iop := p.tryIndexJoin(n, j, lop, rop, lcols, rcols); iop != nil {
+			return iop, sc, nil
 		}
 		return j, sc, nil
 	}

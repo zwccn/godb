@@ -47,7 +47,7 @@ go build -o godb.exe .
 | 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
 | 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；三者都支持 `RETURNING`（含 `RETURNING *`、表达式与别名） |
-| 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` |
+| 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` / `EXPLAIN ANALYZE` |
 | 约束 | `NOT NULL`、`UNIQUE`、`PRIMARY KEY`（复合）、`CHECK`、`FOREIGN KEY`（含 `ON DELETE CASCADE`） |
 | CTE | `WITH name [(cols)] AS (SELECT ...)`，可多个、可互相引用（物化一次） |
 | 集合运算 | `UNION [ALL]` / `INTERSECT` / `EXCEPT`；`FROM` 子查询（含 `AS t(a, b)` 列别名） |
@@ -580,6 +580,65 @@ main.go        启动装配、参数解析
 写路径以前才是真瓶颈：每次提交都要重组整表行切片 + 重建所有索引，
 20 万行的表改一行要 40 ms（带两个二级索引是 158 ms）。解决办法是让行槽位稳定下来。
 
+### 多表连接
+
+三件事，按收益排序：
+
+**1. 谓词下推**（收益最大）。`FROM a JOIN b ON … WHERE a.x = 1` 里的 `a.x = 1`
+只碰一张表，就在扫 a 的时候就过滤掉（能走索引就走），不用把整张表灌进连接、
+到最后才过滤。判断很保守：条件里出现子查询、或列名两张表都有（有歧义），
+整条不下推 —— 漏下推只是慢，下推错了是结果不对。
+
+**外连接的可空侧不下推**：`a LEFT JOIN b ON … WHERE b.x IS NULL` 里如果把
+`b.x IS NULL` 推到 b 上，会先滤掉 b 再把不匹配的 a 补 NULL，语义就变了
+（本来该出 1 行，会变成 2 行）。所以只沿着 INNER/CROSS 的两侧、LEFT 的左侧、
+RIGHT 的右侧走。
+
+**2. 索引连接**。哈希连接必须把两侧都读进来；索引连接只读外表，内表按索引点查。
+「外表很小、内表很大且有索引」时差一个数量级。内表的选择看「体量分」：
+
+- 有下推条件的一侧算 0（条件已经把它压小了），没有的算表行数；
+- **内表取分更高的那侧**（大表才值得按索引点查）；
+- 内表的连接列必须是某个索引的**完整列**（顺序一致），部分前缀走不了点查；
+- `LEFT JOIN` 不能交换（内表只能是右表），`INNER` 可以换驱动侧。
+
+**3. `EXPLAIN` 里能看见决策**。每个节点后面接 `|` 加说明：走了哪个索引、读了多少行、
+为什么没走索引（会列出表上有哪些索引）、为什么选这个连接算法。
+
+```
+Index Inner Join using jf_did on jf (on: (jf.did = jd.id))
+  | 选索引连接：内表 jf 的 jf_did 有完整匹配索引; 驱动 1 行，内表（左）按索引点查
+  Filter (pushed: (jd.id = 5))
+    Index Scan using jd_pkey on jd  | 索引取回 1 行（键 = 5）
+```
+
+### 慢在哪：EXPLAIN ANALYZE
+
+`EXPLAIN` 只讲「打算怎么做」，`EXPLAIN ANALYZE` 会**真跑一遍**（结果丢掉），
+在每个节点后面加上实际行数与耗时：
+
+```
+Project (count)
+  Aggregate (count(*))
+    Filter ((jd.id = 5))
+      Index Inner Join using jf_did on jf  (rows=100 time=0)
+  | 选索引连接：内表 jf 的 jf_did 有完整匹配索引; 驱动 1 行
+        Filter (pushed: (jd.id = 5))
+          Index Scan using jd_pkey on jd  (rows=1 time=0)  | 索引取回 1 行（键 = 5）
+```
+
+几个典型的读法：
+
+| 现象 | 说明 |
+|---|---|
+| `Seq Scan on x  \| 全表读入 200000 行`，上层只出 100 行 | 该给这张表的过滤列建索引 |
+| `下推条件没走索引：现有索引 a_b(a,b)…` | 条件不在索引首列上，或不是等值/区间 |
+| `左 200000 行 / 右 1 行 → 输出 100 行` | 连接读得太多，考虑索引连接 |
+| `(rows=… time=…)` 里某一层时间远大于下一层 | 时间花在这一层自己的计算上（哈希、排序、聚合） |
+
+计时有成本（每行一次取时钟），所以**只有 EXPLAIN ANALYZE 才打开**，
+正常查询不受影响。
+
 ### 行槽位与写路径
 
 `TableData.Rows` 是**槽位数组**，删除只把槽位置 `nil` 并记进 `free`，不搬动后面的行。
@@ -782,13 +841,15 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - `NUMERIC(p,s)` 内部用 `float64`，**不是精确十进制**。
 - 耗时精度受操作系统时钟限制：小于本机时钟步进（沙箱里约 0.2ms）的操作只能显示上界 `<0.20 ms`。
 - JOIN 会物化两侧数据；连接结果超过 200 万行会直接报错而不是把内存吃光。
-- 没有查询优化器（不做谓词下推、连接顺序重排），执行计划就是 SQL 的直译。
+- 没有统计信息，连接策略和索引选择都是**估算**（表行数 + 「有没有过滤条件」）。
+  谓词下推只做「只碰一张表」的整条合取项，不会拆 `a = 1 OR b = 2` 这种；
+  连接顺序只做「两表之间换驱动侧」，三表以上的顺序不做重排。
 - DDL 不能在事务块内执行。多库已经支持（见上），但**库之间完全不能互相访问**：
   没有跨库查询、没有 `ALTER DATABASE`、没有库级权限。
 - 索引是**有序**的（B+Tree），但只用得上「完整键等值 + 首列区间 + `IN` 列表 +
   `OR` 合并 + 前缀排序」：`OR` 要求所有分支落在同一个索引上、`NOT IN` 用不上索引、
   `(a,b)` 索引上 `b > 5` 用不上、没有索引跳跃扫描和覆盖索引。
-  规划器也只在单表查询里选索引（多表 JOIN 不做连接顺序重排）。
+  多表连接能下推条件、能在两表之间选驱动侧，但**不做三表以上的连接顺序重排**。
 - 每个索引在内存里多一份「键 + 槽位」的树节点，**索引越多内存越大**。写路径已经是增量的
   （改一行只动一个键），但内存是实打实的成本，别在低基数列上建一堆索引。
 - `CHECK` 约束会校验，但还没进 `pg_constraint`：psql `\d` 的「Check constraints」

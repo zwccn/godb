@@ -20,6 +20,12 @@ type ColInfo struct {
 	Qualifier string
 	Name      string
 	Type      types.Type
+	// 这一列直接来自哪张表（pg_class.oid）的第几列（attnum，从 1 开始）。
+	// 只有「表列原样透出」时才填；表达式、聚合、CTE 的列保持 0。
+	// PG 协议的 RowDescription 要回这两个值，Navicat 靠它判断结果集能不能回写
+	// —— 全 0 时它把数据网格设成只读（能看不能改）。
+	TableOID int32
+	AttNum   int16
 }
 
 // Schema 是一组列。

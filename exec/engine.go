@@ -15,6 +15,10 @@ import (
 type Column struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
+	// 列的来源表 OID 与列号（PG 协议 RowDescription 要回给客户端）。
+	// 表达式/聚合列保持 0 —— 客户端据此判断结果集能不能回写。
+	TableOID int32 `json:"-"`
+	AttNum   int16 `json:"-"`
 }
 
 // Result 是一条语句的执行结果。
@@ -154,7 +158,7 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 	sc := plan.Schema()
 	cols := make([]Column, len(sc))
 	for i, c := range sc {
-		cols[i] = Column{Name: c.Name, Type: c.Type.String()}
+		cols[i] = Column{Name: c.Name, Type: c.Type.String(), TableOID: c.TableOID, AttNum: c.AttNum}
 	}
 	var rows [][]interface{}
 	for {
@@ -862,8 +866,15 @@ func (e *Engine) tableScope(t *catalog.Table, alias string) Schema {
 		qual = t.Name
 	}
 	sc := make(Schema, len(t.Columns))
+	oid, _ := syscat.RelationOID(e.Cat, t.Name)
 	for i, c := range t.Columns {
-		sc[i] = ColInfo{Qualifier: strings.ToLower(qual), Name: strings.ToLower(c.Name), Type: c.Type()}
+		sc[i] = ColInfo{
+			Qualifier: strings.ToLower(qual),
+			Name:      strings.ToLower(c.Name),
+			Type:      c.Type(),
+			TableOID:  oid,
+			AttNum:    int16(i + 1),
+		}
 	}
 	return sc
 }

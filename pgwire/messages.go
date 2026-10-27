@@ -99,6 +99,11 @@ type field struct {
 	TypeOID int32
 	TypeLen int16
 	Format  int16 // 0 = text
+	// 这一列来自哪张表（pg_class.oid）的第几列（attnum）。
+	// 客户端（Navicat 尤其）靠它判断结果集能否回写：全 0 就是「只读结果集」，
+	// 数据网格里连编辑按钮都不给。表达式列按 PG 的规矩也留 0。
+	TableOID int32
+	AttNum   int16
 }
 
 func encodeRowDescription(fields []field) []byte {
@@ -106,8 +111,8 @@ func encodeRowDescription(fields []field) []byte {
 	w.int16(int16(len(fields)))
 	for _, f := range fields {
 		w.str(f.Name)
-		w.int32(0) // 表 OID
-		w.int16(0) // 列号
+		w.int32(f.TableOID)
+		w.int16(f.AttNum)
 		w.int32(f.TypeOID)
 		w.int16(f.TypeLen)
 		w.int32(-1) // type modifier

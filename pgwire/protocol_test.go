@@ -395,6 +395,34 @@ func TestExtendedQueryTextParam(t *testing.T) {
 	}
 }
 
+func TestExtendedExecuteNoDuplicateRowDesc(t *testing.T) {
+	// 扩展协议里 RowDescription 只由 Describe 发一次；Execute 再发一遍会让
+	// Npgsql 直接抛 "unexpected backend message of type RowDescription"（.NET 客户端连不上）。
+	_, addr := startServer(t)
+	c := dial(t, addr)
+	defer c.close()
+
+	c.sendRaw(testParse("s3", "SELECT id FROM t WHERE name = $1", []int32{25}))
+	c.sendRaw(testBind("", "s3", []string{"bob"}))
+	c.sendRaw(testDescribe('P', ""))
+	c.sendRaw(testExecute(""))
+	c.sendRaw(testSync())
+	msgs := c.readUntil('Z')
+
+	rowDescCount := 0
+	for _, m := range msgs {
+		if m.typ == 'T' {
+			rowDescCount++
+		}
+	}
+	if rowDescCount != 1 {
+		t.Fatalf("RowDescription 出现 %d 次，应为 1（Describe 一次，Execute 不重复）", rowDescCount)
+	}
+	if rows := dataRows(msgs); len(rows) != 1 || string(rows[0][0]) != "2" {
+		t.Fatalf("rows = %v (期望 id=2)", rows)
+	}
+}
+
 func TestCompatProbes(t *testing.T) {
 	_, addr := startServer(t)
 	c := dial(t, addr)
@@ -441,5 +469,78 @@ func TestEmptyQuery(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("missing EmptyQueryResponse")
+	}
+}
+
+// 列来源：RowDescription 里每列的 tableOID / attnum 必须指向真实的表和列。
+// Navicat 这类客户端靠它判断结果集能不能回写 —— 全 0 时数据网格是只读的
+//（能看不能改），而 psql 完全不看这两个字段，所以以前没暴露。
+func TestRowDescriptionCarriesColumnOrigin(t *testing.T) {
+	d, addr := startServer(t)
+	c := dial(t, addr)
+	defer c.close()
+
+	// 客户端拿到 tableOID 后会去 pg_class 对照，所以这里也查一遍真值
+	out, err := d.Exec(d.Session("origin"), "SELECT oid FROM pg_class WHERE relname = 't'")
+	if err != nil || len(out) != 1 || len(out[0].Rows) != 1 {
+		t.Fatalf("查 pg_class 失败: %v", err)
+	}
+	var wantOID int32
+	switch v := out[0].Rows[0][0].(type) {
+	case int64:
+		wantOID = int32(v)
+	case int32:
+		wantOID = v
+	default:
+		t.Fatalf("oid 类型异常: %T", out[0].Rows[0][0])
+	}
+
+	msgs := c.query("SELECT id, name, score + 1 AS bump, 'x' AS lit FROM t")
+	var desc []byte
+	for _, m := range msgs {
+		if m.typ == 'T' {
+			desc = m.body
+		}
+	}
+	if desc == nil {
+		t.Fatal("缺少 RowDescription")
+	}
+
+	n := int(binary.BigEndian.Uint16(desc[0:2]))
+	if n != 4 {
+		t.Fatalf("列数 = %d, want 4", n)
+	}
+	type col struct {
+		name   string
+		oid    int32
+		attnum int16
+	}
+	cols := make([]col, 0, n)
+	off := 2
+	for i := 0; i < n; i++ {
+		end := off
+		for end < len(desc) && desc[end] != 0 {
+			end++
+		}
+		name := string(desc[off:end])
+		off = end + 1
+		oid := int32(binary.BigEndian.Uint32(desc[off : off+4]))
+		attnum := int16(binary.BigEndian.Uint16(desc[off+4 : off+6]))
+		off += 4 + 2 + 4 + 2 + 4 + 2 // 表OID, 列号, 类型OID, typlen, typmod, format
+		cols = append(cols, col{name, oid, attnum})
+	}
+
+	if cols[0].name != "id" || cols[0].oid != wantOID || cols[0].attnum != 1 {
+		t.Fatalf("id 的来源 = %+v, want oid=%d attnum=1", cols[0], wantOID)
+	}
+	if cols[1].oid != wantOID || cols[1].attnum != 2 {
+		t.Fatalf("name 的来源 = %+v, want oid=%d attnum=2", cols[1], wantOID)
+	}
+	// 表达式和字面量不是表列，按 PG 的规矩必须是 0，否则客户端会尝试回写算出来的列
+	if cols[2].oid != 0 || cols[2].attnum != 0 {
+		t.Fatalf("表达式列不该带来源: %+v", cols[2])
+	}
+	if cols[3].oid != 0 || cols[3].attnum != 0 {
+		t.Fatalf("字面量列不该带来源: %+v", cols[3])
 	}
 }

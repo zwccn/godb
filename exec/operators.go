@@ -7,6 +7,7 @@ import (
 
 	"godb/catalog"
 	"godb/storage"
+	"godb/syscat"
 	"godb/types"
 )
 
@@ -41,8 +42,8 @@ type scanOp struct {
 	notes []string
 }
 
-func newScan(tx *storage.Tx, t *catalog.Table, qual string) *scanOp {
-	return &scanOp{tx: tx, table: t.Name, qual: qual, sc: tableSchema(t, qual)}
+func newScan(tx *storage.Tx, t *catalog.Table, qual string, cat *catalog.Catalog) *scanOp {
+	return &scanOp{tx: tx, table: t.Name, qual: qual, sc: tableSchema(cat, t, qual)}
 }
 
 func (o *scanOp) Schema() Schema { return o.sc }
@@ -89,10 +90,19 @@ func (o *scanOp) Describe() string {
 func (o *scanOp) Children() []Operator { return nil }
 
 // tableSchema 按表定义生成 FROM 子树的列布局。
-func tableSchema(t *catalog.Table, qual string) Schema {
+// cat 只用来算表 OID（PG 协议里要回给客户端，客户端据此判断能不能回写）；
+// 传 nil 也能用，只是 OID 为 0。
+func tableSchema(cat *catalog.Catalog, t *catalog.Table, qual string) Schema {
 	sc := make(Schema, len(t.Columns))
+	oid, _ := syscat.RelationOID(cat, t.Name)
 	for i, c := range t.Columns {
-		sc[i] = ColInfo{Qualifier: strings.ToLower(qual), Name: strings.ToLower(c.Name), Type: c.Type()}
+		sc[i] = ColInfo{
+			Qualifier: strings.ToLower(qual),
+			Name:      strings.ToLower(c.Name),
+			Type:      c.Type(),
+			TableOID:  oid,
+			AttNum:    int16(i + 1),
+		}
 	}
 	return sc
 }
@@ -120,11 +130,11 @@ type indexScanOp struct {
 	fetched int // Open 时从索引取回的行数（EXPLAIN 用）
 }
 
-func newIndexScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, vals []types.Value, qual string) *indexScanOp {
+func newIndexScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, vals []types.Value, qual string, cat *catalog.Catalog) *indexScanOp {
 	return &indexScanOp{
 		tx: tx, tbl: t, ixName: ixName, cols: cols, ixCols: ixCols,
 		ixNames: colNames(t, ixCols), vals: vals,
-		sc: tableSchema(t, qual),
+		sc: tableSchema(cat, t, qual),
 	}
 }
 
@@ -224,11 +234,11 @@ type indexRangeScanOp struct {
 	ixNames []string // 同上，换成列名
 }
 
-func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, rs []storage.KeyRange, qual string) *indexRangeScanOp {
+func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, rs []storage.KeyRange, qual string, cat *catalog.Catalog) *indexRangeScanOp {
 	return &indexRangeScanOp{
 		tx: tx, tbl: t, ixName: ixName, cols: cols, ixCols: ixCols, rs: rs,
 		ixNames: colNames(t, ixCols),
-		sc:      tableSchema(t, qual),
+		sc:      tableSchema(cat, t, qual),
 	}
 }
 

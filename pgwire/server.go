@@ -501,7 +501,7 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 	defer c.setActivity("idle", "")
 	var out [][]byte
 	for _, r := range results {
-		out = append(out, encodeResult(r)...)
+		out = append(out, encodeResult(r, true)...)
 	}
 	if err != nil {
 		out = append(out, c.errorResponse(err)...)
@@ -510,15 +510,22 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 	_ = c.write(out...)
 }
 
-func encodeResult(r *exec.Result) [][]byte {
+func encodeResult(r *exec.Result, withRowDesc bool) [][]byte {
 	var out [][]byte
 	if len(r.Columns) > 0 {
-		fields := make([]field, len(r.Columns))
-		for i, col := range r.Columns {
-			oid, size := typeOID(col.Type)
-			fields[i] = field{Name: col.Name, TypeOID: oid, TypeLen: size}
+		// 扩展协议里 RowDescription 已经由 Describe 发过一次了，Execute 只补 DataRow；
+		// 再发一遍 Npgsql 会直接抛 "unexpected backend message of type RowDescription"。
+		if withRowDesc {
+			fields := make([]field, len(r.Columns))
+			for i, col := range r.Columns {
+				oid, size := typeOID(col.Type)
+				fields[i] = field{
+					Name: col.Name, TypeOID: oid, TypeLen: size,
+					TableOID: col.TableOID, AttNum: col.AttNum,
+				}
+			}
+			out = append(out, encodeRowDescription(fields))
 		}
-		out = append(out, encodeRowDescription(fields))
 		for _, row := range r.Rows {
 			vals := make([][]byte, len(row))
 			for i, v := range row {
@@ -689,7 +696,9 @@ func (c *conn) handleExecute(payload []byte) {
 	results, err := c.db.Exec(c.sess, p.sql)
 	var out [][]byte
 	for _, r := range results {
-		out = append(out, encodeResult(r)...)
+		// false：Execute 阶段不再重复 RowDescription（Describe 已经发过），
+		// 否则 Npgsql 等严格客户端会认为报文顺序非法。
+		out = append(out, encodeResult(r, false)...)
 	}
 	if err != nil {
 		out = append(out, c.errorResponse(err)...)
@@ -752,7 +761,10 @@ func (c *conn) fieldsFor(sqlText string) ([]field, bool) {
 	fields := make([]field, len(sc))
 	for i, col := range sc {
 		oid, size := typeOID(col.Type.String())
-		fields[i] = field{Name: col.Name, TypeOID: oid, TypeLen: size}
+		fields[i] = field{
+			Name: col.Name, TypeOID: oid, TypeLen: size,
+			TableOID: col.TableOID, AttNum: col.AttNum,
+		}
 	}
 	return fields, true
 }

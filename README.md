@@ -475,6 +475,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 |---|---|
 | psql / pgcli | `-h 127.0.0.1 -p 6432 -U godb -d godb` |
 | Navicat / pgAdmin / DBeaver | 主机 `127.0.0.1`，端口 `6432`，初始数据库 `godb`，用户名 `godb`，**没设密码时密码留空** |
+| .NET（Npgsql / FreeSql / EF Core / Dapper） | 连接串要带 `Server Compatibility Mode=NoTypeLoading`，见下面「.NET / Npgsql」小节 |
 
 没启用密码时是 trust 认证，用户名填什么都行；在设置页设了密码之后，用户名必须和那里填的
 一致（默认 `godb`），密码不能空。
@@ -493,16 +494,55 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 | 简单查询 `Q`（支持多语句，逐条返回结果集） | ✅ |
 | 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数 | ✅ |
 | `RowDescription` 带 PG 类型 OID（int4/int8/text/bool/float8/numeric/timestamp…） | ✅ |
+| `RowDescription` 的 `tableOID` / `attnum`（列的真实来源，客户端靠它判断结果集能否回写） | ✅ 表达式列按 PG 规矩给 0 |
 | 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |
 | 事务状态 `ReadyForQuery` 的 `I`/`T`/`E` | ✅ |
 | `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
 | `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
 | 标量子查询 `(SELECT ...)` | ✅ 含相关子查询；多行会报 `more than one row` |
 | `FROM` 子查询、`UNION`/`INTERSECT`/`EXCEPT` | ✅ 客户端触发器页的查询需要 |
-| `IN`/`EXISTS` 子查询、CTE、窗口函数 | ❌ |
+| `IN`/`EXISTS` 子查询、窗口函数 | ❌（`WITH` 普通 CTE 是支持的） |
 | 括号联接组 `LEFT JOIN (a JOIN b ON …) x ON …` | ✅ 客户端刷对象树必需 |
 
+### 数据网格能不能编辑：`tableOID` / `attnum`
+
+Navicat / DBeaver 这类工具里「表数据」网格是否可编辑，看的不是权限，而是
+`RowDescription` 里每列带着的两个字段：**这一列来自哪张表（`tableOID`）的第几列（`attnum`）**。
+两个都填 0 时，客户端会把结果当成「不可更新的查询结果」，工具栏里连新增/删除/应用
+都不给 —— 表现就是**数据能看、改不了**。psql 完全不看这两个字段，所以用 psql 根本测不出来。
+
+现在这些查询都会把来源透出来：`SELECT * FROM t`、`SELECT a, b FROM t`、带表别名、
+带 `WHERE` / `ORDER BY` / `LIMIT` 的。表达式列（`score + 1 AS bump`）、字面量、聚合结果
+按 PG 的规矩仍然是 0 —— 那些本来就不该原地编辑。
+
 > 注意端口：默认用 `6432`，因为本机 `5432` 往往已经被真正的 PostgreSQL 占用。
+
+### .NET / Npgsql（FreeSql、EF Core、Dapper）
+
+.NET 生态基本都是 Npgsql，它有两个跟别的客户端不一样的习惯：
+
+**1. 连上之后先拉一份类型目录**。Npgsql 会往 `pg_type` / `pg_enum` 上跑几条联合查询建 OID 映射，
+最后一条 `SELECT pg_type.oid, enumlabel FROM pg_enum JOIN pg_type ON pg_type.oid = enumtypid ORDER BY oid, enumsortorder`
+里的 `order by oid`，PostgreSQL 是先按**输出列名**匹配的（落到第 1 列 `pg_type.oid`），
+godb 目前按来源列解析，而两张表都有 `oid`，于是报 `column reference "oid" is ambiguous`（见「已知限制」）。
+在 ORDER BY 解析规则对齐之前，连接串加 `Server Compatibility Mode=NoTypeLoading` 跳过整段类型加载即可：
+
+```
+Host=127.0.0.1;Port=6432;Database=godb;Username=godb;Pooling=false;Server Compatibility Mode=NoTypeLoading
+```
+
+枚举值要写成 `NoTypeLoading`（**无空格**），写成 `No Type Loading` 会报
+`Requested value 'No Type Loading' was not found`。`Username` 必须有值，trust 认证下随便填。
+
+**2. 扩展协议校验很严**。`RowDescription` 只允许由 `Describe` 回一帧，`Execute` 阶段再回一帧就直接抛
+`Received unexpected backend message of type RowDescription`。godb 之前 `handleExecute` 复用
+`encodeResult` 时会多回一帧，**2026-10-27 已修**（`encodeResult(r, withRowDesc bool)`，简单查询传
+`true`、`Execute` 传 `false`；回归测试 `TestExtendedExecuteNoDuplicateRowDesc`）。
+排查这类问题：开 `-pg-log` 能把客户端发来的每条 SQL 落到文件，帧序列用 `tools/pg_extended.py` 打一遍最直观。
+
+配 FreeSql 还有两个坑：`FreeSql.Provider.PostgreSQL` 要用 3.5.x（3.2.x 在 .NET 9+ 上 `Build()` 时会因
+`TimeSpan.FromSeconds` 重载歧义崩在 `FreeSql.Internal.Utils` 的静态构造）；实体列名显式标
+`[Column(Name = "小写列名")]`，可空列必须用可空类型，否则 NULL 会被悄悄折成 0。
 
 ### 系统目录（虚拟表）
 
@@ -952,7 +992,7 @@ CHECKPOINT;
 ## 测试
 
 ```bash
-go test ./...        # 219 个用例
+go test ./...        # 220 个用例
 go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 ```
 
@@ -960,7 +1000,7 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - `lock/`：S-S 相容、S-X / X-X 冲突、批量申请原子性、释放唤醒、S→X 升级、等待图死锁（只让年轻者放弃）、快照。
 - `db/persistence_test.go`：增量 checkpoint（没改的表文件 mtime 不变）、按需加载（启动 0 张、查一张变 1 张）、旧 `snapshot.json` 自动迁移、快照与 WAL 重叠时不重复应用、catalog 与快照列数不一致时能打开、二进制 WAL 往返、旧版 JSON WAL 兼容、尾部截断帧容错、`CHECKPOINT` 语句、组提交 fsync 合并、`ADD COLUMN` 不重写快照。
 - `db/`：CRUD 与约束、NULL 三值逻辑、排序分页、分组聚合、四种 JOIN、DISTINCT、表达式与函数、事务提交回滚、中毒事务、WAL 崩溃恢复、ALTER 四种动作、错误路径；并发部分覆盖读读并行、跨表写并行、读写互斥、写挡读、保守预扫描消除升级、死锁检测、未提交不可见、20 次并发自增不丢更新。
-- `pgwire/`：简单查询（含多语句）、扩展查询与文本参数、事务状态、错误 SQLSTATE、密码认证（错密码 / 错用户 / 正确密码 / 未启用时 trust）、系统目录能查但只读且不加锁。
+- `pgwire/`：简单查询（含多语句）、扩展查询与文本参数、事务状态、错误 SQLSTATE、密码认证（错密码 / 错用户 / 正确密码 / 未启用时 trust）、系统目录能查但只读且不加锁、扩展协议 `Execute` 不重复回 `RowDescription`（Npgsql 严格校验这点）。
 - `web/`：`/api/dbs` 列表 / 建库 / 切库写 cookie / 删库规则 / **非本机写被拒**；`/api/config` 读取、保存、远程写被拒、非法值被拒。
 - `config/`：配置原子写与校验、`-http`/`-pg` 只作首次种子、密码哈希往返（PBKDF2），以及 SCRAM / MD5 的哈希工具。
 
@@ -1000,6 +1040,11 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - `CHECK` 约束会校验，但还没进 `pg_constraint`：psql `\d` 的「Check constraints」
   段和客户端的检查约束页是空的。
 - 标识符统一转小写（`"Ud"` 与 `ud` 视为同一张表），不像 PostgreSQL 那样区分引号标识符的大小写。
+- `ORDER BY` 只按来源列解析，**不会优先匹配输出列名**。PG 的规则是先看 select 列表里有没有同名的输出列：
+  `SELECT pg_type.oid, enumlabel FROM pg_enum JOIN pg_type ON … ORDER BY oid` 在 PG 里落到第 1 列，
+  在 godb 里因为两张表都有 `oid` 而报 `column reference "oid" is ambiguous`。
+  Npgsql 连上来时那条类型目录查询正好撞上，所以 .NET 客户端目前要带 `Server Compatibility Mode=NoTypeLoading`
+  （见「.NET / Npgsql」小节）；要根治得改 `ORDER BY` 的解析顺序（先输出列名，再来源列，最后序号）。
 - 系统目录是"够客户端用"的子集：`pg_proc` 只列了少量函数、统计视图（`pg_stat_*`）大多是空壳，
   需要新表时补 `syscat/syscat.go` 的 `specs` 与 `syscat/rows.go` 的生成逻辑即可。
 - `pg_get_indexdef` / `pg_get_constraintdef` 现在会返回真实定义（`\d` 的索引行不再只剩一个逗号），

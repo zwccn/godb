@@ -476,7 +476,7 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		if qual == "" {
 			qual = t.Name
 		}
-		var op Operator = newScan(p.Tx, t, qual)
+		var op Operator = newScan(p.Tx, t, qual, p.Cat)
 		sc := op.Schema()
 		// 多表查询：这张表上的条件就地过滤掉，别整表灌进连接
 		if conds := p.pushdown[strings.ToLower(qual)]; len(conds) > 0 {
@@ -613,9 +613,9 @@ func (p *Planner) tryIndexScan(bt *sql.BaseTable, where sql.Expr) (Operator, boo
 		return nil, false
 	}
 	if plan.isRange {
-		return newIndexRangeScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.rs, qual), true
+		return newIndexRangeScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.rs, qual, p.Cat), true
 	}
-	return newIndexScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.eq, qual), true
+	return newIndexScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.eq, qual, p.Cat), true
 }
 
 // indexPlan 描述一次索引访问。
@@ -1301,6 +1301,15 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 		}
 		exprs[i] = ev
 		out[i] = ColInfo{Name: itemName(it), Type: ev.Type()}
+		// 投影项就是表列时，把「来自哪张表哪一列」一起透出来。
+		// 不填的话 PG 协议里 tableOID/attnum 全是 0，Navicat 会把结果网格设成只读
+		//（数据能看不能改），因为它没法把结果行回写定位到源表。
+		if ref, ok := it.Expr.(*sql.ColumnRef); ok {
+			if idx, _, err := sc.Resolve(ref.Table, ref.Name); err == nil {
+				out[i].TableOID = sc[idx].TableOID
+				out[i].AttNum = sc[idx].AttNum
+			}
+		}
 	}
 
 	if len(s.OrderBy) > 0 {

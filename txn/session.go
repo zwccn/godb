@@ -272,6 +272,9 @@ type Stmt struct {
 // Tx 返回语句所在事务。
 func (st *Stmt) Tx() *storage.Tx { return st.s.tx }
 
+// Auto 返回这条语句是否是自动提交（不在显式事务里）。
+func (st *Stmt) Auto() bool { return st.auto }
+
 // BeginStatement 开始一条语句：确保有事务且锁已就位（可能阻塞等待）。
 // 调用方在拿到 *Stmt 后再去执行引擎执行，最后必须调用 End。
 //

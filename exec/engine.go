@@ -730,6 +730,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 		Tag:      fmt.Sprintf("INSERT 0 %d", len(rows)-skipped),
 		Affected: len(rows) - skipped,
 	}
+	syscat.NoteDML(t.Name, int64(len(rows)-skipped), 0, 0)
 	if len(retEvals) > 0 {
 		res.Columns = retCols
 		for _, r := range inserted {
@@ -1369,6 +1370,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		affected++
 	}
 	res := &Result{Command: "UPDATE", Tag: fmt.Sprintf("UPDATE %d", affected), Affected: affected}
+	syscat.NoteDML(t.Name, 0, int64(affected), 0)
 	if len(retEvals) > 0 {
 		res.Columns = retCols
 		if err := fillReturning(res, retEvals, retRows); err != nil {
@@ -1535,6 +1537,7 @@ deleteRows:
 		}
 	}
 	res := &Result{Command: "DELETE", Tag: fmt.Sprintf("DELETE %d", len(refs)), Affected: len(refs)}
+	syscat.NoteDML(t.Name, 0, 0, int64(len(refs)))
 	if len(retEvals) > 0 {
 		res.Columns = retCols
 		if err := fillReturning(res, retEvals, delRows); err != nil {

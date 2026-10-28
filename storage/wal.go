@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"godb/types"
 )
@@ -469,6 +470,9 @@ func legacyValue(v interface{}) types.Value {
 }
 
 // replayWAL 重放日志：只应用「代次高于快照」且带 commit 标记的事务。
+// replayWAL 重放 WAL。多表并行：先按事务提交状态筛出需要重放的记录，
+// 再按表分组（表内保序，表间无依赖），多表同时 apply。
+// 单表场景与旧实现等价（顺序不变）。
 func (s *Store) replayWAL() error {
 	recs, err := readWALFile(walPath(s.Dir))
 	if err != nil {
@@ -498,34 +502,64 @@ func (s *Store) replayWAL() error {
 		s.appliedGen = maxGen
 	}
 
-	type pendingTx struct{ recs []walRec }
-	pending := map[int64]*pendingTx{}
+	// 1) 哪些事务提交了
+	committed := map[int64]bool{}
 	for _, rec := range recs {
-		// 每张表的数据文件各自记录"已经包含到哪个代次"，
-		// 所以这里按表过滤：该表文件已经包含这一代的改动就跳过。
-		if rec.Op != opCommit {
-			if rec.Gen <= s.tableGen[cleanName(rec.Table)] {
-				continue
-			}
-		}
 		if rec.Op == opCommit {
-			if p, ok := pending[rec.Tx]; ok {
-				for _, r := range p.recs {
-					if err := s.applyRec(r); err != nil {
-						return fmt.Errorf("重放 WAL 失败: %w", err)
-					}
-				}
-				delete(pending, rec.Tx)
-			}
+			committed[rec.Tx] = true
+		}
+	}
+	// 2) 按表分组（只收已提交事务、且代次比表文件新的记录）
+	byTable := map[string][]walRec{}
+	for _, rec := range recs {
+		if rec.Op == opCommit || !committed[rec.Tx] {
 			continue
 		}
-		if _, ok := pending[rec.Tx]; !ok {
-			pending[rec.Tx] = &pendingTx{}
+		key := cleanName(rec.Table)
+		if rec.Gen <= s.tableGen[key] {
+			continue // 该表文件已包含这一代
 		}
-		pending[rec.Tx].recs = append(pending[rec.Tx].recs, rec)
+		byTable[key] = append(byTable[key], rec)
 	}
-	// 没有 commit 标记的事务直接丢弃（原子性）
-	return nil
+	if len(byTable) == 0 {
+		return nil
+	}
+
+	// 3) 多表并行 apply；单表时直接串行（避免 goroutine 开销）
+	if len(byTable) == 1 {
+		for _, tbl := range byTable {
+			for _, r := range tbl {
+				if err := s.applyRec(r); err != nil {
+					return fmt.Errorf("重放 WAL 失败: %w", err)
+				}
+			}
+		}
+		return nil
+	}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		firstErr error
+	)
+	for _, tbl := range byTable {
+		tbl := tbl
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, r := range tbl {
+				if err := s.applyRec(r); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("重放 WAL 失败: %w", err)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // bumpSeq 让自增计数器至少抬到这一行里的值。
@@ -562,13 +596,13 @@ func (s *Store) applyRec(rec walRec) error {
 	switch rec.Op {
 	case opIns:
 		row, rep := castRow(t, rec.New)
-		s.Repaired += int64(rep)
+		atomic.AddInt64(&s.Repaired, int64(rep))
 		td.Rows = append(td.Rows, row)
 		td.Live++
 		bumpSeq(t.SerialIdx(), td, row)
 	case opDel:
 		row, rep := castRow(t, rec.Old)
-		s.Repaired += int64(rep)
+		atomic.AddInt64(&s.Repaired, int64(rep))
 		for i := range td.Rows {
 			if td.Rows[i] == nil {
 				continue
@@ -584,9 +618,9 @@ func (s *Store) applyRec(rec walRec) error {
 		}
 	case opUpd:
 		oldRow, rep := castRow(t, rec.Old)
-		s.Repaired += int64(rep)
+		atomic.AddInt64(&s.Repaired, int64(rep))
 		newRow, rep2 := castRow(t, rec.New)
-		s.Repaired += int64(rep2)
+		atomic.AddInt64(&s.Repaired, int64(rep2))
 		for i := range td.Rows {
 			if td.Rows[i] == nil {
 				continue

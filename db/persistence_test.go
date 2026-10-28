@@ -600,3 +600,37 @@ func TestSerialSeqAfterWalReplay(t *testing.T) {
 		t.Fatalf("重启后插入应拿到 id=5，实际 count=%v max(id)=%v", row[0], row[1])
 	}
 }
+
+// 多表 WAL 并行重放：跨表事务、多表各自有数据，重启后全部正确。
+func TestWALReplayMultiTable(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s := "s"
+	run(t, d, s, `CREATE TABLE m1 (id INTEGER PRIMARY KEY, v TEXT)`)
+	run(t, d, s, `CREATE TABLE m2 (id INTEGER PRIMARY KEY, v TEXT)`)
+	run(t, d, s, `CREATE TABLE m3 (id INTEGER PRIMARY KEY, v TEXT)`)
+	// 多表混合写：一个事务跨多表 + 各表独立事务
+	run(t, d, s, `BEGIN`)
+	run(t, d, s, `INSERT INTO m1 VALUES (1, 'a1'), (2, 'a2')`)
+	run(t, d, s, `INSERT INTO m2 VALUES (1, 'b1')`)
+	run(t, d, s, `INSERT INTO m3 VALUES (1, 'c1'), (2, 'c2'), (3, 'c3')`)
+	run(t, d, s, `COMMIT`)
+	run(t, d, s, `INSERT INTO m1 VALUES (3, 'a3')`)
+	run(t, d, s, `UPDATE m2 SET v = 'b1x' WHERE id = 1`)
+	run(t, d, s, `DELETE FROM m3 WHERE id = 2`)
+	// 模拟被杀（不 checkpoint）
+	if err := d.Store.Close(); err != nil {
+		t.Fatalf("Store.Close: %v", err)
+	}
+	d2, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+	assertRows(t, run(t, d2, s, `SELECT id, v FROM m1 ORDER BY id`), []string{"1|a1", "2|a2", "3|a3"})
+	assertRows(t, run(t, d2, s, `SELECT id, v FROM m2`), []string{"1|b1x"})
+	assertRows(t, run(t, d2, s, `SELECT id, v FROM m3 ORDER BY id`), []string{"1|c1", "3|c3"})
+}

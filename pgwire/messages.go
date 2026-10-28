@@ -9,6 +9,7 @@ package pgwire
 import (
 	"bytes"
 	"encoding/binary"
+	"strconv"
 )
 
 // 消息类型（后端 → 前端）
@@ -162,8 +163,14 @@ func encodeParseComplete() []byte { return (&writer{}).message(msgParseComplete)
 func encodeBindComplete() []byte  { return (&writer{}).message(msgBindComplete) }
 func encodeCloseComplete() []byte { return (&writer{}).message(msgCloseComplete) }
 
-// encodeError 组装 ErrorResponse。code 是 SQLSTATE。
-func encodeError(severity, code, message string) []byte {
+// encodeErrorNoPos 是 encodeError 的便捷包装（无位置信息）。
+func encodeErrorNoPos(severity, code, message string) []byte {
+	return encodeError(severity, code, message, 0)
+}
+
+// encodeError 组装 ErrorResponse。code 是 SQLSTATE。pos > 0 时附带位置（P 字段，
+// 1 起的字符偏移，客户端拿来定位到出错位置）。
+func encodeError(severity, code, message string, pos int) []byte {
 	w := &writer{}
 	w.byte('S')
 	w.str(severity)
@@ -173,6 +180,10 @@ func encodeError(severity, code, message string) []byte {
 	w.str(code)
 	w.byte('M')
 	w.str(message)
+	if pos > 0 {
+		w.byte('P')
+		w.str(strconv.Itoa(pos))
+	}
 	w.byte(0) // 字段列表结束
 	return w.message(msgErrorResponse)
 }

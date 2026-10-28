@@ -361,8 +361,15 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	}
 
 	// 3) 收尾：语句级回滚 + 自动提交
-	if err := stmt.End(execErr); err != nil {
-		return nil, err
+	endErr := stmt.End(execErr)
+	// 事务计数（pg_stat_database 的 xact_commit / xact_rollback）
+	if execErr != nil {
+		syscat.NoteXact(false)
+	} else if stmt.Auto() {
+		syscat.NoteXact(endErr == nil)
+	}
+	if endErr != nil {
+		return nil, endErr
 	}
 	return res, nil
 }
@@ -388,11 +395,13 @@ func (d *DB) execTxControl(sess *txn.Session, ts *sql.TxStmt, pre map[string]loc
 		// PG 语义：事务已中毒时 COMMIT 等价于 ROLLBACK
 		if sess.Aborted() {
 			_ = sess.Rollback()
+			syscat.NoteXact(false)
 			return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK", Message: "事务已中止，已回滚"}, nil
 		}
 		d.Store.SchemaMu.RLock()
 		err := sess.Commit()
 		d.Store.SchemaMu.RUnlock()
+		syscat.NoteXact(err == nil)
 		if err != nil {
 			return nil, err
 		}
@@ -405,6 +414,7 @@ func (d *DB) execTxControl(sess *txn.Session, ts *sql.TxStmt, pre map[string]loc
 		if err := sess.Rollback(); err != nil {
 			return nil, err
 		}
+		syscat.NoteXact(false)
 		return &exec.Result{Command: "ROLLBACK", Tag: "ROLLBACK"}, nil
 	}
 	return nil, fmt.Errorf("unsupported transaction command")

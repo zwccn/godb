@@ -287,6 +287,7 @@ func classifyError(err error, stmt int) *apiError {
 	e := &apiError{Message: err.Error(), Stmt: stmt, Kind: "sql"}
 	var te *lock.TimeoutError
 	var de *lock.DeadlockError
+	var pe *sql.Error
 	switch {
 	case errors.As(err, &te):
 		e.Kind = "lock_timeout"
@@ -295,7 +296,7 @@ func classifyError(err error, stmt int) *apiError {
 		e.Kind = "deadlock"
 		e.RolledBack = true
 	}
-	if pe, ok := err.(*sql.Error); ok {
+	if errors.As(err, &pe) {
 		e.Line = pe.Line
 		e.Col = pe.Col
 	}

@@ -36,13 +36,13 @@ func (c *conn) authenticateMD5(verifier string) error {
 		return err
 	}
 	if typ != 'p' {
-		c.write(encodeError("FATAL", "08P01", "expected password message"))
+		c.write(encodeErrorNoPos("FATAL", "08P01", "expected password message"))
 		return fmt.Errorf("expected password message, got %q", typ)
 	}
 	got := string(trimZero(body))
 	want := config.MD5Response(verifier, salt)
 	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-		c.write(encodeError("FATAL", "28P01",
+		c.write(encodeErrorNoPos("FATAL", "28P01",
 			fmt.Sprintf(`password authentication failed for user %q`, c.user)))
 		return fmt.Errorf("password authentication failed")
 	}
@@ -86,7 +86,7 @@ func (c *conn) authenticateScram(verifier string) error {
 	iter, salt, storedKey, serverKey, ok := config.ScramKeys(verifier)
 	if !ok {
 		// 验证串坏了：不要静默放行，也别让客户端卡住
-		c.write(encodeError("FATAL", "28P01", "password verifier is corrupted"))
+		c.write(encodeErrorNoPos("FATAL", "28P01", "password verifier is corrupted"))
 		return fmt.Errorf("bad scram verifier")
 	}
 	if err := c.write(encodeAuthenticationSASL([]string{"SCRAM-SHA-256"})); err != nil {
@@ -106,7 +106,7 @@ func (c *conn) authenticateScram(verifier string) error {
 		return err
 	}
 	if mech != "SCRAM-SHA-256" {
-		c.write(encodeError("FATAL", "08P01", "unsupported SASL mechanism"))
+		c.write(encodeErrorNoPos("FATAL", "08P01", "unsupported SASL mechanism"))
 		return fmt.Errorf("unsupported SASL mechanism %q", mech)
 	}
 	clientFirst := string(initial)
@@ -154,7 +154,7 @@ func (c *conn) authenticateScram(verifier string) error {
 	}
 	clientFinalNoProof := clientFinal[:pAt]
 	if scramAttr(clientFinalNoProof, "r") != combined {
-		c.write(encodeError("FATAL", "28P01", "SCRAM nonce mismatch"))
+		c.write(encodeErrorNoPos("FATAL", "28P01", "SCRAM nonce mismatch"))
 		return fmt.Errorf("SCRAM nonce mismatch")
 	}
 	proof, err := base64.StdEncoding.DecodeString(proofB64)
@@ -165,7 +165,7 @@ func (c *conn) authenticateScram(verifier string) error {
 	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalNoProof
 	sig, ok := config.ScramCheckProof(storedKey, serverKey, authMessage, proof)
 	if !ok {
-		c.write(encodeError("FATAL", "28P01",
+		c.write(encodeErrorNoPos("FATAL", "28P01",
 			fmt.Sprintf(`password authentication failed for user %q`, c.user)))
 		return fmt.Errorf("password authentication failed")
 	}

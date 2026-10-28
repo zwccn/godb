@@ -554,8 +554,15 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 		return out
 
 	case "pg_stat_database":
+		ds := GetDBStats()
+		numBE := len(ActivitySnapshot())
 		return []types.Row{mk(def, map[string]types.Value{
-			"datid": iv(DbOID), "datname": sv(DatabaseName), "numbackends": iv(1),
+			"datid": iv(DbOID), "datname": sv(DatabaseName), "numbackends": iv(numBE),
+			"xact_commit": i64(ds.XactCommit), "xact_rollback": i64(ds.XactRollback),
+			"blks_read": i64(0), "blks_hit": i64(0),
+			"tup_returned": i64(ds.TupReturned), "tup_fetched": i64(ds.TupFetched),
+			"tup_inserted": i64(ds.TupInserted), "tup_updated": i64(ds.TupUpdated),
+			"tup_deleted": i64(ds.TupDeleted),
 		})}
 
 	case "pg_stat_user_tables", "pg_stat_all_tables":
@@ -571,7 +578,10 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 			out = append(out, mk(def, map[string]types.Value{
 				"relid": iv(int(tm.oid)), "schemaname": sv("public"), "relname": sv(tm.t.Name),
 				"seq_scan": i64(st.SeqScans), "idx_scan": i64(st.IdxScans),
-				"n_live_tup": i64(src.rowsOf(tm.t.Name)), "n_dead_tup": i64(0),
+				"seq_tup_read": i64(0), "idx_tup_fetch": i64(0),
+				"n_tup_ins": i64(st.TupIns), "n_tup_upd": i64(st.TupUpd),
+				"n_tup_del": i64(st.TupDel), "n_tup_hot_upd": i64(0),
+				"n_live_tup": i64(src.rowsOf(tm.t.Name)), "n_dead_tup": i64(st.TupDel),
 				"last_analyze": lastAn,
 			}))
 		}
@@ -602,11 +612,13 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 	case "pg_stat_user_indexes":
 		var out []types.Row
 		for _, tm := range m.userTables() {
+			st := GetStats(tm.t.Name)
 			for _, ix := range tm.idx {
 				out = append(out, mk(def, map[string]types.Value{
 					"relid": iv(int(tm.oid)), "indexrelid": iv(int(ix.oid)),
 					"schemaname": sv("public"), "relname": sv(tm.t.Name),
 					"indexrelname": sv(ix.name),
+					"idx_scan": i64(st.IdxScans), "idx_tup_read": i64(0), "idx_tup_fetch": i64(0),
 				}))
 			}
 		}

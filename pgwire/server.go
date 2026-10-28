@@ -149,6 +149,10 @@ type conn struct {
 	portals  map[string]*portal
 	skipSync bool // 出错后丢弃消息直到 Sync
 
+	// lastQuery 记最近一次收到的 SQL 文本，用来把解析错误的行/列号换算成
+	// PG 协议的字符偏移（ErrorResponse 的 P 字段）。
+	lastQuery string
+
 	// pid 是给 pg_stat_activity 用的后端编号；unregister 在连接结束时注销
 	pid        int32
 	unregister func()
@@ -285,7 +289,7 @@ func (c *conn) startup() error {
 			continue
 		}
 		if code>>16 != 3 {
-			c.write(encodeError("FATAL", "0A000",
+			c.write(encodeErrorNoPos("FATAL", "0A000",
 				fmt.Sprintf("unsupported frontend protocol %d.%d", code>>16, code&0xffff)))
 			return fmt.Errorf("unsupported protocol")
 		}
@@ -318,7 +322,7 @@ func (c *conn) startup() error {
 	}
 	// 选库放在认证之后：未认证就告诉对方「这个库不存在」等于泄露库名。
 	if err := c.selectDB(); err != nil {
-		c.write(encodeError("FATAL", "3D000", err.Error()))
+		c.write(encodeErrorNoPos("FATAL", "3D000", err.Error()))
 		return err
 	}
 
@@ -378,12 +382,12 @@ func (c *conn) authenticate() error {
 		return err
 	}
 	if typ != 'p' {
-		c.write(encodeError("FATAL", "08P01", "expected password message"))
+		c.write(encodeErrorNoPos("FATAL", "08P01", "expected password message"))
 		return fmt.Errorf("expected password message, got %q", typ)
 	}
 	pw := string(trimZero(body))
 	if c.srv.AuthVerify == nil || !c.srv.AuthVerify(c.user, pw) {
-		c.write(encodeError("FATAL", "28P01",
+		c.write(encodeErrorNoPos("FATAL", "28P01",
 			fmt.Sprintf(`password authentication failed for user %q`, c.user)))
 		return fmt.Errorf("password authentication failed")
 	}
@@ -474,7 +478,7 @@ func (c *conn) dispatch(typ byte, payload []byte) (keep bool) {
 		if r := recover(); r != nil {
 			c.bw.Reset(c.nc)
 			c.srv.logf("PG 连接内 panic（消息 %q）: %v", typ, r)
-			_ = c.write(encodeError("ERROR", "XX000", fmt.Sprintf("internal error: %v", r)))
+			_ = c.write(encodeErrorNoPos("ERROR", "XX000", fmt.Sprintf("internal error: %v", r)))
 			c.skipSync = true
 			keep = true
 		}
@@ -513,6 +517,7 @@ func (c *conn) handleSimpleQuery(payload []byte) {
 		_ = c.write(encodeEmptyQuery(), encodeReadyForQuery(c.txStatus()))
 		return
 	}
+	c.lastQuery = text
 	c.srv.logQuery(text)
 	// SET / SHOW 由 SQL 层处理（见 exec.ShowResult），这里不再拦一道，
 	// 免得网页控制台和 PG 协议两条路径的行为分叉。
@@ -609,7 +614,35 @@ func encodeResultFormats(r *exec.Result, withRowDesc bool, formats []int16) ([][
 
 func (c *conn) errorResponse(err error) [][]byte {
 	code, msg := mapError(err)
-	return [][]byte{encodeError("ERROR", code, msg)}
+	// 解析错误带行号列号：换算成 PG 协议的字符偏移（P 字段），客户端能定位到出错处。
+	pos := 0
+	if pe, ok := err.(*sql.Error); ok && pe.Line > 0 {
+		pos = lineColToOffset(c.lastQuery, pe.Line, pe.Col)
+	}
+	return [][]byte{encodeError("ERROR", code, msg, pos)}
+}
+
+// lineColToOffset 把 1 起的行/列号换算成 1 起的字符偏移（PG 协议 P 字段）。
+// 换算不了就返回 0（客户端只看消息文本里的 "line N, column M"）。
+func lineColToOffset(query string, line, col int) int {
+	if query == "" || line <= 0 || col <= 0 {
+		return 0
+	}
+	curLine := 1
+	off := 0
+	for i := 0; i < len(query); i++ {
+		if curLine == line {
+			return off + col // 1-based
+		}
+		if query[i] == '\n' {
+			curLine++
+			off = i + 1
+		}
+	}
+	if curLine == line {
+		return off + col
+	}
+	return 0
 }
 
 // ---------- 扩展查询 ----------
@@ -650,6 +683,7 @@ func (c *conn) handleParse(payload []byte) {
 	}
 	// 预编译语句（扩展协议）也要进查询日志：客户端有的元数据查询走
 	// Parse/Bind/Execute 而不是简单查询，不记下来排查时会完全看不见。
+	c.lastQuery = query
 	c.srv.logQuery(query)
 	c.prepared[name] = &preparedStmt{query: query, paramOIDs: oids}
 	_ = c.write(encodeParseComplete())

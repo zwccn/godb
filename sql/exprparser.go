@@ -376,6 +376,18 @@ func (p *parser) parsePrimaryBase() (Expr, error) {
 			return &FuncCall{Name: strings.ToLower(t.Text)}, nil
 		}
 	}
+	// 带类型前缀的字面量：DATE '2024-03-05'、TIMESTAMP '…'、TIME '…'。
+	// 这是 PG 的标准写法，ORM 生成的 SQL 里到处都是（`WHERE ts > TIMESTAMP '2019-01-01'`）。
+	// 只在「类型名紧跟字符串」时生效，所以 `SELECT date FROM t` 里的列名不受影响。
+	if t.Kind == Word && p.peekN(1).Kind == StringVal {
+		switch strings.ToLower(t.Text) {
+		case "date", "time", "timestamp", "timestamptz", "timetz":
+			lit := p.peekN(1).Text
+			tn := strings.ToLower(t.Text)
+			p.pos += 2
+			return &Cast{X: &Literal{Val: types.Text(lit)}, TypeName: tn}, nil
+		}
+	}
 	switch t.Kind {
 	case NumberVal:
 		p.pos++

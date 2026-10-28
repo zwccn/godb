@@ -48,9 +48,9 @@ go build -o godb.exe .
 |---|---|
 | 持久化 | `CHECKPOINT` / `FLUSH`（强制刷盘 + 全量快照，返回代次与统计） |
 | 索引 | `CREATE [UNIQUE] INDEX name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验 |
-| 表管理 | `CREATE TABLE`（`SERIAL`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE` |
+| 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
-| 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名） |
+| 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名）；`ON CONFLICT [(cols)] DO NOTHING / DO UPDATE SET …`（含 `EXCLUDED`）；`UPDATE … FROM 表`、`DELETE … USING 表`（按关联条件批量改/删） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` / `EXPLAIN ANALYZE` |
 | 约束 | `NOT NULL`、`UNIQUE`、`PRIMARY KEY`（复合）、`CHECK`、`FOREIGN KEY`（含 `ON DELETE CASCADE`） |
 | CTE | `WITH name [(cols)] AS (SELECT ...)`，可多个、可互相引用（物化一次） |
@@ -58,17 +58,18 @@ go build -o godb.exe .
 | 集合函数 | `FROM generate_series(a, b[, step])`、`FROM regexp_matches(text, pattern)`，可带列别名列表 |
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
 | 聚合 | `count(*)`、`count(x)`、`sum`、`avg`、`min`、`max`，支持 `DISTINCT` |
-| 表达式 | 算术 `+ - * / %`、位运算 `& \| #`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`（含 `information_schema.sql_identifier` 这类带 schema 的类型名）、数组下标 `a[i]`、`\|\|` |
-| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches` |
-| 事务 | `BEGIN`/`START TRANSACTION`、`COMMIT`、`ROLLBACK`；语句级原子性；崩溃恢复 |
+| 表达式 | 算术 `+ - * / %`、位运算 `& \| #`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`（含子查询）、`EXISTS (子查询)`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`（含 `information_schema.sql_identifier` 这类带 schema 的类型名）、**带类型前缀的字面量 `DATE '2024-01-01'` / `TIMESTAMP '…'` / `TIME '…'`**、数组下标 `a[i]`、`\|\|` |
+| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches/string_agg`；日期 `EXTRACT(field FROM x)` / `date_part` / `date_trunc`；序列 `nextval/currval/lastval/setval/pg_get_serial_sequence` |
+| 事务 | `BEGIN`/`START TRANSACTION`（可带 `ISOLATION LEVEL …`、`READ ONLY/READ WRITE`）、`COMMIT`、`ROLLBACK`；**`SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`**（ORM 的嵌套事务靠它）；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
 | 多库 | `CREATE DATABASE` / `DROP DATABASE`；每个库一套独立的 catalog / WAL / 锁，互不影响；`pg_database` 与 `\l` 能看到全部库；控制台顶栏可切换，库管理面板能看每个库的表数/行数/占用并新建删除 |
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：递归 CTE（`WITH RECURSIVE`）、窗口函数、
-`FULL JOIN`、`NATURAL JOIN`、行级锁，以及 `IN (...)` / `EXISTS (...)` 里的子查询
-（`FROM` 子查询和标量子查询是支持的，见下）。
+`FULL JOIN`、`NATURAL JOIN`、行级锁（`SELECT … FOR UPDATE`）、`LATERAL`；
+`UPDATE … FROM` / `DELETE … USING` 的后面只接受**表**，不接受派生表
+（`FROM (SELECT …) x` 会报语法错误，需要的话先落成临时表）。
 
 索引能处理：完整键等值、首列区间（`> < >= <= BETWEEN`、`LIKE 'x%'`）、
 `IN` 列表、`OR` 的多点/多区间合并、以及命中索引列前缀的 `ORDER BY`（免排序，可反向）。
@@ -492,7 +493,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 | cleartext password 认证（设置页里设了密码就必须输，错了回 `28P01` 并断开） | ✅ |
 | md5 / SCRAM-SHA-256 认证 | ❌ |
 | 简单查询 `Q`（支持多语句，逐条返回结果集） | ✅ |
-| 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数 | ✅ 二进制支持 int2/4/8、float4/8、bool、numeric、timestamp[tz]、date、time、uuid、bytea、jsonb、文本类 |
+| 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数、**二进制结果集与 portal format code** | ✅ 参数与结果都支持 int2/4/8、float4/8、bool、numeric、timestamp[tz]、date、time、uuid、bytea、jsonb、文本类 |
 | `RowDescription` 带 PG 类型 OID（int4/int8/text/bool/float8/numeric/timestamp…） | ✅ |
 | `RowDescription` 的 `tableOID` / `attnum`（列的真实来源，客户端靠它判断结果集能否回写） | ✅ 表达式列按 PG 规矩给 0 |
 | 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |

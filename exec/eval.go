@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -741,7 +742,30 @@ func (e *castEval) Eval(row types.Row) (types.Value, error) {
 	if err != nil {
 		return types.Null, err
 	}
+	// numeric → 文本必须是定点表示。numeric 内部存的是 float64，按 'g' 会把
+	// 1234567890123.45 写成 1.23456789012345e+12，而 PG 的 numeric 从不出科学计数法，
+	// 客户端（Npgsql 的 decimal、FreeSql）拿到指数形式直接解析失败。
+	// 协议层按「列自己的类型名」也挡住了同一件事，这里是显式 `::text` / `CAST(... AS text)`
+	// 的那条路 —— 两条都漏一条就会从另一边冒出来。
+	if v.K == types.KFloat && e.t.Kind == types.KText && isNumericTypeName(e.x.Type().Name) {
+		f := v.Float()
+		if !math.IsInf(f, 0) && !math.IsNaN(f) {
+			return types.Text(strconv.FormatFloat(f, 'f', -1, 64)), nil
+		}
+	}
+	// date → 文本只出年月日。godb 内部时间统一是 KTime，TextForm 会带上 " 00:00:00"，
+	// 而 PG 的 date 文本只有 2024-01-01（协议层按列类型截过一次，这里是显式 CAST 的路）。
+	if v.K == types.KTime && e.t.Kind == types.KText && strings.EqualFold(e.x.Type().Name, "date") {
+		return types.Text(v.Time().Format("2006-01-02")), nil
+	}
 	return types.Cast(v, e.t)
+}
+
+// isNumericTypeName 判断列类型名是不是 numeric/decimal（含带精度后缀的写法）。
+func isNumericTypeName(name string) bool {
+	n := strings.ToLower(name)
+	return n == "numeric" || n == "decimal" ||
+		strings.HasPrefix(n, "numeric(") || strings.HasPrefix(n, "decimal(")
 }
 
 type caseEval struct {

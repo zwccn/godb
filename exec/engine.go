@@ -174,7 +174,11 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 		}
 		out := make([]interface{}, len(row))
 		for i, v := range row {
-			out[i] = v.Interface()
+			ct := ""
+			if i < len(cols) {
+				ct = cols[i].Type
+			}
+			out[i] = cellValue(v, ct)
 		}
 		rows = append(rows, out)
 	}
@@ -702,7 +706,11 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 				if err != nil {
 					return nil, err
 				}
-				out[i] = v.Interface()
+				ct := ""
+				if i < len(retCols) {
+					ct = retCols[i].Type
+				}
+				out[i] = cellValue(v, ct)
 			}
 			res.Rows = append(res.Rows, out)
 		}
@@ -1317,6 +1325,22 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 }
 
 // fillReturning 按行求值 RETURNING 的每个输出项，填进 res 的结果集。
+// cellValue 把一个值转成结果集里的单元格。
+//
+// date 列只留年月日：内部时间统一是 KTime，Interface() 会给出
+// "2024-03-05 00:00:00"，而 PG 的 date 文本就是 "2024-03-05"。
+// 协议层（pgwire.textValueAs）和 exec 的 ::text 转换都各挡了一次，
+// 这里是控制台走的 JSON 那条路 —— 三条都盖住才不会从某个入口漏出来。
+func cellValue(v types.Value, colType string) interface{} {
+	if v.K == types.KTime && strings.HasPrefix(strings.ToLower(colType), "date") {
+		s := v.Interface().(string)
+		if len(s) >= 10 {
+			return s[:10]
+		}
+	}
+	return v.Interface()
+}
+
 func fillReturning(res *Result, evals []Eval, rows []types.Row) error {
 	for _, r := range rows {
 		out := make([]interface{}, len(evals))
@@ -1325,7 +1349,11 @@ func fillReturning(res *Result, evals []Eval, rows []types.Row) error {
 			if err != nil {
 				return err
 			}
-			out[i] = v.Interface()
+			ct := ""
+			if i < len(res.Columns) {
+				ct = res.Columns[i].Type
+			}
+			out[i] = cellValue(v, ct)
 		}
 		res.Rows = append(res.Rows, out)
 	}

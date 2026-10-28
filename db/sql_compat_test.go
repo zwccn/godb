@@ -152,3 +152,88 @@ func TestArrayTypeCast(t *testing.T) {
 		t.Fatal("varchar(10)[] 转换结果不该是 NULL")
 	}
 }
+
+// numeric 转文本必须给定点表示。PG 的 numeric 从不用科学计数法，
+// 而 godb 内部把 numeric 存成 float64：不管的话 1234567890123.45 会从
+// `::text` / CAST 这条路漏成 1.23456789012345e+12，客户端的 decimal 解析直接失败。
+// 协议层（pgwire.textValueAs）按列类型也挡了一次，两条路都要有测试。
+func TestNumericToTextIsPlainDecimal(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	run(t, d, s, `CREATE TABLE nt (id int primary key, amount numeric)`)
+	run(t, d, s, `INSERT INTO nt VALUES (1, 1234567890123.45), (2, -0.001), (3, 0)`)
+
+	cases := []struct{ sql, want string }{
+		{`SELECT 1234567890123.45::numeric::text`, "1234567890123.45"},
+		{`SELECT amount::text FROM nt WHERE id = 1`, "1234567890123.45"},
+		{`SELECT CAST(amount AS text) FROM nt WHERE id = 2`, "-0.001"},
+		{`SELECT amount::text FROM nt WHERE id = 3`, "0"},
+		// float8 保持 'g'（大数用指数形式，PG 也是这样），别把这条规则扩大化
+		{`SELECT (1e20)::float8::text`, "1e+20"},
+	}
+	for _, c := range cases {
+		got := fmt.Sprint(run(t, d, s, c.sql)[0].Rows[0][0])
+		if got != c.want {
+			t.Fatalf("%s = %q, want %q", c.sql, got, c.want)
+		}
+	}
+}
+
+// date 转文本只出年月日：内部是 KTime，TextForm 会带 " 00:00:00"，
+// 而 PG 的 date 文本就是 2024-01-01。timestamp 仍要保留时间部分。
+func TestDateToTextHasNoTimePart(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	run(t, d, s, `CREATE TABLE dt (id int primary key, day date, ts timestamp)`)
+	run(t, d, s, `INSERT INTO dt VALUES (1, '2024-01-01', '2024-01-01 08:09:10')`)
+
+	cases := []struct{ sql, want string }{
+		{`SELECT day::text FROM dt WHERE id = 1`, "2024-01-01"},
+		{`SELECT CAST(day AS text) FROM dt WHERE id = 1`, "2024-01-01"},
+		{`SELECT ts::text FROM dt WHERE id = 1`, "2024-01-01 08:09:10"},
+		// 不是 date 列就不要截，避免把 timestamp 也砍成日期
+		{`SELECT ('2024-01-01 08:09:10'::timestamp)::text`, "2024-01-01 08:09:10"},
+		// 控制台走 JSON，不经过 ::text，也要只出年月日
+		{`SELECT day FROM dt WHERE id = 1`, "2024-01-01"},
+	}
+	for _, c := range cases {
+		got := fmt.Sprint(run(t, d, s, c.sql)[0].Rows[0][0])
+		if got != c.want {
+			t.Fatalf("%s = %q, want %q", c.sql, got, c.want)
+		}
+	}
+}
+
+// 带类型前缀的字面量：DATE '2024-03-05' / TIMESTAMP '…' / TIME '…'。
+// 这是 PG 的标准写法，ORM 生成的 SQL（`WHERE ts > TIMESTAMP '2019-01-01'`）常见，
+// 之前直接报 syntax error。注意它只在「类型名紧跟字符串」时生效。
+func TestTypedStringLiteral(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	run(t, d, s, `CREATE TABLE tl (id int primary key, day date, ts timestamp)`)
+
+	cases := []struct{ sql, want string }{
+		{`SELECT DATE '2024-03-05'::text`, "2024-03-05"},
+		{`SELECT TIMESTAMP '2024-03-05 06:07:08'::text`, "2024-03-05 06:07:08"},
+		{`SELECT TIME '02:03:04'::text`, "02:03:04"},
+		// 用在 WHERE 里（最常见的形态）
+		{`SELECT count(*) AS n FROM tl WHERE ts > TIMESTAMP '2019-01-01 00:00:00'`, "0"},
+		{`SELECT extract(year from DATE '2024-03-05')`, "2024"},
+	}
+	for _, c := range cases {
+		got := fmt.Sprint(run(t, d, s, c.sql)[0].Rows[0][0])
+		if got != c.want {
+			t.Fatalf("%s = %q, want %q", c.sql, got, c.want)
+		}
+	}
+
+	// date 仍能当列名用（不能被当成类型前缀吃掉）
+	run(t, d, s, `CREATE TABLE tl2 (date text)`)
+	run(t, d, s, `INSERT INTO tl2 VALUES ('x')`)
+	if got := fmt.Sprint(run(t, d, s, `SELECT date FROM tl2`)[0].Rows[0][0]); got != "x" {
+		t.Fatalf("列名 date 被误当类型前缀：%q", got)
+	}
+}

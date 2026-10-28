@@ -207,17 +207,19 @@ try {
             <li><code>GROUP BY</code> · <code>HAVING</code> · 聚合 <code>count/sum/avg/min/max</code>（含 <code>DISTINCT</code>）</li>
             <li><code>INNER</code> / <code>LEFT</code> / <code>RIGHT</code> / <code>CROSS JOIN</code>，多表串联、表别名与列别名</li>
             <li>标量子查询、<code>FROM</code> 子查询（派生表）、<code>UNION</code> / <code>INTERSECT</code> / <code>EXCEPT</code>、<code>WITH</code></li>
-            <li>集合函数 <code>FROM generate_series(a,b)</code> / <code>regexp_matches(...)</code>、数组下标 <code>a[i]</code></li>
-            <li><code>CASE WHEN</code> · <code>CAST</code>/<code>::</code> · <code>IN</code> · <code>BETWEEN</code> · <code>LIKE</code>/<code>ILIKE</code> · <code>||</code></li>
+            <li><code>IN (子查询)</code> · <code>EXISTS (子查询)</code> · 集合函数 <code>FROM generate_series</code></li>
+            <li><code>CASE WHEN</code> · <code>CAST</code>/<code>::</code> · <code>DATE '2024-01-01'</code> 这类带类型前缀的字面量</li>
+            <li><code>EXTRACT(field FROM x)</code> · <code>date_part</code> · <code>date_trunc</code> · 数组下标 <code>a[i]</code> · <code>||</code></li>
           </ul>
         </div>
         <div class="help-group">
           <div class="help-group-title">写入与结构</div>
           <ul>
-            <li><code>INSERT ... VALUES</code> / <code>INSERT ... SELECT</code> · <code>UPDATE</code> · <code>DELETE</code> · <code>RETURNING</code></li>
-            <li><code>CREATE</code> / <code>ALTER</code> / <code>DROP TABLE</code> · <code>TRUNCATE</code></li>
-            <li><code>CREATE INDEX</code>（B+Tree）、主键 / 唯一 / 非空 / 外键 / 默认值</li>
-            <li><code>BEGIN</code> · <code>COMMIT</code> · <code>ROLLBACK</code>（表级 S/X 锁，可串行化）</li>
+            <li><code>INSERT ... VALUES</code> / <code>INSERT ... SELECT</code> / <code>ON CONFLICT DO NOTHING | DO UPDATE</code> · <code>RETURNING</code></li>
+            <li><code>UPDATE ... FROM 表</code> · <code>DELETE ... USING 表</code>（按关联条件批量改 / 删）</li>
+            <li><code>CREATE</code> / <code>ALTER</code> / <code>DROP TABLE</code> · <code>TRUNCATE</code> · <code>COMMENT ON</code> · <code>GENERATED AS IDENTITY</code></li>
+            <li><code>CREATE INDEX</code>（B+Tree）、主键 / 唯一 / 非空 / 外键 / 默认值 / CHECK</li>
+            <li><code>BEGIN</code> · <code>COMMIT</code> · <code>ROLLBACK</code> · <code>SAVEPOINT</code> / <code>ROLLBACK TO</code>（表级 S/X 锁，可串行化）</li>
             <li><code>CREATE</code> / <code>DROP DATABASE</code>，换库用顶栏的「库」下拉</li>
           </ul>
         </div>
@@ -233,8 +235,8 @@ try {
           <div class="help-group-title">明确不支持</div>
           <ul>
             <li>递归 CTE（<code>WITH RECURSIVE</code>）、窗口函数</li>
-            <li><code>FULL JOIN</code> / <code>NATURAL JOIN</code>、行级锁</li>
-            <li><code>IN (...)</code> / <code>EXISTS (...)</code> 里的子查询</li>
+            <li><code>FULL JOIN</code> / <code>NATURAL JOIN</code>、行级锁、<code>LATERAL</code></li>
+            <li><code>UPDATE … FROM</code> / <code>DELETE … USING</code> 后面只能跟表，不能跟派生表</li>
           </ul>
         </div>
       </div>

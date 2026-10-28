@@ -1213,10 +1213,43 @@ function renderHelpExamples() {
   }
 }
 
-function openHelp() {
-  renderHelpExamples();
-  helpModal.classList.remove('hidden');
+const helpDataHint = document.getElementById('helpDataHint');
+const btnHelpSample = document.getElementById('btnHelpSample');
+
+// 手册里「读」的示例要求当前库有示例表。别人打开时库可能是空的（新建的库、
+// 或刚清空过），那时示例会全报 relation "employees" does not exist —— 与其让人猜，
+// 不如在页脚直接说清当前状态，并把「补齐」的按钮放在手边。
+function updateHelpDataHint() {
+  const names = new Set(schemaCache.map(t => t.name));
+  const ok = names.has('departments') && names.has('employees');
+  helpDataHint.textContent = ok
+    ? '示例数据已就绪（departments / employees）· 补全按当前库的真实表和列提示'
+    : '当前库没有示例表，上面「读」的示例会报 relation does not exist';
+  btnHelpSample.classList.toggle('hidden', ok);
 }
+
+async function openHelp() {
+  renderHelpExamples();
+  updateHelpDataHint();          // 先按缓存给个即时反馈
+  helpModal.classList.remove('hidden');
+  // #help 深链一进页面就打开帮助时，schemaCache 还没加载完，直接判「没有示例表」
+  // 会误报（实测截图两张完全一样就是踩在这个时机上）。补拉一次再校正。
+  try { await loadSchema(); } catch (e) {}
+  updateHelpDataHint();
+}
+
+// 在帮助里当场补齐示例数据。这里不复用 loadSample()：那个会顺手把示例 SQL
+// 填进编辑器并执行，而用户此刻只是想看手册。
+btnHelpSample.addEventListener('click', async () => {
+  if (!confirm('将在当前库重建示例数据（departments / employees），当前库已有的表会被清空。继续？')) return;
+  try {
+    await api('/api/sample', {});
+    await loadSchema();
+    updateHelpDataHint();
+  } catch (e) {
+    alert('载入失败：' + e.message);
+  }
+});
 
 function closeHelp() {
   helpModal.classList.add('hidden');

@@ -197,7 +197,9 @@ try {
     <div class="modal-body">
       <div class="help-intro">
         语法手册，按由浅入深排列；每级都给一段能直接跑的例子。<br>
-        读的例子都跑在「设置 → 数据 → 载入示例数据」之后的 <code>departments</code> / <code>employees</code> 上；
+        读的例子都跑在示例数据 <code>departments</code> / <code>employees</code> 上 ——
+        所以<b>当前库得先有这两张表</b>：如果下面报 <code>relation … does not exist</code>，
+        点右下角的「载入示例数据」补齐即可（页脚会显示当前是就绪还是缺表）。<br>
         写（建表 / 改 / 删）的例子一律在自己的 <code>demo*</code> 临时表里，<b>不会动你的数据</b>，
         而且都先 <code>DROP TABLE IF EXISTS</code>，连点两次也不会报「已存在」。
       </div>
@@ -396,8 +398,11 @@ CHECKPOINT;</pre>
       </div>
     </div>
     <div class="modal-foot">
-      <span class="modal-hint">补全会按当前库的真实表和列提示，带类型与主键标记</span>
-      <button id="btnHelpDone" class="btn btn-sm">知道了</button>
+      <span id="helpDataHint" class="modal-hint"></span>
+      <span class="help-foot-actions">
+        <button id="btnHelpSample" class="btn btn-sm hidden">载入示例数据</button>
+        <button id="btnHelpDone" class="btn btn-sm">知道了</button>
+      </span>
     </div>
   </div>
 </div>

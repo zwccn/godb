@@ -399,6 +399,40 @@ class CDP {
     const helpScroll = await cdp.eval(`document.querySelector('#helpModal .modal-body').scrollTop`);
     check('点目录能跳到对应章节', helpScroll > 200, 'scrollTop=' + Math.round(helpScroll));
 
+    // 页脚要说明「示例数据在不在」：不在就得给出一键补齐的按钮，
+    // 否则别人打开空库时会看到一堆 relation does not exist 却不知道先做什么
+    const helpData = await cdp.eval(`(() => {
+      const h = document.getElementById('helpDataHint');
+      const b = document.getElementById('btnHelpSample');
+      const read = () => ({ text: h.textContent.trim(), hidden: b.classList.contains('hidden') });
+      const now = read();
+      schemaCache.length = 0;          // 模拟空库：当前库没有任何表
+      updateHelpDataHint();
+      const empty = read();
+      return { now, empty };
+    })()`);
+    check('帮助页脚：示例数据就绪时说明状态、不留载入按钮',
+      helpData.now.text.indexOf('已就绪') >= 0 && helpData.now.hidden === true,
+      helpData.now.text);
+    check('帮助页脚：缺示例表时给出提示 + 载入按钮',
+      helpData.empty.text.indexOf('没有示例表') >= 0 && helpData.empty.hidden === false,
+      helpData.empty.text);
+    // 把 schema 恢复回去，后面的补全断言还要用
+    await cdp.eval(`loadSchema().then(() => updateHelpDataHint())`);
+    await sleep(400);
+
+    // 深链 #help 一进页面就打开帮助：此时 schema 可能还没加载完，
+    // 页脚不能因此误报「没有示例表」（实测踩过：两张截图字节完全一样）
+    await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8080/?theme=sky#help' });
+    await sleep(2600);
+    const deepLink = await cdp.eval(`(() => ({
+      text: document.getElementById('helpDataHint').textContent.trim(),
+      hidden: document.getElementById('btnHelpSample').classList.contains('hidden'),
+    }))()`);
+    check('深链 #help 打开时页脚不会误报缺示例表',
+      deepLink.text.indexOf('已就绪') >= 0 && deepLink.hidden === true,
+      deepLink.text);
+
     // 点示例只填进编辑器、不自动执行
     await cdp.eval(`[...document.querySelectorAll('.help-ex-item')].find(b => b.dataset.ex === 'join').click()`);
     await sleep(400);

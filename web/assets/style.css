@@ -682,6 +682,12 @@ body {
   background: var(--bg-3);
 }
 
+.help-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 目录跳转时让 modal-body 平滑滚动（它是这个弹窗的滚动容器） */
 .modal-card.help .modal-body { scroll-behavior: smooth; }
 

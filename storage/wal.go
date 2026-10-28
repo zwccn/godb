@@ -528,6 +528,20 @@ func (s *Store) replayWAL() error {
 	return nil
 }
 
+// bumpSeq 让自增计数器至少抬到这一行里的值。
+//
+// 加载快照时会按现有行恢复 Seq，但 WAL 里往往还有比快照更新的行：重放只把行
+// 加进来而不跟着抬 Seq，重启后第一笔 INSERT 就会拿到旧值撞主键（压测留下
+// 60 万行后被踩到：max(id)=600691，不指定 id 的 INSERT 却撞了已有的 id=1）。
+func bumpSeq(si int, td *TableData, row types.Row) {
+	if si < 0 || si >= len(row) {
+		return
+	}
+	if row[si].K == types.KInt && row[si].I > td.Seq {
+		td.Seq = row[si].I
+	}
+}
+
 func (s *Store) applyRec(rec walRec) error {
 	key := cleanName(rec.Table)
 	if !s.isLoaded(key) {
@@ -551,6 +565,7 @@ func (s *Store) applyRec(rec walRec) error {
 		s.Repaired += int64(rep)
 		td.Rows = append(td.Rows, row)
 		td.Live++
+		bumpSeq(t.SerialIdx(), td, row)
 	case opDel:
 		row, rep := castRow(t, rec.Old)
 		s.Repaired += int64(rep)
@@ -581,6 +596,8 @@ func (s *Store) applyRec(rec walRec) error {
 				break
 			}
 		}
+		// UPDATE 也可能把自增列改成更大的值
+		bumpSeq(t.SerialIdx(), td, newRow)
 	}
 	return nil
 }

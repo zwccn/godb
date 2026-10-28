@@ -567,3 +567,36 @@ func TestStartupRotatesWAL(t *testing.T) {
 		t.Fatalf("启动后 WAL 该被轮转清空，实际 %d -> %d 字节", before.Size(), after.Size())
 	}
 }
+
+// WAL 里比快照更新的自增行，重放后序列必须跟上。
+//
+// 场景：插 2 行 → CHECKPOINT（落快照，max(id)=2）→ 再插 2 行（进 WAL，id=3,4）→
+// 重开 → 再插一行。修之前重开后 Seq 停在快照里的 2，新插入拿到 id=3 撞主键
+// （压测留下 60 万行后被踩到：max(id)=600691，不指定 id 的 INSERT 却撞了 id=1）。
+func TestSerialSeqAfterWalReplay(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s := "s"
+	run(t, d, s, `CREATE TABLE sr (id serial primary key, v text)`)
+	run(t, d, s, `INSERT INTO sr (v) VALUES ('a'), ('b')`)
+	run(t, d, s, `CHECKPOINT`)
+	run(t, d, s, `INSERT INTO sr (v) VALUES ('c'), ('d')`)
+	// 只关 WAL 文件、不写快照 —— 模拟进程被杀。用 d.Close() 的话会顺手
+	// checkpoint，WAL 里的行就进了快照，走不到「重放」这条路（第一版就是这么漏测的）
+	if err := d.Store.Close(); err != nil {
+		t.Fatalf("store close: %v", err)
+	}
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	run(t, d2, s, `INSERT INTO sr (v) VALUES ('e')`)
+
+	res := run(t, d2, s, `SELECT count(*), max(id) FROM sr`)
+	row := res[0].Rows[0]
+	if fmt.Sprint(row[0]) != "5" || fmt.Sprint(row[1]) != "5" {
+		t.Fatalf("重启后插入应拿到 id=5，实际 count=%v max(id)=%v", row[0], row[1])
+	}
+}

@@ -641,29 +641,15 @@ body {
 
 .help-ex-item:hover .help-ex-note { color: var(--accent-soft-text); }
 
-.help-grammar {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 18px;
-}
-
-.help-group-title {
-  color: var(--accent-soft-text);
-  font-size: calc(11px * var(--fs));
-  letter-spacing: .4px;
-  text-transform: uppercase;
-  margin-bottom: 4px;
-}
-
-.help-group ul {
-  margin: 0;
-  padding-left: 15px;
-  color: var(--text-2);
+/* 滑块式目录：内容按由浅入深分 10 级，章节多了才有跳转的必要 */
+.help-intro {
+  color: var(--text-3);
   font-size: calc(11.5px * var(--fs));
-  line-height: 1.62;
+  line-height: 1.65;
+  margin: 2px 0 8px;
 }
 
-.help-group code {
+.help-intro code {
   font-family: var(--mono);
   font-size: calc(11px * var(--fs));
   color: var(--code-text);
@@ -672,8 +658,126 @@ body {
   border-radius: 3px;
 }
 
-.help-group.muted .help-group-title { color: var(--text-3); }
-.help-group.muted ul { color: var(--text-3); }
+.help-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.help-toc button {
+  font-family: inherit;
+  font-size: calc(11px * var(--fs));
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+
+.help-toc button:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: var(--bg-3);
+}
+
+/* 目录跳转时让 modal-body 平滑滚动（它是这个弹窗的滚动容器） */
+.modal-card.help .modal-body { scroll-behavior: smooth; }
+
+.help-lv {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 0 10px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.help-lv-no {
+  align-self: start;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+}
+
+.help-lv-title {
+  color: var(--text);
+  font-size: calc(12.5px * var(--fs));
+  font-weight: 600;
+}
+
+.help-lv-desc {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+  line-height: 1.55;
+}
+
+/* 语法条目之间靠 gap 分隔（不再用 ·）：条目多了能整齐换行，行尾也不会留一个孤立的分隔符 */
+.help-lv-syn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-top: 5px;
+  color: var(--text-2);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.7;
+}
+
+.help-lv-syn code,
+.help-lv-desc code {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--code-text);
+  background: var(--code-bg);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+/* 例子统一用代码块，横向溢出自己滚，不要把弹窗撑破 */
+.help-code {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.55;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* 窄屏：代码块改成自动换行。手机上横向滚动的小块很容易被当成「内容被截断」，
+   而这些例子本来就短，折行更好读。 */
+@media (max-width: 720px) {
+  .help-code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-x: visible;
+  }
+}
+
+/* 「明确不支持」整段弱化，一眼能看出不是可用清单 */
+.help-lv.is-muted .help-lv-no {
+  border-color: var(--border);
+  background: var(--bg-2);
+  color: var(--text-3);
+}
+
+.help-lv.is-muted .help-lv-title { color: var(--text-2); }
+.help-lv.is-muted .help-lv-desc,
+.help-lv.is-muted .help-lv-syn { color: var(--text-3); }
 
 .help-keys {
   display: flex;

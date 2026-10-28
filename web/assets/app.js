@@ -1221,6 +1221,16 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !helpModal.classList.contains('hidden')) closeHelp();
 });
 
+// 帮助手册的目录跳转。手册按由浅入深分了 10 级 + 不支持，篇幅较长，
+// 光靠滚轮找很累。用事件委托（内容虽然当前是静态的，但保持和别的弹窗一致）。
+// scrollIntoView 会自己找最近的滚动祖先 —— 这里就是 modal-body。
+document.addEventListener('click', ev => {
+  const go = ev.target.closest('[data-goto]');
+  if (!go) return;
+  const target = document.getElementById(go.dataset.goto);
+  if (target && target.scrollIntoView) target.scrollIntoView({ block: 'start' });
+});
+
 // 点示例只填进编辑器、不自动执行：避免手一滑就把库改了
 helpExamples.addEventListener('click', ev => {
   const item = ev.target.closest('.help-ex-item');

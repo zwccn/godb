@@ -359,21 +359,38 @@ class CDP {
     const helpUi = await cdp.eval(`(() => {
       const m = document.getElementById('helpModal');
       const ex = [...m.querySelectorAll('.help-ex-item')];
+      const lv = [...m.querySelectorAll('.help-lv')];
       return {
         ex: ex.length,
         first: ex.length ? ex[0].querySelector('.help-ex-name').textContent.trim() : '',
         allHaveNote: ex.every(b => (b.querySelector('.help-ex-note') || {}).textContent.trim().length > 4),
-        groups: [...m.querySelectorAll('.help-group-title')].map(g => g.textContent.trim()),
+        levels: lv.map(el => el.querySelector('.help-lv-title').textContent.trim()),
+        // 「明确不支持」那一级没有示例代码是正常的
+        noCode: lv.filter(el => !el.classList.contains('is-muted') && !el.querySelector('pre.help-code')).length,
+        toc: m.querySelectorAll('.help-toc button').length,
         keys: m.querySelectorAll('.help-keys kbd').length,
         fits: m.querySelector('.modal-body').scrollWidth <= m.querySelector('.modal-body').clientWidth + 1,
       };
     })()`);
     check('帮助里有 7 个示例、每个都带一句说明',
       helpUi.ex === 7 && helpUi.allHaveNote, `${helpUi.ex} 个，第一个是「${helpUi.first}」`);
-    check('帮助里有四组语法（含「明确不支持」）',
-      helpUi.groups.length === 4 && helpUi.groups.indexOf('明确不支持') >= 0, helpUi.groups.join(' / '));
+    // 手册由浅入深：第 1 级是增删改查，最后一级必须是「明确不支持」
+    check('语法手册按由浅入深分了 10 级 + 不支持',
+      helpUi.levels.length === 11 &&
+        helpUi.levels[0].indexOf('建表') >= 0 &&
+        helpUi.levels[10] === '明确不支持',
+      helpUi.levels.join(' / '));
+    check('每个支持性章节都带可执行的示例代码', helpUi.noCode === 0, `${helpUi.noCode} 级没有代码`);
+    check('目录条目与章节数一致', helpUi.toc === helpUi.levels.length,
+      `${helpUi.toc} 个目录 / ${helpUi.levels.length} 级`);
     check('帮助里有快捷键说明', helpUi.keys >= 3, helpUi.keys + ' 个按键');
     check('帮助内容没有被挤破（不横向溢出）', helpUi.fits);
+
+    // 点目录要能跳到对应章节（modal-body 是滚动容器，平滑滚动留点时间）
+    await cdp.eval(`document.querySelector('.help-toc [data-goto="h9"]').click()`);
+    await sleep(900);
+    const helpScroll = await cdp.eval(`document.querySelector('#helpModal .modal-body').scrollTop`);
+    check('点目录能跳到对应章节', helpScroll > 200, 'scrollTop=' + Math.round(helpScroll));
 
     // 点示例只填进编辑器、不自动执行
     await cdp.eval(`[...document.querySelectorAll('.help-ex-item')].find(b => b.dataset.ex === 'join').click()`);

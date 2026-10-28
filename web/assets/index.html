@@ -191,57 +191,182 @@ try {
 <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="帮助">
   <div class="modal-card help">
     <div class="modal-head">
-      <span>帮助 · 示例与语法</span>
+      <span>帮助 · 语法手册</span>
       <button id="btnHelpClose" class="icon-btn" title="关闭">×</button>
     </div>
     <div class="modal-body">
-      <div class="set-sec">示例查询（点一下填进编辑器）</div>
-      <div id="helpExamples" class="help-ex"></div>
+      <div class="help-intro">
+        语法手册，按由浅入深排列；每级都给一段能直接跑的例子。<br>
+        例子基于「设置 → 数据 → 载入示例数据」之后的 <code>departments</code> / <code>employees</code>；
+        点上面的编号可以跳到对应段落。PG 协议端口默认 <code>6432</code>，psql / Navicat / DBeaver 可直连。
+      </div>
 
-      <div class="set-sec">支持的语法</div>
-      <div class="help-grammar">
-        <div class="help-group">
-          <div class="help-group-title">查询</div>
-          <ul>
-            <li><code>SELECT</code> · <code>WHERE</code> · <code>ORDER BY</code> · <code>LIMIT</code> / <code>OFFSET</code> · <code>DISTINCT</code></li>
-            <li><code>GROUP BY</code> · <code>HAVING</code> · 聚合 <code>count/sum/avg/min/max</code>（含 <code>DISTINCT</code>）</li>
-            <li><code>INNER</code> / <code>LEFT</code> / <code>RIGHT</code> / <code>CROSS JOIN</code>，多表串联、表别名与列别名</li>
-            <li>标量子查询、<code>FROM</code> 子查询（派生表）、<code>UNION</code> / <code>INTERSECT</code> / <code>EXCEPT</code>、<code>WITH</code></li>
-            <li><code>IN (子查询)</code> · <code>EXISTS (子查询)</code> · 集合函数 <code>FROM generate_series</code></li>
-            <li><code>CASE WHEN</code> · <code>CAST</code>/<code>::</code> · <code>DATE '2024-01-01'</code> 这类带类型前缀的字面量</li>
-            <li><code>VALUES (…),(…)</code> 当查询源：独立执行、<code>FROM (VALUES …) x(a,b)</code> 派生表</li>
-            <li><code>EXTRACT(field FROM x)</code> · <code>date_part</code> · <code>date_trunc</code> · 数组下标 <code>a[i]</code> · <code>||</code></li>
-          </ul>
-        </div>
-        <div class="help-group">
-          <div class="help-group-title">写入与结构</div>
-          <ul>
-            <li><code>INSERT ... VALUES</code> / <code>INSERT ... SELECT</code> / <code>ON CONFLICT DO NOTHING | DO UPDATE</code> · <code>RETURNING</code></li>
-            <li>子查询也能用在写语句里：<code>DELETE … WHERE id IN (SELECT …)</code>、<code>UPDATE … SET c = (SELECT …)</code></li>
-            <li><code>UPDATE … FROM</code> / <code>DELETE … USING</code> 的数据源同 <code>SELECT</code>：多表、<code>JOIN</code>、<code>(SELECT …) x</code>、<code>(VALUES …) x(a,b)</code></li>
-            <li><code>CREATE</code> / <code>ALTER</code> / <code>DROP TABLE</code> · <code>TRUNCATE</code> · <code>COMMENT ON</code> · <code>GENERATED AS IDENTITY</code></li>
-            <li><code>CREATE INDEX</code>（B+Tree）、主键 / 唯一 / 非空 / 外键 / 默认值 / CHECK</li>
-            <li><code>BEGIN</code> · <code>COMMIT</code> · <code>ROLLBACK</code> · <code>SAVEPOINT</code> / <code>ROLLBACK TO</code>（表级 S/X 锁，可串行化）</li>
-            <li><code>CREATE</code> / <code>DROP DATABASE</code>，换库用顶栏的「库」下拉</li>
-          </ul>
-        </div>
-        <div class="help-group">
-          <div class="help-group-title">工具</div>
-          <ul>
-            <li><code>EXPLAIN</code> / <code>EXPLAIN ANALYZE</code> 看计划与真实耗时</li>
-            <li><code>CHECKPOINT</code> / <code>FLUSH</code> 立即落盘并轮转 WAL · <code>SHOW</code> 看参数</li>
-            <li><code>pg_catalog</code> / <code>information_schema</code> 可供 psql、Navicat 查询</li>
-          </ul>
-        </div>
-        <div class="help-group muted">
-          <div class="help-group-title">明确不支持</div>
-          <ul>
-            <li>递归 CTE（<code>WITH RECURSIVE</code>）、窗口函数</li>
-            <li><code>FULL JOIN</code> / <code>NATURAL JOIN</code>、行级锁、<code>LATERAL</code></li>
+      <div class="help-toc">
+        <button type="button" data-goto="h1">1 增删改查</button>
+        <button type="button" data-goto="h2">2 查询</button>
+        <button type="button" data-goto="h3">3 分组统计</button>
+        <button type="button" data-goto="h4">4 多表连接</button>
+        <button type="button" data-goto="h5">5 子查询 / 集合</button>
+        <button type="button" data-goto="h6">6 写入进阶</button>
+        <button type="button" data-goto="h7">7 结构与索引</button>
+        <button type="button" data-goto="h8">8 事务与并发</button>
+        <button type="button" data-goto="h9">9 函数与类型</button>
+        <button type="button" data-goto="h10">10 诊断与维护</button>
+        <button type="button" data-goto="h11">11 不支持</button>
+      </div>
 
-          </ul>
+      <div class="help-lv" id="h1">
+        <div class="help-lv-no">1</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">建表与增删改查</div>
+          <div class="help-lv-desc">最小闭环：建表 → 插数据 → 查 → 改 → 删。</div>
+          <div class="help-lv-syn"><span><code>CREATE TABLE</code></span><span><code>INSERT</code></span><span><code>SELECT</code></span><span><code>UPDATE</code></span><span><code>DELETE</code></span></div>
+          <pre class="help-code">CREATE TABLE t (id serial PRIMARY KEY, name text, n int);
+INSERT INTO t (name, n) VALUES ('a', 1), ('b', 2);
+SELECT * FROM t;
+UPDATE t SET n = n + 1 WHERE name = 'a';
+DELETE FROM t WHERE id = 2;</pre>
         </div>
       </div>
+
+      <div class="help-lv" id="h2">
+        <div class="help-lv-no">2</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">查询：筛选、排序、分页、去重</div>
+          <div class="help-lv-desc">日常用得最多的一层，条件、排序、翻页、去重都在这里。</div>
+          <div class="help-lv-syn"><span><code>WHERE</code></span><span><code>AND / OR / NOT</code></span><span><code>IN</code></span><span><code>BETWEEN</code></span><span><code>LIKE / ILIKE</code></span><span><code>IS NULL</code></span><span><code>ORDER BY ASC/DESC NULLS FIRST|LAST</code></span><span><code>LIMIT / OFFSET</code></span><span><code>DISTINCT</code></span></div>
+          <pre class="help-code">SELECT DISTINCT dept_id FROM employees
+WHERE salary BETWEEN 10000 AND 30000 AND name LIKE '张%'
+ORDER BY salary DESC NULLS LAST
+LIMIT 10 OFFSET 20;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h3">
+        <div class="help-lv-no">3</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">分组统计</div>
+          <div class="help-lv-desc">聚合函数配 <code>GROUP BY</code>；分组后再筛选用 <code>HAVING</code>（不是 WHERE）。</div>
+          <div class="help-lv-syn"><span><code>count / sum / avg / min / max</code>（含 <code>DISTINCT</code>）· <code>GROUP BY</code></span><span><code>HAVING</code></span></div>
+          <pre class="help-code">SELECT dept_id, count(*) AS n, round(avg(salary), 2) AS avg_pay
+FROM employees
+GROUP BY dept_id
+HAVING count(*) > 1
+ORDER BY n DESC;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h4">
+        <div class="help-lv-no">4</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">多表连接</div>
+          <div class="help-lv-desc"><code>LEFT JOIN</code> 保留左表全部行，对不上的右表列为 NULL —— 统计「没人/没单」时靠它。</div>
+          <div class="help-lv-syn"><span><code>INNER</code> / <code>LEFT</code> / <code>RIGHT</code> / <code>CROSS JOIN</code></span><span><code>ON</code></span><span>表别名与列别名</span><span>括号联接组 <code>(a JOIN b ON …) x</code></span></div>
+          <pre class="help-code">SELECT d.name, count(e.id) AS n
+FROM departments d
+LEFT JOIN employees e ON e.dept_id = d.id
+GROUP BY d.name
+ORDER BY n DESC;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h5">
+        <div class="help-lv-no">5</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">子查询与集合运算</div>
+          <div class="help-lv-desc">标量子查询返回单值，可以引用外层列；<code>WITH</code> 把中间结果命名一次，多处复用。</div>
+          <div class="help-lv-syn"><span>标量子查询</span><span><code>IN (子查询)</code></span><span><code>EXISTS</code></span><span><code>FROM</code> 派生表 <code>(SELECT …) x</code></span><span><code>VALUES (…),(…)</code></span><span><code>UNION [ALL]</code> / <code>INTERSECT</code> / <code>EXCEPT</code></span><span><code>WITH</code></span></div>
+          <pre class="help-code">SELECT name FROM employees
+WHERE dept_id IN (SELECT id FROM departments WHERE budget > 100000)
+  AND salary > (SELECT avg(salary) FROM employees);
+
+WITH big AS (SELECT id FROM departments WHERE budget > 100000)
+SELECT count(*) FROM employees WHERE dept_id IN (SELECT id FROM big);</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h6">
+        <div class="help-lv-no">6</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">写入进阶：返回、冲突、批量</div>
+          <div class="help-lv-desc"><code>ON CONFLICT</code> 是「有就改、没有就插」；<code>RETURNING</code> 直接拿到写后的行，省一次查询。</div>
+          <div class="help-lv-syn"><span><code>RETURNING</code></span><span><code>ON CONFLICT DO NOTHING | DO UPDATE SET … EXCLUDED</code></span><span><code>INSERT … SELECT</code></span><span><code>UPDATE … FROM</code></span><span><code>DELETE … USING</code></span><span>写语句的 <code>WHERE</code>/<code>SET</code>/<code>VALUES</code> 里也能用子查询</span></div>
+          <pre class="help-code">INSERT INTO employees (id, name, salary) VALUES (1, '张伟', 42000)
+ON CONFLICT (id) DO UPDATE SET salary = EXCLUDED.salary
+RETURNING id, name;
+
+UPDATE employees e SET salary = s.salary
+FROM (VALUES (1, 50000)) s(id, salary)
+WHERE e.id = s.id RETURNING e.id, e.salary;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h7">
+        <div class="help-lv-no">7</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">表结构与索引</div>
+          <div class="help-lv-desc">索引是内存 B+Tree，建完立刻生效；等值、范围、<code>IN</code>、<code>ORDER BY</code> 免排序都会用到。</div>
+          <div class="help-lv-syn"><span><code>ALTER TABLE ADD / DROP / RENAME COLUMN</code></span><span><code>RENAME TO</code></span><span><code>ALTER COLUMN TYPE</code></span><span><code>CREATE [UNIQUE] INDEX</code></span><span><code>DROP INDEX</code></span><span><code>PRIMARY KEY / UNIQUE / NOT NULL / DEFAULT / CHECK / FOREIGN KEY</code></span><span><code>GENERATED AS IDENTITY</code></span><span><code>COMMENT ON</code></span><span><code>TRUNCATE</code></span></div>
+          <pre class="help-code">ALTER TABLE employees ADD COLUMN email text;
+CREATE INDEX idx_emp_dept ON employees (dept_id);
+COMMENT ON TABLE employees IS '员工表';
+TRUNCATE TABLE employees;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h8">
+        <div class="help-lv-no">8</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">事务与并发</div>
+          <div class="help-lv-desc">表级 S/X 锁、严格两阶段封锁（可串行化）；<code>SAVEPOINT</code> 用于部分回滚，ORM 的嵌套事务靠它。</div>
+          <div class="help-lv-syn"><span><code>BEGIN</code> / <code>START TRANSACTION</code>（<code>ISOLATION LEVEL …</code>、<code>READ ONLY</code>）· <code>COMMIT</code></span><span><code>ROLLBACK</code></span><span><code>SAVEPOINT</code> / <code>ROLLBACK TO SAVEPOINT</code> / <code>RELEASE SAVEPOINT</code></span></div>
+          <pre class="help-code">BEGIN;
+UPDATE employees SET salary = salary + 100 WHERE id = 1;
+SAVEPOINT sp1;
+DELETE FROM employees WHERE id = 2;
+ROLLBACK TO SAVEPOINT sp1;   -- 只撤销上面那条 DELETE
+COMMIT;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h9">
+        <div class="help-lv-no">9</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">常用函数与类型</div>
+          <div class="help-lv-desc">够覆盖大部分报表写法；序列函数只在 <code>SERIAL</code> 建出的序列上有效。</div>
+          <div class="help-lv-syn"><span>字符串 <code>lower / upper / length / trim / replace / substring / position / concat / string_agg</code></span><span>日期 <code>extract</code> / <code>date_part</code> / <code>date_trunc</code> / <code>now</code></span><span>序列 <code>nextval / currval / lastval</code></span><span>其他 <code>coalesce / nullif / greatest / least / regexp_matches</code></span><span>类型 <code>int / bigint / serial / numeric(p,s) / real / double precision / text / varchar(n) / boolean / date / timestamp</code></span></div>
+          <pre class="help-code">SELECT extract(year FROM now()) AS y,
+       date_trunc('month', now()) AS m,
+       coalesce(nullif(title, ''), '未填') AS t,
+       round(avg(salary), 2) AS avg_pay
+FROM employees
+GROUP BY 1, 2, 3;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h10">
+        <div class="help-lv-no">10</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">诊断与维护</div>
+          <div class="help-lv-desc">看计划、看落盘、看系统目录；<code>EXPLAIN ANALYZE</code> 会真的执行并给出每步行数与耗时。</div>
+          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span></div>
+          <pre class="help-code">EXPLAIN ANALYZE SELECT * FROM employees WHERE dept_id = 1;
+SHOW server_version;
+CHECKPOINT;</pre>
+        </div>
+      </div>
+
+      <div class="help-lv is-muted" id="h11">
+        <div class="help-lv-no">11</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">明确不支持</div>
+          <div class="help-lv-desc">这些会报清晰的错误，不会静默算错 —— 与其试半天，不如先看这一条。</div>
+          <div class="help-lv-syn"><span>递归 CTE <code>WITH RECURSIVE</code></span><span>窗口函数 <code>OVER (…)</code></span><span><code>FULL JOIN</code> / <code>NATURAL JOIN</code></span><span>行级锁 <code>SELECT … FOR UPDATE</code></span><span><code>LATERAL</code></span></div>
+        </div>
+      </div>
+
+      <div class="set-sec">上手示例（点一下填进编辑器，只填不执行）</div>
+      <div id="helpExamples" class="help-ex"></div>
 
       <div class="set-sec">快捷键与小技巧</div>
       <div class="help-keys">

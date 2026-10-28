@@ -71,10 +71,14 @@ type Session struct {
 	tx         *storage.Tx
 	lockTx     int64
 	age        int64
-	global     bool // serial 模式下是否持全局锁
-	aborted    bool
-	last       time.Time
-	lastWaitNs int64
+	global bool // serial 模式下是否持全局锁
+	aborted bool
+	// lastUnix / lastWaitNs 存纳秒时间戳，用 atomic 而不是裸字段：
+	// 巡检 goroutine（sweepSessions）每秒读它们判断事务是否空闲，
+	// 而执行线程在每条语句结束时写 —— 裸读写会被 -race 抓成数据竞争，
+	// 32 位下还可能读到撕裂的值。atomic.Int64 自带 8 字节对齐。
+	lastUnix   atomic.Int64
+	lastWaitNs atomic.Int64
 	// savepoints 是 SAVEPOINT 栈（由内到外）。提交/回滚时整栈丢弃。
 	savepoints []savepoint
 	// lastSeq 是会话级的最后一次序列值（lastval() 跨语句有效）。
@@ -192,8 +196,8 @@ func NewSession(id string, st *storage.Store, mgr *Manager, locks *lock.Manager,
 		mgr:   mgr,
 		locks: locks,
 		opts:  opts,
-		last:  time.Now(),
 	}
+	s.lastUnix.Store(time.Now().UnixNano())
 	s.cancelCh.Store(&ch)
 	// 每个会话的锁等待都要能被自己的取消标志打断（面板 Kill）。
 	// opts 是值拷贝，各会话互不影响。
@@ -259,13 +263,22 @@ func (s *Session) TxInfo() (inTx bool, start time.Time, stmts int, idle time.Dur
 	if ns > 0 {
 		start = time.Unix(0, ns)
 	}
-	return s.tx != nil, start, int(s.txStmts.Load()), time.Since(s.last)
+	return s.tx != nil, start, int(s.txStmts.Load()), time.Since(s.lastTime())
+}
+
+// lastTime 返回上次活动时刻；从未活动过时返回零值（与原来裸 time.Time 的行为一致）。
+func (s *Session) lastTime() time.Time {
+	ns := s.lastUnix.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // NoteStmt 记一条完成的语句（事务内语句计数）。
 func (s *Session) NoteStmt() {
 	s.txStmts.Add(1)
-	s.last = time.Now()
+	s.Touch()
 }
 
 // SetLockTimeout 热更新本会话的锁等待超时（<= 0 表示不限）。
@@ -311,19 +324,19 @@ func (s *Session) Current() *storage.Tx { return s.tx }
 func (s *Session) Isolation() Isolation { return s.iso }
 
 // Touch 刷新活动时间。
-func (s *Session) Touch() { s.last = time.Now() }
+func (s *Session) Touch() { s.lastUnix.Store(time.Now().UnixNano()) }
 
 // Idle 返回距上次活动的时长。
-func (s *Session) Idle() time.Duration { return time.Since(s.last) }
+func (s *Session) Idle() time.Duration { return time.Since(s.lastTime()) }
 
 // LastWait 返回最近一次加锁等待的时长（0 表示没等过）。
-func (s *Session) LastWait() time.Duration { return time.Duration(s.lastWaitNs) }
+func (s *Session) LastWait() time.Duration { return time.Duration(s.lastWaitNs.Load()) }
 
 // LastWaitNs 返回最近一次加锁等待的纳秒数。
-func (s *Session) LastWaitNs() int64 { return s.lastWaitNs }
+func (s *Session) LastWaitNs() int64 { return s.lastWaitNs.Load() }
 
 // ResetLastWait 清掉上次等待时长。
-func (s *Session) ResetLastWait() { s.lastWaitNs = 0 }
+func (s *Session) ResetLastWait() { s.lastWaitNs.Store(0) }
 
 // startTx 建立一个新事务并一次性拿到它需要的锁（保守 2PL）。
 func (s *Session) startTx(intents map[string]lock.Mode) error {
@@ -350,7 +363,7 @@ func (s *Session) startTx(intents map[string]lock.Mode) error {
 	s.notify(ObsWaiting, modeNames(intents))
 	if err := s.locks.AcquireAll(id, s.ID, age, intents, s.opts); err != nil {
 		tx.Rollback()
-		s.lastWaitNs = hrtime.Since(start)
+		s.lastWaitNs.Store(int64(hrtime.Since(start)))
 		s.notify(ObsIdle, nil)
 		return err
 	}
@@ -387,7 +400,7 @@ func (s *Session) inheritLastSeq() {
 
 func (s *Session) noteWait(start hrtime.Stamp) {
 	if d := hrtime.Since(start); d > 2_000_000 { // 超过 2ms 才记录
-		s.lastWaitNs = d
+		s.lastWaitNs.Store(int64(d))
 	}
 }
 
@@ -410,7 +423,7 @@ func (s *Session) EnsureLocks(intents map[string]lock.Mode) error {
 	start := hrtime.Now()
 	s.notify(ObsWaiting, modeNames(need))
 	if err := s.locks.AcquireAll(s.lockTx, s.ID, s.age, need, s.opts); err != nil {
-		s.lastWaitNs = hrtime.Since(start)
+		s.lastWaitNs.Store(int64(hrtime.Since(start)))
 		s.notify(ObsIdle, nil)
 		return err
 	}

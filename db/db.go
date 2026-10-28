@@ -833,17 +833,22 @@ func (d *DB) sweepSessions() {
 		d.mu.Unlock()
 		limit := time.Duration(d.Timeouts().SlowTxIdleSec) * time.Second
 		for _, s := range list {
+			// 先拿会话锁再读状态：InTx() 读的是裸指针 s.tx，而执行线程会在
+			// 持这把锁的情况下改写它。TryLock 成功就说明没人正在执行，此时
+			// 读到的状态是一致的；失败则说明这个会话正在跑语句，跳过即可
+			// —— 它马上会自己收尾，硬抢锁会把执行打乱。
+			if !s.TryLock() {
+				continue
+			}
 			if !s.InTx() {
+				s.Unlock()
 				continue
 			}
 			idle := s.Idle()
 			slow := limit > 0 && idle > limit
 			abandoned := idle > 3*time.Minute
 			if !slow && !abandoned {
-				continue
-			}
-			// 正在跑语句的会话跳过：它马上会自己收尾，硬抢锁会把执行打乱。
-			if !s.TryLock() {
+				s.Unlock()
 				continue
 			}
 			s.ForceRollback()

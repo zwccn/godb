@@ -2,7 +2,7 @@ package exec
 
 import (
 	"fmt"
-	"strconv"
+	"math/big"
 	"strings"
 
 	"godb/types"
@@ -58,7 +58,9 @@ type sumAcc struct {
 	isDec    bool
 	i        int64
 	f        float64
-	dec      string // 精确十进制累加
+	// decimal 累加：对齐到同一小数位后用大整数加尾数（比 big.Rat 快一个量级）
+	dm    *big.Int
+	dscale int
 	seen     map[string]bool
 	distinct bool
 	has      bool
@@ -77,16 +79,24 @@ func (a *sumAcc) add(v types.Value) error {
 	}
 	a.has = true
 	if a.isDec {
-		s := v.TextForm()
-		if a.dec == "" {
-			a.dec = s
-			return nil
-		}
-		out, err := types.AddDecimal(a.dec, s)
+		m, sc, err := types.DecimalMantissa(v.TextForm())
 		if err != nil {
 			return err
 		}
-		a.dec = out
+		if a.dm == nil {
+			a.dm, a.dscale = m, sc
+			return nil
+		}
+		// 对齐小数位
+		if sc > a.dscale {
+			pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(sc-a.dscale)), nil)
+			a.dm.Mul(a.dm, pow)
+			a.dscale = sc
+		} else if sc < a.dscale {
+			pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(a.dscale-sc)), nil)
+			m.Mul(m, pow)
+		}
+		a.dm.Add(a.dm, m)
 		return nil
 	}
 	if a.isFloat {
@@ -110,7 +120,10 @@ func (a *sumAcc) result() types.Value {
 		return types.Null
 	}
 	if a.isDec {
-		return types.Decimal(a.dec)
+		if a.dm == nil {
+			return types.Decimal("0")
+		}
+		return types.Decimal(types.MantissaDecimal(a.dm, a.dscale))
 	}
 	if a.isFloat {
 		return types.Float(a.f)
@@ -121,7 +134,8 @@ func (a *sumAcc) result() types.Value {
 type avgAcc struct {
 	f        float64
 	n        int64
-	dec      string
+	dm       *big.Int
+	dscale   int
 	isDec    bool
 	distinct bool
 	seen     map[string]bool
@@ -139,15 +153,22 @@ func (a *avgAcc) add(v types.Value) error {
 		a.seen[k] = true
 	}
 	if a.isDec {
-		s := v.TextForm()
-		if a.dec == "" {
-			a.dec = s
+		m, sc, err := types.DecimalMantissa(v.TextForm())
+		if err != nil {
+			return err
+		}
+		if a.dm == nil {
+			a.dm, a.dscale = m, sc
 		} else {
-			out, err := types.AddDecimal(a.dec, s)
-			if err != nil {
-				return err
+			if sc > a.dscale {
+				pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(sc-a.dscale)), nil)
+				a.dm.Mul(a.dm, pow)
+				a.dscale = sc
+			} else if sc < a.dscale {
+				pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(a.dscale-sc)), nil)
+				m.Mul(m, pow)
 			}
-			a.dec = out
+			a.dm.Add(a.dm, m)
 		}
 		a.n++
 		return nil
@@ -166,11 +187,14 @@ func (a *avgAcc) result() types.Value {
 		return types.Null
 	}
 	if a.isDec {
-		out, err := types.DivDecimal(a.dec, strconv.FormatInt(a.n, 10))
-		if err != nil {
-			return types.Null
+		if a.dm == nil {
+			return types.Decimal("0")
 		}
-		return types.Decimal(out)
+		// 尾数乘 10^6 再除 n，保留 6 位小数后规范化
+		num := new(big.Int).Set(a.dm)
+		num.Mul(num, big.NewInt(1_000_000))
+		num.Quo(num, big.NewInt(a.n))
+		return types.Decimal(types.MantissaDecimal(num, a.dscale+6))
 	}
 	return types.Float(a.f / float64(a.n))
 }

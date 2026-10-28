@@ -142,8 +142,75 @@ func Decimal(s string) Value {
 	return Value{K: KDecimal, S: n}
 }
 
-// compareDecimal 比较两个十进制文本。
-func compareDecimal(a, b string) int {
+// DecimalMantissa 把规范十进制文本拆成 (尾数, 小数位)：`123.45` → (12345, 2)。
+// 比 big.Rat.SetString 快得多，供 sum/avg 累加用。
+func DecimalMantissa(s string) (*big.Int, int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, 0, fmt.Errorf("invalid numeric %q", s)
+	}
+	neg := false
+	if s[0] == '+' {
+		s = s[1:]
+	} else if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	dot := strings.IndexByte(s, '.')
+	intPart, fracPart := s, ""
+	if dot >= 0 {
+		intPart, fracPart = s[:dot], s[dot+1:]
+	}
+	// 去掉尾零，缩小小数位
+	fracPart = strings.TrimRight(fracPart, "0")
+	scale := len(fracPart)
+	digits := intPart + fracPart
+	if digits == "" {
+		digits = "0"
+	}
+	m := new(big.Int)
+	if _, ok := m.SetString(digits, 10); !ok {
+		return nil, 0, fmt.Errorf("invalid numeric %q", s)
+	}
+	if neg {
+		m.Neg(m)
+	}
+	return m, scale, nil
+}
+
+// MantissaDecimal 把 (尾数, 小数位) 渲染成规范十进制文本。
+func MantissaDecimal(m *big.Int, scale int) string {
+	if m == nil {
+		return "0"
+	}
+	s := m.String()
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	for len(s) <= scale {
+		s = "0" + s
+	}
+	if scale == 0 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	out := s[:len(s)-scale] + "." + s[len(s)-scale:]
+	out = strings.TrimRight(out, "0")
+	out = strings.TrimRight(out, ".")
+	if out == "" || out == "-" {
+		return "0"
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
+// CompareDecimal 比较两个十进制文本。
+func CompareDecimal(a, b string) int {
 	ra, rb := DecimalRat(a), DecimalRat(b)
 	return ra.Cmp(rb)
 }

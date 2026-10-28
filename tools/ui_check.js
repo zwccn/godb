@@ -135,6 +135,28 @@ class CDP {
     check('执行计划：全是非查询语句时给出明确提示',
       /只能解释查询语句/.test(onlyWrite) && /UPDATE/.test(onlyWrite), onlyWrite.slice(0, 100));
 
+    // 0.3) 新能力：Top-N、interval、精确 numeric、快聚合、覆盖索引
+    const runSql = async (sql, wait = 900) => {
+      await cdp.eval(`cm.setValue(${JSON.stringify(sql)})`);
+      await cdp.eval(`document.getElementById('btnRun').click()`);
+      await sleep(wait);
+      return (await cdp.eval(`document.getElementById('results').textContent`) || '').replace(/\s+/g, ' ');
+    };
+    const t1 = await runSql(`SELECT 0.1::numeric + 0.2::numeric AS x`);
+    check('精确 numeric：0.1+0.2=0.3', t1.includes('0.3') && !t1.includes('0.30000000000000004'), t1.slice(0, 80));
+    const t2 = await runSql(`SELECT now() - INTERVAL '1 day' AS d`);
+    check('interval 时间加减', /执行失败|error/i.test(t2) === false && /20\d\d-/.test(t2), t2.slice(0, 80));
+    const t3 = await runSql(`SELECT lpad('1', 6, '0') AS c`);
+    check('lpad', t3.includes('000001'), t3.slice(0, 80));
+    const t3b = await runSql(`SELECT unnest(array[1,2]) AS n`);
+    check('unnest 展开多行', t3b.includes('1') && t3b.includes('2'), t3b.slice(0, 80));
+    const t4 = await runSql(`EXPLAIN SELECT count(*) FROM employees`);
+    check('快聚合 count(*)', /Fast Aggregate/.test(t4), t4.slice(0, 100));
+    const t5 = await runSql(`CREATE INDEX IF NOT EXISTS ix_ui_dept ON employees (dept_id)`);
+    check('CREATE INDEX IF NOT EXISTS', !/执行失败|error/i.test(t5), t5.slice(0, 80));
+    const t5b = await runSql(`EXPLAIN SELECT dept_id FROM employees WHERE dept_id > 0`);
+    check('覆盖索引或索引扫描', /Index/.test(t5b), t5b.slice(0, 100));
+
     // 0.5) 编辑器高度：默认够高、能拖、双击回自动
     check('CodeMirror 已接管编辑区（语法高亮 + 补全）',
       await cdp.eval(`!!document.querySelector('.CodeMirror') && !!window.CodeMirror`),
@@ -377,8 +399,8 @@ class CDP {
         fits: m.querySelector('.modal-body').scrollWidth <= m.querySelector('.modal-body').clientWidth + 1,
       };
     })()`);
-    check('帮助里有 7 个示例、每个都带一句说明',
-      helpUi.ex === 7 && helpUi.allHaveNote, `${helpUi.ex} 个，第一个是「${helpUi.first}」`);
+    check('帮助里有 8 个示例、每个都带一句说明',
+      helpUi.ex === 8 && helpUi.allHaveNote, `${helpUi.ex} 个，第一个是「${helpUi.first}」`);
     // 手册由浅入深：第 1 级是增删改查，最后一级必须是「明确不支持」
     check('语法手册按由浅入深分了 10 级 + 不支持',
       helpUi.levels.length === 11 &&

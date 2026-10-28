@@ -234,7 +234,7 @@ func Compare(a, b Value) (int, error) {
 		case KFloat:
 			return cmpFloat(a.Float(), b.Float()), nil
 		case KDecimal:
-			return compareDecimal(a.S, b.S), nil
+			return CompareDecimal(a.S, b.S), nil
 		case KText:
 			return strings.Compare(a.S, b.S), nil
 		case KBool:
@@ -253,7 +253,7 @@ func Compare(a, b Value) (int, error) {
 	if a.IsNumeric() && b.IsNumeric() {
 		// 有 decimal 参与时走精确比较，避免 float 精度把 0.1+0.2 判成不等于 0.3
 		if a.K == KDecimal || b.K == KDecimal {
-			return compareDecimal(a.TextForm(), b.TextForm()), nil
+			return CompareDecimal(a.TextForm(), b.TextForm()), nil
 		}
 		return cmpFloat(a.Float(), b.Float()), nil
 	}

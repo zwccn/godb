@@ -52,6 +52,13 @@ type Session struct {
 	// User 是登录用户名（current_user 回显）。
 	User string
 
+	// execToken 是并发执行信号量的令牌（由 db 层注入）。
+	// 信号量按事务持有：BEGIN 时获取，COMMIT/ROLLBACK 时释放。
+	// 这样保证「持有表锁 ⊆ 持有信号量」，不会出现锁×信号量交叉死锁。
+	execToken   bool
+	releaseExec func()
+	_execAcquire func() func() // db 层注入的信号量获取函数
+
 	mu    sync.Mutex // 保证同一会话的请求串行执行
 	st    *storage.Store
 	iso   Isolation
@@ -382,9 +389,44 @@ func (s *Session) releaseAll() {
 	} else if s.lockTx != 0 {
 		s.locks.Release(s.lockTx)
 	}
+	// 释放并发执行信号量（按事务持有，事务结束才放）
+	if s.execToken {
+		s.execToken = false
+		if s.releaseExec != nil {
+			s.releaseExec()
+			s.releaseExec = nil
+		}
+	}
 	s.tx = nil
 	s.lockTx = 0
 	s.age = 0
 	s.aborted = false
 	s.savepoints = nil
+}
+
+// SetExecToken 注入并发执行信号量的获取/释放函数（db 层调用）。
+func (s *Session) SetExecToken(acquire func() func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s._execAcquire = acquire
+}
+
+// AcquireExecToken 获取并发执行信号量（按事务持有）。
+// 已持有则跳过。返回 true 表示本次是新获取的。
+func (s *Session) AcquireExecToken() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.execToken || s._execAcquire == nil {
+		return false
+	}
+	s.releaseExec = s._execAcquire()
+	s.execToken = true
+	return true
+}
+
+// ExecTokenHeld 是否已持有信号量。
+func (s *Session) ExecTokenHeld() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.execToken
 }

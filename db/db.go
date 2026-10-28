@@ -225,6 +225,8 @@ func (d *DB) Session(id string) *txn.Session {
 	s, ok := d.sessions[id]
 	if !ok {
 		s = txn.NewSession(id, d.Store, d.Mgr, d.Locks, d.Iso, d.lockOpts)
+		// 注入信号量获取函数：session 在事务结束时调用 releaseAll 释放。
+		s.SetExecToken(d.acquireExec)
 		d.sessions[id] = s
 	}
 	return s
@@ -240,9 +242,9 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	if d.closed.Load() {
 		return nil, fmt.Errorf("database %q has been dropped", d.Name)
 	}
-	// 并发上限：超出的在这里排队等，不占表锁、不扫表、不占内存。
-	release := d.acquireExec()
-	defer release()
+	// 并发上限：信号量按事务持有（不是按单条 SQL），避免锁×信号量交叉死锁。
+	// 自动提交：获取→执行→释放；显式事务：BEGIN 获取，COMMIT/ROLLBACK 释放。
+	sess.AcquireExecToken()
 
 	start := hrtime.Now()
 	stmts, err := sql.Parse(text)

@@ -827,6 +827,9 @@ var builtinTypes = []typeDef{
 	{"tsquery", types.OIDTsquery, "tsquery", "U", 0, 3645, "i", "x"},
 }
 
+// arrayRecvOID 是 pg_proc 里 array_recv 的 OID，必须和 builtinProcs 里那条一致。
+const arrayRecvOID = 2402
+
 // typeRows 生成 pg_type。数组类型不单独列，按基类型的 typarray 全自动生成：
 // 名字是 "_"+基名（真 PG 的写法是 _int4 / _text，不是 int4_array），
 // 这样 typarray 指过去的 OID 一定存在，客户端反查数组元素类型才不会落空。
@@ -859,7 +862,8 @@ func typeRows(def *catalog.Table) []types.Row {
 			"typispreferred": bv(false), "typisdefined": bv(true), "typdelim": sv(","),
 			"typrelid": iv(0), "typelem": iv(int(td.oid)), "typarray": iv(0),
 			"typinput": sv("array_in"), "typoutput": sv("array_out"),
-			"typreceive": sv("array_recv"), "typsend": sv("array_send"),
+			// 必须是 OID 而不是函数名：客户端是 JOIN pg_proc 比 oid 的
+			"typreceive": iv(arrayRecvOID), "typsend": sv("array_send"),
 			"typalign": sv("i"), "typstorage": sv("x"),
 			"typnotnull": bv(false), "typbasetype": iv(0), "typtypmod": iv(-1),
 			"typndims": iv(0), "typcollation": iv(0),
@@ -887,6 +891,12 @@ var builtinProcs = []procRow{
 	{1642, "pg_get_indexdef", 3, 25}, {1643, "pg_get_triggerdef", 2, 25},
 	{1644, "pg_get_constraintdef", 2, 25}, {2236, "pg_get_viewdef", 2, 25},
 	{1693, "pg_encoding_to_char", 1, 19}, {1701, "pg_recvlogical", 0, 25},
+	// 数组类型的输入输出函数。Npgsql 判断「这个类型是不是数组」的办法是
+	// LEFT JOIN pg_proc ON proc.oid = pg_type.typreceive 然后看 proname 是不是
+	// array_recv；pg_proc 里没有这一行，数组就会被当成普通基类型，
+	// 客户端拿不到 handler，读数组列直接报 unknown type。
+	{750, "array_in", 3, 2277}, {751, "array_out", 1, 2277},
+	{2402, "array_recv", 3, 2277}, {2403, "array_send", 1, 17},
 }
 
 func procRows(def *catalog.Table) []types.Row {

@@ -138,7 +138,7 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 
 	switch n := e.(type) {
 	case *sql.Literal:
-		return &constEval{v: n.Val, t: types.TypeOf(n.Val)}, nil
+		return &constEval{v: n.Val, t: types.LiteralType(n.Val)}, nil
 
 	case *sql.Subquery:
 		if c.planner == nil {
@@ -492,11 +492,27 @@ func (e *binEval) Eval(row types.Row) (types.Value, error) {
 		}
 		switch e.op {
 		case "+":
-			return types.Int(a + b), nil
+			sum := a + b
+			// 溢出会回绕成错的数字，而且不报错 —— 比崩溃更难查。按 PG 报 22003。
+			if (b > 0 && sum < a) || (b < 0 && sum > a) {
+				return types.Null, errIntOutOfRange(e.t)
+			}
+			return types.Int(sum), nil
 		case "-":
-			return types.Int(a - b), nil
+			diff := a - b
+			if (b < 0 && diff < a) || (b > 0 && diff > a) {
+				return types.Null, errIntOutOfRange(e.t)
+			}
+			return types.Int(diff), nil
 		case "*":
-			return types.Int(a * b), nil
+			if a != 0 && b != 0 {
+				prod := a * b
+				if prod/b != a || (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
+					return types.Null, errIntOutOfRange(e.t)
+				}
+				return types.Int(prod), nil
+			}
+			return types.Int(0), nil
 		case "/":
 			if b == 0 {
 				return types.Null, fmt.Errorf("division by zero")
@@ -1350,7 +1366,14 @@ func binType(op string, l, r types.Type) types.Type {
 		}
 	}
 	if l.Kind == types.KInt && r.Kind == types.KInt {
-		return types.Type{Kind: types.KInt, Name: "integer"}
+		// 整数四则的结果类型取两侧较宽的一个（PG 规则：int4 + int8 → int8）。
+		// 一律报 integer 会让 RowDescription 给出 OID 23，客户端按 4 字节解码就把值截断了。
+		// interval 底层也是 KInt（纳秒），但上面已经单独返回过，走不到这里。
+		name := "integer"
+		if isInt8Type(l) || isInt8Type(r) {
+			name = "bigint"
+		}
+		return types.Type{Kind: types.KInt, Name: name}
 	}
 	// 有 decimal 参与的四则 → decimal（精确）
 	if l.Kind == types.KDecimal || r.Kind == types.KDecimal {
@@ -1363,6 +1386,23 @@ func binType(op string, l, r types.Type) types.Type {
 
 func isIntervalType(t types.Type) bool {
 	return t.Kind == types.KInterval || strings.EqualFold(t.Name, "interval")
+}
+
+// isInt8Type 判断类型是不是 8 字节整数（int8 / bigint）。
+func isInt8Type(t types.Type) bool {
+	switch strings.ToLower(t.Name) {
+	case "bigint", "int8", "bigserial", "serial8":
+		return true
+	}
+	return false
+}
+
+// errIntOutOfRange 整数溢出。回绕会静默给出错值，按 PG 报 22003 更安全。
+func errIntOutOfRange(t types.Type) error {
+	if isInt8Type(t) {
+		return fmt.Errorf("bigint out of range")
+	}
+	return fmt.Errorf("integer out of range")
 }
 
 // isDecimalVal 判断值是否是精确十进制。

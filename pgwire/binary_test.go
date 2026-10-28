@@ -238,3 +238,135 @@ func TestBinaryNumericRoundTrip(t *testing.T) {
 		t.Fatalf("+Inf 编码 = % x", got)
 	}
 }
+
+// 数组二进制编码：头 + 维度 + 元素。用 Npgsql 相同的读法校验，
+// 避免出现「结构能发出去但客户端解不开」。
+func TestBinaryArray(t *testing.T) {
+	readArray := func(b []byte) (elemOID int32, ndim int, elems []string, nulls []bool) {
+		t.Helper()
+		if len(b) < 12 {
+			t.Fatalf("数组头长度不足: %d", len(b))
+		}
+		ndim = int(int32(binary.BigEndian.Uint32(b[0:4])))
+		elemOID = int32(binary.BigEndian.Uint32(b[8:12]))
+		pos := 12
+		if ndim == 0 {
+			return elemOID, 0, nil, nil
+		}
+		n := int(int32(binary.BigEndian.Uint32(b[pos : pos+4])))
+		pos += 8 // 维度长度 + 下界
+		for i := 0; i < n; i++ {
+			ln := int(int32(binary.BigEndian.Uint32(b[pos : pos+4])))
+			pos += 4
+			if ln < 0 {
+				elems = append(elems, "")
+				nulls = append(nulls, true)
+				continue
+			}
+			elems = append(elems, string(b[pos:pos+ln]))
+			nulls = append(nulls, false)
+			pos += ln
+		}
+		return elemOID, ndim, elems, nulls
+	}
+
+	enc, err := encodeBinaryValue("{1,2,3}", 1007) // int4[]
+	if err != nil {
+		t.Fatalf("int4[]: %v", err)
+	}
+	elemOID, ndim, elems, _ := readArray(enc)
+	if elemOID != 23 || ndim != 1 || len(elems) != 3 {
+		t.Fatalf("int4[] 头不对: elemOID=%d ndim=%d elems=%v", elemOID, ndim, elems)
+	}
+	for i, want := range []int32{1, 2, 3} {
+		if len(elems[i]) != 4 {
+			t.Fatalf("int4[] 第 %d 个元素长度 = %d，期望 4", i, len(elems[i]))
+		}
+		if got := int32(binary.BigEndian.Uint32([]byte(elems[i]))); got != want {
+			t.Fatalf("int4[] 第 %d 个元素 = %d, want %d", i, got, want)
+		}
+	}
+
+	// 带 NULL 的元素：长度写成 -1
+	enc, err = encodeBinaryValue("{1,NULL,3}", 1007)
+	if err != nil {
+		t.Fatalf("int4[] 带 NULL: %v", err)
+	}
+	if got := binary.BigEndian.Uint32(enc[4:8]); got != 1 {
+		t.Fatalf("hasnull 标志 = %d，期望 1", got)
+	}
+	_, _, _, nulls := readArray(enc)
+	if len(nulls) != 3 || !nulls[1] || nulls[0] || nulls[2] {
+		t.Fatalf("NULL 位置不对: %v", nulls)
+	}
+
+	// text[] 里的引号与逗号
+	enc, err = encodeBinaryValue(`{a,"b,c"}`, 1009)
+	if err != nil {
+		t.Fatalf("text[]: %v", err)
+	}
+	_, _, elems, _ = readArray(enc)
+	if len(elems) != 2 || elems[0] != "a" || elems[1] != "b,c" {
+		t.Fatalf("text[] 元素 = %v，期望 [a b,c]", elems)
+	}
+
+	// 空数组：ndim=0
+	enc, err = encodeBinaryValue("{}", 1007)
+	if err != nil {
+		t.Fatalf("空数组: %v", err)
+	}
+	if elemOID, ndim, _, _ = readArray(enc); ndim != 0 || elemOID != 23 {
+		t.Fatalf("空数组头不对: ndim=%d elemOID=%d", ndim, elemOID)
+	}
+
+	// 多维暂不支持，要明确报错而不是发出错位的字节
+	if _, err := encodeBinaryValue("{{1,2},{3,4}}", 1007); err == nil {
+		t.Fatal("多维数组应该报错")
+	}
+}
+
+// interval 二进制：微秒 + 天 + 月 三段。
+func TestBinaryInterval(t *testing.T) {
+	cases := []struct {
+		in            string
+		wantMon, wantD int32
+		wantMicros    int64
+	}{
+		{"1 day", 0, 1, 0},
+		{"00:00:00", 0, 0, 0},
+		{"1 year 2 mons 3 days 04:05:06", 14, 3, 4*3600e6 + 5*60e6 + 6e6},
+		{"-3 hours", 0, 0, -3 * 3600e6},
+	}
+	for _, c := range cases {
+		enc, err := encodeBinaryValue(c.in, 1186)
+		if err != nil {
+			t.Fatalf("%q: %v", c.in, err)
+		}
+		if len(enc) != 16 {
+			t.Fatalf("%q 编码长度 = %d，期望 16", c.in, len(enc))
+		}
+		micros := int64(binary.BigEndian.Uint64(enc[0:8]))
+		days := int32(binary.BigEndian.Uint32(enc[8:12]))
+		mons := int32(binary.BigEndian.Uint32(enc[12:16]))
+		if micros != c.wantMicros || days != c.wantD || mons != c.wantMon {
+			t.Fatalf("%q -> micros=%d days=%d mons=%d，期望 micros=%d days=%d mons=%d",
+				c.in, micros, days, mons, c.wantMicros, c.wantD, c.wantMon)
+		}
+	}
+}
+
+// 声明成 int4 却装不下的值必须报错，不能按 4 字节截断 ——
+// 截断的结果是一本正经的错数字，客户端和人都看不出来。
+func TestBinaryIntOverflow(t *testing.T) {
+	if _, err := encodeBinaryValue(int64(9223372036854775807), 23); err == nil ||
+		!strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("int4 越界应报 out of range，实际: %v", err)
+	}
+	if _, err := encodeBinaryValue(int64(70000), 21); err == nil {
+		t.Fatal("int2 越界应报错")
+	}
+	// int8 正常
+	if enc, err := encodeBinaryValue(int64(9223372036854775807), 20); err != nil || len(enc) != 8 {
+		t.Fatalf("int8 编码失败: %v %d", err, len(enc))
+	}
+}

@@ -995,6 +995,8 @@ func mapError(err error) (string, string) {
 		return "55P03", msg // 锁等待超时
 	case strings.Contains(msg, "等待锁冲突"):
 		return "40P01", msg // 互等让位（DeadlockError）
+	case strings.Contains(msg, "out of range"):
+		return "22003", msg // numeric_value_out_of_range
 	case strings.Contains(msg, "aborted"):
 		return "25P02", msg
 	case strings.Contains(msg, "cannot run DDL inside"):

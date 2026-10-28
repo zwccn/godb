@@ -45,10 +45,18 @@ func encodeBinaryValue(v interface{}, oid int32) ([]byte, error) {
 		if !ok {
 			return nil, fmt.Errorf("cannot encode %T as integer", v)
 		}
+		// 越界直接报错，别截断：声明成 int4 却装不下时，截断会把 9223372036854775807
+		// 静默变成 -1，客户端拿到的是一本正经的错数字。
 		switch oid {
 		case types.OIDInt2:
+			if n < math.MinInt16 || n > math.MaxInt16 {
+				return nil, fmt.Errorf("smallint out of range")
+			}
 			return binary.BigEndian.AppendUint16(nil, uint16(int16(n))), nil
 		case types.OIDInt4:
+			if n < math.MinInt32 || n > math.MaxInt32 {
+				return nil, fmt.Errorf("integer out of range")
+			}
 			return binary.BigEndian.AppendUint32(nil, uint32(int32(n))), nil
 		}
 		return binary.BigEndian.AppendUint64(nil, uint64(n)), nil
@@ -141,6 +149,18 @@ func encodeBinaryValue(v interface{}, oid int32) ([]byte, error) {
 	case types.OIDJsonb:
 		// 首字节是版本号（目前只有 1），其余是 JSON 文本
 		return append([]byte{1}, textOf(v)...), nil
+
+	case types.OIDInterval:
+		return intervalBinaryOf(v)
+
+	// 数组：元素类型由数组 OID 决定，编码见 arrayBinaryOf。
+	case 1000, 1005, 1007, 1009, 1015, 1016, 1021, 1022,
+		1028, 1115, 1182, 1183, 1185, 1187, 1231, 2951:
+		elem, ok := arrayElemOID(oid)
+		if !ok {
+			return nil, fmt.Errorf("binary result of type OID %d is not supported", oid)
+		}
+		return arrayBinaryOf(v, elem)
 	}
 	return nil, fmt.Errorf("binary result of type OID %d is not supported", oid)
 }
@@ -383,4 +403,201 @@ func textOf(v interface{}) string {
 		return "f"
 	}
 	return fmt.Sprint(v)
+}
+
+// ---------- interval ----------
+
+// intervalBinaryOf 把 interval 的 PG 文本形式（"1 year 2 mons 3 days 04:05:06.5"）
+// 转成二进制：int64 微秒 + int32 天 + int32 月。
+// 三段分开是 PG 的约定；我们内部存的是「月数 + 纳秒」，天和时分秒都在纳秒里，
+// 这里按文本原样拆开，保证客户端读回去和写进来一致。
+func intervalBinaryOf(v interface{}) ([]byte, error) {
+	months, days, micros, err := parseIntervalText(textOf(v))
+	if err != nil {
+		return nil, err
+	}
+	out := binary.BigEndian.AppendUint64(nil, uint64(micros))
+	out = binary.BigEndian.AppendUint32(out, uint32(int32(days)))
+	out = binary.BigEndian.AppendUint32(out, uint32(int32(months)))
+	return out, nil
+}
+
+// parseIntervalText 解析 intervalText 生成的文本。单位支持 year/mon/day/hour/min/sec
+// 的单复数形式，以及 HH:MM:SS[.ffffff] 时钟段；整体可以带一个前导负号。
+func parseIntervalText(s string) (months, days, micros int64, err error) {
+	orig := strings.TrimSpace(s)
+	s = orig
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg = true
+		s = strings.TrimSpace(s[1:])
+	}
+	sign := func(n int64) int64 {
+		if neg {
+			return -n
+		}
+		return n
+	}
+	fields := strings.Fields(s)
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if strings.ContainsRune(f, ':') {
+			h, m, sec, cerr := parseClock(f)
+			if cerr != nil {
+				return 0, 0, 0, fmt.Errorf("cannot encode %q as interval", orig)
+			}
+			micros += sign(h*3600e6 + m*60e6 + int64(sec*1e6))
+			continue
+		}
+		n, perr := strconv.ParseInt(f, 10, 64)
+		if perr != nil || i+1 >= len(fields) {
+			return 0, 0, 0, fmt.Errorf("cannot encode %q as interval", orig)
+		}
+		unit := strings.ToLower(fields[i+1])
+		i++
+		switch strings.TrimSuffix(unit, "s") {
+		case "year", "yr":
+			months += sign(n * 12)
+		case "mon", "month":
+			months += sign(n)
+		case "day":
+			days += sign(n)
+		case "hour", "hr":
+			micros += sign(n * 3600e6)
+		case "min", "minute":
+			micros += sign(n * 60e6)
+		case "sec", "second":
+			micros += sign(int64(float64(n) * 1e6))
+		default:
+			return 0, 0, 0, fmt.Errorf("cannot encode %q as interval", orig)
+		}
+	}
+	return months, days, micros, nil
+}
+
+func parseClock(f string) (h, m int64, sec float64, err error) {
+	parts := strings.Split(f, ":")
+	if len(parts) != 3 {
+		return 0, 0, 0, fmt.Errorf("bad clock %q", f)
+	}
+	if h, err = strconv.ParseInt(parts[0], 10, 64); err != nil {
+		return 0, 0, 0, err
+	}
+	if m, err = strconv.ParseInt(parts[1], 10, 64); err != nil {
+		return 0, 0, 0, err
+	}
+	if sec, err = strconv.ParseFloat(parts[2], 64); err != nil {
+		return 0, 0, 0, err
+	}
+	return h, m, sec, nil
+}
+
+// ---------- 数组 ----------
+
+// arrayBinaryOf 生成 PG 数组二进制格式：
+//
+//	int32 ndim | int32 hasnull | int32 elemOID
+//	ndim × (int32 dimlen | int32 lowerbound)
+//	每个元素：int32 len + 内容（NULL 写 -1）
+//
+// 只支持一维：我们的数组值就是一段文本（'{1,2,3}'），没有多维的构造路径。
+func arrayBinaryOf(v interface{}, elemOID int32) ([]byte, error) {
+	elems, nulls, err := parseArrayLiteral(textOf(v))
+	if err != nil {
+		return nil, err
+	}
+	hasNull := 0
+	for _, n := range nulls {
+		if n {
+			hasNull = 1
+			break
+		}
+	}
+	ndim := 0
+	if len(elems) > 0 {
+		ndim = 1
+	}
+	out := binary.BigEndian.AppendUint32(nil, uint32(ndim))
+	out = binary.BigEndian.AppendUint32(out, uint32(hasNull))
+	out = binary.BigEndian.AppendUint32(out, uint32(elemOID))
+	if ndim == 0 {
+		return out, nil
+	}
+	out = binary.BigEndian.AppendUint32(out, uint32(len(elems)))
+	out = binary.BigEndian.AppendUint32(out, 1) // 下标从 1 开始
+	for i, e := range elems {
+		if nulls[i] {
+			out = binary.BigEndian.AppendUint32(out, 0xFFFFFFFF)
+			continue
+		}
+		b, err := encodeBinaryValue(e, elemOID)
+		if err != nil {
+			return nil, err
+		}
+		out = binary.BigEndian.AppendUint32(out, uint32(len(b)))
+		out = append(out, b...)
+	}
+	return out, nil
+}
+
+// parseArrayLiteral 把 PG 数组文本（{a,b,"c,d",NULL}）拆成元素。
+// 处理双引号包裹、反斜杠转义、元素为 NULL（未加引号时）三种情况；
+// 多维数组直接报错，不猜。
+func parseArrayLiteral(s string) ([]string, []bool, error) {
+	t := strings.TrimSpace(s)
+	if len(t) < 2 || t[0] != '{' || t[len(t)-1] != '}' {
+		return nil, nil, fmt.Errorf("cannot encode %q as array", s)
+	}
+	body := t[1 : len(t)-1]
+	if strings.TrimSpace(body) == "" {
+		return nil, nil, nil
+	}
+	var (
+		elems []string
+		nulls []bool
+		cur   strings.Builder
+		inQ   bool
+		esc   bool
+		wasQ  bool
+	)
+	flush := func() error {
+		raw := cur.String()
+		cur.Reset()
+		null := !wasQ && strings.EqualFold(strings.TrimSpace(raw), "NULL")
+		if !wasQ {
+			raw = strings.TrimSpace(raw)
+		}
+		if raw == "" && !null && !wasQ {
+			return fmt.Errorf("cannot encode %q as array", s)
+		}
+		elems = append(elems, raw)
+		nulls = append(nulls, null)
+		wasQ = false
+		return nil
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		switch {
+		case esc:
+			cur.WriteByte(c)
+			esc = false
+		case c == '\\':
+			esc = true
+		case c == '"':
+			inQ = !inQ
+			wasQ = true
+		case c == '{' && !inQ:
+			return nil, nil, fmt.Errorf("nested arrays are not supported")
+		case c == ',' && !inQ:
+			if err := flush(); err != nil {
+				return nil, nil, err
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if err := flush(); err != nil {
+		return nil, nil, err
+	}
+	return elems, nulls, nil
 }

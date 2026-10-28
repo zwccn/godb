@@ -14,6 +14,15 @@ func Cast(v Value, t Type) (Value, error) {
 	if v.K == KNull {
 		return Null, nil
 	}
+	// 数组：内部统一用 PG 的数组文本（'{1,2,3}'）表示，不做逐元素转换。
+	// 必须放在下面的前缀匹配之前 —— "numeric[]" 也以 "numeric" 开头，
+	// 不先返回就会被当成标量 numeric，拿整个 "{1,2}" 去解析而报错。
+	if strings.HasSuffix(strings.ToLower(t.Name), "[]") {
+		if v.K == KText {
+			return v, nil
+		}
+		return Null, fmt.Errorf("cannot cast type %s to %s", v.K.String(), t.Name)
+	}
 	// interval：月数进 z、天/时/分/秒进 I（纳秒），timestamp 加减用日历月
 	if strings.EqualFold(t.Name, "interval") {
 		switch v.K {

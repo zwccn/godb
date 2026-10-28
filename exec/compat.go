@@ -142,6 +142,11 @@ var compatFuncs = map[string]string{
 	"has_function_privilege": "bool", "pg_has_role": "bool",
 	"pg_is_in_recovery": "bool", "pg_is_other_temp_schema": "bool",
 	"pg_jit_available": "bool", "pg_relation_is_publishable": "bool",
+	// 连接池归还连接时 Npgsql 会发 SELECT pg_advisory_unlock_all()，
+	// 我们没有咨询锁，返回 true 表示「已经全部释放」，别让整条 reset 序列失败。
+	"pg_advisory_unlock_all": "bool",
+	// FreeSql / EFCore 的 CodeFirst 结构同步会问索引列的性质
+	"pg_index_column_has_property": "bool",
 
 	// 整数
 	"pg_backend_pid": "int", "txid_current": "int", "pg_relation_size": "int",
@@ -243,6 +248,32 @@ func evalCompat(cat *catalog.Catalog, dbName, user, name string, vals []types.Va
 		"has_column_privilege", "has_function_privilege", "pg_has_role",
 		"pg_cancel_backend", "pg_terminate_backend", "pg_reload_conf":
 		return types.Bool(true), true, nil
+	case "pg_advisory_unlock_all":
+		// 没有咨询锁机制，报告「全部释放」是最诚实的回答
+		return types.Bool(true), true, nil
+	case "pg_index_column_has_property":
+		// pg_index_column_has_property(index, 列序号, 属性名) → bool。
+		// 未知属性按 PG 的规矩返回 NULL（不是 false）。
+		if len(vals) >= 3 {
+			prop := strings.ToLower(strings.TrimSpace(vals[2].TextForm()))
+			switch prop {
+			case "asc":
+				return types.Bool(true), true, nil
+			case "desc":
+				return types.Bool(false), true, nil
+			case "nulls_first":
+				return types.Bool(false), true, nil
+			case "nulls_last":
+				return types.Bool(true), true, nil
+			case "orderable":
+				return types.Bool(true), true, nil
+			case "search_nulls":
+				return types.Bool(true), true, nil
+			case "distance_orderable", "returnable", "search_array":
+				return types.Bool(false), true, nil
+			}
+		}
+		return types.Null, true, nil
 	case "pg_encoding_to_char":
 		return types.Text("UTF8"), true, nil
 	case "pg_client_encoding":

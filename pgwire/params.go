@@ -261,6 +261,16 @@ func arrayElemOID(oid int32) (int32, bool) {
 		return 1114, true
 	case 1182: // date[]
 		return 1082, true
+	case 1183: // time[]
+		return 1083, true
+	case 1185: // timestamptz[]
+		return 1184, true
+	case 1187: // interval[]
+		return 1186, true
+	case 1028: // oid[]
+		return 26, true
+	case 2951: // uuid[]
+		return 2950, true
 	}
 	return 0, false
 }

@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -25,6 +26,22 @@ func (t Type) IsNumeric() bool { return t.Kind == KInt || t.Kind == KFloat }
 
 // TypeOf 返回值的自然类型。
 func TypeOf(v Value) Type { return Type{Kind: v.K, Name: v.K.String()} }
+
+// LiteralType 返回「字面量」的类型。
+//
+// 和 TypeOf 的差别只在整数：TypeOf 对任何 KInt 都报 integer，但 PG 的整数字面量
+// 是按值域提升的（int4 → int8 → numeric）。如果大整数也声明成 int4，RowDescription
+// 给出的就是 OID 23，客户端按 4 字节解码，值会被静默截断（select 9223372036854775807
+// 变成 -1）。这里按 int32 边界判断，超出就用 bigint。
+func LiteralType(v Value) Type {
+	if v.K == KInt {
+		if v.I >= math.MinInt32 && v.I <= math.MaxInt32 {
+			return Type{Kind: KInt, Name: "integer"}
+		}
+		return Type{Kind: KInt, Name: "bigint"}
+	}
+	return TypeOf(v)
+}
 
 // ParseType 把 SQL 里写的类型名（已小写）解析成 Type。
 func ParseType(name string, args []int) (Type, error) {

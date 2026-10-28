@@ -163,17 +163,48 @@ func OIDByName(name string) int32 {
 		return OIDTimestamptz
 	}
 	if strings.HasSuffix(n, "[]") {
-		// 这两类数组在系统目录里很常见，客户端会按 OID 判断是数组还是标量；
-		// 统一报 text[] 会让 pg_constraint/pg_index 的列看起来不对劲。
-		switch strings.TrimSuffix(n, "[]") {
-		case "int2", "_int2":
+		// 数组元素类型必须报对：客户端拿到 OID 才知道该按什么解码。
+		// 以前统一报 text[]（1009），`'{1,2,3}'::int[]` 会被解成三个字符串，
+		// 二进制结果集更是直接报「不支持」。
+		elem := strings.TrimSuffix(n, "[]")
+		elem = strings.TrimPrefix(elem, "_")
+		switch elem {
+		case "int2", "smallint":
 			return 1005
-		case "oid", "_oid":
+		case "int4", "integer", "int", "serial", "serial4":
+			return 1007
+		case "int8", "bigint", "bigserial", "serial8":
+			return 1016
+		case "text":
+			return 1009
+		case "bool", "boolean":
+			return 1000
+		case "float4", "real":
+			return 1021
+		case "float8", "double precision", "double":
+			return 1022
+		case "numeric", "decimal":
+			return 1231
+		case "date":
+			return 1182
+		case "time":
+			return 1183
+		case "timestamp", "datetime":
+			return 1115
+		case "timestamptz":
+			return 1185
+		case "interval":
+			return 1187
+		case "oid":
 			return 1028
 		case "aclitem":
 			return 1034
+		case "varchar", "character varying", "char varying":
+			return 1015
+		case "uuid":
+			return 2951
 		}
-		// 其它数组类型的 OID 不重要，统一报 text[]，避免客户端误判成标量
+		// 没列出来的（regclass[] 等）仍按 text[]，避免客户端误判成标量
 		return 1009
 	}
 	return OIDText

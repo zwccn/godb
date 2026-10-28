@@ -299,25 +299,35 @@ func (p *parser) parseStatement() (Statement, error) {
 			parts = append(parts, p.advance().Text)
 		}
 		return &SetStmt{Raw: "SET " + strings.Join(parts, " ")}, nil
-	case "DISCARD", "RESET", "DEALLOCATE":
+	case "DISCARD", "RESET", "DEALLOCATE", "CLOSE", "UNLISTEN", "LISTEN":
 		// DISCARD { ALL | PLANS | SEQUENCES | TEMPORARY | TEMP }
 		// RESET   { ALL | 参数名 }
 		// DEALLOCATE [PREPARE] { ALL | 语句名 }
-		// 三类都是清理会话用的，godb 没有可清的东西，解析出来当 no-op 确认。
+		// CLOSE   { ALL | 游标名 }
+		// UNLISTEN { * | 频道名 } / LISTEN 频道名
+		// 都是清理会话用的，godb 没有游标和 LISTEN，解析出来当 no-op 确认。
+		// 注意必须吃掉剩余 token（UNLISTEN * 里的 * 是符号不是名字），
+		// 否则同一条多语句批次里后面的语句会从 * 开始解析，直接语法错。
 		cmd := strings.ToUpper(t.Text)
 		p.pos++
 		if cmd == "DEALLOCATE" {
 			p.acceptKw("prepare")
 		}
-		arg := ""
-		if p.peek().Kind == Word {
-			arg = strings.ToUpper(p.advance().Text)
+		var parts []string
+		for p.peek().Kind != EOF && !p.peek().IsPunct(";") {
+			parts = append(parts, p.advance().Text)
 		}
+		arg := strings.ToUpper(strings.Join(parts, " "))
 		// 命令标签跟 PG 保持一致：DISCARD 带参数（DISCARD ALL），
-		// RESET / DEALLOCATE 只回动词本身（psql 里看到的就是 RESET / DEALLOCATE）
+		// RESET / DEALLOCATE / UNLISTEN 只回动词本身；CLOSE 的标签是 CLOSE CURSOR
 		tag := cmd
-		if cmd == "DISCARD" && arg != "" {
-			tag = cmd + " " + arg
+		switch cmd {
+		case "DISCARD":
+			if arg != "" {
+				tag = cmd + " " + arg
+			}
+		case "CLOSE":
+			tag = "CLOSE CURSOR"
 		}
 		return &SessionCleanup{Command: cmd, Tag: tag}, nil
 	}
@@ -625,7 +635,8 @@ func (p *parser) parseCreate() (Statement, error) {
 	}
 	colPK := 0
 	for {
-		if p.atKw("primary") || p.atKw("unique") || p.atKw("check") || p.atKw("foreign") {
+		if p.atKw("primary") || p.atKw("unique") || p.atKw("check") || p.atKw("foreign") ||
+			p.atKw("constraint") {
 			if err := p.parseTableConstraint(ct); err != nil {
 				return nil, err
 			}
@@ -651,7 +662,45 @@ func (p *parser) parseCreate() (Statement, error) {
 	if err := p.expectPunct(")"); err != nil {
 		return nil, err
 	}
+	// 建表语句尾部的存储参数：CREATE TABLE ... WITH (OIDS=FALSE) / WITHOUT OIDS。
+	// FreeSql、EFCore 生成的 DDL 固定带这一段。godb 没有 OIDS 这个概念，
+	// 整段吃掉即可（也不看 INHERITS / TABLESPACE 之外的其它子句）。
+	if p.atKw("without") {
+		p.pos++
+		p.acceptKw("oids")
+	} else if p.acceptKw("with") {
+		if p.atPunct("(") {
+			if err := p.skipParens(); err != nil {
+				return nil, err
+			}
+		} else {
+			// WITH OIDS 这种老写法
+			p.acceptKw("oids")
+		}
+	}
 	return ct, nil
+}
+
+// skipParens 吃掉一个配对完整的括号组（支持嵌套）。
+// 用于忽略客户端 DDL 里我们不关心的选项列表，比如 WITH (fillfactor=70, ...)。
+func (p *parser) skipParens() error {
+	if err := p.expectPunct("("); err != nil {
+		return err
+	}
+	depth := 1
+	for depth > 0 {
+		t := p.peek()
+		if t.Kind == EOF {
+			return p.errAt(t, "unterminated option list")
+		}
+		if t.IsPunct("(") {
+			depth++
+		} else if t.IsPunct(")") {
+			depth--
+		}
+		p.pos++
+	}
+	return nil
 }
 
 // parseReferences 解析 REFERENCES 后面的部分：表名 [(列)] [ON DELETE/UPDATE 动作]。
@@ -720,6 +769,16 @@ func (p *parser) parseReferences() (*FKDef, error) {
 }
 
 func (p *parser) parseTableConstraint(ct *CreateTable) error {
+	// 表级约束允许带 CONSTRAINT <名字> 前缀（ORM 生成的建表语句都是这个形态）：
+	//   CONSTRAINT "PK_xxx" PRIMARY KEY ("id")
+	//   CONSTRAINT "FK_xxx" FOREIGN KEY ("a") REFERENCES ...
+	// 名字本身不影响语义（主键/唯一/外键都由列标记承载），解析后丢弃，
+	// 但必须吃掉 —— 否则 "constraint" 会被当成列名，紧接着报错。
+	if p.acceptKw("constraint") {
+		if _, err := p.ident(); err != nil {
+			return err
+		}
+	}
 	if p.acceptKw("primary") {
 		if err := p.expectKw("key"); err != nil {
 			return err

@@ -20,7 +20,8 @@ const (
 	KText
 	KBool
 	KTime
-	KDecimal // NUMERIC：S 存规范十进制文本，运算精确
+	KDecimal  // NUMERIC：S 存规范十进制文本，运算精确
+	KInterval // I = 纳秒（天/时/分/秒），z = 月数（含年*12）
 )
 
 func (k Kind) String() string {
@@ -37,6 +38,8 @@ func (k Kind) String() string {
 		return "timestamp"
 	case KDecimal:
 		return "numeric"
+	case KInterval:
+		return "interval"
 	case KNull:
 		return "unknown"
 	}
@@ -77,6 +80,19 @@ func Bool(b bool) Value {
 func Time(t time.Time) Value {
 	_, offSec := t.Zone()
 	return Value{K: KTime, I: t.UnixNano(), z: int16(offSec / 60)}
+}
+
+// Interval 构造 interval：months 月 + nanos 纳秒。
+func Interval(months, nanos int64) Value {
+	return Value{K: KInterval, I: nanos, z: int16(months)}
+}
+
+// Months 返回 interval 的月数部分。
+func (v Value) Months() int64 {
+	if v.K != KInterval {
+		return 0
+	}
+	return int64(v.z)
 }
 
 func (v Value) IsNull() bool    { return v.K == KNull }
@@ -133,10 +149,69 @@ func (v Value) TextForm() string {
 		return v.Time().Format("2006-01-02 15:04:05.999999")
 	case KDecimal:
 		return v.S
+	case KInterval:
+		return intervalText(v.Months(), v.I)
 	case KText:
 		return v.S
 	}
 	return "NULL"
+}
+
+// intervalText 渲染 interval 为 PG 风格文本（如 "1 mon 2 days 03:00:00"）。
+func intervalText(months, nanos int64) string {
+	var parts []string
+	if months != 0 {
+		y, m := months/12, months%12
+		if y != 0 {
+			parts = append(parts, fmt.Sprintf("%d year%s", abs64(y), plural(y)))
+		}
+		if m != 0 {
+			parts = append(parts, fmt.Sprintf("%d mon%s", abs64(m), plural(m)))
+		}
+	}
+	neg := nanos < 0
+	if neg {
+		nanos = -nanos
+	}
+	days := nanos / (24 * 3600 * 1e9)
+	nanos %= 24 * 3600 * 1e9
+	h := nanos / (3600 * 1e9)
+	nanos %= 3600 * 1e9
+	mi := nanos / (60 * 1e9)
+	nanos %= 60 * 1e9
+	sec := float64(nanos) / 1e9
+	if days != 0 {
+		parts = append(parts, fmt.Sprintf("%d day%s", days, plural(days)))
+	}
+	if h != 0 || mi != 0 || sec != 0 || (len(parts) == 0 && months == 0) {
+		if sec == float64(int64(sec)) {
+			parts = append(parts, fmt.Sprintf("%02d:%02d:%02d", h, mi, int64(sec)))
+		} else {
+			parts = append(parts, fmt.Sprintf("%02d:%02d:%09.6f", h, mi, sec))
+		}
+	}
+	s := strings.Join(parts, " ")
+	if neg && s != "" {
+		return "-" + s
+	}
+	if s == "" {
+		return "00:00:00"
+	}
+	return s
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func plural(v int64) string {
+	if v == 1 || v == -1 {
+		return ""
+	}
+	return "s"
 }
 
 func formatFloat(f float64) string {
@@ -411,6 +486,8 @@ func (v Value) Interface() interface{} {
 	case KDecimal:
 		// 保持精确文本：转 float 会丢精度/出科学计数法（1234567890123.45 → 1.23e+12）
 		return v.S
+	case KInterval:
+		return intervalText(v.Months(), v.I)
 	}
 	return nil
 }

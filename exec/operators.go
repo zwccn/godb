@@ -59,6 +59,7 @@ func (o *scanOp) Open() error {
 	// 不会把 60 万行全读进内存（旧实现 Open 就物化全表）。
 	o.it = o.tx.ScanIter(o.table)
 	o.scanned = 0
+	syscat.NoteSeqScan(o.table)
 	t.done(false)
 	return nil
 }
@@ -257,6 +258,7 @@ func (o *indexRangeScanOp) Schema() Schema { return o.sc }
 func (o *indexRangeScanOp) Open() error {
 	t := o.begin()
 	o.scanner = o.tx.ScanIndex(o.tbl, o.ixName, o.cols, o.ixCols, o.rs, o.desc)
+	syscat.NoteIdxScan(o.tbl.Name)
 	t.done(false)
 	return nil
 }

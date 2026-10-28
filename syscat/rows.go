@@ -543,10 +543,41 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 	case "pg_stat_user_tables", "pg_stat_all_tables":
 		var out []types.Row
 		for _, tm := range m.userTables() {
+			st := GetStats(tm.t.Name)
+			var lastAn types.Value
+			if !st.LastAnalyze.IsZero() {
+				lastAn = types.Time(st.LastAnalyze)
+			} else {
+				lastAn = types.Null
+			}
 			out = append(out, mk(def, map[string]types.Value{
 				"relid": iv(int(tm.oid)), "schemaname": sv("public"), "relname": sv(tm.t.Name),
+				"seq_scan": i64(st.SeqScans), "idx_scan": i64(st.IdxScans),
 				"n_live_tup": i64(src.rowsOf(tm.t.Name)), "n_dead_tup": i64(0),
+				"last_analyze": lastAn,
 			}))
+		}
+		return out
+
+	case "pg_stats":
+		var out []types.Row
+		for _, tm := range m.userTables() {
+			st := GetStats(tm.t.Name)
+			for _, col := range tm.t.Columns {
+				cs := st.Cols[strings.ToLower(col.Name)]
+				var nullFrac, nDist types.Value
+				if st.Rows > 0 {
+					nullFrac = types.Float(float64(st.Rows-cs.NotNull) / float64(st.Rows))
+				} else {
+					nullFrac = types.Float(0)
+				}
+				nDist = types.Float(float64(cs.Distinct))
+				out = append(out, mk(def, map[string]types.Value{
+					"schemaname": sv("public"), "tablename": sv(tm.t.Name), "attname": sv(col.Name),
+					"inherited": bv(false), "null_frac": nullFrac, "avg_width": iv(0),
+					"n_distinct": nDist, "most_common_vals": types.Null, "correlation": types.Null,
+				}))
+			}
 		}
 		return out
 

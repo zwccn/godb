@@ -19,6 +19,7 @@ import (
 	"godb/storage"
 	"godb/syscat"
 	"godb/txn"
+	"godb/types"
 )
 
 // Options 是数据库的并发控制配置。
@@ -292,9 +293,9 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	if _, ok := st.(*sql.Checkpoint); ok {
 		return d.execCheckpoint(sess)
 	}
-	// ANALYZE：没有统计信息，识别出来直接成功（客户端会发）。
-	if _, ok := st.(*sql.Analyze); ok {
-		return &exec.Result{Command: "ANALYZE", Tag: "ANALYZE"}, nil
+	// ANALYZE：收集简单统计（行数、列基数），写进 syscat 供 pg_stats / pg_stat 使用。
+	if an, ok := st.(*sql.Analyze); ok {
+		return d.execAnalyze(sess, an)
 	}
 
 	// SHOW / SET 是会话参数，不碰表、不需要锁，也不受中毒事务影响
@@ -451,6 +452,53 @@ func isDDL(st sql.Statement) bool {
 		return true
 	}
 	return false
+}
+
+// execAnalyze 扫一遍用户表，收集行数与列基数（distinct 上限 1024 个值）。
+func (d *DB) execAnalyze(sess *txn.Session, _ *sql.Analyze) (*exec.Result, error) {
+	stmt, err := sess.BeginStatement(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.End(nil)
+	tx := stmt.Tx()
+	nTables := 0
+	for _, t := range d.Cat.Tables {
+		if strings.HasPrefix(strings.ToLower(t.Name), "pg_") ||
+			strings.HasPrefix(strings.ToLower(t.Name), "information_schema") {
+			continue
+		}
+		cols := make(map[string]syscat.ColStats, len(t.Columns))
+		seen := make([]map[string]bool, len(t.Columns))
+		for i := range seen {
+			seen[i] = map[string]bool{}
+		}
+		var rows int64
+		err := tx.Scan(t.Name, func(_ storage.Ref, row types.Row) error {
+			rows++
+			for i := range t.Columns {
+				if i >= len(row) || row[i].IsNull() {
+					continue
+				}
+				c := t.Columns[i]
+				cs := cols[strings.ToLower(c.Name)]
+				cs.NotNull++
+				if len(seen[i]) < 1024 {
+					seen[i][types.Key([]types.Value{row[i]})] = true
+					cs.Distinct = int64(len(seen[i]))
+				}
+				cols[strings.ToLower(c.Name)] = cs
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		syscat.RecordAnalyze(t.Name, rows, cols)
+		nTables++
+	}
+	return &exec.Result{Command: "ANALYZE", Tag: "ANALYZE",
+		Message: fmt.Sprintf("analyzed %d tables", nTables)}, nil
 }
 
 // TxState 是会话的事务状态（给前端显示用）。

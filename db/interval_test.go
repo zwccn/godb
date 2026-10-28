@@ -56,22 +56,42 @@ func TestIntervalArithmetic(t *testing.T) {
 		t.Fatalf("now()-interval 行数 = %d", len(r))
 	}
 
-	// interval + interval
-	r = rowsOf(t, run(t, d, s, `SELECT INTERVAL '1 day' + INTERVAL '2 hours'`))
-	// 26 小时 = 93600 秒 = 93600000000000 纳秒
-	if fmt.Sprint(r[0][0]) != "93600000000000" {
-		t.Fatalf("interval+interval = %v", fmt.Sprint(r[0][0]))
+	// interval + interval：日/时相加，文本形式
+	got = strings.TrimSpace(fmt.Sprint(run(t, d, s, `SELECT INTERVAL '1 day' + INTERVAL '2 hours'`)[0].Rows[0][0]))
+	if !strings.Contains(got, "1 day") || !strings.Contains(got, "02:00:00") {
+		t.Fatalf("interval+interval = %q", got)
 	}
 
-	// timestamp - timestamp → interval
-	r = rowsOf(t, run(t, d, s, `SELECT TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'`))
-	if fmt.Sprint(r[0][0]) != "86400000000000" {
-		t.Fatalf("ts-ts = %v", fmt.Sprint(r[0][0]))
+	// timestamp - timestamp → interval（纯时间差）
+	got = strings.TrimSpace(fmt.Sprint(run(t, d, s, `SELECT TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'`)[0].Rows[0][0]))
+	if !strings.Contains(got, "1 day") {
+		t.Fatalf("ts-ts = %q", got)
 	}
 
 	// ::interval 与 INTERVAL '…' 等价
-	r = rowsOf(t, run(t, d, s, `SELECT '3 days'::interval`))
-	if fmt.Sprint(r[0][0]) != "259200000000000" {
-		t.Fatalf("'3 days'::interval = %v", fmt.Sprint(r[0][0]))
+	got = strings.TrimSpace(fmt.Sprint(run(t, d, s, `SELECT '3 days'::interval`)[0].Rows[0][0]))
+	if !strings.Contains(got, "3 days") {
+		t.Fatalf("'3 days'::interval = %q", got)
+	}
+}
+
+// 月/年按日历加，不是 30/365 天近似。
+func TestIntervalCalendarMonths(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	// 2024-01-31 + 1 month = 2024-02-29（闰年二月）
+	got := strings.TrimSpace(fmt.Sprint(run(t, d, s, `SELECT DATE '2024-01-31' + INTERVAL '1 month'`)[0].Rows[0][0]))
+	if !strings.HasPrefix(got, "2024-02-29") {
+		t.Fatalf("1/31 + 1 mon = %q, want 2024-02-29", got)
+	}
+	// 2024-03-31 + 1 month = 2024-04-30（4 月没有 31）
+	got = strings.TrimSpace(fmt.Sprint(run(t, d, s, `SELECT DATE '2024-03-31' + INTERVAL '1 month'`)[0].Rows[0][0]))
+	if !strings.HasPrefix(got, "2024-04-30") {
+		t.Fatalf("3/31 + 1 mon = %q, want 2024-04-30", got)
+	}
+	// 2024-02-29 + 1 year = 2025-02-28（非闰年）
+	got = strings.TrimSpace(fmt.Sprint(run(t, d, s, `SELECT DATE '2024-02-29' + INTERVAL '1 year'`)[0].Rows[0][0]))
+	if !strings.HasPrefix(got, "2025-02-28") {
+		t.Fatalf("2/29 + 1 year = %q, want 2025-02-28", got)
 	}
 }

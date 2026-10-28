@@ -6,6 +6,7 @@ import (
 	"godb/catalog"
 	"godb/sql"
 	"godb/storage"
+	"godb/syscat"
 	"godb/types"
 )
 
@@ -110,6 +111,7 @@ func (o *coverScanOp) Children() []Operator { return nil }
 func (o *coverScanOp) Open() error {
 	t := o.begin()
 	o.it = o.tx.ScanIndex(o.tbl, o.ixName, o.ixCols, o.ixCols, o.rs, o.desc)
+	syscat.NoteIdxScan(o.tbl.Name)
 	t.done(false)
 	return nil
 }

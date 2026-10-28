@@ -491,6 +491,11 @@ var specs = []tableSpec{
 		c("relname", tName), c("indexrelname", tName), c("idx_scan", tInt8),
 		c("idx_tup_read", tInt8), c("idx_tup_fetch", tInt8),
 	}},
+	{"pg_catalog", "pg_stats", []colSpec{
+		c("schemaname", tName), c("tablename", tName), c("attname", tName),
+		c("inherited", tBool), c("null_frac", "float8"), c("avg_width", tInt4),
+		c("n_distinct", "float8"), c("most_common_vals", tText), c("correlation", "float8"),
+	}},
 
 	// ---------------- information_schema ----------------
 	{"information_schema", "schemata", []colSpec{

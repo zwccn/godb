@@ -14,19 +14,21 @@ func Cast(v Value, t Type) (Value, error) {
 	if v.K == KNull {
 		return Null, nil
 	}
-	// interval 以纳秒存进 KInt，文本要按「1 day 02:30:00」这类写法解析
+	// interval：月数进 z、天/时/分/秒进 I（纳秒），timestamp 加减用日历月
 	if strings.EqualFold(t.Name, "interval") {
 		switch v.K {
-		case KInt:
+		case KInterval:
 			return v, nil
+		case KInt:
+			return Interval(0, v.I), nil
 		case KFloat:
-			return Int(int64(math.Round(v.Float()))), nil
+			return Interval(0, int64(math.Round(v.Float()))), nil
 		case KText:
-			ns, err := ParseInterval(v.S)
+			months, ns, err := ParseIntervalParts(v.S)
 			if err != nil {
 				return Null, err
 			}
-			return Int(ns), nil
+			return Interval(months, ns), nil
 		}
 	}
 	// NUMERIC / DECIMAL：精确十进制（KDecimal）
@@ -206,17 +208,17 @@ func castDecimal(v Value, t Type) (Value, error) {
 	return Null, fmt.Errorf("cannot cast type %s to %s", v.K, t.String())
 }
 
-// ParseInterval 解析 PG 风格的 interval 文本，返回纳秒数。
+// ParseInterval 解析 PG 风格的 interval 文本。
+// 返回 (months, nanos)：月/年进 months（timestamp 加减用日历月），其余进 nanos。
 //
 // 支持：`1 day` / `2 days` / `1 d` / `01:30:00` / `1 day 02:03:04` /
 // `3 months` / `1 year` / `2 weeks` / `1.5 seconds` / 组合。
-// month 按 30 天、year 按 365 天近似（教学库够用，精确月长要配 timestamp 逐次加）。
-func ParseInterval(s string) (int64, error) {
+func ParseIntervalParts(s string) (int64, int64, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" {
-		return 0, fmt.Errorf("invalid input syntax for type interval: %q", s)
+		return 0, 0, fmt.Errorf("invalid input syntax for type interval: %q", s)
 	}
-	var total int64
+	var months, nanos int64
 	i := 0
 	for i < len(s) {
 		for i < len(s) && s[i] == ' ' {
@@ -229,9 +231,9 @@ func ParseInterval(s string) (int64, error) {
 		if j := parseTimeOfDay(s[i:]); j > 0 {
 			ns, n, err := parseTimeOfDayVal(s[i : i+j])
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
-			total += ns
+			nanos += ns
 			i += n
 			continue
 		}
@@ -241,13 +243,12 @@ func ParseInterval(s string) (int64, error) {
 			j++
 		}
 		if j == i {
-			return 0, fmt.Errorf("invalid input syntax for type interval: %q", s)
+			return 0, 0, fmt.Errorf("invalid input syntax for type interval: %q", s)
 		}
 		numStr := s[i:j]
-		// 科学计数法（PG 不支持，但 ParseFloat 能吃）；这里只接受普通小数
 		f, err := strconv.ParseFloat(numStr, 64)
 		if err != nil {
-			return 0, fmt.Errorf("invalid input syntax for type interval: %q", s)
+			return 0, 0, fmt.Errorf("invalid input syntax for type interval: %q", s)
 		}
 		for j < len(s) && s[j] == ' ' {
 			j++
@@ -258,39 +259,79 @@ func ParseInterval(s string) (int64, error) {
 		}
 		unit := s[j:k]
 		if unit == "" {
-			return 0, fmt.Errorf("missing unit in interval: %q", s)
+			return 0, 0, fmt.Errorf("missing unit in interval: %q", s)
 		}
-		var mult int64
 		switch unit {
 		case "usec", "us", "microsecond", "microseconds":
-			mult = 1_000
+			nanos += int64(f * 1_000)
 		case "msec", "ms", "millisecond", "milliseconds":
-			mult = 1_000_000
+			nanos += int64(f * 1_000_000)
 		case "s", "sec", "secs", "second", "seconds":
-			mult = 1_000_000_000
+			nanos += int64(f * 1_000_000_000)
 		case "m", "min", "mins", "minute", "minutes":
-			mult = 60 * 1_000_000_000
+			nanos += int64(f * 60 * 1_000_000_000)
 		case "h", "hr", "hrs", "hour", "hours":
-			mult = 3600 * 1_000_000_000
+			nanos += int64(f * 3600 * 1_000_000_000)
 		case "d", "day", "days":
-			mult = 24 * 3600 * 1_000_000_000
+			nanos += int64(f * 24 * 3600 * 1_000_000_000)
 		case "w", "week", "weeks":
-			mult = 7 * 24 * 3600 * 1_000_000_000
+			nanos += int64(f * 7 * 24 * 3600 * 1_000_000_000)
 		case "mon", "mons", "month", "months":
-			mult = 30 * 24 * 3600 * 1_000_000_000
+			months += int64(f)
 		case "y", "year", "years":
-			mult = 365 * 24 * 3600 * 1_000_000_000
+			months += int64(f * 12)
 		case "decade", "decades":
-			mult = 10 * 365 * 24 * 3600 * 1_000_000_000
+			months += int64(f * 120)
 		case "century", "centuries":
-			mult = 100 * 365 * 24 * 3600 * 1_000_000_000
+			months += int64(f * 1200)
 		default:
-			return 0, fmt.Errorf("invalid interval unit %q", unit)
+			return 0, 0, fmt.Errorf("invalid interval unit %q", unit)
 		}
-		total += int64(f * float64(mult))
 		i = k
 	}
-	return total, nil
+	return months, nanos, nil
+}
+
+// ParseInterval 解析 interval 文本为纳秒（月/年按 30/365 天近似，仅用于 interval±interval 的显示）。
+// 时间加减请用 ParseIntervalParts + AddMonthsNanos。
+func ParseInterval(s string) (int64, error) {
+	months, nanos, err := ParseIntervalParts(s)
+	if err != nil {
+		return 0, err
+	}
+	// 近似：1 月 = 30 天，1 年已在 ParseIntervalParts 里算成月
+	nanos += months * 30 * 24 * 3600 * 1_000_000_000
+	return nanos, nil
+}
+
+// AddMonthsNanos 按日历月/日把 interval 加到时间上：先加月（超出月末则夹到月末），
+// 再加纳秒。`2024-01-31 + 1 month = 2024-02-29`（PG 语义，不是 3 月 2 日）。
+func AddMonthsNanos(t time.Time, months, nanos int64) time.Time {
+	if months != 0 {
+		t = addMonthsClamp(t, months)
+	}
+	if nanos != 0 {
+		t = t.Add(time.Duration(nanos))
+	}
+	return t
+}
+
+// addMonthsClamp 加月并把日期夹到目标月的最后一天。
+func addMonthsClamp(t time.Time, months int64) time.Time {
+	year, month, day := t.Date()
+	total := int(month) - 1 + int(months)
+	y := year + total/12
+	m := total%12 + 1
+	if m <= 0 {
+		m += 12
+		y--
+	}
+	// 目标月的天数（取下个月第 0 天 = 本月最后一天）
+	lastDay := time.Date(y, time.Month(m)+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(y, time.Month(m), day, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
 }
 
 // parseTimeOfDayVal 解析 `HH:MM[:SS[.fff]]`，返回纳秒与吃掉的字符数。

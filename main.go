@@ -52,28 +52,11 @@ func main() {
 	}
 
 	start := time.Now()
-	// 多库：默认库在 <data> 根，其它库在 <data>/db/<名字>/
-	dbs, warns, err := db.OpenManager(*dir, db.Options{
-		Isolation: isolation,
-		Lock: lock.Options{
-			Timeout:        *lockTimeout,
-			Retry:          *lockRetry,
-			DeadlockDetect: *deadlockDetect,
-			DeadlockAfter:  *deadlockAfter,
-		},
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "打开数据库失败: %v\n", err)
-		os.Exit(1)
-	}
-	defer dbs.Close()
-	for _, w := range warns {
-		log.Printf("注意: %v", w)
-	}
-	d := dbs.Default()
-
 	// 配置：唯一来源是 <数据目录>/config.json。命令行里的地址只作为
 	// 首次生成文件时的种子，之后以文件为准（下面会明确提示）。
+	//
+	// 先读配置再开库：HTTP 监听地址在配置里，要在 WAL 重放之前就把端口
+	// 占上并显示启动页（重放可能要几十秒，不能让浏览器一直连接被拒）。
 	seed := config.Seed(*addr, *pgAddr)
 	cfg, err := config.Load(*dir, seed, nil)
 	if err != nil {
@@ -81,18 +64,13 @@ func main() {
 		os.Exit(1)
 	}
 	conf := cfg.Get()
-	d.Store.SetCheckpointPolicy(storagePolicy(conf.Storage))
 
-	// 慢语句日志：诊断开关，走命令行，不进配置文件。
-	if *slow > 0 {
-		d.SlowThreshold = *slow
-		d.SlowLog = func(text string, took time.Duration, stmts int) {
-			log.Printf("慢语句 %s（%d 条）：%s",
-				took.Truncate(time.Millisecond), stmts, oneLine(text, 400))
-		}
-	}
+	// 启动门：HTTP 先起，未就绪时回启动页；OpenManager 完成后换上真路由。
+	gate := web.NewBootGate()
+	gate.SetPhase("正在启动", "准备打开数据目录")
 
-	// 打开 PG 查询日志（诊断开关，留在命令行）
+	// 打开 PG 查询日志（诊断开关，留在命令行）。提前到这里打开，
+	// 这样 netsrv.New 创建时就能带上。
 	var pgLogFile *os.File
 	if *pgLog != "" {
 		f, err := os.OpenFile(*pgLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -104,7 +82,50 @@ func main() {
 		}
 	}
 
+	mgr := netsrv.New(cfg, nil, gate, log.Printf, pgLogFile)
+	if err := mgr.StartHTTP(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	log.Printf("HTTP 已就绪（启动页）: %s —— 正在恢复数据…", mgr.State().HTTPAddr)
+
+	// 多库：默认库在 <data> 根，其它库在 <data>/db/<名字>/
+	gate.SetPhase("打开数据库", "载入表结构")
+	dbs, warns, err := db.OpenManager(*dir, db.Options{
+		Isolation: isolation,
+		Lock: lock.Options{
+			Timeout:        *lockTimeout,
+			Retry:          *lockRetry,
+			DeadlockDetect: *deadlockDetect,
+			DeadlockAfter:  *deadlockAfter,
+		},
+		Progress: func(msg string) { gate.SetPhase("打开数据库", msg) },
+	})
+	if err != nil {
+		gate.SetPhase("启动失败", err.Error())
+		fmt.Fprintf(os.Stderr, "打开数据库失败: %v\n", err)
+		// 启动页留在端口上一会儿，让人能看到错误；然后照常退出。
+		time.Sleep(3 * time.Second)
+		os.Exit(1)
+	}
+	defer dbs.Close()
+	for _, w := range warns {
+		log.Printf("注意: %v", w)
+	}
+	d := dbs.Default()
+	d.Store.SetCheckpointPolicy(storagePolicy(conf.Storage))
+
+	// 慢语句日志：诊断开关，走命令行，不进配置文件。
+	if *slow > 0 {
+		d.SlowThreshold = *slow
+		d.SlowLog = func(text string, took time.Duration, stmts int) {
+			log.Printf("慢语句 %s（%d 条）：%s",
+				took.Truncate(time.Millisecond), stmts, oneLine(text, 400))
+		}
+	}
+
 	if len(d.Tables()) == 0 && !*noSample {
+		gate.SetPhase("载入示例数据", "departments / employees")
 		init := d.Session("init")
 		if err := d.LoadSample(init); err != nil {
 			log.Printf("载入示例数据失败: %v", err)
@@ -113,11 +134,14 @@ func main() {
 		}
 	}
 
+	gate.SetPhase("启动服务", "绑定 PG 协议")
 	srv := web.New(d)
 	srv.DBs = dbs
-	mgr := netsrv.New(cfg, dbs, srv.Routes(), log.Printf, pgLogFile)
+	mgr.SetDBs(dbs)
 	srv.WithConfig(cfg, mgr)
-	if err := mgr.Start(); err != nil {
+	// 换上真正的控制台路由：同一个端口，启动页原地切换到正式界面。
+	gate.SetReady(srv.Routes())
+	if err := mgr.StartPG(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}

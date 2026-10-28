@@ -83,6 +83,17 @@ func OpenManager(root string, o Options) (*Manager, []error, error) {
 func (m *Manager) openAt(name, dir string) (*DB, error) {
 	o := m.opts
 	o.Name = name
+	// 把启动阶段带上库名，启动页能分清在恢复哪个库。
+	if o.Progress != nil {
+		base := o.Progress
+		o.Progress = func(msg string) {
+			if name == "" || strings.EqualFold(name, syscat.DefaultDatabaseName) {
+				base(msg)
+			} else {
+				base(name + " · " + msg)
+			}
+		}
+	}
 	d, err := Open(dir, o)
 	if err != nil {
 		return nil, err

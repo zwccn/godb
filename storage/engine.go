@@ -81,7 +81,9 @@ type Store struct {
 }
 
 // Open 打开数据目录：加载快照 → 重放 WAL → 立刻 checkpoints 并截断 WAL。
-func Open(dir string, cat *catalog.Catalog) (*Store, error) {
+// Open 打开（或初始化）数据目录。progress 可为 nil，用于汇报启动阶段
+// （「载入快照」「WAL 重放」这类），启动页会把它显示出来。
+func Open(dir string, cat *catalog.Catalog, progress func(string)) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -99,20 +101,35 @@ func Open(dir string, cat *catalog.Catalog) (*Store, error) {
 	for _, t := range cat.Tables {
 		s.Data[cleanName(t.Name)] = newTableData(t.Name)
 	}
+	if progress != nil {
+		progress("载入表快照")
+	}
 	if err := s.loadSnapshot(); err != nil {
 		return nil, err
+	}
+	if progress != nil {
+		progress("WAL 重放")
 	}
 	if err := s.replayWAL(); err != nil {
 		return nil, err
 	}
+	if progress != nil {
+		progress("重建索引")
+	}
 	s.rebuildAll()
 	// 先打开旧 WAL（不清空），写完快照后再轮转：
 	// 这样即使 Open 之后立刻崩溃，旧记录仍在，重放不会丢数据。
+	if progress != nil {
+		progress("打开 WAL")
+	}
 	w, err := openWAL(dir, s.appliedGen+1)
 	if err != nil {
 		return nil, err
 	}
 	s.wal = w
+	if progress != nil {
+		progress("写入启动快照")
+	}
 	if err := s.Checkpoint(); err != nil {
 		return nil, err
 	}

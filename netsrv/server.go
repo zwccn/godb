@@ -50,24 +50,60 @@ type Manager struct {
 }
 
 // New 创建监听管理器。handler 是 Web 控制台的路由，queryLog 可为 nil。
+//
+// dbs 允许先传 nil（启动页阶段：数据库还在 WAL 重放），
+// 等就绪后调 SetDBs 再起 PG 监听。HTTP 监听不依赖数据库，可以立刻开始。
 func New(cfg *config.Store, dbs *db.Manager, handler http.Handler,
 	logf func(string, ...interface{}), queryLog io.Writer) *Manager {
 	if logf == nil {
 		logf = func(string, ...interface{}) {}
 	}
-	return &Manager{cfg: cfg, db: dbs.Default(), dbs: dbs, handler: handler, logf: logf, queryLog: queryLog}
+	m := &Manager{cfg: cfg, dbs: dbs, handler: handler, logf: logf, queryLog: queryLog}
+	if dbs != nil {
+		m.db = dbs.Default()
+	}
+	return m
+}
+
+// SetDBs 在数据库就绪后注入（启动页阶段 New 时 dbs 可能是 nil）。
+// 起 PG 监听之前必须调过它。
+func (m *Manager) SetDBs(dbs *db.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dbs = dbs
+	if dbs != nil {
+		m.db = dbs.Default()
+	}
 }
 
 // Start 按当前配置启动两个监听。HTTP 失败会返回错误（控制台是必需品），
 // PG 失败只记日志（不该因为 PG 端口被占就整个服务起不来）。
 func (m *Manager) Start() error {
+	if err := m.StartHTTP(); err != nil {
+		return err
+	}
+	return m.StartPG()
+}
+
+// StartHTTP 只启动 Web 控制台监听（数据库还没就绪时先用它）。
+func (m *Manager) StartHTTP() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	n := m.cfg.Get().Network
 	if err := m.rebindHTTP(n.HTTPAddr()); err != nil {
 		return fmt.Errorf("HTTP 端口 %s 无法监听: %w", n.HTTPAddr(), err)
 	}
+	return nil
+}
+
+// StartPG 只启动 PostgreSQL 协议监听。需要先 SetDBs。
+func (m *Manager) StartPG() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.db == nil && m.dbs == nil {
+		return fmt.Errorf("PostgreSQL 协议监听需要先注入数据库（SetDBs）")
+	}
+	n := m.cfg.Get().Network
 	if err := m.rebindPG(n.PGAddr()); err != nil {
 		m.logf("PostgreSQL 协议监听失败（%s）: %v —— 其余功能正常，可在设置页改端口", n.PGAddr(), err)
 	}

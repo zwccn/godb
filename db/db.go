@@ -28,6 +28,9 @@ type Options struct {
 	Lock      lock.Options
 	// Name 是库名。空表示默认库（godb）。多库模式下由 Manager 逐个设。
 	Name string
+	// Progress 是启动阶段回调（「载入快照」「WAL 重放」…），可为 nil。
+	// 启动页用它显示恢复进度；单库测试里留空即可。
+	Progress func(msg string)
 }
 
 // execCheckpoint 处理 CHECKPOINT / FLUSH 语句：把 WAL 刷盘并写一份全量快照。
@@ -132,7 +135,7 @@ func Open(dir string, o Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, err := storage.Open(dir, cat)
+	st, err := storage.Open(dir, cat, o.Progress)
 	if err != nil {
 		return nil, err
 	}

@@ -326,6 +326,38 @@ func (o *oneRowOp) Next() (types.Row, bool, error) {
 	return types.Row{}, true, nil
 }
 
+// valuesOp 是 `VALUES (…),(…)` 查询源。
+// PG 里它就是一个查询，所以既能独立执行，也能当派生表 `FROM (VALUES …) x(a,b)`，
+// 后面还能接 UNION。列名是 column1、column2……，由外层的别名列表改名。
+type valuesOp struct {
+	rows [][]Eval
+	sc   Schema
+	i    int
+}
+
+func (o *valuesOp) Schema() Schema       { return o.sc }
+func (o *valuesOp) Open() error          { o.i = 0; return nil }
+func (o *valuesOp) Close() error         { return nil }
+func (o *valuesOp) Describe() string     { return fmt.Sprintf("Values (%d rows)", len(o.rows)) }
+func (o *valuesOp) Children() []Operator { return nil }
+
+func (o *valuesOp) Next() (types.Row, bool, error) {
+	if o.i >= len(o.rows) {
+		return nil, false, nil
+	}
+	evs := o.rows[o.i]
+	o.i++
+	row := make(types.Row, len(evs))
+	for j, ev := range evs {
+		v, err := ev.Eval(nil)
+		if err != nil {
+			return nil, false, err
+		}
+		row[j] = v
+	}
+	return row, true, nil
+}
+
 // ---------- 过滤 ----------
 
 type filterOp struct {

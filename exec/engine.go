@@ -751,24 +751,45 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 //
 // 关联表通常很小（字典表、临时表），整表读进来比逐行回表简单得多，
 // 也避免在事务扫描过程里再嵌套一次扫描。
-func (e *Engine) relatedRows(tx *storage.Tx, ref *sql.BaseTable) (Schema, [][]types.Value, error) {
-	t, ok := e.Cat.Get(ref.Table)
-	if !ok {
-		if _, sys := syscat.Lookup(ref.Schema, ref.Table); sys {
-			return nil, nil, fmt.Errorf("permission denied: %q is a system catalog", ref.Table)
-		}
-		return nil, nil, fmt.Errorf("relation %q does not exist", ref.Table)
+// relatedRows 把 UPDATE ... FROM / DELETE ... USING 的数据源跑成「列布局 + 全部行」。
+//
+// 以前它只会读一张表（*sql.BaseTable），派生表和多表 JOIN 在解析阶段就被拒了。
+// 现在复用 SELECT 的 FROM 构造（planner.buildFrom），所以 `FROM b, c`、
+// `FROM b JOIN c ON …`、`FROM (SELECT …) x`、`FROM (VALUES …) x(a,b)` 全都能用 ——
+// 而且和 SELECT 走同一份算子代码，语义不会两边走偏。
+//
+// 注意这里**不做谓词下推**：p.pushdown 只有 BuildSelect 才会填，WHERE 里同时引用
+// 目标表和关联表，推到关联表上会改语义。所以整份数据源会被读完再配对。
+func (e *Engine) relatedRows(tx *storage.Tx, ref sql.TableRef) (Schema, [][]types.Value, error) {
+	if ref == nil {
+		return nil, nil, nil
 	}
-	sc := e.tableScope(t, ref.Alias)
+	p := e.planner(tx)
+	op, sc, err := p.buildFrom([]sql.TableRef{ref})
+	if err != nil {
+		return nil, nil, err
+	}
+	if op == nil {
+		return nil, nil, nil
+	}
+	if err := op.Open(); err != nil {
+		return nil, nil, err
+	}
+	defer op.Close()
+
 	var rows [][]types.Value
-	err := tx.Scan(t.Name, func(_ storage.Ref, row types.Row) error {
+	for {
+		row, ok, err := op.Next()
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			break
+		}
+		// 算子可能复用缓冲：留下之前拷一份
 		cp := make(types.Row, len(row))
 		copy(cp, row)
 		rows = append(rows, cp)
-		return nil
-	})
-	if err != nil {
-		return nil, nil, err
 	}
 	return sc, rows, nil
 }
@@ -1144,8 +1165,8 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 	sc := e.tableScope(t, s.Alias)
 	// UPDATE ... FROM：把关联表整表读进来，scope 拼在目标表后面。
 	var fromRows [][]types.Value
-	if s.From != nil {
-		fs, fr, err := e.relatedRows(tx, s.From)
+	if len(s.From) > 0 {
+		fs, fr, err := e.relatedRows(tx, s.From[0])
 		if err != nil {
 			return nil, err
 		}
@@ -1227,7 +1248,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		return append(out, fr...)
 	}
 	collect := func(ref storage.Ref, row types.Row) error {
-		if s.From == nil {
+		if len(s.From) == 0 {
 			ok, err := matchRow(row)
 			if err != nil || !ok {
 				return err
@@ -1255,7 +1276,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 	}
 	// WHERE 能完整匹配某个索引时就不全表扫（多数 UPDATE 都是按主键改一行）。
 	// 带 FROM 时不能走索引路径：WHERE 还引用了关联表的列。
-	if s.From == nil {
+	if len(s.From) == 0 {
 		if irefs, irows, indexed := collectByIndex(tx, t, s.Where); indexed {
 			for i := range irefs {
 				if err := collect(irefs[i], irows[i]); err != nil {
@@ -1399,8 +1420,8 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 	sc := e.tableScope(t, s.Alias)
 	// DELETE ... USING：把关联表整表读进来，scope 拼在目标表后面。
 	var usingRows [][]types.Value
-	if s.Using != nil {
-		us, ur, err := e.relatedRows(tx, s.Using)
+	if len(s.Using) > 0 {
+		us, ur, err := e.relatedRows(tx, s.Using[0])
 		if err != nil {
 			return nil, err
 		}
@@ -1432,7 +1453,7 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 	// matchUsing 判断目标行是否与 USING 表里的某一行共同满足 WHERE。
 	// 命中任意一行即可（删不删是布尔结论，不需要挑具体是哪一行）。
 	matchUsing := func(row types.Row) (bool, error) {
-		if s.Using == nil {
+		if len(s.Using) == 0 {
 			if pred == nil {
 				return true, nil
 			}

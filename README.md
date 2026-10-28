@@ -50,11 +50,11 @@ go build -o godb.exe .
 | 索引 | `CREATE [UNIQUE] INDEX name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验 |
 | 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
-| 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名）；`ON CONFLICT [(cols)] DO NOTHING / DO UPDATE SET …`（含 `EXCLUDED`）；`UPDATE … FROM 表`、`DELETE … USING 表`（按关联条件批量改/删） |
+| 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名）；`ON CONFLICT [(cols)] DO NOTHING / DO UPDATE SET …`（含 `EXCLUDED`）；`UPDATE … FROM`、`DELETE … USING`（数据源同 `SELECT` 的 `FROM`：多表 / `JOIN` / 派生表 / `(VALUES …)`）；`WHERE` / `SET` / `VALUES` 里可以用子查询（`IN (SELECT …)`、标量、`EXISTS`） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` / `EXPLAIN ANALYZE` |
 | 约束 | `NOT NULL`、`UNIQUE`、`PRIMARY KEY`（复合）、`CHECK`、`FOREIGN KEY`（含 `ON DELETE CASCADE`） |
 | CTE | `WITH name [(cols)] AS (SELECT ...)`，可多个、可互相引用（物化一次） |
-| 集合运算 | `UNION [ALL]` / `INTERSECT` / `EXCEPT`；`FROM` 子查询（含 `AS t(a, b)` 列别名） |
+| 集合运算 | `UNION [ALL]` / `INTERSECT` / `EXCEPT`；`FROM` 子查询（含 `AS t(a, b)` 列别名）；`VALUES (…),(…)` 作为查询源（独立执行 / 派生表 / 参与集合运算） |
 | 集合函数 | `FROM generate_series(a, b[, step])`、`FROM regexp_matches(text, pattern)`，可带列别名列表 |
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
 | 聚合 | `count(*)`、`count(x)`、`sum`、`avg`、`min`、`max`，支持 `DISTINCT` |
@@ -67,9 +67,9 @@ go build -o godb.exe .
 | 接入 | 内嵌 Web 控制台（HTTP/JSON，表树支持右键菜单与表设计器）+ **PostgreSQL wire protocol v3**（psql / Navicat / pgAdmin 可直连） |
 
 **明确不支持**（会报清晰的错误）：递归 CTE（`WITH RECURSIVE`）、窗口函数、
-`FULL JOIN`、`NATURAL JOIN`、行级锁（`SELECT … FOR UPDATE`）、`LATERAL`；
-`UPDATE … FROM` / `DELETE … USING` 的后面只接受**表**，不接受派生表
-（`FROM (SELECT …) x` 会报语法错误，需要的话先落成临时表）。
+`FULL JOIN`、`NATURAL JOIN`、行级锁（`SELECT … FOR UPDATE`）、`LATERAL`。
+`UPDATE … FROM` / `DELETE … USING` 的数据源和 `SELECT` 的 `FROM` 完全一致（单表、多表、
+`JOIN`、派生表 `(SELECT …) x`、`(VALUES …) x(a,b)`）。
 
 索引能处理：完整键等值、首列区间（`> < >= <= BETWEEN`、`LIKE 'x%'`）、
 `IN` 列表、`OR` 的多点/多区间合并、以及命中索引列前缀的 `ORDER BY`（免排序，可反向）。

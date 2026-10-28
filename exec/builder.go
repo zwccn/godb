@@ -51,6 +51,10 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 			return nil, err
 		}
 	}
+	// `VALUES (…),(…)`：没有 FROM/WHERE，直接产出行
+	if s.Values != nil {
+		return p.buildValues(s.Values)
+	}
 	// 集合运算节点是个空壳：SetLeft/SetRight 才是两个操作数。
 	if s.SetOp != "" {
 		return p.buildSetOp(s)
@@ -447,6 +451,41 @@ func condOwner(e sql.Expr, targets []pushdownTarget) (string, bool) {
 		return "", false
 	}
 	return owner, true
+}
+
+// buildValues 构建 `VALUES (…),(…)`：逐行逐列编译，列类型取第一行的（遇到 NULL 继续往后看）。
+// 列名按 PG 的 column1、column2……；外层 `x(a,b)` 会由 buildSubTable 改名。
+func (p *Planner) buildValues(rows [][]sql.Expr) (Operator, error) {
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("VALUES must have at least one row")
+	}
+	width := len(rows[0])
+	if width == 0 {
+		return nil, fmt.Errorf("VALUES row must have at least one column")
+	}
+	ctx := &compileCtx{planner: p, outerScopes: p.outerScopes}
+	evals := make([][]Eval, len(rows))
+	sc := make(Schema, width)
+	for i, row := range rows {
+		if len(row) != width {
+			return nil, fmt.Errorf("VALUES lists must all be the same length")
+		}
+		evals[i] = make([]Eval, width)
+		for j, ex := range row {
+			ev, err := compile(ex, ctx)
+			if err != nil {
+				return nil, err
+			}
+			evals[i][j] = ev
+			if i == 0 {
+				sc[j] = ColInfo{Name: fmt.Sprintf("column%d", j+1), Type: ev.Type()}
+			} else if sc[j].Type.Kind == types.KNull && ev.Type().Kind != types.KNull {
+				// 第一行是 NULL 时别把整列定成 NULL 类型
+				sc[j].Type = ev.Type()
+			}
+		}
+	}
+	return &valuesOp{rows: evals, sc: sc}, nil
 }
 
 // buildFrom 构建 FROM 子树。

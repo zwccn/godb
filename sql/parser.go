@@ -165,6 +165,9 @@ func (p *parser) parseStatement() (Statement, error) {
 	switch strings.ToUpper(t.Text) {
 	case "SELECT":
 		return p.parseSelect()
+	case "VALUES":
+		// `VALUES (1),(2)` 本身就是一条查询语句（PG 如此），走同一套 SELECT 解析
+		return p.parseSelect()
 	case "WITH":
 		p.pos++
 		return p.parseWith()
@@ -1525,18 +1528,14 @@ func (p *parser) parseUpdate() (Statement, error) {
 		return nil, err
 	}
 	st.Sets = sets
-	// UPDATE ... FROM 另一张表（关联更新）
+	// UPDATE ... FROM 额外数据源（关联更新）。和 SELECT 的 FROM 同一套解析：
+	// 单表 / 逗号多表 / JOIN / 派生表 `(SELECT …) x` / `(VALUES …) x(a,b)`。
 	if p.acceptKw("from") {
-		ft, err := p.tableName()
+		ref, err := p.parseFromRefs()
 		if err != nil {
 			return nil, err
 		}
-		st.From = &BaseTable{Table: ft}
-		if alias, ok, err := p.parseOptAlias(); err != nil {
-			return nil, err
-		} else if ok {
-			st.From.Alias = alias
-		}
+		st.From = []TableRef{ref}
 	}
 	if p.acceptKw("where") {
 		e, err := p.parseExpr()
@@ -1567,18 +1566,13 @@ func (p *parser) parseDelete() (Statement, error) {
 	} else if ok {
 		st.Alias = alias
 	}
-	// DELETE ... USING 另一张表（按关联条件删行）
+	// DELETE ... USING 额外数据源（按关联条件删行），解析规则同 UPDATE ... FROM
 	if p.acceptKw("using") {
-		ut, err := p.tableName()
+		ref, err := p.parseFromRefs()
 		if err != nil {
 			return nil, err
 		}
-		st.Using = &BaseTable{Table: ut}
-		if alias, ok, err := p.parseOptAlias(); err != nil {
-			return nil, err
-		} else if ok {
-			st.Using.Alias = alias
-		}
+		st.Using = []TableRef{ref}
 	}
 	if p.acceptKw("where") {
 		e, err := p.parseExpr()
@@ -1739,7 +1733,45 @@ func (p *parser) parseSetOperand() (*Select, error) {
 		}
 		return sel, nil
 	}
+	// VALUES 也是一种查询源（PG 里 `VALUES (1),(2)` 就是查询，可以和 UNION 组合）
+	if p.atKw("values") {
+		return p.parseValuesQuery()
+	}
 	return p.parseSelectCore()
+}
+
+// parseValuesQuery 解析 `VALUES (…),(…)`：每行一组括号，行与行之间逗号分隔。
+// 独立执行时的列名是 column1、column2……；当派生表用时由 `x(a,b)` 改名。
+func (p *parser) parseValuesQuery() (*Select, error) {
+	if err := p.expectKw("values"); err != nil {
+		return nil, err
+	}
+	var rows [][]Expr
+	for {
+		if err := p.expectPunct("("); err != nil {
+			return nil, err
+		}
+		var row []Expr
+		for {
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			row = append(row, e)
+			if p.acceptPunct(",") {
+				continue
+			}
+			break
+		}
+		if err := p.expectPunct(")"); err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+		if !p.acceptPunct(",") {
+			break
+		}
+	}
+	return &Select{Values: rows}, nil
 }
 
 // parseSelectCore 解析 SELECT ... [GROUP BY] [HAVING]，不含集合运算与
@@ -1935,6 +1967,28 @@ func (p *parser) parseOptAlias() (string, bool, error) {
 		return strings.ToLower(t.Text), true, nil
 	}
 	return "", false, nil
+}
+
+// parseFromRefs 解析 UPDATE ... FROM / DELETE ... USING 后面的数据源。
+// 规则与 SELECT 的 FROM 完全一致（逗号分隔视为交叉连接、支持 JOIN 与派生表），
+// 返回合并后的一棵引用树。
+func (p *parser) parseFromRefs() (TableRef, error) {
+	var refs []TableRef
+	for {
+		r, err := p.parseTableRef()
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, r)
+		if !p.acceptPunct(",") {
+			break
+		}
+	}
+	merged := refs[0]
+	for _, r := range refs[1:] {
+		merged = &Join{Left: merged, Right: r, Type: JoinCross}
+	}
+	return merged, nil
 }
 
 func (p *parser) parseTableRef() (TableRef, error) {

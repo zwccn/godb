@@ -22,15 +22,15 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 		addIntent(out, s.Table, lock.Exclusive)
 	case *sql.Update:
 		addIntent(out, s.Table, lock.Exclusive)
-		// UPDATE ... FROM：关联表只读，S 锁
-		if s.From != nil {
-			collectRef(s.From, lock.Shared, out)
+		// UPDATE ... FROM：关联数据源只读，S 锁（可能是多表 / JOIN / 派生表）
+		for _, ref := range s.From {
+			collectRef(ref, lock.Shared, out)
 		}
 	case *sql.Delete:
 		addIntent(out, s.Table, lock.Exclusive)
-		// DELETE ... USING：关联表只读，S 锁
-		if s.Using != nil {
-			collectRef(s.Using, lock.Shared, out)
+		// DELETE ... USING：关联数据源只读，S 锁
+		for _, ref := range s.Using {
+			collectRef(ref, lock.Shared, out)
 		}
 	case *sql.Truncate:
 		addIntent(out, s.Table, lock.Exclusive)

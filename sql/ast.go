@@ -186,9 +186,10 @@ type Update struct {
 	Sets  []*Assignment
 	Where Expr
 
-	// From 是 UPDATE ... FROM 里的额外表（PostgreSQL 的关联更新）。
-	// 只支持一张表，够 ORM 用；多表可以用 EXISTS/标量子查询绕。
-	From *BaseTable
+	// From 是 UPDATE ... FROM 里的额外数据源（PostgreSQL 的关联更新）。
+	// 和 SELECT 的 FROM 用同一套 TableRef：单表、多表（逗号=交叉连接）、
+	// JOIN、派生表 `(SELECT …) x`、`(VALUES …) x(a,b)` 都支持。
+	From []TableRef
 
 	Returning []*SelectItem
 }
@@ -199,8 +200,9 @@ type Delete struct {
 	Alias string
 	Where Expr
 
-	// Using 是 DELETE ... USING 里的额外表（按另一张表的匹配条件删行）。
-	Using *BaseTable
+	// Using 是 DELETE ... USING 里的额外数据源（按另一张表的匹配条件删行），
+	// 类型与 UPDATE ... FROM 相同。
+	Using []TableRef
 
 	Returning []*SelectItem
 }
@@ -231,6 +233,11 @@ type Select struct {
 
 	// CTEs 是本查询前面 WITH 定义的公用表表达式（按声明顺序）。
 	CTEs []*CTE
+
+	// Values 非空表示这是一条 `VALUES (…),(…)` 查询（PG 里它就是查询源，
+	// 可以独立执行，也可以当派生表 `FROM (VALUES …) x(a,b)`）。此时 Items / From
+	// / Where 都是空的。
+	Values [][]Expr
 
 	SetOp    string // "union" / "intersect" / "except"
 	SetAll   bool

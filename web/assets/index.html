@@ -209,6 +209,7 @@ try {
             <li>标量子查询、<code>FROM</code> 子查询（派生表）、<code>UNION</code> / <code>INTERSECT</code> / <code>EXCEPT</code>、<code>WITH</code></li>
             <li><code>IN (子查询)</code> · <code>EXISTS (子查询)</code> · 集合函数 <code>FROM generate_series</code></li>
             <li><code>CASE WHEN</code> · <code>CAST</code>/<code>::</code> · <code>DATE '2024-01-01'</code> 这类带类型前缀的字面量</li>
+            <li><code>VALUES (…),(…)</code> 当查询源：独立执行、<code>FROM (VALUES …) x(a,b)</code> 派生表</li>
             <li><code>EXTRACT(field FROM x)</code> · <code>date_part</code> · <code>date_trunc</code> · 数组下标 <code>a[i]</code> · <code>||</code></li>
           </ul>
         </div>
@@ -217,7 +218,7 @@ try {
           <ul>
             <li><code>INSERT ... VALUES</code> / <code>INSERT ... SELECT</code> / <code>ON CONFLICT DO NOTHING | DO UPDATE</code> · <code>RETURNING</code></li>
             <li>子查询也能用在写语句里：<code>DELETE … WHERE id IN (SELECT …)</code>、<code>UPDATE … SET c = (SELECT …)</code></li>
-            <li><code>UPDATE ... FROM 表</code> · <code>DELETE ... USING 表</code>（按关联条件批量改 / 删）</li>
+            <li><code>UPDATE … FROM</code> / <code>DELETE … USING</code> 的数据源同 <code>SELECT</code>：多表、<code>JOIN</code>、<code>(SELECT …) x</code>、<code>(VALUES …) x(a,b)</code></li>
             <li><code>CREATE</code> / <code>ALTER</code> / <code>DROP TABLE</code> · <code>TRUNCATE</code> · <code>COMMENT ON</code> · <code>GENERATED AS IDENTITY</code></li>
             <li><code>CREATE INDEX</code>（B+Tree）、主键 / 唯一 / 非空 / 外键 / 默认值 / CHECK</li>
             <li><code>BEGIN</code> · <code>COMMIT</code> · <code>ROLLBACK</code> · <code>SAVEPOINT</code> / <code>ROLLBACK TO</code>（表级 S/X 锁，可串行化）</li>
@@ -237,7 +238,7 @@ try {
           <ul>
             <li>递归 CTE（<code>WITH RECURSIVE</code>）、窗口函数</li>
             <li><code>FULL JOIN</code> / <code>NATURAL JOIN</code>、行级锁、<code>LATERAL</code></li>
-            <li><code>UPDATE … FROM</code> / <code>DELETE … USING</code> 后面只能跟表，不能跟派生表</li>
+
           </ul>
         </div>
       </div>

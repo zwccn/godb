@@ -300,3 +300,137 @@ func TestDMLAllowsSubquery(t *testing.T) {
 		t.Fatalf("自引用子查询的 UPDATE 影响了 %d 行，期望 2", n)
 	}
 }
+
+// UPDATE ... FROM / DELETE ... USING 的数据源：多表、JOIN、派生表、VALUES。
+// 以前解析阶段只吃一个表名，`FROM b, c` / `FROM (SELECT …) x` 直接报语法错误。
+// 现在和 SELECT 的 FROM 走同一套解析与算子，行为应该完全一致。
+func TestDMLFromListVariants(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	run(t, d, s, `CREATE TABLE fl_t (id int primary key, v text, n int)`)
+	run(t, d, s, `CREATE TABLE fl_a (id int primary key, v text)`)
+	run(t, d, s, `CREATE TABLE fl_b (id int, aid int, v text)`)
+
+	seed := func() {
+		run(t, d, s, `DELETE FROM fl_t`)
+		run(t, d, s, `DELETE FROM fl_a`)
+		run(t, d, s, `DELETE FROM fl_b`)
+		run(t, d, s, `INSERT INTO fl_t VALUES (1,'t1',0),(2,'t2',0)`)
+		run(t, d, s, `INSERT INTO fl_a VALUES (1,'A1'),(2,'A2')`)
+		run(t, d, s, `INSERT INTO fl_b VALUES (10,1,'B10'),(20,2,'B20')`)
+	}
+	val := func(sql string) string {
+		res := run(t, d, s, sql)
+		if len(res[0].Rows) == 0 {
+			return "(no rows)"
+		}
+		return fmt.Sprint(res[0].Rows[0][0])
+	}
+
+	// ① 多表（逗号 = 交叉连接）
+	seed()
+	if n := run(t, d, s, `UPDATE fl_t SET v = a.v FROM fl_a a, fl_b b WHERE fl_t.id = a.id AND b.aid = a.id`)[0].Affected; n != 2 {
+		t.Fatalf("多表 FROM 影响了 %d 行，期望 2", n)
+	}
+	if got := val(`SELECT v FROM fl_t WHERE id = 2`); got != "A2" {
+		t.Fatalf("多表 FROM 后 v = %q，期望 A2", got)
+	}
+
+	// ② JOIN ... ON
+	seed()
+	if n := run(t, d, s, `UPDATE fl_t SET n = b.id FROM fl_a a JOIN fl_b b ON b.aid = a.id WHERE fl_t.id = a.id`)[0].Affected; n != 2 {
+		t.Fatalf("JOIN 形式影响了 %d 行，期望 2", n)
+	}
+	if got := val(`SELECT n FROM fl_t WHERE id = 1`); got != "10" {
+		t.Fatalf("JOIN 形式后 n = %q，期望 10", got)
+	}
+
+	// ③ 派生表 (SELECT …) x
+	seed()
+	if n := run(t, d, s, `UPDATE fl_t SET v = x.v FROM (SELECT id, v || '!' AS v FROM fl_a) x WHERE fl_t.id = x.id`)[0].Affected; n != 2 {
+		t.Fatalf("派生表影响了 %d 行，期望 2", n)
+	}
+	if got := val(`SELECT v FROM fl_t WHERE id = 1`); got != "A1!" {
+		t.Fatalf("派生表后 v = %q，期望 A1!", got)
+	}
+
+	// ④ VALUES 派生表 + 列别名列表
+	seed()
+	if n := run(t, d, s, `UPDATE fl_t SET v = s.v FROM (VALUES (1,'V1'),(2,'V2')) s(id, v) WHERE fl_t.id = s.id`)[0].Affected; n != 2 {
+		t.Fatalf("VALUES 派生表影响了 %d 行，期望 2", n)
+	}
+	if got := val(`SELECT v FROM fl_t WHERE id = 2`); got != "V2" {
+		t.Fatalf("VALUES 派生表后 v = %q，期望 V2", got)
+	}
+
+	// ⑤ 目标表带别名 + 派生表（EF Core 生成的形态）
+	seed()
+	if n := run(t, d, s, `UPDATE fl_t AS t SET v = s.v FROM (SELECT id, 'X' AS v FROM fl_a) AS s WHERE t.id = s.id`)[0].Affected; n != 2 {
+		t.Fatalf("带别名的 UPDATE 影响了 %d 行，期望 2", n)
+	}
+	if got := val(`SELECT v FROM fl_t WHERE id = 1`); got != "X" {
+		t.Fatalf("带别名后 v = %q，期望 X", got)
+	}
+
+	// ⑥ DELETE ... USING 多表与派生表
+	seed()
+	if n := run(t, d, s, `DELETE FROM fl_t USING fl_a a, fl_b b WHERE fl_t.id = a.id AND b.aid = a.id`)[0].Affected; n != 2 {
+		t.Fatalf("DELETE USING 多表删了 %d 行，期望 2", n)
+	}
+	seed()
+	if n := run(t, d, s, `DELETE FROM fl_t USING (SELECT id FROM fl_a WHERE id = 2) s WHERE fl_t.id = s.id`)[0].Affected; n != 1 {
+		t.Fatalf("DELETE USING 派生表删了 %d 行，期望 1", n)
+	}
+	if got := val(`SELECT count(*) FROM fl_t`); got != "1" {
+		t.Fatalf("删完应剩 1 行，实际 %q", got)
+	}
+
+	// ⑦ 数据源里再套子查询（锁意图要覆盖到派生表内部的表）
+	seed()
+	if n := run(t, d, s, `UPDATE fl_t SET n = 7 FROM (SELECT id FROM fl_a WHERE id IN (SELECT aid FROM fl_b)) s WHERE fl_t.id = s.id`)[0].Affected; n != 2 {
+		t.Fatalf("派生表内嵌子查询影响了 %d 行，期望 2", n)
+	}
+}
+
+// `VALUES (…),(…)` 是一种查询源：能独立执行、能当派生表、能接集合运算。
+// 之前完全不支持 —— `parseSetOperand` 只认 SELECT，所以 `FROM (VALUES …)` 会报
+// "expected SELECT"。批量更新（UPDATE … FROM (VALUES …) x(a,b)）靠它。
+func TestValuesQuery(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	// 独立执行：列名按 PG 的 column1 / column2
+	res := run(t, d, s, `VALUES (1, 'a'), (2, 'b')`)
+	if len(res[0].Rows) != 2 {
+		t.Fatalf("VALUES 行数 = %d，期望 2", len(res[0].Rows))
+	}
+	if got := res[0].Columns[0].Name; got != "column1" {
+		t.Fatalf("列名 = %q，期望 column1", got)
+	}
+	if got := fmt.Sprint(res[0].Rows[1][1]); got != "b" {
+		t.Fatalf("第二行第二列 = %q，期望 b", got)
+	}
+
+	// 当派生表：别名列表按位置改名
+	if got := fmt.Sprint(run(t, d, s, `SELECT x.b FROM (VALUES (1,'a'),(2,'b')) x(a, b) WHERE x.a = 2`)[0].Rows[0][0]); got != "b" {
+		t.Fatalf("派生表查询 = %q，期望 b", got)
+	}
+
+	// 派生表参与 JOIN
+	run(t, d, s, `CREATE TABLE vq (id int primary key, nm text)`)
+	run(t, d, s, `INSERT INTO vq VALUES (1,'one'),(2,'two')`)
+	if got := fmt.Sprint(run(t, d, s, `SELECT v.nm FROM vq v JOIN (VALUES (1),(2)) x(id) ON x.id = v.id ORDER BY v.id DESC LIMIT 1`)[0].Rows[0][0]); got != "two" {
+		t.Fatalf("JOIN 派生表 = %q，期望 two", got)
+	}
+
+	// 与集合运算组合
+	if got := fmt.Sprint(run(t, d, s, `SELECT count(*) FROM (VALUES (1),(2) UNION ALL VALUES (3)) u`)[0].Rows[0][0]); got != "3" {
+		t.Fatalf("VALUES + UNION 计数 = %q，期望 3", got)
+	}
+
+	// 列数不一致要报错，而不是静默按第一行截断
+	if _, err := d.Exec(d.Session(s), `VALUES (1), (1, 2)`); err == nil {
+		t.Fatal("列数不一致的 VALUES 应该报错")
+	}
+}

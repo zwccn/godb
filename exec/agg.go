@@ -58,10 +58,13 @@ type sumAcc struct {
 	isDec    bool
 	i        int64
 	f        float64
-	// decimal 累加：对齐到同一小数位后用大整数加尾数（比 big.Rat 快一个量级）
-	dm    *big.Int
-	dscale int
-	seen     map[string]bool
+	// decimal 累加：优先 int64 定标度快路径（零分配），溢出/变标度才回退 big.Int
+	dinit  bool  // 是否已有第一个 decimal 值
+	di     int64 // int64 尾数累加（dfast=true 时有效）
+	dscale int   // 当前小数位
+	dfast  bool  // true = int64 路径；false = big.Int 路径
+	dm     *big.Int
+	seen   map[string]bool
 	distinct bool
 	has      bool
 }
@@ -79,25 +82,15 @@ func (a *sumAcc) add(v types.Value) error {
 	}
 	a.has = true
 	if a.isDec {
+		// 先走 int64 快速解析（零分配），失败才退回 big.Int
+		if mi, sc, ok := types.DecimalMantissaFast(v.TextForm()); ok {
+			return a.addMantissaInt64(mi, sc)
+		}
 		m, sc, err := types.DecimalMantissa(v.TextForm())
 		if err != nil {
 			return err
 		}
-		if a.dm == nil {
-			a.dm, a.dscale = m, sc
-			return nil
-		}
-		// 对齐小数位
-		if sc > a.dscale {
-			pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(sc-a.dscale)), nil)
-			a.dm.Mul(a.dm, pow)
-			a.dscale = sc
-		} else if sc < a.dscale {
-			pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(a.dscale-sc)), nil)
-			m.Mul(m, pow)
-		}
-		a.dm.Add(a.dm, m)
-		return nil
+		return a.addMantissa(m, sc)
 	}
 	if a.isFloat {
 		f, err := toFloat(v)
@@ -115,11 +108,113 @@ func (a *sumAcc) add(v types.Value) error {
 	return nil
 }
 
+// addMantissaInt64 用 int64 尾数累加（零分配路径）。
+func (a *sumAcc) addMantissaInt64(mi int64, sc int) error {
+	if !a.dinit {
+		a.dinit = true
+		a.di = mi
+		a.dscale = sc
+		a.dfast = true
+		return nil
+	}
+	if a.dfast && sc == a.dscale {
+		s := a.di + mi
+		if (a.di > 0 && mi > 0 && s < 0) || (a.di < 0 && mi < 0 && s >= 0) {
+			// 溢出：切到 big.Int
+			a.dm = big.NewInt(a.di)
+			a.dfast = false
+			a.dm.Add(a.dm, big.NewInt(mi))
+			return nil
+		}
+		a.di = s
+		return nil
+	}
+	// 标度不同或已在 big.Int 模式：走通用路径
+	return a.addMantissa(big.NewInt(mi), sc)
+}
+
+// addMantissa 累加一个（尾数, 标度）对。优先 int64 快路径，溢出或变标度时回退 big.Int。
+func (a *sumAcc) addMantissa(m *big.Int, sc int) error {
+	if !a.dinit {
+		// 第一个值
+		a.dinit = true
+		if m.IsInt64() {
+			a.di = m.Int64()
+			a.dscale = sc
+			a.dfast = true
+			return nil
+		}
+		a.dm = m
+		a.dscale = sc
+		a.dfast = false
+		return nil
+	}
+	if a.dfast {
+		if sc == a.dscale {
+			// 同标度：int64 直接加
+			mi := m.Int64()
+			if !m.IsInt64() {
+				// 溢出 int64：切到 big.Int
+				a.bigFromInt64()
+				a.dm.Add(a.dm, m)
+				return nil
+			}
+			s := a.di + mi
+			if (a.di > 0 && mi > 0 && s < 0) || (a.di < 0 && mi < 0 && s >= 0) {
+				// 溢出：切到 big.Int
+				a.bigFromInt64()
+				a.dm.Add(a.dm, m)
+				return nil
+			}
+			a.di = s
+			return nil
+		}
+		// 标度不同：先切到 big.Int 再对齐
+		a.bigFromInt64()
+	}
+	// big.Int 路径
+	if sc > a.dscale {
+		pow := pow10(sc - a.dscale)
+		a.dm.Mul(a.dm, pow)
+		a.dscale = sc
+	} else if sc < a.dscale {
+		pow := pow10(a.dscale - sc)
+		m = new(big.Int).Mul(m, pow)
+	}
+	a.dm.Add(a.dm, m)
+	return nil
+}
+
+// bigFromInt64 把当前 int64 累加状态迁移到 big.Int。
+func (a *sumAcc) bigFromInt64() {
+	a.dm = big.NewInt(a.di)
+	a.dfast = false
+}
+
+// pow10 返回 10^n（缓存常用值，避免每次分配）。
+func pow10(n int) *big.Int {
+	if n >= 0 && n < len(pow10Cache) {
+		return pow10Cache[n]
+	}
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
+}
+
+var pow10Cache = func() []*big.Int {
+	c := make([]*big.Int, 21)
+	for i := range c {
+		c[i] = new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(i)), nil)
+	}
+	return c
+}()
+
 func (a *sumAcc) result() types.Value {
 	if !a.has {
 		return types.Null
 	}
 	if a.isDec {
+		if a.dfast {
+			return types.Decimal(types.MantissaDecimal(big.NewInt(a.di), a.dscale))
+		}
 		if a.dm == nil {
 			return types.Decimal("0")
 		}
@@ -134,8 +229,11 @@ func (a *sumAcc) result() types.Value {
 type avgAcc struct {
 	f        float64
 	n        int64
+	dinit    bool
+	di       int64
 	dm       *big.Int
 	dscale   int
+	dfast    bool
 	isDec    bool
 	distinct bool
 	seen     map[string]bool
@@ -153,23 +251,17 @@ func (a *avgAcc) add(v types.Value) error {
 		a.seen[k] = true
 	}
 	if a.isDec {
+		// 先走 int64 快速解析（零分配），失败才退回 big.Int
+		if mi, sc, ok := types.DecimalMantissaFast(v.TextForm()); ok {
+			a.addMantissaInt64(mi, sc)
+			a.n++
+			return nil
+		}
 		m, sc, err := types.DecimalMantissa(v.TextForm())
 		if err != nil {
 			return err
 		}
-		if a.dm == nil {
-			a.dm, a.dscale = m, sc
-		} else {
-			if sc > a.dscale {
-				pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(sc-a.dscale)), nil)
-				a.dm.Mul(a.dm, pow)
-				a.dscale = sc
-			} else if sc < a.dscale {
-				pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(a.dscale-sc)), nil)
-				m.Mul(m, pow)
-			}
-			a.dm.Add(a.dm, m)
-		}
+		a.addMantissa(m, sc)
 		a.n++
 		return nil
 	}
@@ -182,16 +274,92 @@ func (a *avgAcc) add(v types.Value) error {
 	return nil
 }
 
+// addMantissaInt64 与 sumAcc 相同的 int64 快速路径。
+func (a *avgAcc) addMantissaInt64(mi int64, sc int) {
+	if !a.dinit {
+		a.dinit = true
+		a.di = mi
+		a.dscale = sc
+		a.dfast = true
+		return
+	}
+	if a.dfast && sc == a.dscale {
+		s := a.di + mi
+		if (a.di > 0 && mi > 0 && s < 0) || (a.di < 0 && mi < 0 && s >= 0) {
+			a.dm = big.NewInt(a.di)
+			a.dfast = false
+			a.dm.Add(a.dm, big.NewInt(mi))
+			return
+		}
+		a.di = s
+		return
+	}
+	a.addMantissa(big.NewInt(mi), sc)
+}
+
+// addMantissa 与 sumAcc 相同的 int64 快路径。
+func (a *avgAcc) addMantissa(m *big.Int, sc int) {
+	if !a.dinit {
+		a.dinit = true
+		if m.IsInt64() {
+			a.di = m.Int64()
+			a.dscale = sc
+			a.dfast = true
+			return
+		}
+		a.dm = m
+		a.dscale = sc
+		a.dfast = false
+		return
+	}
+	if a.dfast {
+		if sc == a.dscale {
+			mi := m.Int64()
+			if !m.IsInt64() {
+				a.dm = big.NewInt(a.di)
+				a.dfast = false
+				a.dm.Add(a.dm, m)
+				return
+			}
+			s := a.di + mi
+			if (a.di > 0 && mi > 0 && s < 0) || (a.di < 0 && mi < 0 && s >= 0) {
+				a.dm = big.NewInt(a.di)
+				a.dfast = false
+				a.dm.Add(a.dm, m)
+				return
+			}
+			a.di = s
+			return
+		}
+		a.dm = big.NewInt(a.di)
+		a.dfast = false
+	}
+	if sc > a.dscale {
+		pow := pow10(sc - a.dscale)
+		a.dm.Mul(a.dm, pow)
+		a.dscale = sc
+	} else if sc < a.dscale {
+		pow := pow10(a.dscale - sc)
+		m = new(big.Int).Mul(m, pow)
+	}
+	a.dm.Add(a.dm, m)
+}
+
 func (a *avgAcc) result() types.Value {
 	if a.n == 0 {
 		return types.Null
 	}
 	if a.isDec {
-		if a.dm == nil {
+		var dm *big.Int
+		if a.dfast {
+			dm = big.NewInt(a.di)
+		} else if a.dm != nil {
+			dm = a.dm
+		} else {
 			return types.Decimal("0")
 		}
 		// 尾数乘 10^6 再除 n，保留 6 位小数后规范化
-		num := new(big.Int).Set(a.dm)
+		num := new(big.Int).Set(dm)
 		num.Mul(num, big.NewInt(1_000_000))
 		num.Quo(num, big.NewInt(a.n))
 		return types.Decimal(types.MantissaDecimal(num, a.dscale+6))

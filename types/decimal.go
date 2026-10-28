@@ -142,6 +142,49 @@ func Decimal(s string) Value {
 	return Value{K: KDecimal, S: n}
 }
 
+// DecimalMantissaFast 尝试用 int64 解析尾数（零分配快速路径）。
+// 返回 (尾数, 小数位, true)；超出 int64 范围或解析失败返回 false。
+func DecimalMantissaFast(s string) (int64, int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, false
+	}
+	neg := false
+	if s[0] == '+' {
+		s = s[1:]
+	} else if s[0] == '-' {
+		neg = true
+		s = s[1:]
+	}
+	dot := strings.IndexByte(s, '.')
+	intPart, fracPart := s, ""
+	if dot >= 0 {
+		intPart, fracPart = s[:dot], s[dot+1:]
+	}
+	fracPart = strings.TrimRight(fracPart, "0")
+	scale := len(fracPart)
+	digits := intPart + fracPart
+	if digits == "" {
+		return 0, scale, true // "0" 或 "."
+	}
+	var m int64
+	for i := 0; i < len(digits); i++ {
+		c := digits[i]
+		if c < '0' || c > '9' {
+			return 0, 0, false
+		}
+		d := int64(c - '0')
+		if m > (9223372036854775807-d)/10 {
+			return 0, 0, false // 溢出
+		}
+		m = m*10 + d
+	}
+	if neg {
+		m = -m
+	}
+	return m, scale, true
+}
+
 // DecimalMantissa 把规范十进制文本拆成 (尾数, 小数位)：`123.45` → (12345, 2)。
 // 比 big.Rat.SetString 快得多，供 sum/avg 累加用。
 func DecimalMantissa(s string) (*big.Int, int, error) {

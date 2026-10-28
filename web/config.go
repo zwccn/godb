@@ -54,20 +54,22 @@ type runtimeView struct {
 }
 
 type configResp struct {
-	Path     string         `json:"path"`
-	Storage  config.Storage `json:"storage"`
-	Network  config.Network `json:"network"`
-	Auth     authView       `json:"auth"`
-	Runtime  runtimeView    `json:"runtime"`
-	Warnings []string       `json:"warnings"`
+	Path        string              `json:"path"`
+	Storage     config.Storage      `json:"storage"`
+	Network     config.Network      `json:"network"`
+	Auth        authView            `json:"auth"`
+	Performance config.Performance  `json:"performance"`
+	Runtime     runtimeView         `json:"runtime"`
+	Warnings    []string            `json:"warnings"`
 }
 
 // configReq 是保存请求。密码单独用明文传入（不回显），
 // ClearPassword 用来显式清掉已有密码。
 type configReq struct {
-	Storage config.Storage `json:"storage"`
-	Network config.Network `json:"network"`
-	Auth    struct {
+	Storage     config.Storage      `json:"storage"`
+	Network     config.Network      `json:"network"`
+	Performance config.Performance  `json:"performance"`
+	Auth        struct {
 		RequirePassword bool   `json:"requirePassword"`
 		User            string `json:"user"`
 		Password        string `json:"password"`
@@ -115,6 +117,7 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	next := cur
 	next.Storage = req.Storage
 	next.Network = req.Network
+	next.Performance = req.Performance
 	next.Auth.RequirePassword = req.Auth.RequirePassword
 	next.Auth.User = req.Auth.User
 	if req.Auth.ClearPassword {
@@ -167,6 +170,7 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.DB.Store.SetCheckpointPolicy(toPolicy(saved.Storage))
+	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent)
 	writeJSON(w, http.StatusOK, s.configView(r))
 }
 
@@ -177,6 +181,7 @@ func (s *Server) configView(r *http.Request) configResp {
 		Path:    s.Config.Path(),
 		Storage: c.Storage,
 		Network: c.Network,
+		Performance: c.Performance,
 		Auth: authView{
 			RequirePassword: c.Auth.RequirePassword,
 			User:            c.Auth.User,

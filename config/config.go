@@ -66,12 +66,20 @@ type Auth struct {
 	ScramVerifier string `json:"scramVerifier,omitempty"`
 }
 
+// Performance 控制执行并发。
+type Performance struct {
+	// MaxConcurrent：同时执行 SQL 的最大并发数，超出的排队等。
+	// 0 表示不限制。防止大量并发大查询把内存吃光（godb 全内存驻留）。
+	MaxConcurrent int `json:"maxConcurrent"`
+}
+
 // Config 是完整的配置文件内容。
 type Config struct {
-	Version int     `json:"version"`
-	Storage Storage `json:"storage"`
-	Network Network `json:"network"`
-	Auth    Auth    `json:"auth"`
+	Version     int         `json:"version"`
+	Storage     Storage     `json:"storage"`
+	Network     Network     `json:"network"`
+	Auth        Auth        `json:"auth"`
+	Performance Performance `json:"performance"`
 }
 
 // Default 返回出厂默认值。
@@ -93,6 +101,9 @@ func Default() Config {
 		Auth: Auth{
 			RequirePassword: false,
 			User:            "godb",
+		},
+		Performance: Performance{
+			MaxConcurrent: 32,
 		},
 	}
 }
@@ -129,6 +140,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.CheckpointWALMB < 0 || c.Storage.CheckpointWALMB > 65536 {
 		return fmt.Errorf("「WAL 超过多少 MB 落盘」必须在 0 到 65536 之间")
+	}
+
+	if c.Performance.MaxConcurrent < 0 || c.Performance.MaxConcurrent > 10000 {
+		return fmt.Errorf("「最大并发数」必须在 0 到 10000 之间（0 = 不限）")
 	}
 
 	if err := checkPort("HTTP 端口", c.Network.HTTPPort); err != nil {

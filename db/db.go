@@ -92,6 +92,13 @@ type DB struct {
 	// SlowLog 收到慢语句的原文与耗时；nil 表示不记录。
 	SlowLog func(sqlText string, took time.Duration, stmts int)
 
+	// execSem 是并发执行信号量：同时执行 SQL 的 goroutine 上限。
+	// 超出的在 Exec 入口排队等（不占表锁、不扫表、不占内存）。
+	// nil 表示不限制。
+	execSem chan struct{}
+	// SetMaxConcurrent 动态调整并发上限（配置热更新用）。
+	// 0 = 不限。缩小时已在执行的不受影响，新的按新值排。
+
 	lockOpts lock.Options
 
 	mu       sync.Mutex
@@ -190,6 +197,27 @@ func (d *DB) Close() error {
 // Dir 返回数据目录。
 func (d *DB) Dir() string { return d.dir }
 
+// SetMaxConcurrent 设置并发执行上限（0 = 不限）。
+// 配置热更新时调用。已在执行的不受影响，新的按新值排。
+func (d *DB) SetMaxConcurrent(n int) {
+	if n <= 0 {
+		d.execSem = nil
+		return
+	}
+	d.execSem = make(chan struct{}, n)
+}
+
+// acquireExec 取一个执行令牌；limit 为 0 时直接放行。
+// 返回释放函数。
+func (d *DB) acquireExec() (release func()) {
+	sem := d.execSem
+	if sem == nil {
+		return func() {}
+	}
+	sem <- struct{}{}
+	return func() { <-sem }
+}
+
 // Session 取出（或创建）一个会话。
 func (d *DB) Session(id string) *txn.Session {
 	d.mu.Lock()
@@ -212,6 +240,10 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	if d.closed.Load() {
 		return nil, fmt.Errorf("database %q has been dropped", d.Name)
 	}
+	// 并发上限：超出的在这里排队等，不占表锁、不扫表、不占内存。
+	release := d.acquireExec()
+	defer release()
+
 	start := hrtime.Now()
 	stmts, err := sql.Parse(text)
 	if err != nil {

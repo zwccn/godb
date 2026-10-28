@@ -302,6 +302,13 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	if err := sess.AcquireExecToken(); err != nil {
 		return nil, err
 	}
+	// 兜底：如果 Exec 提前返回（解析错误等）且不在显式事务里，释放信号量。
+	// 正常路径由 Stmt.End/releaseAll 释放，这里只兜异常出口。
+	defer func() {
+		if !sess.InTx() && sess.ExecTokenHeld() {
+			sess.ForceRollback()
+		}
+	}()
 
 	start := hrtime.Now()
 	stmts, err := sql.Parse(text)

@@ -1119,3 +1119,24 @@ godb 没有行级锁（`FOR UPDATE`），事务内"先 SELECT 再 UPDATE 同一�
 | 事务内 `SELECT` 再 `UPDATE` 同一行 | **单条原子 `UPDATE`**：`UPDATE room SET seats_left = seats_left - 1 WHERE id=1 AND seats_left > 0`，看影响行数判断成败 |
 | 依赖 `FOR UPDATE` 加锁 | 不支持，请用原子 `UPDATE` 或应用层串行化 |
 | 指望重试解决 `40P01` | **重试无效**，改用原子写法或应用层单写队列 |
+
+## 并发控制：maxConcurrent / maxQueued / waitTimeout
+
+三个参数协同控制并发，解决不同层面的问题：
+
+| 参数 | 作用 | 超限行为 | 默认值 |
+|---|---|---|---|
+| `maxConcurrent` | 同时执行 SQL 的 goroutine 数（限内存） | 排队等 | 32 |
+| `maxQueued` | 排队上限（限堆积） | 快速失败 | 256 |
+| `waitTimeoutMs` | 排队超时（限延迟） | 快速失败 | 3000ms |
+
+**信号量按事务持有**（不是按单条 SQL）：`BEGIN` 获取，`COMMIT/ROLLBACK` 释放。
+这是防止「锁×信号量交叉死锁」的必要设计——持有表锁 ⊆ 持有信号量。
+
+**注意**：显式事务的信号量占用时间 = 整个事务时长（含客户端处理时间）。
+如果业务大量使用显式事务（如 `BEGIN → 处理 50ms → COMMIT`），
+`maxConcurrent=32` 的吞吐上限约为 `32 / 0.055 ≈ 580 req/s`。
+按业务形态调大 `maxConcurrent` 即可（如 128、256）。
+
+**超时叠加**：排队 `waitTimeoutMs` + 表锁等待 3s 是两层独立计时，
+最坏 ≈ `waitTimeoutMs + 3s`。业务层超时建议设 ≥ 8~10 秒，避免重试风暴。

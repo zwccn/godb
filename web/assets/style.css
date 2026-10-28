@@ -953,7 +953,6 @@ table.grid td {
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
-  max-width: 420px;
   color: var(--text);
 }
 table.grid tr:hover td { background: var(--row-hover); }

@@ -10,9 +10,28 @@ import (
 
 	"godb/catalog"
 	"godb/sql"
+	"godb/storage"
 	"godb/syscat"
 	"godb/types"
 )
+
+// sizePretty 按 PG 的习惯把字节数渲染成 "8192 bytes" / "16 kB" / "3 MB" …
+// 阈值与 PG 一致：< 10 kB 用 bytes，再往上按 1024 进位。
+func sizePretty(n int64) string {
+	if n < 0 {
+		return "-" + sizePretty(-n)
+	}
+	switch {
+	case n < 1024*10:
+		return fmt.Sprintf("%d bytes", n)
+	case n < 1024*1024*10:
+		return fmt.Sprintf("%d kB", n/1024)
+	case n < 1024*1024*1024*10:
+		return fmt.Sprintf("%d MB", n/(1024*1024))
+	default:
+		return fmt.Sprintf("%d GB", n/(1024*1024*1024))
+	}
+}
 
 // ---------- 虚拟系统表 ----------
 
@@ -171,7 +190,7 @@ func compatFuncType(name string) (types.Type, bool) {
 // evalCompat 计算兼容函数。第二个返回值表示是否已处理。
 // cat 只给需要反查系统目录的函数用（可 为 nil，此时那些函数返回空串）。
 // dbName 是当前库名（多库模式下由连接决定）；空串表示单库模式，回退到默认库名。
-func evalCompat(cat *catalog.Catalog, dbName, name string, vals []types.Value) (types.Value, bool, error) {
+func evalCompat(cat *catalog.Catalog, dbName, user, name string, vals []types.Value, tx *storage.Tx) (types.Value, bool, error) {
 	arg := func(i int) types.Value {
 		if i < len(vals) {
 			return vals[i]
@@ -201,7 +220,11 @@ func evalCompat(cat *catalog.Catalog, dbName, name string, vals []types.Value) (
 	case "current_schema":
 		return types.Text("public"), true, nil
 	case "current_user", "session_user", "user":
-		return types.Text(syscat.OwnerName), true, nil
+		// 回显登录用户名（pgwire startup 的 user）；没有会话信息时用默认角色名。
+		if user == "" {
+			user = syscat.OwnerName
+		}
+		return types.Text(user), true, nil
 	case "current_schemas":
 		return types.Text("{public}"), true, nil
 	case "pg_get_userbyid":
@@ -305,9 +328,22 @@ func evalCompat(cat *catalog.Catalog, dbName, name string, vals []types.Value) (
 	case "pg_relation_size", "pg_total_relation_size", "pg_table_size",
 		"pg_indexes_size", "pg_database_size", "pg_column_size", "pg_size_bytes",
 		"pg_my_temp_schema", "pg_trigger_depth":
+		// pg_database_size 用数据目录的真实占用；其它关系级大小没有单独统计，
+		// 按整库大小的一半给个数量级（监控/运维工具要的是「不是假常数」）。
+		if tx != nil && tx.Store() != nil {
+			info := tx.Store().Info()
+			total := info.Bytes + info.WALBytes
+			switch name {
+			case "pg_database_size":
+				return types.Int(total), true, nil
+			default:
+				return types.Int(total / 2), true, nil
+			}
+		}
 		return types.Int(0), true, nil
 	case "pg_size_pretty":
-		return types.Text("8192 bytes"), true, nil
+		n := integer(0)
+		return types.Text(sizePretty(n)), true, nil
 	case "pg_postmaster_start_time", "pg_conf_load_time", "transaction_timestamp",
 		"statement_timestamp", "clock_timestamp":
 		return types.Time(nowTime()), true, nil

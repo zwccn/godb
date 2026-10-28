@@ -168,6 +168,7 @@ func (s *Server) handle(nc net.Conn) {
 		return
 	}
 	c.sess = c.db.Session("pg-" + randHex())
+	c.sess.User = c.user // current_user / session_user 回显登录名
 	c.register()
 	defer func() {
 		if c.sess != nil && c.sess.InTx() {

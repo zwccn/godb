@@ -4,6 +4,7 @@ package exec
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
@@ -890,6 +891,8 @@ type funcEval struct {
 	cat *catalog.Catalog
 	// dbName 供 current_database() 用。空串表示单库模式，回退到默认库名。
 	dbName string
+	// user 供 current_user / session_user 回显登录名。
+	user string
 	// tx 供 currval / lastval / nextval 读自增计数器用。
 	tx *storage.Tx
 }
@@ -906,7 +909,7 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 		vals[i] = v
 	}
 	if isCompatFunc(e.name) {
-		v, _, err := evalCompat(e.cat, e.dbName, e.name, vals)
+		v, _, err := evalCompat(e.cat, e.dbName, e.user, e.name, vals, e.tx)
 		return v, err
 	}
 	switch e.name {
@@ -1017,6 +1020,47 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 		return types.Text(strings.TrimLeft(v.TextForm(), " ")), nil
 	case "rtrim":
 		return types.Text(strings.TrimRight(v.TextForm(), " ")), nil
+	case "random":
+		return types.Float(rand.Float64()), nil
+	case "lpad", "rpad":
+		if len(vals) < 2 {
+			return types.Null, fmt.Errorf("%s requires at least 2 arguments", e.name)
+		}
+		if vals[1].IsNull() {
+			return types.Null, nil
+		}
+		n, err := toInt(vals[1])
+		if err != nil {
+			return types.Null, err
+		}
+		fill := " "
+		if len(vals) > 2 && !vals[2].IsNull() {
+			fill = vals[2].TextForm()
+		}
+		s := v.TextForm()
+		rs := []rune(s)
+		if n <= 0 {
+			return types.Text(""), nil
+		}
+		if int64(len(rs)) >= n {
+			if e.name == "lpad" {
+				return types.Text(string(rs[:n])), nil
+			}
+			return types.Text(string(rs[int64(len(rs))-n:])), nil
+		}
+		rf := []rune(fill)
+		if len(rf) == 0 {
+			return types.Text(s), nil
+		}
+		pad := make([]rune, 0, n)
+		for int64(len(pad)) < n-int64(len(rs)) {
+			pad = append(pad, rf...)
+		}
+		pad = pad[:n-int64(len(rs))]
+		if e.name == "lpad" {
+			return types.Text(string(pad) + s), nil
+		}
+		return types.Text(s + string(pad)), nil
 	case "abs":
 		if v.K == types.KInt {
 			if v.I < 0 {
@@ -1230,15 +1274,18 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 		if c.planner.Info != nil {
 			fe.dbName = c.planner.Info.Name
 		}
+		fe.user = c.planner.User
 	}
 	switch name {
 	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring",
-		"concat", "text", "array", "regexp_matches":
+		"concat", "text", "array", "regexp_matches", "lpad", "rpad":
 		fe.t = types.Type{Kind: types.KText, Name: "text"}
 	case "length", "char_length", "character_length", "position", "strpos":
 		fe.t = types.Type{Kind: types.KInt, Name: "integer"}
 	case "now", "current_timestamp", "date_trunc":
 		fe.t = types.Type{Kind: types.KTime, Name: "timestamp"}
+	case "random":
+		fe.t = types.Type{Kind: types.KFloat, Name: "double precision"}
 	case "extract", "date_part":
 		// PG 14 起 extract 返回 numeric；老版本是 double precision，
 		// 用 numeric 两边都能接受（Npgsql 的 GetDouble 会做转换）。

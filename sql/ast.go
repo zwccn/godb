@@ -62,10 +62,11 @@ type FKDef struct {
 
 // CreateIndex 对应 CREATE [UNIQUE] INDEX name ON table (cols)。
 type CreateIndex struct {
-	Name   string
-	Table  string
-	Cols   []string
-	Unique bool
+	Name       string
+	Table      string
+	Cols       []string
+	Unique     bool
+	IfNotExists bool
 }
 
 // DropIndex 对应 DROP INDEX [IF EXISTS] name。
@@ -124,6 +125,9 @@ type Truncate struct{ Table string }
 // Checkpoint 对应 CHECKPOINT / FLUSH：把内存数据与日志强制刷到磁盘。
 // 它不改数据，只影响持久化时机。
 type Checkpoint struct{}
+
+// Analyze 对应 ANALYZE [table, ...]：godb 没有统计信息，识别后直接成功。
+type Analyze struct{}
 
 // Show 对应 SHOW name：查会话参数。参数名原样保留（可能带空格，如
 // "time zone"），由执行层去查表。
@@ -351,6 +355,7 @@ func (*DropTable) stmtNode()      {}
 func (*AlterTable) stmtNode()     {}
 func (*Truncate) stmtNode()       {}
 func (*Checkpoint) stmtNode()     {}
+func (*Analyze) stmtNode()        {}
 func (*Show) stmtNode()           {}
 func (*SetStmt) stmtNode()        {}
 func (*SessionCleanup) stmtNode() {}

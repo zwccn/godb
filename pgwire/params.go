@@ -177,9 +177,167 @@ func binaryLiteral(raw []byte, oid int32) (string, error) {
 		return quoteLiteral(string(raw[1:])), nil
 	}
 
+	// 数组类型（int2/4/8、float4/8、text/varchar、bool、numeric 一维）
+	if lit, ok, err := arrayBinaryText(raw, oid); ok {
+		return lit, err
+	}
+
 	// 兜底：宁可明确报错，也不要把二进制字节当文本拼进去 ——
 	// 以前就是这么干的：错误信息里全是乱码，jsonb / uuid 这类还会「写成功但数据是错的」。
 	return "", fmt.Errorf("binary parameter of type OID %d is not supported (use a text-format parameter instead)", oid)
+}
+
+// arrayBinaryText 解 PG 二进制数组（一维）为 `{a,b,c}` 文本字面量。
+// 元素按 OID 逐个解码；多维或未知元素类型放弃（ok=false）。
+func arrayBinaryText(raw []byte, oid int32) (string, bool, error) {
+	elemOID, ok := arrayElemOID(oid)
+	if !ok {
+		return "", false, nil
+	}
+	if len(raw) < 12 {
+		return "", true, fmt.Errorf("bad array length %d", len(raw))
+	}
+	ndim := int(int32(binary.BigEndian.Uint32(raw[0:4])))
+	// flags := binary.BigEndian.Uint32(raw[4:8])
+	gotElem := int32(binary.BigEndian.Uint32(raw[8:12]))
+	if gotElem != 0 && gotElem != elemOID {
+		return "", true, fmt.Errorf("array element OID %d does not match parameter type", gotElem)
+	}
+	if ndim == 0 {
+		return "'{}'", true, nil
+	}
+	if ndim != 1 {
+		return "", true, fmt.Errorf("only 1-dimensional array parameters are supported (got %d dims)", ndim)
+	}
+	if len(raw) < 20 {
+		return "", true, fmt.Errorf("bad array header")
+	}
+	n := int(int32(binary.BigEndian.Uint32(raw[12:16])))
+	// lowerBound := int32(binary.BigEndian.Uint32(raw[16:20]))
+	pos := 20
+	elems := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		if pos+4 > len(raw) {
+			return "", true, fmt.Errorf("bad array element header at %d", i)
+		}
+		ln := int(int32(binary.BigEndian.Uint32(raw[pos : pos+4])))
+		pos += 4
+		if ln < 0 {
+			elems = append(elems, "NULL")
+			continue
+		}
+		if pos+ln > len(raw) {
+			return "", true, fmt.Errorf("bad array element length at %d", i)
+		}
+		s, err := arrayElemText(raw[pos:pos+ln], elemOID)
+		if err != nil {
+			return "", true, err
+		}
+		pos += ln
+		elems = append(elems, s)
+	}
+	return "'" + arrayLiteralText(elems) + "'", true, nil
+}
+
+func arrayElemOID(oid int32) (int32, bool) {
+	switch oid {
+	case 1005: // int2[]
+		return 21, true
+	case 1007: // int4[]
+		return 23, true
+	case 1016: // int8[]
+		return 20, true
+	case 1021: // float4[]
+		return 700, true
+	case 1022: // float8[]
+		return 701, true
+	case 1009, 1015: // text[] / varchar[]
+		return 25, true
+	case 1000: // bool[]
+		return 16, true
+	case 1231: // numeric[]
+		return 1700, true
+	case 1115: // timestamp[]
+		return 1114, true
+	case 1182: // date[]
+		return 1082, true
+	}
+	return 0, false
+}
+
+func arrayElemText(b []byte, elemOID int32) (string, error) {
+	switch elemOID {
+	case 21:
+		if len(b) != 2 {
+			return "", fmt.Errorf("bad int2 array element")
+		}
+		return strconv.FormatInt(int64(int16(binary.BigEndian.Uint16(b))), 10), nil
+	case 23:
+		if len(b) != 4 {
+			return "", fmt.Errorf("bad int4 array element")
+		}
+		return strconv.FormatInt(int64(int32(binary.BigEndian.Uint32(b))), 10), nil
+	case 20:
+		if len(b) != 8 {
+			return "", fmt.Errorf("bad int8 array element")
+		}
+		return strconv.FormatInt(int64(binary.BigEndian.Uint64(b)), 10), nil
+	case 700:
+		if len(b) != 4 {
+			return "", fmt.Errorf("bad float4 array element")
+		}
+		return strconv.FormatFloat(float64(math.Float32frombits(binary.BigEndian.Uint32(b))), 'g', -1, 64), nil
+	case 701:
+		if len(b) != 8 {
+			return "", fmt.Errorf("bad float8 array element")
+		}
+		return strconv.FormatFloat(math.Float64frombits(binary.BigEndian.Uint64(b)), 'g', -1, 64), nil
+	case 16:
+		if len(b) != 1 {
+			return "", fmt.Errorf("bad bool array element")
+		}
+		if b[0] != 0 {
+			return "t", nil
+		}
+		return "f", nil
+	case 25:
+		return string(b), nil
+	case 1700:
+		s, err := numericBinaryText(b)
+		if err != nil {
+			return "", err
+		}
+		return strings.Trim(s, "'"), nil
+	case 1114:
+		s, err := timestampBinaryText(b, false)
+		if err != nil {
+			return "", err
+		}
+		return strings.Trim(s, "'"), nil
+	case 1082:
+		s, err := dateBinaryText(b)
+		if err != nil {
+			return "", err
+		}
+		return strings.Trim(s, "'"), nil
+	}
+	return "", fmt.Errorf("unsupported array element OID %d", elemOID)
+}
+
+func arrayLiteralText(items []string) string {
+	parts := make([]string, len(items))
+	for i, s := range items {
+		if s == "NULL" {
+			parts[i] = "NULL"
+			continue
+		}
+		if strings.ContainsAny(s, ",{}\"\\ ") {
+			parts[i] = `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+		} else {
+			parts[i] = s
+		}
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 // numericBinaryText 解 PG 的 numeric 二进制格式：

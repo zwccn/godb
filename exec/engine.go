@@ -45,6 +45,8 @@ type Engine struct {
 	// Info 描述「当前是哪个库、还有哪些库」。单库模式（测试里常见）留 nil，
 	// 此时 pg_database / current_database() 只报一个默认库。
 	Info *DBInfo
+	// User 是登录用户名（current_user / session_user 回显；空串回退到角色名）。
+	User string
 }
 
 // DBInfo 是一个库的自我描述。
@@ -59,7 +61,11 @@ type DBInfo struct {
 // planner 统一构造 Planner，把库信息带上。
 // 之前有三处各自 `&Planner{Tx: tx, Cat: e.Cat}`，加字段容易漏。
 func (e *Engine) planner(tx *storage.Tx) *Planner {
-	p := &Planner{Tx: tx, Cat: e.Cat, Info: e.Info}
+	user := e.User
+	if user == "" && tx != nil {
+		user = tx.User
+	}
+	p := &Planner{Tx: tx, Cat: e.Cat, Info: e.Info, User: user}
 	return p
 }
 
@@ -1715,6 +1721,9 @@ func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
 	for _, idx := range e.Cat.Tables {
 		for _, ix := range idx.Indexes {
 			if strings.EqualFold(ix.Name, s.Name) {
+				if s.IfNotExists {
+					return &Result{Command: "CREATE INDEX", Tag: "CREATE INDEX", Message: "relation already exists, skipping"}, nil
+				}
 				return nil, fmt.Errorf("relation %q already exists", s.Name)
 			}
 		}
@@ -1732,6 +1741,9 @@ func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
 	// 和约束隐式建的索引重名会让客户端的索引页出现两条同名索引，提前拦掉。
 	for _, ix := range syscat.ConstraintIndexNames(t) {
 		if strings.EqualFold(ix, s.Name) {
+			if s.IfNotExists {
+				return &Result{Command: "CREATE INDEX", Tag: "CREATE INDEX", Message: "relation already exists, skipping"}, nil
+			}
 			return nil, fmt.Errorf("relation %q already exists", s.Name)
 		}
 	}

@@ -49,6 +49,8 @@ func ParseIsolation(s string) (Isolation, error) {
 // Session 是一个客户端会话，持有（可选的）显式事务与其表锁。
 type Session struct {
 	ID string
+	// User 是登录用户名（current_user 回显）。
+	User string
 
 	mu    sync.Mutex // 保证同一会话的请求串行执行
 	st    *storage.Store
@@ -198,12 +200,14 @@ func (s *Session) startTx(intents map[string]lock.Mode) error {
 		}
 		s.global = true
 		s.tx = s.st.Begin()
+		s.tx.User = s.User
 		s.inheritLastSeq()
 		s.aborted = false
 		return nil
 	}
 
 	tx := s.st.Begin()
+	tx.User = s.User
 	id, age := s.locks.NewTx(s.ID)
 	start := hrtime.Now()
 	if err := s.locks.AcquireAll(id, s.ID, age, intents, s.opts); err != nil {

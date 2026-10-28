@@ -292,6 +292,10 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	if _, ok := st.(*sql.Checkpoint); ok {
 		return d.execCheckpoint(sess)
 	}
+	// ANALYZE：没有统计信息，识别出来直接成功（客户端会发）。
+	if _, ok := st.(*sql.Analyze); ok {
+		return &exec.Result{Command: "ANALYZE", Tag: "ANALYZE"}, nil
+	}
 
 	// SHOW / SET 是会话参数，不碰表、不需要锁，也不受中毒事务影响
 	// （真 PG 里 SET 在 aborted 事务里也能执行）。

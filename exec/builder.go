@@ -22,6 +22,8 @@ type Planner struct {
 	// Info 是当前库的名字与库列表；nil 表示单库模式（pg_database 只报默认库）。
 	// 只影响系统目录与 current_database()，不影响查询计划。
 	Info *DBInfo
+	// User 是登录用户名（current_user / session_user 回显）。
+	User string
 
 	// pushdown 是「只涉及单张表的 WHERE 条件」，按表的限定符分组。
 	// 多表查询时由 BuildSelect 算好，buildTableRef 里在扫表时就先用它过滤
@@ -45,6 +47,16 @@ type cteData struct {
 
 // BuildSelect 构建查询计划。
 func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
+	// SELECT unnest(arr) 等价于 SELECT unnest FROM unnest(arr)：
+	// PG 的集合函数在 select 列表会展开成多行，我们按 FROM 形式实现。
+	if s.Values == nil && s.SetOp == "" && len(s.From) == 0 && len(s.Items) == 1 && !s.Items[0].Star {
+		if fc, ok := s.Items[0].Expr.(*sql.FuncCall); ok && strings.EqualFold(fc.Name, "unnest") {
+			rewritten := *s
+			rewritten.From = []sql.TableRef{&sql.FuncTable{Name: "unnest", Args: fc.Args, Alias: "unnest"}}
+			rewritten.Items = []*sql.SelectItem{{Expr: &sql.ColumnRef{Name: "unnest"}}}
+			return p.BuildSelect(&rewritten)
+		}
+	}
 	// WITH：先把 CTE 物化，后面的 FROM 才能按名字取到
 	if len(s.CTEs) > 0 {
 		if err := p.materializeCTEs(s.CTEs); err != nil {
@@ -73,7 +85,7 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 		// 那属于连接顺序重排的范畴，这个引擎没有优化器。
 		if len(s.From) == 1 {
 			if bt, ok := s.From[0].(*sql.BaseTable); ok {
-				if is, ok2 := p.tryIndexScan(bt, s.Where); ok2 {
+				if is, ok2 := p.tryIndexScanBest(bt, s.Where, s.OrderBy, s.Items, topNHint(s) > 0); ok2 {
 					op = is
 				}
 			}
@@ -83,6 +95,14 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 			return nil, err
 		}
 		op = &filterOp{child: op, pred: pred, label: sql.String(s.Where)}
+	} else if len(s.From) == 1 {
+		// 没有 WHERE 时也可以按索引序扫：ORDER BY 命中 PK/NOT NULL 索引前缀就免排序，
+		// 带 LIMIT 还能提前停（分页）。
+		if bt, ok := s.From[0].(*sql.BaseTable); ok {
+			if is, ok2 := p.tryOrderByIndex(bt, s.OrderBy, s.Items); ok2 {
+				op = is
+			}
+		}
 	}
 
 	items, err := expandStars(s.Items, sc)
@@ -661,6 +681,80 @@ func (p *Planner) tryIndexScan(bt *sql.BaseTable, where sql.Expr) (Operator, boo
 	return newIndexScan(p.Tx, t, plan.ixName, plan.cols, plan.ixCols, plan.eq, qual, p.Cat), true
 }
 
+// tryIndexScanBest 在「WHERE 能走的索引」和「ORDER BY 能走的索引」之间选一个。
+//
+// 优先级（分页是刚需，宁可多扫几行也要有序 + 提前停）：
+//  1. WHERE 是完整键等值（点查）→ 用它，选择性最高；
+//  2. WHERE 索引与 ORDER BY 是同一个 → 用它（已经有序）；
+//  3. ORDER BY 命中 PK/NOT NULL 索引前缀、且带 LIMIT → 按该索引有序扫，
+//     WHERE 交给上层 filter（Limit 会提前停）；
+//  4. 否则按原规则走 WHERE 索引；
+//  5. WHERE 索引没有、ORDER BY 有 → 用 ORDER BY 索引。
+func (p *Planner) tryIndexScanBest(bt *sql.BaseTable, where sql.Expr, orderBy []*sql.OrderItem, items []*sql.SelectItem, hasLimit bool) (Operator, bool) {
+	if p.Tx == nil || p.lookupCTE(bt.Table) != nil {
+		return nil, false
+	}
+	t, ok := p.Cat.Get(bt.Table)
+	if !ok {
+		return nil, false
+	}
+	qual := bt.Alias
+	if qual == "" {
+		qual = t.Name
+	}
+	qual = strings.ToLower(qual)
+
+	wPlan, hasWhere := pickIndex(t, where, qual)
+	oName, oCols, _, hasOrder := pickOrderIndex(t, orderBy, hasOutputAlias(items))
+
+	// 1) 点查优先
+	if hasWhere && !wPlan.isRange {
+		return newIndexScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.eq, qual, p.Cat), true
+	}
+	// 2) 同一索引：WHERE 区间本身就是有序的
+	if hasWhere && hasOrder && wPlan.ixName == oName && sameCols(wPlan.ixCols, oCols) {
+		return newIndexRangeScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.rs, qual, p.Cat), true
+	}
+	// 3) 有序扫 + LIMIT 提前停
+	if hasOrder && hasLimit {
+		rs := []storage.KeyRange{{}}
+		return newIndexRangeScan(p.Tx, t, oName, oCols, oCols, rs, qual, p.Cat), true
+	}
+	// 4) WHERE 索引
+	if hasWhere {
+		if wPlan.isRange {
+			return newIndexRangeScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.rs, qual, p.Cat), true
+		}
+		return newIndexScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.eq, qual, p.Cat), true
+	}
+	// 5) 只有 ORDER BY
+	if hasOrder {
+		return newIndexRangeScan(p.Tx, t, oName, oCols, oCols, []storage.KeyRange{{}}, qual, p.Cat), true
+	}
+	return nil, false
+}
+
+// tryOrderByIndex 无 WHERE 时按 ORDER BY 选索引（免排序 + LIMIT 提前停）。
+func (p *Planner) tryOrderByIndex(bt *sql.BaseTable, orderBy []*sql.OrderItem, items []*sql.SelectItem) (Operator, bool) {
+	if p.Tx == nil || p.lookupCTE(bt.Table) != nil || len(orderBy) == 0 {
+		return nil, false
+	}
+	t, ok := p.Cat.Get(bt.Table)
+	if !ok {
+		return nil, false
+	}
+	qual := bt.Alias
+	if qual == "" {
+		qual = t.Name
+	}
+	qual = strings.ToLower(qual)
+	name, cols, _, ok := pickOrderIndex(t, orderBy, hasOutputAlias(items))
+	if !ok {
+		return nil, false
+	}
+	return newIndexRangeScan(p.Tx, t, name, cols, cols, []storage.KeyRange{{}}, qual, p.Cat), true
+}
+
 // indexPlan 描述一次索引访问。
 //
 //	isRange        → 扫 rs 里的键区间（OR 合并后可能多于一个）
@@ -702,6 +796,78 @@ func pickIndex(t *catalog.Table, where sql.Expr, qual string) (indexPlan, bool) 
 	}
 	// 4) 首列的范围条件
 	return pickRangeIndex(t, where, qual)
+}
+
+// pickOrderIndex 找「ORDER BY 列是索引列前缀」的索引，用于免排序扫描。
+//
+// 只接受排序列全部 NOT NULL / 主键的索引：B+Tree 里不存 NULL 键，
+// 列可空时走索引会漏掉 NULL 行（PG 会把它们排在最前或最后）。
+// 这就是「没有 WHERE 时不用索引做 ORDER BY」原先一刀切的原因 —— 对 PK/NOT NULL 过于保守。
+//
+// bareUnsafe：select 列表有 AS 改名时，裸的 ORDER BY 名优先匹配**输出列**，
+// 可能不是来源列（`SELECT v AS id … ORDER BY id` 按 v 排）。这时不能按来源列走索引。
+func pickOrderIndex(t *catalog.Table, orderBy []*sql.OrderItem, bareUnsafe bool) (ixName string, ixCols []int, desc bool, ok bool) {
+	if len(orderBy) == 0 {
+		return "", nil, false, false
+	}
+	desc = orderBy[0].Desc
+	match := func(cols []int) bool {
+		if len(cols) == 0 || len(orderBy) > len(cols) {
+			return false
+		}
+		for i, oi := range orderBy {
+			if oi.Desc != desc {
+				return false // 混合方向，索引只能整体正扫或反扫
+			}
+			ref, isCol := oi.Expr.(*sql.ColumnRef)
+			if !isCol {
+				return false
+			}
+			if ref.Table == "" && bareUnsafe {
+				return false
+			}
+			ci := cols[i]
+			if ci < 0 || ci >= len(t.Columns) {
+				return false
+			}
+			c := t.Columns[ci]
+			if !c.NotNull && !c.PrimaryKey {
+				return false // 可空列：索引不含 NULL 键，会漏行
+			}
+			if !strings.EqualFold(ref.Name, c.Name) {
+				return false
+			}
+		}
+		return true
+	}
+	if match(t.PKIdxes()) {
+		return "", t.PKIdxes(), desc, true
+	}
+	for _, ix := range t.Indexes {
+		cols := make([]int, 0, len(ix.Columns))
+		for _, cn := range ix.Columns {
+			_, idx, exists := t.Col(cn)
+			if !exists {
+				cols = nil
+				break
+			}
+			cols = append(cols, idx)
+		}
+		if cols != nil && match(cols) {
+			return ix.Name, cols, desc, true
+		}
+	}
+	return "", nil, false, false
+}
+
+// hasOutputAlias 判断 select 列表是否含 AS 改名（会遮蔽来源列名）。
+func hasOutputAlias(items []*sql.SelectItem) bool {
+	for _, it := range items {
+		if it != nil && it.Alias != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // pickInIndex 把 `col IN (v1, v2, ...)` 变成同一索引上的多个等值区间。
@@ -1371,7 +1537,7 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 				}
 				keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 			}
-			op = &sortOp{child: op, keys: keys, sc: sc}
+			op = &sortOp{child: op, keys: keys, sc: sc, topN: topNHint(s)}
 		}
 	}
 
@@ -1413,7 +1579,7 @@ func (p *Planner) buildSetOp(s *sql.Select) (Operator, error) {
 			}
 			keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 		}
-		op = &sortOp{child: op, keys: keys, sc: sc}
+		op = &sortOp{child: op, keys: keys, sc: sc, topN: topNHint(s)}
 	}
 	return p.applyLimit(s, op)
 }
@@ -1507,7 +1673,7 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 			}
 			keysOut = append(keysOut, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 		}
-		op = &sortOp{child: op, keys: keysOut, sc: outSc}
+		op = &sortOp{child: op, keys: keysOut, sc: outSc, topN: topNHint(s)}
 	}
 
 	op = &projectOp{child: op, exprs: exprs, sc: finalSc}
@@ -1553,42 +1719,72 @@ func (p *Planner) orderKey(oi *sql.OrderItem, items []*sql.SelectItem, targetExp
 	return compile(oi.Expr, ctx)
 }
 
-func (p *Planner) applyLimit(s *sql.Select, op Operator) (Operator, error) {
-	if s.Limit == nil && s.Offset == nil {
-		return op, nil
+// topNHint 返回 Top-N 排序应保留的行数（LIMIT+OFFSET），0 表示不适用。
+//
+// 不适用：没有常量 LIMIT、带 DISTINCT（要先去重才能截断）、LIMIT 太大（堆不如全排）。
+func topNHint(s *sql.Select) int {
+	if s.Distinct || (s.Limit == nil && s.Offset == nil) {
+		return 0
 	}
-	limit := int64(-1)
-	offset := int64(0)
+	limit, offset, err := constLimitOffset(s)
+	if err != nil || limit < 0 {
+		return 0
+	}
+	n := limit
+	if n > (1<<62)-1-offset {
+		return 0
+	}
+	n += offset
+	if n <= 0 || n > 1<<20 {
+		return 0
+	}
+	return int(n)
+}
+
+// constLimitOffset 读取 LIMIT/OFFSET 的常量值。limit<0 表示没有 LIMIT。
+func constLimitOffset(s *sql.Select) (limit, offset int64, err error) {
+	limit = int64(-1)
 	if s.Limit != nil {
 		v, err := CompileConst(s.Limit)
 		if err != nil {
-			return nil, err
+			return 0, 0, err
 		}
 		n, err := toInt(v)
 		if err != nil || v.IsNull() {
-			return nil, fmt.Errorf("LIMIT must be an integer")
+			return 0, 0, fmt.Errorf("LIMIT must be an integer")
 		}
 		if n < 0 {
-			return nil, fmt.Errorf("LIMIT must not be negative")
+			return 0, 0, fmt.Errorf("LIMIT must not be negative")
 		}
 		limit = n
 	}
 	if s.Offset != nil {
 		v, err := CompileConst(s.Offset)
 		if err != nil {
-			return nil, err
+			return 0, 0, err
 		}
 		if v.IsNull() {
-			return nil, fmt.Errorf("OFFSET must be an integer")
+			return 0, 0, fmt.Errorf("OFFSET must be an integer")
 		}
 		n, err := toInt(v)
 		if err != nil {
-			return nil, fmt.Errorf("OFFSET must be an integer")
+			return 0, 0, fmt.Errorf("OFFSET must be an integer")
 		}
 		if n < 0 {
-			return nil, fmt.Errorf("OFFSET must not be negative")
+			return 0, 0, fmt.Errorf("OFFSET must not be negative")
 		}
 		offset = n
+	}
+	return limit, offset, nil
+}
+
+func (p *Planner) applyLimit(s *sql.Select, op Operator) (Operator, error) {
+	if s.Limit == nil && s.Offset == nil {
+		return op, nil
+	}
+	limit, offset, err := constLimitOffset(s)
+	if err != nil {
+		return nil, err
 	}
 	if limit < 0 {
 		limit = int64(1) << 62

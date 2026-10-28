@@ -71,15 +71,40 @@ func TestOrderByStillSorts(t *testing.T) {
 		{`SELECT * FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY b`, "只排第二列，索引帮不上"},
 		{`SELECT * FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY a, b DESC`, "混合方向"},
 		{`SELECT * FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY a + 0`, "表达式排序"},
-		{`SELECT * FROM ob WHERE note > 'n1' ORDER BY note`, "note 没索引"},
-		{`SELECT * FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY id`, "排序列不在索引里"},
-		{`SELECT * FROM ob ORDER BY id`, "没有 WHERE，不走索引"},
+		{`SELECT * FROM ob WHERE note > 'n1' ORDER BY note`, "note 没索引（且可空）"},
+		{`SELECT * FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY id`, "排序列不在 WHERE 索引里，又没有 LIMIT"},
+		{`SELECT id AS k, code AS id FROM ob ORDER BY id`, "裸名优先匹配输出别名，不能按来源列走索引"},
 	}
 	for _, c := range cases {
 		plan := explainPlan(t, d, s, c.sql)
 		if !strings.Contains(plan, "Sort") {
 			t.Errorf("%s（%s）\n  必须排序，实际: %s", c.sql, c.why, plan)
 		}
+	}
+}
+
+// PK/NOT NULL 列上的 ORDER BY 可以走索引（原先「没 WHERE 就不走」过于保守）。
+func TestOrderByUsesPKIndexWithoutWhere(t *testing.T) {
+	d := setupOrderTable(t)
+	plan := explainPlan(t, d, "s", `SELECT * FROM ob ORDER BY id`)
+	if !strings.Contains(plan, "Index Range Scan") {
+		t.Fatalf("ORDER BY 主键应走索引，实际: %s", plan)
+	}
+	if strings.Contains(plan, "Sort") {
+		t.Fatalf("已有序不该再 Sort，实际: %s", plan)
+	}
+	// 结果仍须有序
+	rows := rowsOf(t, run(t, d, "s", `SELECT id FROM ob ORDER BY id`))
+	if len(rows) == 0 {
+		t.Fatal("无行")
+	}
+	prev := -1
+	for _, r := range rows {
+		id := intOf(t, r[0])
+		if id < prev {
+			t.Fatalf("id 乱序：%d 出现在 %d 之后", id, prev)
+		}
+		prev = id
 	}
 }
 
@@ -549,5 +574,38 @@ func TestOrderByDescWithOrUnion(t *testing.T) {
 		if fmt.Sprint(desc[i][0]) != fmt.Sprint(asc[len(asc)-1-i][0]) {
 			t.Fatalf("第 %d 行不对称：desc=%v asc=%v", i, desc[i], asc[len(asc)-1-i])
 		}
+	}
+}
+
+// Top-N：ORDER BY + LIMIT 只保留前 N 行，结果仍须与全排序一致。
+func TestTopNLimitMatchesFullSort(t *testing.T) {
+	d := setupOrderTable(t)
+	s := "s"
+	// WHERE 走索引 a，ORDER BY b 不在该索引上 → Top-N 排序
+	full := rowsOf(t, run(t, d, s, `SELECT id FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY b, id`))
+	top := rowsOf(t, run(t, d, s, `SELECT id FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY b, id LIMIT 5`))
+	if len(top) != 5 {
+		t.Fatalf("LIMIT 5 应 5 行，实际 %d", len(top))
+	}
+	for i := range top {
+		if fmt.Sprint(top[i][0]) != fmt.Sprint(full[i][0]) {
+			t.Fatalf("Top-N 与全排序第 %d 行不一致：%v vs %v", i, top[i], full[i])
+		}
+	}
+	// DESC + OFFSET
+	off := rowsOf(t, run(t, d, s, `SELECT id FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY b DESC, id DESC LIMIT 3 OFFSET 2`))
+	fullDesc := rowsOf(t, run(t, d, s, `SELECT id FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY b DESC, id DESC`))
+	if len(off) != 3 {
+		t.Fatalf("OFFSET 后应 3 行，实际 %d", len(off))
+	}
+	for i := range off {
+		if fmt.Sprint(off[i][0]) != fmt.Sprint(fullDesc[i+2][0]) {
+			t.Fatalf("OFFSET Top-N 第 %d 行不一致：%v vs %v", i, off[i], fullDesc[i+2])
+		}
+	}
+	// 计划里应是 Top-N（LIMIT 命中且未免排序时）
+	plan := explainPlan(t, d, s, `SELECT id FROM ob WHERE a BETWEEN 0 AND 9 ORDER BY b, id LIMIT 5`)
+	if !strings.Contains(plan, "Top-N") && !strings.Contains(plan, "Sort") {
+		t.Fatalf("应有 Top-N 或 Sort，实际: %s", plan)
 	}
 }

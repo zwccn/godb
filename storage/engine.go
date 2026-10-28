@@ -392,6 +392,9 @@ type Tx struct {
 	seq map[string]int64
 	n   int
 
+	// User 是发起本事务的登录名（current_user 回显；空串表示未知）。
+	User string
+
 	// lastSeq / hasLastSeq 记录本事务最后一次 nextval 分配的值（lastval() 用）。
 	lastSeq    int64
 	hasLastSeq bool

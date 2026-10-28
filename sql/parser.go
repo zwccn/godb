@@ -186,6 +186,15 @@ func (p *parser) parseStatement() (Statement, error) {
 	case "CHECKPOINT", "FLUSH":
 		p.pos++
 		return &Checkpoint{}, nil
+	case "ANALYZE":
+		p.pos++
+		// ANALYZE [VERBOSE] [tbl | (tbl, ...)]：我们没有统计信息，接受并忽略
+		p.acceptKw("verbose")
+		// 可选表名列表
+		for p.peek().Kind != EOF && !p.peek().IsPunct(";") {
+			p.advance()
+		}
+		return &Analyze{}, nil
 	case "COPY":
 		p.pos++
 		return p.parseCopy()
@@ -1284,6 +1293,17 @@ func (p *parser) parseCopy() (Statement, error) {
 // parseCreateIndex 解析 CREATE INDEX 的剩余部分。
 func (p *parser) parseCreateIndex(unique bool) (Statement, error) {
 	st := &CreateIndex{Unique: unique}
+	// CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (cols)
+	if p.atKw("if") {
+		p.pos++
+		if err := p.expectKw("not"); err != nil {
+			return nil, err
+		}
+		if err := p.expectKw("exists"); err != nil {
+			return nil, err
+		}
+		st.IfNotExists = true
+	}
 	// 索引名可选（PostgreSQL 会自动取），为了简单要求显式给出
 	if p.atKw("on") {
 		return nil, p.errAt(p.peek(), "CREATE INDEX requires a name")

@@ -46,8 +46,8 @@ go build -o godb.exe .
 
 | 类别 | 支持 |
 |---|---|
-| 持久化 | `CHECKPOINT` / `FLUSH`（强制刷盘 + 全量快照，返回代次与统计） |
-| 索引 | `CREATE [UNIQUE] INDEX name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验 |
+| 持久化 | `CHECKPOINT` / `FLUSH`（强制刷盘 + 全量快照，返回代次与统计）；`ANALYZE`（识别并成功，暂无统计信息） |
+| 索引 | `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验；**`ORDER BY` 命中 PK/NOT NULL 索引前缀时可免排序，带 `LIMIT` 还能提前停（Top-N 分页）** |
 | 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
 | 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名）；`ON CONFLICT [(cols)] DO NOTHING / DO UPDATE SET …`（含 `EXCLUDED`）；`UPDATE … FROM`、`DELETE … USING`（数据源同 `SELECT` 的 `FROM`：多表 / `JOIN` / 派生表 / `(VALUES …)`）；`WHERE` / `SET` / `VALUES` 里可以用子查询（`IN (SELECT …)`、标量、`EXISTS`） |
@@ -59,7 +59,7 @@ go build -o godb.exe .
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
 | 聚合 | `count(*)`、`count(x)`、`sum`、`avg`、`min`、`max`，支持 `DISTINCT` |
 | 表达式 | 算术 `+ - * / %`、位运算 `& \| #`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`（含子查询）、`EXISTS (子查询)`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`（含 `information_schema.sql_identifier` 这类带 schema 的类型名）、**带类型前缀的字面量 `DATE '2024-01-01'` / `TIMESTAMP '…'` / `TIME '…'`**、数组下标 `a[i]`、`\|\|` |
-| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches/string_agg`；日期 `EXTRACT(field FROM x)` / `date_part` / `date_trunc`；序列 `nextval/currval/lastval/setval/pg_get_serial_sequence` |
+| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches/string_agg/lpad/rpad/random`；日期 `EXTRACT(field FROM x)` / `date_part` / `date_trunc`；序列 `nextval/currval/lastval/setval/pg_get_serial_sequence`；`unnest(array)`（SELECT 列表会展开成多行，或 `FROM unnest(...)`） |
 | 事务 | `BEGIN`/`START TRANSACTION`（可带 `ISOLATION LEVEL …`、`READ ONLY/READ WRITE`）、`COMMIT`、`ROLLBACK`；**`SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`**（ORM 的嵌套事务靠它）；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |

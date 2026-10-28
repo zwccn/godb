@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 	"strings"
@@ -491,13 +492,22 @@ type sortKey struct {
 	nullsFirst bool
 }
 
+// sortEntry 是一行及其预计算的排序键（一次 Eval，比较时不再反复求值）。
+type sortEntry struct {
+	row  types.Row
+	keys []types.Value
+}
+
 type sortOp struct {
 	child Operator
 	keys  []sortKey
-	rows  []types.Row
+	rows  []sortEntry
 	i     int
 	sc    Schema
 	err   error
+	// topN > 0 时用「大小为 N 的最大堆」只保留前 N 行（含 OFFSET），
+	// 不把整段结果物化下来再全排。分页 `ORDER BY … LIMIT n` 靠它。
+	topN int
 }
 
 func (o *sortOp) Schema() Schema       { return o.sc }
@@ -512,7 +522,64 @@ func (o *sortOp) Describe() string {
 		}
 		parts[i] = d
 	}
-	return "Sort (" + strings.Join(parts, ", ") + ")"
+	name := "Sort (" + strings.Join(parts, ", ") + ")"
+	if o.topN > 0 {
+		name = "Top-N " + name + fmt.Sprintf(" (n=%d)", o.topN)
+	}
+	return name
+}
+
+// lessEntry 按排序键比较两行：true 表示 a 应该排在 b 前面。
+func (o *sortOp) lessEntry(a, b sortEntry) bool {
+	for i, k := range o.keys {
+		av, bv := a.keys[i], b.keys[i]
+		c := 0
+		switch {
+		case av.IsNull() && bv.IsNull():
+			continue
+		case av.IsNull():
+			// 空值位置与排序方向无关（NULLS FIRST / LAST 是绝对位置）
+			return k.nullsFirst
+		case bv.IsNull():
+			return !k.nullsFirst
+		default:
+			cmp, err := types.Compare(av, bv)
+			if err != nil {
+				o.err = err
+				return false
+			}
+			c = cmp
+		}
+		if c == 0 {
+			continue // 这一列相等，看下一列；别在这里就 return false
+		}
+		if k.desc {
+			return c > 0
+		}
+		return c < 0
+	}
+	return false
+}
+
+// topNHeap 是「保留最好的 N 个」用的最大堆：堆顶是当前最差的那行（要被淘汰的）。
+// container/heap 是小顶堆，所以 Less 表示「更差、更该丢」。
+type topNHeap struct {
+	op    *sortOp
+	items []sortEntry
+}
+
+func (h *topNHeap) Len() int { return len(h.items) }
+func (h *topNHeap) Less(i, j int) bool {
+	// 堆顶 = 最差 = 排序序里最大（ASC 时键值最大）
+	return h.op.lessEntry(h.items[j], h.items[i])
+}
+func (h *topNHeap) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *topNHeap) Push(x any)    { h.items = append(h.items, x.(sortEntry)) }
+func (h *topNHeap) Pop() any {
+	n := len(h.items)
+	it := h.items[n-1]
+	h.items = h.items[:n-1]
+	return it
 }
 
 func (o *sortOp) Open() error {
@@ -522,59 +589,69 @@ func (o *sortOp) Open() error {
 	o.rows = o.rows[:0]
 	o.i = 0
 	o.err = nil
-	for {
-		row, ok, err := o.child.Next()
-		if err != nil {
-			return err
+
+	// 预计算排序键：每行只 Eval 一次，比较时直接用值
+	makeEntry := func(row types.Row) (sortEntry, error) {
+		ks := make([]types.Value, len(o.keys))
+		for i, k := range o.keys {
+			v, err := k.eval.Eval(row)
+			if err != nil {
+				return sortEntry{}, err
+			}
+			ks[i] = v
 		}
-		if !ok {
-			break
-		}
-		o.rows = append(o.rows, row)
+		return sortEntry{row: row, keys: ks}, nil
 	}
-	keys := o.keys
-	rows := o.rows
-	sort.SliceStable(rows, func(i, j int) bool {
+
+	if o.topN > 0 {
+		h := &topNHeap{op: o}
+		for {
+			row, ok, err := o.child.Next()
+			if err != nil {
+				return err
+			}
+			if !ok {
+				break
+			}
+			e, err := makeEntry(row)
+			if err != nil {
+				return err
+			}
+			if h.Len() < o.topN {
+				heap.Push(h, e)
+			} else if o.lessEntry(e, h.items[0]) {
+				// e 比堆顶（当前最差）更好 → 换掉堆顶
+				h.items[0] = e
+				heap.Fix(h, 0)
+			}
+			if o.err != nil {
+				return o.err
+			}
+		}
+		o.rows = h.items
+	} else {
+		for {
+			row, ok, err := o.child.Next()
+			if err != nil {
+				return err
+			}
+			if !ok {
+				break
+			}
+			e, err := makeEntry(row)
+			if err != nil {
+				return err
+			}
+			o.rows = append(o.rows, e)
+		}
+	}
+	// 堆里是「按最差优先」的无序序列，最后再整体排成正确顺序
+	entries := o.rows
+	sort.SliceStable(entries, func(i, j int) bool {
 		if o.err != nil {
 			return false
 		}
-		for _, k := range keys {
-			av, err := k.eval.Eval(rows[i])
-			if err != nil {
-				o.err = err
-				return false
-			}
-			bv, err := k.eval.Eval(rows[j])
-			if err != nil {
-				o.err = err
-				return false
-			}
-			c := 0
-			switch {
-			case av.IsNull() && bv.IsNull():
-				continue
-			case av.IsNull():
-				// 空值位置与排序方向无关（NULLS FIRST / LAST 是绝对位置）
-				return k.nullsFirst
-			case bv.IsNull():
-				return !k.nullsFirst
-			default:
-				cmp, err := types.Compare(av, bv)
-				if err != nil {
-					o.err = err
-					return false
-				}
-				c = cmp
-			}
-			if c == 0 {
-				continue // 这一列相等，看下一列；别在这里就 return false
-			}
-			if k.desc {
-				return c > 0
-			}
-			return c < 0
-		}
-		return false
+		return o.lessEntry(entries[i], entries[j])
 	})
 	return o.err
 }
@@ -583,7 +660,7 @@ func (o *sortOp) Next() (types.Row, bool, error) {
 	if o.i >= len(o.rows) {
 		return nil, false, nil
 	}
-	r := o.rows[o.i]
+	r := o.rows[o.i].row
 	o.i++
 	return r, true, nil
 }

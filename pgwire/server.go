@@ -969,6 +969,15 @@ func textValue(v interface{}) []byte {
 
 func mapError(err error) (string, string) {
 	msg := err.Error()
+	// 背压错误：用标准 SQLSTATE，客户端能识别为「暂时不可用」并重试
+	var tq *db.TooManyQueuedError
+	var qt *db.QueueTimeoutError
+	if errors.As(err, &tq) {
+		return "53300", msg // too_many_connections
+	}
+	if errors.As(err, &qt) {
+		return "55P03", msg // lock_not_available
+	}
 	switch {
 	case strings.Contains(msg, "syntax error") || strings.Contains(msg, "unexpected"):
 		return "42601", msg

@@ -214,6 +214,26 @@ func (d *DB) SetMaxConcurrent(n, queueMax int, waitTimeout time.Duration) {
 	d.execWaitTimeout = waitTimeout
 }
 
+// TooManyQueuedError 表示排队队列已满（背压快速失败）。
+// SQLSTATE 53300 (too_many_connections)，客户端可识别为「暂时不可用」并重试。
+type TooManyQueuedError struct {
+	Queued int
+}
+
+func (e *TooManyQueuedError) Error() string {
+	return fmt.Sprintf("too many queued requests (%d), try again later", e.Queued)
+}
+
+// QueueTimeoutError 表示排队等待超时（背压快速失败）。
+// SQLSTATE 55P03 (lock_not_available)，客户端可识别为「锁不可用」并重试。
+type QueueTimeoutError struct {
+	Timeout time.Duration
+}
+
+func (e *QueueTimeoutError) Error() string {
+	return fmt.Sprintf("timed out waiting for execution slot (%s)", e.Timeout)
+}
+
 // acquireExec 取一个执行令牌。带背压：
 //   - 队列满 → 立即返回错误（快速失败，客户端能感知）
 //   - 等待超时 → 立即返回错误
@@ -227,7 +247,7 @@ func (d *DB) acquireExec() (release func(), err error) {
 	}
 	// 背压：排队太长直接拒绝
 	if d.execQueueMax > 0 && d.execWaiters.Load() >= int64(d.execQueueMax) {
-		return nil, fmt.Errorf("too many queued requests (%d), try again later", d.execQueueMax)
+		return nil, &TooManyQueuedError{Queued: d.execQueueMax}
 	}
 	d.execWaiters.Add(1)
 	defer d.execWaiters.Add(-1)
@@ -249,7 +269,7 @@ func (d *DB) acquireExec() (release func(), err error) {
 	case sem <- struct{}{}:
 		return func() { <-sem }, nil
 	case <-timer.C:
-		return nil, fmt.Errorf("timed out waiting for execution slot (%s)", timeout)
+		return nil, &QueueTimeoutError{Timeout: timeout}
 	}
 }
 

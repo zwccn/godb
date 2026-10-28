@@ -367,6 +367,11 @@ class CDP {
         levels: lv.map(el => el.querySelector('.help-lv-title').textContent.trim()),
         // 「明确不支持」那一级没有示例代码是正常的
         noCode: lv.filter(el => !el.classList.contains('is-muted') && !el.querySelector('pre.help-code')).length,
+        // 写类示例（含 INSERT/UPDATE/DELETE/ALTER/TRUNCATE/DROP）不许落在示例数据表上，
+        // 否则用户点一下「执行」就把 departments/employees 改了或清空了
+        writeHitsSample: lv.map(el => el.querySelector('pre.help-code')).filter(Boolean)
+          .filter(co => /\b(INSERT|UPDATE|DELETE|ALTER|TRUNCATE|DROP)\b/i.test(co.textContent))
+          .filter(co => /employees|departments/.test(co.textContent)).length,
         toc: m.querySelectorAll('.help-toc button').length,
         keys: m.querySelectorAll('.help-keys kbd').length,
         fits: m.querySelector('.modal-body').scrollWidth <= m.querySelector('.modal-body').clientWidth + 1,
@@ -381,6 +386,8 @@ class CDP {
         helpUi.levels[10] === '明确不支持',
       helpUi.levels.join(' / '));
     check('每个支持性章节都带可执行的示例代码', helpUi.noCode === 0, `${helpUi.noCode} 级没有代码`);
+    check('写类示例只落在 demo 临时表上（不碰示例数据）', helpUi.writeHitsSample === 0,
+      `${helpUi.writeHitsSample} 段写到示例表上`);
     check('目录条目与章节数一致', helpUi.toc === helpUi.levels.length,
       `${helpUi.toc} 个目录 / ${helpUi.levels.length} 级`);
     check('帮助里有快捷键说明', helpUi.keys >= 3, helpUi.keys + ' 个按键');

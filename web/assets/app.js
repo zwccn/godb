@@ -154,8 +154,10 @@ LIMIT 50;`,
 BEGIN;
 UPDATE employees SET salary = salary + 1000 WHERE dept_id = 1;
 SELECT name, salary FROM employees WHERE dept_id = 1;
--- 满意就执行 COMMIT; 后悔就执行 ROLLBACK;`,
-  ddl: `CREATE TABLE projects (
+-- 满意就执行 COMMIT; 后悔就执行 ROLLBACK;
+-- 想整体还原示例数据：设置 → 数据 → 载入示例数据`,
+  ddl: `DROP TABLE IF EXISTS projects;
+CREATE TABLE projects (
   id       SERIAL PRIMARY KEY,
   name     TEXT NOT NULL UNIQUE,
   owner_id INTEGER,
@@ -172,9 +174,15 @@ WHERE e.salary > 20000
 GROUP BY d.name
 HAVING count(*) > 1
 ORDER BY 人数 DESC;`,
-  alter: `ALTER TABLE employees ADD COLUMN level INTEGER DEFAULT 1;
-SELECT id, name, level FROM employees LIMIT 5;
-ALTER TABLE employees DROP COLUMN level;`,
+  alter: `DROP TABLE IF EXISTS demo_alter;
+CREATE TABLE demo_alter (id INTEGER, note TEXT);
+INSERT INTO demo_alter VALUES (1, 'before');
+
+ALTER TABLE demo_alter ADD COLUMN level INTEGER DEFAULT 1;
+SELECT * FROM demo_alter;          -- 新列按 DEFAULT 回填
+
+ALTER TABLE demo_alter DROP COLUMN level;
+SELECT * FROM demo_alter;`,
 };
 
 /* ---------------- 工具 ---------------- */

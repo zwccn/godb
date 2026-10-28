@@ -197,8 +197,9 @@ try {
     <div class="modal-body">
       <div class="help-intro">
         语法手册，按由浅入深排列；每级都给一段能直接跑的例子。<br>
-        例子基于「设置 → 数据 → 载入示例数据」之后的 <code>departments</code> / <code>employees</code>；
-        点上面的编号可以跳到对应段落。PG 协议端口默认 <code>6432</code>，psql / Navicat / DBeaver 可直连。
+        读的例子都跑在「设置 → 数据 → 载入示例数据」之后的 <code>departments</code> / <code>employees</code> 上；
+        写（建表 / 改 / 删）的例子一律在自己的 <code>demo*</code> 临时表里，<b>不会动你的数据</b>，
+        而且都先 <code>DROP TABLE IF EXISTS</code>，连点两次也不会报「已存在」。
       </div>
 
       <div class="help-toc">
@@ -219,13 +220,14 @@ try {
         <div class="help-lv-no">1</div>
         <div class="help-lv-body">
           <div class="help-lv-title">建表与增删改查</div>
-          <div class="help-lv-desc">最小闭环：建表 → 插数据 → 查 → 改 → 删。</div>
+          <div class="help-lv-desc">最小闭环：建表 → 插数据 → 查 → 改 → 删。表建在 <code>demo</code> 上，不碰示例数据。</div>
           <div class="help-lv-syn"><span><code>CREATE TABLE</code></span><span><code>INSERT</code></span><span><code>SELECT</code></span><span><code>UPDATE</code></span><span><code>DELETE</code></span></div>
-          <pre class="help-code">CREATE TABLE t (id serial PRIMARY KEY, name text, n int);
-INSERT INTO t (name, n) VALUES ('a', 1), ('b', 2);
-SELECT * FROM t;
-UPDATE t SET n = n + 1 WHERE name = 'a';
-DELETE FROM t WHERE id = 2;</pre>
+          <pre class="help-code">DROP TABLE IF EXISTS demo;
+CREATE TABLE demo (id serial PRIMARY KEY, name text, n int);
+INSERT INTO demo (name, n) VALUES ('a', 1), ('b', 2);
+SELECT * FROM demo ORDER BY id;
+UPDATE demo SET n = n + 1 WHERE name = 'a';
+DELETE FROM demo WHERE name = 'b';</pre>
         </div>
       </div>
 
@@ -235,10 +237,12 @@ DELETE FROM t WHERE id = 2;</pre>
           <div class="help-lv-title">查询：筛选、排序、分页、去重</div>
           <div class="help-lv-desc">日常用得最多的一层，条件、排序、翻页、去重都在这里。</div>
           <div class="help-lv-syn"><span><code>WHERE</code></span><span><code>AND / OR / NOT</code></span><span><code>IN</code></span><span><code>BETWEEN</code></span><span><code>LIKE / ILIKE</code></span><span><code>IS NULL</code></span><span><code>ORDER BY ASC/DESC NULLS FIRST|LAST</code></span><span><code>LIMIT / OFFSET</code></span><span><code>DISTINCT</code></span></div>
-          <pre class="help-code">SELECT DISTINCT dept_id FROM employees
-WHERE salary BETWEEN 10000 AND 30000 AND name LIKE '张%'
-ORDER BY salary DESC NULLS LAST
-LIMIT 10 OFFSET 20;</pre>
+          <pre class="help-code">SELECT DISTINCT city FROM departments ORDER BY city;
+
+SELECT name, salary FROM employees
+WHERE salary BETWEEN 20000 AND 45000 AND name LIKE '%张%'
+ORDER BY salary DESC
+LIMIT 5;</pre>
         </div>
       </div>
 
@@ -289,15 +293,19 @@ SELECT count(*) FROM employees WHERE dept_id IN (SELECT id FROM big);</pre>
         <div class="help-lv-no">6</div>
         <div class="help-lv-body">
           <div class="help-lv-title">写入进阶：返回、冲突、批量</div>
-          <div class="help-lv-desc"><code>ON CONFLICT</code> 是「有就改、没有就插」；<code>RETURNING</code> 直接拿到写后的行，省一次查询。</div>
+          <div class="help-lv-desc"><code>ON CONFLICT</code> 是「有就改、没有就插」；<code>RETURNING</code> 直接拿到写后的行，省一次查询。写在 <code>demo_up</code> 上。</div>
           <div class="help-lv-syn"><span><code>RETURNING</code></span><span><code>ON CONFLICT DO NOTHING | DO UPDATE SET … EXCLUDED</code></span><span><code>INSERT … SELECT</code></span><span><code>UPDATE … FROM</code></span><span><code>DELETE … USING</code></span><span>写语句的 <code>WHERE</code>/<code>SET</code>/<code>VALUES</code> 里也能用子查询</span></div>
-          <pre class="help-code">INSERT INTO employees (id, name, salary) VALUES (1, '张伟', 42000)
-ON CONFLICT (id) DO UPDATE SET salary = EXCLUDED.salary
-RETURNING id, name;
+          <pre class="help-code">DROP TABLE IF EXISTS demo_up;
+CREATE TABLE demo_up (id int PRIMARY KEY, name text, salary numeric(10,2));
 
-UPDATE employees e SET salary = s.salary
+INSERT INTO demo_up VALUES (1, '张伟', 42000)
+ON CONFLICT (id) DO UPDATE SET salary = EXCLUDED.salary
+RETURNING id, name, salary;
+
+UPDATE demo_up d SET salary = s.salary
 FROM (VALUES (1, 50000)) s(id, salary)
-WHERE e.id = s.id RETURNING e.id, e.salary;</pre>
+WHERE d.id = s.id
+RETURNING d.id, d.salary;</pre>
         </div>
       </div>
 
@@ -305,12 +313,14 @@ WHERE e.id = s.id RETURNING e.id, e.salary;</pre>
         <div class="help-lv-no">7</div>
         <div class="help-lv-body">
           <div class="help-lv-title">表结构与索引</div>
-          <div class="help-lv-desc">索引是内存 B+Tree，建完立刻生效；等值、范围、<code>IN</code>、<code>ORDER BY</code> 免排序都会用到。</div>
+          <div class="help-lv-desc">索引是内存 B+Tree，建完立刻生效；等值、范围、<code>IN</code>、<code>ORDER BY</code> 免排序都会用到。结构改动在 <code>demo_ddl</code> 上。</div>
           <div class="help-lv-syn"><span><code>ALTER TABLE ADD / DROP / RENAME COLUMN</code></span><span><code>RENAME TO</code></span><span><code>ALTER COLUMN TYPE</code></span><span><code>CREATE [UNIQUE] INDEX</code></span><span><code>DROP INDEX</code></span><span><code>PRIMARY KEY / UNIQUE / NOT NULL / DEFAULT / CHECK / FOREIGN KEY</code></span><span><code>GENERATED AS IDENTITY</code></span><span><code>COMMENT ON</code></span><span><code>TRUNCATE</code></span></div>
-          <pre class="help-code">ALTER TABLE employees ADD COLUMN email text;
-CREATE INDEX idx_emp_dept ON employees (dept_id);
-COMMENT ON TABLE employees IS '员工表';
-TRUNCATE TABLE employees;</pre>
+          <pre class="help-code">DROP TABLE IF EXISTS demo_ddl;
+CREATE TABLE demo_ddl (id int PRIMARY KEY, dept_id int, note text);
+ALTER TABLE demo_ddl ADD COLUMN email text;
+CREATE INDEX idx_demo_ddl_dept ON demo_ddl (dept_id);
+COMMENT ON TABLE demo_ddl IS '结构演示';
+TRUNCATE TABLE demo_ddl;</pre>
         </div>
       </div>
 
@@ -318,14 +328,20 @@ TRUNCATE TABLE employees;</pre>
         <div class="help-lv-no">8</div>
         <div class="help-lv-body">
           <div class="help-lv-title">事务与并发</div>
-          <div class="help-lv-desc">表级 S/X 锁、严格两阶段封锁（可串行化）；<code>SAVEPOINT</code> 用于部分回滚，ORM 的嵌套事务靠它。</div>
+          <div class="help-lv-desc">表级 S/X 锁、严格两阶段封锁（可串行化）；<code>SAVEPOINT</code> 用于部分回滚，ORM 的嵌套事务靠它。演示在 <code>demo_tx</code> 上。</div>
           <div class="help-lv-syn"><span><code>BEGIN</code> / <code>START TRANSACTION</code>（<code>ISOLATION LEVEL …</code>、<code>READ ONLY</code>）· <code>COMMIT</code></span><span><code>ROLLBACK</code></span><span><code>SAVEPOINT</code> / <code>ROLLBACK TO SAVEPOINT</code> / <code>RELEASE SAVEPOINT</code></span></div>
-          <pre class="help-code">BEGIN;
-UPDATE employees SET salary = salary + 100 WHERE id = 1;
+          <pre class="help-code">DROP TABLE IF EXISTS demo_tx;
+CREATE TABLE demo_tx (id int PRIMARY KEY, v int);
+INSERT INTO demo_tx VALUES (1, 100), (2, 200);
+
+BEGIN;
+UPDATE demo_tx SET v = v + 1 WHERE id = 1;
 SAVEPOINT sp1;
-DELETE FROM employees WHERE id = 2;
+DELETE FROM demo_tx WHERE id = 2;
 ROLLBACK TO SAVEPOINT sp1;   -- 只撤销上面那条 DELETE
-COMMIT;</pre>
+COMMIT;
+
+SELECT * FROM demo_tx ORDER BY id;</pre>
         </div>
       </div>
 
@@ -338,9 +354,11 @@ COMMIT;</pre>
           <pre class="help-code">SELECT extract(year FROM now()) AS y,
        date_trunc('month', now()) AS m,
        coalesce(nullif(title, ''), '未填') AS t,
-       round(avg(salary), 2) AS avg_pay
+       salary
 FROM employees
-GROUP BY 1, 2, 3;</pre>
+ORDER BY salary DESC LIMIT 5;
+
+SELECT count(*) AS n, round(avg(salary), 2) AS avg_pay FROM employees;</pre>
         </div>
       </div>
 

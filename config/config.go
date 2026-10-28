@@ -71,6 +71,11 @@ type Performance struct {
 	// MaxConcurrent：同时执行 SQL 的最大并发数，超出的排队等。
 	// 0 表示不限制。防止大量并发大查询把内存吃光（godb 全内存驻留）。
 	MaxConcurrent int `json:"maxConcurrent"`
+	// MaxQueued：排队上限，超过就快速失败（背压）。
+	// 0 = 不限排队（只靠 WaitTimeout 兜底）。
+	MaxQueued int `json:"maxQueued"`
+	// WaitTimeoutMs：排队最长等待（毫秒），超过快速失败。
+	WaitTimeoutMs int `json:"waitTimeoutMs"`
 }
 
 // Config 是完整的配置文件内容。
@@ -104,6 +109,8 @@ func Default() Config {
 		},
 		Performance: Performance{
 			MaxConcurrent: 32,
+			MaxQueued:     256,
+			WaitTimeoutMs: 3000,
 		},
 	}
 }
@@ -144,6 +151,12 @@ func (c *Config) Validate() error {
 
 	if c.Performance.MaxConcurrent < 0 || c.Performance.MaxConcurrent > 10000 {
 		return fmt.Errorf("「最大并发数」必须在 0 到 10000 之间（0 = 不限）")
+	}
+	if c.Performance.MaxQueued < 0 || c.Performance.MaxQueued > 100000 {
+		return fmt.Errorf("「排队上限」必须在 0 到 100000 之间（0 = 不限）")
+	}
+	if c.Performance.WaitTimeoutMs < 0 || c.Performance.WaitTimeoutMs > 60000 {
+		return fmt.Errorf("「排队超时」必须在 0 到 60000 毫秒之间")
 	}
 
 	if err := checkPort("HTTP 端口", c.Network.HTTPPort); err != nil {

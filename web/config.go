@@ -170,7 +170,8 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.DB.Store.SetCheckpointPolicy(toPolicy(saved.Storage))
-	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent)
+	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent, saved.Performance.MaxQueued,
+		time.Duration(saved.Performance.WaitTimeoutMs)*time.Millisecond)
 	writeJSON(w, http.StatusOK, s.configView(r))
 }
 

@@ -114,7 +114,8 @@ func main() {
 	}
 	d := dbs.Default()
 	d.Store.SetCheckpointPolicy(storagePolicy(conf.Storage))
-	d.SetMaxConcurrent(conf.Performance.MaxConcurrent)
+	d.SetMaxConcurrent(conf.Performance.MaxConcurrent, conf.Performance.MaxQueued,
+		time.Duration(conf.Performance.WaitTimeoutMs)*time.Millisecond)
 
 	// 慢语句日志：诊断开关，走命令行，不进配置文件。
 	if *slow > 0 {

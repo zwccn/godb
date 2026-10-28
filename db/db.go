@@ -96,8 +96,12 @@ type DB struct {
 	// 超出的在 Exec 入口排队等（不占表锁、不扫表、不占内存）。
 	// nil 表示不限制。
 	execSem chan struct{}
-	// SetMaxConcurrent 动态调整并发上限（配置热更新用）。
-	// 0 = 不限。缩小时已在执行的不受影响，新的按新值排。
+	// execWaiters 是当前排队等待信号量的 goroutine 数（背压用）。
+	execWaiters atomic.Int64
+	// execQueueMax 是排队上限：超过就快速失败（背压），0 = 不限。
+	execQueueMax int
+	// execWaitTimeout 是排队最长等待时间：超过就快速失败。
+	execWaitTimeout time.Duration
 
 	lockOpts lock.Options
 
@@ -199,23 +203,54 @@ func (d *DB) Dir() string { return d.dir }
 
 // SetMaxConcurrent 设置并发执行上限（0 = 不限）。
 // 配置热更新时调用。已在执行的不受影响，新的按新值排。
-func (d *DB) SetMaxConcurrent(n int) {
+func (d *DB) SetMaxConcurrent(n, queueMax int, waitTimeout time.Duration) {
 	if n <= 0 {
 		d.execSem = nil
+		d.execQueueMax = 0
 		return
 	}
 	d.execSem = make(chan struct{}, n)
+	d.execQueueMax = queueMax
+	d.execWaitTimeout = waitTimeout
 }
 
-// acquireExec 取一个执行令牌；limit 为 0 时直接放行。
-// 返回释放函数。
-func (d *DB) acquireExec() (release func()) {
+// acquireExec 取一个执行令牌。带背压：
+//   - 队列满 → 立即返回错误（快速失败，客户端能感知）
+//   - 等待超时 → 立即返回错误
+//   - 0 = 不限并发时直接放行
+//
+// 返回 release 函数。error 非 nil 时不需要调 release。
+func (d *DB) acquireExec() (release func(), err error) {
 	sem := d.execSem
 	if sem == nil {
-		return func() {}
+		return func() {}, nil
 	}
-	sem <- struct{}{}
-	return func() { <-sem }
+	// 背压：排队太长直接拒绝
+	if d.execQueueMax > 0 && d.execWaiters.Load() >= int64(d.execQueueMax) {
+		return nil, fmt.Errorf("too many queued requests (%d), try again later", d.execQueueMax)
+	}
+	d.execWaiters.Add(1)
+	defer d.execWaiters.Add(-1)
+
+	// 快速尝试
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	default:
+	}
+	// 排队等（带超时）
+	timeout := d.execWaitTimeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-timer.C:
+		return nil, fmt.Errorf("timed out waiting for execution slot (%s)", timeout)
+	}
 }
 
 // Session 取出（或创建）一个会话。
@@ -243,8 +278,10 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 		return nil, fmt.Errorf("database %q has been dropped", d.Name)
 	}
 	// 并发上限：信号量按事务持有（不是按单条 SQL），避免锁×信号量交叉死锁。
-	// 自动提交：获取→执行→释放；显式事务：BEGIN 获取，COMMIT/ROLLBACK 释放。
-	sess.AcquireExecToken()
+	// 带背压：队列满/超时快速失败，客户端能感知并降级。
+	if err := sess.AcquireExecToken(); err != nil {
+		return nil, err
+	}
 
 	start := hrtime.Now()
 	stmts, err := sql.Parse(text)

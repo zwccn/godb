@@ -5,6 +5,7 @@
 package syscat
 
 import (
+	"runtime"
 	"strings"
 	"sync"
 
@@ -51,11 +52,34 @@ const DatabaseName = DefaultDatabaseName
 const (
 	ServerVersion    = "10.0"
 	ServerVersionNum = "100000"
-	GodbVersion      = "0.1.0"
+	GodbVersion      = "0.2.0"
 )
 
 // ServerVersionLine 是 version() 的返回值。
-const ServerVersionLine = "PostgreSQL " + ServerVersion + " (godb " + GodbVersion + ") on x86_64-pc-windows, compiled by Go"
+//
+// 平台部分按实际编译目标推导，不写死：发布物有 windows / linux / darwin
+// 共 6 个组合，写死 x86_64-pc-windows 会让 linux 和 macOS 用户看到错误的
+// 编译平台。格式沿用 PG 的目标三元组习惯。
+var ServerVersionLine = "PostgreSQL " + ServerVersion + " (godb " + GodbVersion + ") on " + targetTriple() + ", compiled by Go"
+
+// targetTriple 把 GOOS/GOARCH 映射成 PG 常见的目标三元组。
+func targetTriple() string {
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "windows/amd64":
+		return "x86_64-pc-windows"
+	case "windows/arm64":
+		return "aarch64-pc-windows"
+	case "linux/amd64":
+		return "x86_64-pc-linux-gnu"
+	case "linux/arm64":
+		return "aarch64-unknown-linux-gnu"
+	case "darwin/amd64":
+		return "x86_64-apple-darwin"
+	case "darwin/arm64":
+		return "arm64-apple-darwin"
+	}
+	return runtime.GOOS + "-" + runtime.GOARCH
+}
 
 // colSpec 是虚拟表的一列。
 type colSpec struct{ name, typ string }

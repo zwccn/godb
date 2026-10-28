@@ -9,9 +9,14 @@ godb
 # 运行时数据（WAL / 快照 / 表结构），首次启动会自动生成
 godb-data/
 godb-data.bak/
-# 带时间戳的备份（拉上游前手动做的）
+# 带时间戳的备份（拉上游前手动做的；lost-* 是事故现场保留目录）
 godb-data.bak-*/
+godb-data.lost-*/
 godb.exe.bak-*
+config.json.bak-*
+
+# 调试用的临时截图
+_shot_*.png
 
 # 日志与临时文件
 *.log

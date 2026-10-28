@@ -63,12 +63,20 @@ func Load(dir string, seed Config, seedFlags []string) (*Store, error) {
 		if err := json.Unmarshal(b, &c); err != nil {
 			return nil, fmt.Errorf("配置文件 %s 解析失败: %w（可以删掉它恢复默认配置）", s.path, err)
 		}
+		oldVer := c.Version
 		c.Normalize()
 		if err := c.Validate(); err != nil {
 			return nil, fmt.Errorf("配置文件 %s 不合法: %w", s.path, err)
 		}
 		s.cur = c
 		s.IgnoredFlags = append(s.IgnoredFlags, seedFlags...)
+		// 迁移过就写回文件：不然每次启动都要再算一遍，用户也看不到
+		// 新增的 timeouts 段（会以为面板上的开关没保存）。
+		if oldVer < c.Version {
+			if err := writeAtomic(s.path, c); err != nil {
+				return nil, fmt.Errorf("配置文件 %s 已升级到 v%d，但写回失败: %w", s.path, c.Version, err)
+			}
+		}
 		return s, nil
 	case os.IsNotExist(err):
 		seed.Normalize()

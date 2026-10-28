@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"godb/hrtime"
 	"godb/types"
 )
 
@@ -171,7 +172,17 @@ func (s *Store) Checkpoint() error {
 	// 手动 CHECKPOINT / 退出时的 Flush 也算一次落盘：更新统计并清零计数，
 	// 否则后台定时器还会因为「计数没清」再补写一次快照。
 	// （这一步现在由 checkpointBodyLocked 内部完成）
-	return s.forceCheckpointLocked()
+	return s.forceCheckpointLocked(CPReasonManual)
+}
+
+// CheckpointDDL 是 DDL 之后的强制落盘。
+//
+// 触发原因单独记成 ddl：DDL 引起的落盘往往是一次整表重写，正好能解释
+// 「为什么刚才那几十毫秒 fsync 变慢了」。
+func (s *Store) CheckpointDDL() error {
+	s.CommitMu.Lock()
+	defer s.CommitMu.Unlock()
+	return s.forceCheckpointLocked(CPReasonDDL)
 }
 
 // Flush 强制落盘：先把 WAL 里未 fsync 的记录刷下去，再做一次 checkpoint。
@@ -190,7 +201,7 @@ func (s *Store) Flush() error {
 	}
 	// Flush（手动 CHECKPOINT / 进程退出）同样算一次落盘：更新统计并清零
 	// 提交计数，否则后台定时器会因为「计数没清」再补写一次快照。
-	return s.forceCheckpointLocked()
+	return s.forceCheckpointLocked(CPReasonFlush)
 }
 
 // snapshotJob 是一次「已经拍好的快照」：只持有行切片的引用，不含序列化结果。
@@ -313,7 +324,8 @@ func (s *Store) checkpointFinishLocked(job *snapshotJob) error {
 // 调用方必须持有 CommitMu，并且仍在 SchemaMu 的锁内 —— 行数据在锁外被读的
 // 前提是期间没有 DDL 能改它们。checkpoint 的所有触发点都满足：提交在语句的
 // 读锁内，DDL 的 checkpoint 在写锁内，后台 ticker 自己先拿读锁。
-func (s *Store) checkpointBodyLocked() error {
+func (s *Store) checkpointBodyLocked(reason string) error {
+	t0 := hrtime.Now()
 	job := s.checkpointStartLocked()
 	s.CommitMu.Unlock()
 	err := func() error {
@@ -328,7 +340,7 @@ func (s *Store) checkpointBodyLocked() error {
 	if err := s.checkpointFinishLocked(job); err != nil {
 		return err
 	}
-	s.noteCheckpointLocked()
+	s.noteCheckpointLocked(reason, hrtime.Since(t0), job.written, len(job.tables))
 	return nil
 }
 
@@ -339,24 +351,24 @@ func (s *Store) checkpointBodyLocked() error {
 // 而 WAL 又被轮转掉，那就是真的丢数据了。
 //
 // 返回值表示「这一轮到底落了盘没有」：提交路径要靠它决定还用不用等 fsync。
-func (s *Store) tryCheckpointLocked() (bool, error) {
+func (s *Store) tryCheckpointLocked(reason string) (bool, error) {
 	if !s.cpBusy.CompareAndSwap(false, true) {
 		return false, nil
 	}
 	defer s.cpBusy.Store(false)
-	return true, s.checkpointBodyLocked()
+	return true, s.checkpointBodyLocked(reason)
 }
 
 // forceCheckpointLocked 用于 CHECKPOINT 语句、DDL 与关闭：语义要求返回时确实已落盘，
 // 所以撞上正在写的那一轮就等它。（轮询期间放开 CommitMu，别把提交堵死。）
-func (s *Store) forceCheckpointLocked() error {
+func (s *Store) forceCheckpointLocked(reason string) error {
 	for !s.cpBusy.CompareAndSwap(false, true) {
 		s.CommitMu.Unlock()
 		time.Sleep(2 * time.Millisecond)
 		s.CommitMu.Lock()
 	}
 	defer s.cpBusy.Store(false)
-	return s.checkpointBodyLocked()
+	return s.checkpointBodyLocked(reason)
 }
 
 // SnapshotInfo 是给 CHECKPOINT 语句/状态查询用的快照信息。

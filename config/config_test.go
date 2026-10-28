@@ -122,7 +122,7 @@ func TestLoadRejectsBrokenFile(t *testing.T) {
 }
 
 func TestSeedFromFlags(t *testing.T) {
-	c := Seed("0.0.0.0:9090", "127.0.0.1:7000")
+	c := Seed("0.0.0.0:9090", "127.0.0.1:7000", -1)
 	if c.Network.HTTPPort != 9090 || !c.Network.HTTPRemote {
 		t.Fatalf("HTTP 种子不对: %+v", c.Network)
 	}
@@ -130,7 +130,7 @@ func TestSeedFromFlags(t *testing.T) {
 		t.Fatalf("PG 种子不对: %+v", c.Network)
 	}
 
-	c = Seed("127.0.0.1:8080", "")
+	c = Seed("127.0.0.1:8080", "", -1)
 	if c.Network.PGEnabled {
 		t.Fatal("-pg 为空时应该禁用 PG 协议")
 	}

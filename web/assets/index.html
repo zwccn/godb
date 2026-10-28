@@ -55,9 +55,9 @@ try {
     <!-- 顶栏只留「随时要看 / 随手要切」的东西：库、事务状态、锁、设置。
          皮肤、字号、载入示例数据、清空数据库都是低频操作，收进设置页。 -->
     <span id="txPill" class="pill pill-idle">空闲</span>
-    <!-- 窄屏把「锁状态」缩成「锁」，省下来的宽度留给库下拉和执行 -->
-    <button id="btnLocks" class="btn btn-ghost" title="锁状态">
-      <span class="lbl-full">锁状态</span><span class="lbl-short">锁</span><span id="lockBadge" class="badge hidden">0</span>
+    <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
+    <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务">
+      <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span>
     </button>
     <button id="btnSettings" class="btn btn-ghost">设置</button>
   </div>
@@ -122,14 +122,105 @@ try {
   </section>
 </main>
 
-<aside id="lockPanel" class="drawer hidden" aria-label="锁状态">
-  <div class="drawer-head">
-    <span>锁状态</span>
-    <button id="btnLockClose" class="icon-btn" title="关闭">×</button>
+<!-- 监控面板：四块 + 底部超时开关，按「卡在哪 / 谁持有 / 持多久 / 是哪种慢」排布。
+     全屏而不是抽屉：锁明细有 8 列，窄抽屉里横着滚谁都看不清。 -->
+<section id="monPanel" class="mon hidden" aria-label="监控面板">
+  <div class="mon-head">
+    <div class="mon-title">
+      监控
+      <span class="mon-db" id="monDB">godb</span>
+      <span class="mon-updated" id="monUpdated"></span>
+    </div>
+    <div class="mon-head-actions">
+      <button id="btnMonRefresh" class="icon-btn" title="立即刷新">⟳</button>
+      <button id="btnMonClose" class="icon-btn" title="关闭（Esc）">×</button>
+    </div>
   </div>
-  <div id="lockBody" class="drawer-body"></div>
-  <div class="drawer-foot"><span id="lockMeta">—</span></div>
-</aside>
+
+  <div class="mon-body">
+    <!-- 1. 水位条：一排数字 + 健康灯。绿灯不用往下看。 -->
+    <div class="mon-water" id="monWater"></div>
+
+    <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
+    <div class="mon-layers" id="monLayers"></div>
+
+    <!-- 3. 锁明细：谁持有、持多久、事务在忙还是闲着、谁在等 -->
+    <section class="mon-card">
+      <div class="mon-card-head">
+        <span>锁明细</span>
+        <span class="mon-sub" id="monLockSub">按持有时长降序 · 点行展开事务详情</span>
+      </div>
+      <div class="mon-lockwrap">
+        <table class="mon-locks">
+          <thead>
+            <tr>
+              <th class="c-table">表名</th>
+              <th class="c-mode">锁</th>
+              <th class="c-sess">持有者</th>
+              <th class="c-held">已持有时长</th>
+              <th class="c-state">事务状态</th>
+              <th class="c-sql">最后一条 SQL</th>
+              <th class="c-wait">等待者</th>
+              <th class="c-act">操作</th>
+            </tr>
+          </thead>
+          <tbody id="monLockBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 4. 资源：进程自身 + 存储 IO。
+         全部由标准库采集（runtime/metrics + getrusage/GetProcessTimes），
+         不依赖任何系统命令行工具，三平台行为一致。 -->
+    <div class="mon-two">
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>进程资源</span>
+          <span class="mon-sub">每秒采样 · 最近 5 分钟</span>
+        </div>
+        <div class="mon-proc" id="monProc"></div>
+      </section>
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>存储与 IO</span>
+          <span class="mon-sub">fsync = 提交实际等待</span>
+        </div>
+        <div class="mon-io" id="monIO"></div>
+      </section>
+    </div>
+
+    <!-- 5. 慢SQL / 慢事务：两个并列 Top N -->
+    <div class="mon-two">
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>慢 SQL</span>
+          <span class="mon-sub">Top 10 · 按执行耗时</span>
+        </div>
+        <div class="mon-list" id="monSlowSQL"></div>
+      </section>
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>慢事务</span>
+          <span class="mon-sub">Top 10 · 按持锁时长</span>
+        </div>
+        <div class="mon-list" id="monSlowTx"></div>
+      </section>
+    </div>
+
+    <!-- 5. 超时开关：默认全「不限」，看着上面的时长分布自己决定开哪个 -->
+    <section class="mon-card" id="monTimeoutCard">
+      <div class="mon-card-head">
+        <span>超时开关</span>
+        <span class="mon-sub">默认全为「不限」；0 或留空 = 不限制</span>
+      </div>
+      <div class="mon-timeouts" id="monTimeouts"></div>
+      <div class="mon-tfoot">
+        <span class="mon-hint" id="monTimeoutHint"></span>
+        <button class="btn btn-primary btn-sm" id="btnMonSaveTimeouts" type="button">保存并应用</button>
+      </div>
+    </section>
+  </div>
+</section>
 
 <div id="dbModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="数据库">
   <div class="modal-card mid">
@@ -164,6 +255,33 @@ try {
       <span id="dbHint" class="modal-hint"></span>
       <div class="foot-actions">
         <button id="btnDBDone" class="btn btn-sm" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="confirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="危险操作确认">
+  <div class="modal-card narrow">
+    <div class="modal-head">
+      <span id="cfTitle">危险操作</span>
+      <button id="cfClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="modal-body cf-body">
+      <div id="cfDesc" class="cf-desc"></div>
+      <div id="cfList" class="cf-list hidden"></div>
+      <div class="cf-label">请输入库名 <b id="cfWord" class="cf-word"></b> 以继续</div>
+      <input id="cfInput" class="cf-input" type="text" spellcheck="false"
+             autocomplete="off" autocapitalize="off" autocorrect="off">
+      <div class="cf-note">
+        删除前会把表结构 + 数据备份到数据目录的 <code>.trash</code>，
+        误删可在停服后用 <code>godb.exe -restore-trash latest</code> 找回。
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span id="cfHint" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="cfCancel" class="btn btn-sm" type="button">取消</button>
+        <button id="cfOk" class="btn btn-sm btn-danger" type="button" disabled>确认</button>
       </div>
     </div>
   </div>

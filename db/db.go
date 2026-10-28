@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,6 +104,13 @@ type DB struct {
 	// execWaitTimeout 是排队最长等待时间：超过就快速失败。
 	execWaitTimeout time.Duration
 
+	// act 是监控面板的数据源（会话活动状态机 + 时长样本 + 慢 SQL 记录）。
+	act *recorder
+	// proc 是进程/存储资源的秒级采样器（第一档：全标准库，零 cgo）。
+	proc *procSampler
+	// timeouts 是面板底部的四个超时开关，热更新（0 = 不限）。
+	timeouts atomic.Pointer[TimeoutStatus]
+
 	lockOpts lock.Options
 
 	mu       sync.Mutex
@@ -150,7 +158,12 @@ func Open(dir string, o Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o.Lock.Timeout <= 0 {
+	// 只有「没设置」（0）才用默认 3 秒；-1 是调用方明确的「不限」。
+	//
+	// 注意：应用层（main.go）永远显式传值，配置文件里的 0 在这里被翻译成 -1，
+	// 所以「出厂不限」不会被这条兜底改回 3 秒。这个 3 秒只留给内嵌/测试调用，
+	// 免得它们什么都不传时永久挂住。
+	if o.Lock.Timeout == 0 {
 		o.Lock = lock.DefaultOptions()
 	}
 	name := strings.ToLower(strings.TrimSpace(o.Name))
@@ -168,12 +181,16 @@ func Open(dir string, o Options) (*DB, error) {
 		lockOpts: o.Lock,
 		sessions: map[string]*txn.Session{},
 		stop:     make(chan struct{}),
+		act:      newRecorder(),
+		proc:     newProcSampler(),
 	}
 	// Info.Name 是库名；All 由 Manager 在打开后注入（它才知道一共有哪些库）。
 	d.Engine = &exec.Engine{Dir: dir, Cat: cat, Store: st,
 		Info: &exec.DBInfo{Name: name}}
 	d.ClockGranNs = int64(hrtime.Granularity())
 	go d.sweepSessions()
+	// 资源采样独立于面板：面板关着也要有曲线，否则打开时看到的永远是空历史。
+	go d.proc.run(d, d.stop)
 	return d, nil
 }
 
@@ -237,10 +254,11 @@ func (e *QueueTimeoutError) Error() string {
 // acquireExec 取一个执行令牌。带背压：
 //   - 队列满 → 立即返回错误（快速失败，客户端能感知）
 //   - 等待超时 → 立即返回错误
+//   - 队列被取消（面板 Kill / 客户端断开）→ 立即返回
 //   - 0 = 不限并发时直接放行
 //
 // 返回 release 函数。error 非 nil 时不需要调 release。
-func (d *DB) acquireExec() (release func(), err error) {
+func (d *DB) acquireExec(sess *txn.Session) (release func(), err error) {
 	sem := d.execSem
 	if sem == nil {
 		return func() {}, nil
@@ -255,23 +273,36 @@ func (d *DB) acquireExec() (release func(), err error) {
 	// 快速尝试
 	select {
 	case sem <- struct{}{}:
+		d.act.set(sess.ID, ActRunning, nil, false)
 		return func() { <-sem }, nil
 	default:
 	}
-	// 排队等（带超时）
+
+	// 排队等（带超时与取消）
+	d.act.set(sess.ID, ActQueued, nil, false)
+	start := hrtime.Now()
 	timeout := d.execWaitTimeout
-	if timeout <= 0 {
-		timeout = 3 * time.Second
+	var timer *time.Timer
+	var expire <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		defer timer.Stop()
+		expire = timer.C
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case sem <- struct{}{}:
+		d.act.noteQueueWait(hrtime.Since(start))
+		d.act.set(sess.ID, ActRunning, nil, false)
 		return func() { <-sem }, nil
-	case <-timer.C:
+	case <-expire:
 		return nil, &QueueTimeoutError{Timeout: timeout}
+	case <-sess.CancelCh():
+		return nil, ErrCanceled
 	}
 }
+
+// ErrCanceled 表示操作被用户取消（面板 Kill）。
+var ErrCanceled = errors.New("canceling statement due to user request")
 
 // Session 取出（或创建）一个会话。
 func (d *DB) Session(id string) *txn.Session {
@@ -281,7 +312,19 @@ func (d *DB) Session(id string) *txn.Session {
 	if !ok {
 		s = txn.NewSession(id, d.Store, d.Mgr, d.Locks, d.Iso, d.lockOpts)
 		// 注入信号量获取函数：session 在事务结束时调用 releaseAll 释放。
-		s.SetExecToken(d.acquireExec)
+		s.SetExecToken(func() (func(), error) { return d.acquireExec(s) })
+		// 注入观测钩子：txn 层只负责报告「等锁 / 执行 / 空闲」，
+		// 剩下的（SQL 文本、耗时样本）由 db 层自己记。
+		s.SetObserve(func(state string, tables []string) {
+			// 事务结束要顺带把「还在事务里」的标记清掉，否则 Kill/回滚之后
+			// 这条会话会一直挂在慢事务列表里（inTx 没人再改它）。
+			if state == txn.ObsTxEnd {
+				d.act.setTx(s.ID, false, time.Time{}, 0, time.Now())
+				d.act.set(s.ID, ActIdle, nil, false)
+				return
+			}
+			d.act.set(s.ID, state, tables, false)
+		})
 		d.sessions[id] = s
 	}
 	return s
@@ -297,10 +340,20 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	if d.closed.Load() {
 		return nil, fmt.Errorf("database %q has been dropped", d.Name)
 	}
+	// 上一次 Kill 的取消标志如果还挂着，说明那条语句已经跑完并收过尾了。
+	// 这里清掉再放行 —— 取消只针对「那一次动作」，不能让它把会话变成永久废人。
+	if sess.Canceled() {
+		sess.ClearCancel()
+	}
+	// 监控：SQL 文本先记下来，排队阶段面板也能看见「谁在等、等的是什么」。
+	d.act.setUser(sess.ID, sess.User)
+	d.act.setSQL(sess.ID, text, nil, false)
+
 	// 并发上限：信号量按事务持有（不是按单条 SQL），避免锁×信号量交叉死锁。
 	// 带背压：队列满/超时快速失败，客户端能感知并降级。
-	if err := sess.AcquireExecToken(); err != nil {
-		return nil, err
+	if aerr := sess.AcquireExecToken(); aerr != nil {
+		d.act.set(sess.ID, ActIdle, nil, false)
+		return nil, aerr
 	}
 	// 兜底：如果 Exec 提前返回（解析错误等）且不在显式事务里，释放信号量。
 	// 正常路径由 Stmt.End/releaseAll 释放，这里只兜异常出口。
@@ -313,6 +366,7 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	start := hrtime.Now()
 	stmts, err := sql.Parse(text)
 	if err != nil {
+		d.act.set(sess.ID, ActIdle, nil, false)
 		return nil, err
 	}
 	// 预扫描整批语句的表意图：显式事务一开就把锁全部拿到（保守 2PL）。
@@ -321,6 +375,7 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	for _, st := range stmts {
 		in, err := exec.TableIntents(st)
 		if err != nil {
+			d.act.set(sess.ID, ActIdle, nil, false)
 			return nil, err
 		}
 		exec.MergeIntents(pre, in)
@@ -329,6 +384,13 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	sess.Lock()
 	defer sess.Unlock()
 	sess.ResetLastWait()
+
+	// 监控收尾：必须在持着 sess 锁时跑（要能安全回滚事务），
+	// 又必须在 sess.Unlock 之前跑，所以注册在它之后（defer 是后进先出）。
+	var totalTook int64
+	defer func() {
+		d.finishExec(sess, totalTook)
+	}()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -346,6 +408,9 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	for _, st := range stmts {
 		var res *exec.Result
 		var err error
+		// 单条语句的表名/读写意图（比整批的 pre 精确，面板上看得准）。
+		tables, write := stmtIntents(st)
+		d.act.setSQL(sess.ID, text, tables, write)
 		switch s := st.(type) {
 		case *sql.CreateDatabase:
 			res, err = d.createDatabase(sess, s)
@@ -354,13 +419,66 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 		default:
 			res, err = d.execOne(sess, st, pre)
 		}
+		if res != nil && res.TookNs > 0 {
+			totalTook += res.TookNs
+			d.act.noteExec(sess.ID, text, tables, write, res.TookNs)
+		}
 		if err != nil {
 			return out, err
+		}
+		// 事务控制语句不计入「已执行语句数」：面板上那个数字要回答
+		// 「这个事务干了几件事」，BEGIN/COMMIT 本身不算事。
+		if _, isTxCtl := st.(*sql.TxStmt); !isTxCtl {
+			sess.NoteStmt()
 		}
 		out = append(out, res)
 	}
 	d.noteSlow(text, start, len(stmts))
 	return out, nil
+}
+
+// finishExec 是一次 Exec 结束后的监控收尾：同步事务元信息、处理取消与慢 SQL 超时。
+// 调用方必须持着会话锁。
+func (d *DB) finishExec(sess *txn.Session, totalTook int64) {
+	t := d.Timeouts()
+
+	// 取消（面板 Kill）：执行中的语句没法打断，约定是「跑完就回滚」。
+	if sess.Canceled() {
+		if sess.InTx() {
+			sess.ForceRollback()
+		}
+		sess.ClearCancel()
+		d.act.countKill()
+	}
+
+	// 慢 SQL 超时：同样只能在语句结束后判定。整批耗时超阈值就回滚所在事务，
+	// 让「一条 SQL 挂住整个事务」不至于一直持锁。
+	if t.SlowSQLSec > 0 && sess.InTx() && totalTook > int64(t.SlowSQLSec)*int64(time.Second) {
+		sess.ForceRollback()
+		d.act.countSlowSQL()
+	}
+
+	inTx, txStart, stmts, _ := sess.TxInfo()
+	d.act.setTx(sess.ID, inTx, txStart, stmts, time.Time{})
+	d.act.set(sess.ID, ActIdle, nil, false)
+}
+
+// stmtIntents 取单条语句的表名与读写标记（供监控显示）。
+func stmtIntents(st sql.Statement) ([]string, bool) {
+	in, err := exec.TableIntents(st)
+	if err != nil || len(in) == 0 {
+		return nil, false
+	}
+	names := make([]string, 0, len(in))
+	write := false
+	for name, mode := range in {
+		names = append(names, name)
+		if mode == lock.Exclusive {
+			write = true
+		}
+	}
+	sort.Strings(names)
+	return names, write
 }
 
 // noteSlow 在整批语句耗时超过阈值时回调慢日志。
@@ -666,10 +784,17 @@ func (d *DB) LockSnapshot() lock.Snapshot {
 	return d.Locks.Snapshot()
 }
 
-// DropAll 删除所有表（用于重置演示库）。
+// DropAll 删除所有表（用于重置演示库 / 重建示例数据）。
+//
+// 删之前先把全部表 + 当时的 catalog 复制到 <data>/.trash/：这两个入口
+// （POST /api/reset、POST /api/sample）都是一键操作，点错了没有任何补救机会。
+// 备份失败就不删 —— 调用方拿到错误比拿到一个空库好。
 func (d *DB) DropAll() error {
 	d.Store.SchemaMu.Lock()
 	defer d.Store.SchemaMu.Unlock()
+	if _, err := d.Store.TrashTables(storage.TrashReasonDropAll, nil); err != nil {
+		return fmt.Errorf("备份到回收站失败，已取消清空: %w", err)
+	}
 	names := d.Cat.Names()
 	for _, n := range names {
 		if err := d.Cat.Drop(n); err != nil {
@@ -685,8 +810,14 @@ func (d *DB) DropAll() error {
 
 // sweepSessions 定期回收长期空闲且持有事务的会话，防止锁被永久占用。
 // 前端在事务打开期间会定时发心跳请求（刷新活动时间），因此只有真正被遗弃的事务会被回收。
+//
+// 两档阈值：
+//   - 面板上的「慢事务超时」（默认不限）：事务空闲超过它就回滚 —— 这是给用户的保护开关；
+//   - 3 分钟遗弃回收：与配置无关的安全网，PG 客户端异常断开时锁不会永久被占。
+//
+// 5 秒一轮而不是 30 秒：用户把慢事务阈值设成 10 秒时，30 秒的巡检精度等于没设。
 func (d *DB) sweepSessions() {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -700,10 +831,29 @@ func (d *DB) sweepSessions() {
 			list = append(list, s)
 		}
 		d.mu.Unlock()
+		limit := time.Duration(d.Timeouts().SlowTxIdleSec) * time.Second
 		for _, s := range list {
-			if s.InTx() && s.Idle() > 3*time.Minute {
-				s.ForceRollback()
+			if !s.InTx() {
+				continue
+			}
+			idle := s.Idle()
+			slow := limit > 0 && idle > limit
+			abandoned := idle > 3*time.Minute
+			if !slow && !abandoned {
+				continue
+			}
+			// 正在跑语句的会话跳过：它马上会自己收尾，硬抢锁会把执行打乱。
+			if !s.TryLock() {
+				continue
+			}
+			s.ForceRollback()
+			s.Unlock()
+			if slow {
+				d.act.countSlowTx()
 			}
 		}
+		// 空闲超过 10 分钟且没有事务的会话记录没必要留着（会话对象本身也一并在
+		// 这里清掉：Web 每开一个浏览器就建一个，长期不清理会慢慢涨）。
+		d.act.drop(10 * time.Minute)
 	}
 }

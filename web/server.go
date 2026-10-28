@@ -15,6 +15,7 @@ import (
 	"godb/lock"
 	"godb/netsrv"
 	"godb/sql"
+	"godb/storage"
 	"godb/txn"
 )
 
@@ -78,6 +79,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/sample", s.handleSample)
 	mux.HandleFunc("/api/locks", s.handleLocks)
+	mux.HandleFunc("/api/monitor", s.handleMonitor)
+	mux.HandleFunc("/api/monitor/kill", s.handleMonitorKill)
+	mux.HandleFunc("/api/monitor/timeouts", s.handleMonitorTimeouts)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/dbs", s.handleDBs)
 	return mux
@@ -366,7 +370,7 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": d.Tables()})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": d.Tables(), "trash": newestTrash(d)})
 }
 
 func (s *Server) handleSample(w http.ResponseWriter, r *http.Request) {
@@ -383,7 +387,17 @@ func (s *Server) handleSample(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": d.Tables()})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "tables": d.Tables(), "trash": newestTrash(d)})
+}
+
+// newestTrash 返回最近一次回收站备份的目录名（没有备份时返回空串）。
+// 两个「一键清库」接口都把它带回去，调用方至少知道东西被备份到哪儿了。
+func newestTrash(d *db.DB) string {
+	ents, err := storage.TrashEntries(d.Dir())
+	if err != nil || len(ents) == 0 {
+		return ""
+	}
+	return ents[0]
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {

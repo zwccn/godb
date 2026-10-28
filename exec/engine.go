@@ -276,7 +276,8 @@ func (e *Engine) persistSchema(needsSnapshot bool) error {
 	if !needsSnapshot {
 		return nil
 	}
-	return e.Store.Checkpoint()
+	// DDL 改的是行宽/列序，旧行按下标或旧类型解释会错位，必须立刻落盘。
+	return e.Store.CheckpointDDL()
 }
 
 func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
@@ -315,6 +316,9 @@ func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
 }
 
 func (e *Engine) execDropTable(s *sql.DropTable) (*Result, error) {
+	// 先整体校验（存在性 + 外键），校验通过再备份，最后才真删 ——
+	// 否则一条会失败的 DROP 也会往回收站里堆一份没用的数据。
+	drop := make([]string, 0, len(s.Tables))
 	for _, name := range s.Tables {
 		if _, ok := e.Cat.Get(name); !ok {
 			if s.IfExists {
@@ -325,6 +329,16 @@ func (e *Engine) execDropTable(s *sql.DropTable) (*Result, error) {
 		if err := e.checkDropFK(name); err != nil {
 			return nil, err
 		}
+		drop = append(drop, name)
+	}
+	// 删表不可逆，先复制一份到 <data>/.trash/。备份失败就整个放弃：
+	// 数据没了比报错难受得多。
+	if len(drop) > 0 {
+		if _, err := e.Store.TrashTables(storage.TrashReasonDropTable, drop); err != nil {
+			return nil, fmt.Errorf("备份到回收站失败，已取消 DROP: %w", err)
+		}
+	}
+	for _, name := range drop {
 		if err := e.Cat.Drop(name); err != nil {
 			return nil, err
 		}

@@ -44,10 +44,14 @@ func (m Mode) String() string {
 
 // Options 控制等待行为。
 type Options struct {
-	Timeout        time.Duration // 单个申请的最长等待
+	Timeout        time.Duration // 单个申请的最长等待；<= 0 表示不限（只靠取消与死锁检测兜底）
 	Retry          time.Duration // 轮询间隔（会加 ±50% 抖动）
 	DeadlockDetect bool          // 是否做等待图检测
 	DeadlockAfter  time.Duration // 等待多久后开始检测
+
+	// Canceled 在等待期间被反复调用；返回 true 表示调用方要求放弃（监控面板 Kill）。
+	// 配上 Manager.WakeAll 使用：外部先置取消标志，再唤醒，等待者醒来即退出。
+	Canceled func() bool
 }
 
 // DefaultOptions 是默认等待策略。
@@ -119,14 +123,25 @@ func (e *TimeoutError) Error() string {
 // DeadlockError 表示多个事务互相等待（等待环），本事务被判定为环里最年轻的而放弃。
 // 解决策略是「后进让先进」：最年轻的事务让位，避免长时间互等。
 type DeadlockError struct {
-	Cycle []int64
-	Peers []string
+	Cycle  []int64
+	Peers  []string
 	Waited time.Duration // 本次已等待时长
 }
 
 func (e *DeadlockError) Error() string {
 	return fmt.Sprintf("等待锁冲突（已等 %s）：%d 个事务互相等待（%s），后进让先进，本事务被回滚，请改用原子写法或重试",
 		e.Waited.Truncate(time.Millisecond), len(e.Peers), strings.Join(e.Peers, " → "))
+}
+
+// CanceledError 表示申请被外部取消（面板 Kill）。这不是超时也不是死锁，
+// 调用方应当把整个事务回滚并告知用户「已取消」。
+type CanceledError struct {
+	Waited time.Duration
+}
+
+func (e *CanceledError) Error() string {
+	return fmt.Sprintf("canceling statement due to user request (waited %s)",
+		e.Waited.Truncate(time.Millisecond))
 }
 
 func shortSession(s string) string {
@@ -186,24 +201,31 @@ func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[str
 	if len(want) == 0 {
 		return nil
 	}
-	if opts.Timeout <= 0 {
-		opts = DefaultOptions()
-	}
 	if opts.DeadlockAfter <= 0 {
 		opts.DeadlockAfter = 500 * time.Millisecond
 	}
 
+	// Timeout <= 0 表示「不限」：不起超时定时器，只在被取消或检测到死锁时退出。
+	// 这里不回落到 DefaultOptions —— 监控面板里的「不限」是用户的显式选择，
+	// 悄悄塞一个 3 秒进去会让面板显示和实际行为对不上。
+	unlimited := opts.Timeout <= 0
+
 	start := time.Now()
-	deadline := start.Add(opts.Timeout)
+	var deadline time.Time
+	if !unlimited {
+		deadline = start.Add(opts.Timeout)
+	}
 
 	// 超时兜底：到点广播唤醒所有等待者，让他们检查 deadline。
 	// 没有这一步，cond.Wait() 可能永远醒不过来（对方也在等锁、没人 Release）。
-	timer := time.AfterFunc(opts.Timeout, func() {
-		m.mu.Lock()
-		m.cond.Broadcast()
-		m.mu.Unlock()
-	})
-	defer timer.Stop()
+	if !unlimited {
+		timer := time.AfterFunc(opts.Timeout, func() {
+			m.mu.Lock()
+			m.cond.Broadcast()
+			m.mu.Unlock()
+		})
+		defer timer.Stop()
+	}
 
 	// 死锁检测定时器：等待超过 DeadlockAfter 后广播唤醒，触发等待图检测。
 	// 互相等待时没人 Release，只能靠这个定时器唤醒。
@@ -226,6 +248,14 @@ func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[str
 			return nil
 		}
 
+		// 取消检查（面板 Kill / 客户端断开）。放在登记等待之前，
+		// 这样被取消的事务不会在快照里留下一个假等待者。
+		if opts.Canceled != nil && opts.Canceled() {
+			delete(m.waits, txID)
+			m.mu.Unlock()
+			return &CanceledError{Waited: time.Since(start)}
+		}
+
 		// 登记等待信息（供死锁检测与快照用）
 		if w, exists := m.waits[txID]; exists {
 			w.want = want
@@ -244,7 +274,7 @@ func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[str
 		}
 
 		// 超时检查（放在 Wait 之前，避免错过 timer 广播）
-		if !time.Now().Before(deadline) {
+		if !unlimited && !time.Now().Before(deadline) {
 			delete(m.waits, txID)
 			m.mu.Unlock()
 			return &TimeoutError{Waited: time.Since(start), Blocked: blocked}
@@ -254,6 +284,14 @@ func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[str
 		// Wait 会释放 mu，唤醒后重新持有。
 		m.cond.Wait()
 	}
+}
+
+// WakeAll 广播唤醒所有等待者，让他们各自重新检查取消/超时条件。
+// 面板 Kill 一个正在等锁的事务时用：只置取消标志不够，cond.Wait 醒不过来。
+func (m *Manager) WakeAll() {
+	m.mu.Lock()
+	m.cond.Broadcast()
+	m.mu.Unlock()
 }
 
 // tryAcquireLocked 检查整批锁是否可授予，可以则一次性授予。

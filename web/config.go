@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"godb/config"
+	"godb/db"
 	"godb/netsrv"
 	"godb/storage"
 )
@@ -59,6 +60,7 @@ type configResp struct {
 	Network     config.Network      `json:"network"`
 	Auth        authView            `json:"auth"`
 	Performance config.Performance  `json:"performance"`
+	Timeouts    config.Timeouts     `json:"timeouts"`
 	Runtime     runtimeView         `json:"runtime"`
 	Warnings    []string            `json:"warnings"`
 }
@@ -69,6 +71,7 @@ type configReq struct {
 	Storage     config.Storage      `json:"storage"`
 	Network     config.Network      `json:"network"`
 	Performance config.Performance  `json:"performance"`
+	Timeouts    config.Timeouts     `json:"timeouts"`
 	Auth        struct {
 		RequirePassword bool   `json:"requirePassword"`
 		User            string `json:"user"`
@@ -118,6 +121,7 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	next.Storage = req.Storage
 	next.Network = req.Network
 	next.Performance = req.Performance
+	next.Timeouts = req.Timeouts
 	next.Auth.RequirePassword = req.Auth.RequirePassword
 	next.Auth.User = req.Auth.User
 	if req.Auth.ClearPassword {
@@ -170,8 +174,13 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.DB.Store.SetCheckpointPolicy(toPolicy(saved.Storage))
-	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent, saved.Performance.MaxQueued,
-		time.Duration(saved.Performance.WaitTimeoutMs)*time.Millisecond)
+	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent, saved.Performance.MaxQueued, 0)
+	s.DB.SetTimeouts(db.TimeoutStatus{
+		SlowSQLSec:    saved.Timeouts.SlowSQLSec,
+		SlowTxIdleSec: saved.Timeouts.SlowTxIdleSec,
+		LockWaitSec:   saved.Timeouts.LockWaitSec,
+		QueueWaitSec:  saved.Timeouts.QueueWaitSec,
+	})
 	writeJSON(w, http.StatusOK, s.configView(r))
 }
 
@@ -183,6 +192,7 @@ func (s *Server) configView(r *http.Request) configResp {
 		Storage: c.Storage,
 		Network: c.Network,
 		Performance: c.Performance,
+		Timeouts:    c.Timeouts,
 		Auth: authView{
 			RequirePassword: c.Auth.RequirePassword,
 			User:            c.Auth.User,

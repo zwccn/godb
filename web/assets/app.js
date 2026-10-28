@@ -1021,81 +1021,640 @@ function renderSchema(tables) {
   }
 }
 
-/* ---------------- 锁状态面板 ---------------- */
+/* ---------------- 监控面板 ---------------- */
 
-const lockPanel = document.getElementById('lockPanel');
-const lockBody = document.getElementById('lockBody');
-const lockMeta = document.getElementById('lockMeta');
-const lockBadge = document.getElementById('lockBadge');
-let lockOpen = false;
+// 数据全部来自 /api/monitor（一次请求拿齐四块），轮询 2 秒。
+// 设计原则对应后端：每个数字都能连到一个动作（Kill / EXPLAIN / 开超时），
+// 连不上的就不放。
 
-function toggleLocks(force) {
-  lockOpen = force === undefined ? !lockOpen : force;
-  lockPanel.classList.toggle('hidden', !lockOpen);
-  document.body.classList.toggle('locks-open', lockOpen);
-  if (lockOpen) loadLocks();
+const monPanel = document.getElementById('monPanel');
+const monEls = {
+  water: document.getElementById('monWater'),
+  layers: document.getElementById('monLayers'),
+  lockBody: document.getElementById('monLockBody'),
+  lockSub: document.getElementById('monLockSub'),
+  proc: document.getElementById('monProc'),
+  io: document.getElementById('monIO'),
+  slowSql: document.getElementById('monSlowSQL'),
+  slowTx: document.getElementById('monSlowTx'),
+  timeouts: document.getElementById('monTimeouts'),
+  timeoutHint: document.getElementById('monTimeoutHint'),
+  db: document.getElementById('monDB'),
+  updated: document.getElementById('monUpdated'),
+  dot: document.getElementById('monDot'),
+  badge: document.getElementById('monBadge'),
+};
+
+let monOpen = false;
+let monData = null;
+let monExpanded = {}; // key = 表名|会话 → 展开详情
+let monTimeoutBuilt = false;
+let monSavingTimeouts = false;
+
+function toggleMonitor(force) {
+  monOpen = force === undefined ? !monOpen : force;
+  monPanel.classList.toggle('hidden', !monOpen);
+  document.body.classList.toggle('mon-open', monOpen);
+  if (monOpen) pollMonitor();
 }
 
-async function loadLocks() {
+// 把毫秒渲染成人话。锁明细里的时长是面板的核心指标，不能只显示 0。
+function fmtMs(ms) {
+  if (ms === undefined || ms === null) return '—';
+  if (ms < 0) ms = 0;
+  if (ms < 1) return '<1ms';
+  if (ms < 1000) return Math.round(ms) + ' ms';
+  if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s';
+  if (ms < 3600000) return Math.floor(ms / 60000) + 'm' + Math.round((ms % 60000) / 1000) + 's';
+  return (ms / 3600000).toFixed(1) + 'h';
+}
+
+// 纳秒（后端样本）→ 毫秒文案；小于时钟步进的显示成 "<0.20ms"，不然一片 0.00 很吓人。
+function fmtNs(ns) {
+  if (!ns || ns <= 0) return '—';
+  if (clockGranNs > 0 && ns < clockGranNs) return '<' + (clockGranNs / 1e6).toFixed(2) + 'ms';
+  return fmtMs(ns / 1e6);
+}
+
+async function pollMonitor() {
+  let m;
   try {
-    const snap = await api('/api/locks');
-    renderLockBadge(snap);
-    if (lockOpen) renderLocks(snap);
+    m = await api('/api/monitor');
   } catch (e) {
-    /* 忽略轮询错误 */
+    return; // 轮询失败不打断操作
   }
+  if (!m || m.water === undefined) return;
+  monData = m;
+  renderMonBadge(m);
+  if (monOpen) renderMonitor(m);
 }
 
-function renderLockBadge(snap) {
-  const n = (snap.waiters || []).length;
+// 顶栏的小圆点 + 待处理计数：面板关着也要能看出「现在不对劲」。
+function renderMonBadge(m) {
+  const w = m.water || {};
+  const lvl = w.level || 'green';
+  monEls.dot.className = 'mon-dot ' + lvl;
+  monEls.dot.title = lvl === 'green' ? '健康' : (lvl === 'yellow' ? '有排队或槽位已满' : '排队触顶或锁成瓶颈');
+  const n = (w.wait || 0) + (w.queue || 0);
   if (n > 0) {
-    lockBadge.textContent = String(n);
-    lockBadge.classList.remove('hidden');
+    monEls.badge.textContent = String(n);
+    monEls.badge.classList.remove('hidden');
   } else {
-    lockBadge.classList.add('hidden');
+    monEls.badge.classList.add('hidden');
   }
 }
 
-function renderLocks(snap) {
-  lockBody.innerHTML = '';
-  const tables = snap.tables || [];
-  if (!tables.length) {
-    lockBody.appendChild(el('div', 'lock-empty', '当前没有任何表锁（空闲中）。'));
+function renderMonitor(m) {
+  monEls.db.textContent = m.water.db || '';
+  monEls.updated.textContent = new Date(m.nowMs || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+  renderWater(m.water || {});
+  renderLayers(m.layers || {});
+  renderProc(m);
+  renderIO(m);
+  renderLocks(m);
+  renderSlowSQL(m);
+  renderSlowTx(m);
+  renderTimeouts(m.timeouts || {});
+}
+
+/* ---- 1. 水位条 ---- */
+
+function renderWater(w) {
+  monEls.water.innerHTML = '';
+  const lvl = w.level || 'green';
+  const execMax = w.execMax > 0 ? String(w.execMax) : '不限';
+  const queueMax = w.queueMax > 0 ? String(w.queueMax) : '不限';
+
+  const item = (key, val, max, tip, cls) => {
+    const box = el('div', 'w-item' + (cls ? ' ' + cls : ''));
+    box.title = tip || '';
+    box.appendChild(el('span', 'w-k', key));
+    box.appendChild(el('b', 'w-v', val));
+    if (max !== undefined) box.appendChild(el('span', 'w-max', '/' + max));
+    return box;
+  };
+
+  // 从外到内排：排队（等槽位）→ 等锁（拿到槽位但卡在锁）→ 执行（真正在跑）。
+  // 从左往右读正好是「一个请求怎么才能跑起来」的顺序。
+  monEls.water.appendChild(item('排队', w.queue, queueMax,
+    '等执行槽位的请求数；触顶会被快速拒绝（背压）',
+    w.queueMax > 0 && w.queue >= w.queueMax ? 'bad' : (w.queue > 0 ? 'warn' : '')));
+  monEls.water.appendChild(item('等锁', w.wait, undefined,
+    '正在等表锁的事务数；多于执行数说明瓶颈在锁，不在算力',
+    w.exec > 0 && w.wait > w.exec ? 'bad' : ''));
+  monEls.water.appendChild(item('执行', w.exec, execMax,
+    '并发执行槽位：事务持有（空闲事务也占位），不是「正在跑 SQL 的条数」'));
+
+  const lamp = el('div', 'w-lamp');
+  lamp.appendChild(el('span', 'mon-dot ' + lvl));
+  lamp.appendChild(el('span', 'w-lamp-text',
+    lvl === 'green' ? '健康' : (lvl === 'yellow' ? '有压力' : '需处理')));
+  monEls.water.appendChild(lamp);
+
+  const c = monData && monData.counters ? monData.counters : {};
+  const note = el('div', 'w-note');
+  note.title = '自启动以来的累计次数';
+  note.textContent = `Kill ${c.kills || 0} · 慢SQL回滚 ${c.slowSqlAborts || 0} · 慢事务回滚 ${c.slowTxAborts || 0}`;
+  monEls.water.appendChild(note);
+}
+
+/* ---- 2. 三层状态 ---- */
+
+function renderLayers(layers) {
+  monEls.layers.innerHTML = '';
+  // 顺序与水位条一致：排队 → 等锁 → 执行，眼睛不用在两处来回换算位置。
+  const cards = [
+    { key: 'queued', name: '排队', lv: 'lv-queue', tip: '等执行槽位的请求' },
+    { key: 'waiting', name: '等锁', lv: 'lv-wait', tip: '卡在表锁上的会话' },
+    { key: 'running', name: '执行', lv: 'lv-run', tip: '正在跑语句的会话' },
+  ];
+  for (const c of cards) {
+    const d = layers[c.key] || {};
+    const box = el('div', 'mon-layer ' + c.lv);
+    box.title = c.tip;
+
+    const head = el('div', 'lv-head');
+    head.appendChild(el('span', 'lv-name', c.name));
+    head.appendChild(el('b', 'lv-count', String(d.count || 0)));
+    box.appendChild(head);
+
+    const stat = el('div', 'lv-stat');
+    stat.appendChild(el('span', '', 'p50 ' + fmtNs(d.p50Ns)));
+    stat.appendChild(el('span', '', 'p95 ' + fmtNs(d.p95Ns)));
+    stat.appendChild(el('span', '', 'max ' + fmtNs(d.maxNs)));
+    box.appendChild(stat);
+
+    const lg = d.longest;
+    const lastRow = el('div', 'lv-longest');
+    if (lg) {
+      lastRow.appendChild(el('span', 'lv-sess', sessionShort(lg.session)));
+      lastRow.appendChild(el('span', 'lv-held', '已 ' + fmtMs(lg.stateMs)));
+      const what = (lg.tables && lg.tables.length ? lg.tables.join(',') + ' · ' : '') + (lg.sql || '');
+      const prev = el('span', 'lv-sql', what || '—');
+      prev.title = lg.sql || '';
+      lastRow.appendChild(prev);
+    } else {
+      lastRow.appendChild(el('span', 'lv-none', '没有'));
+    }
+    box.appendChild(lastRow);
+    monEls.layers.appendChild(box);
+  }
+}
+
+/* ---- 3. 资源：进程自身 + 存储 IO ---- */
+
+function fmtBytes(n) {
+  if (!n || n < 0) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+// 一格大数字：主值 + 一行说明。三格并排比一列长文本好扫。
+function statCell(name, value, sub, tip) {
+  const box = el('div', 'proc-cell');
+  if (tip) box.title = tip;
+  box.appendChild(el('div', 'pc-name', name));
+  box.appendChild(el('div', 'pc-value', value));
+  if (sub) box.appendChild(el('div', 'pc-sub', sub));
+  return box;
+}
+
+function renderProc(m) {
+  const p = m.proc || {};
+  const box = monEls.proc;
+  box.innerHTML = '';
+  if (!p.numCpu) {
+    box.appendChild(el('div', 'mon-none', '这个平台没有采到进程数据。'));
+    return;
+  }
+
+  const grid = el('div', 'proc-grid');
+  grid.appendChild(statCell(
+    'CPU',
+    p.sampled ? p.cpuCore.toFixed(2) + ' 核' : '—',
+    p.sampled
+      ? `用户 ${p.cpuUserCore.toFixed(2)} · 内核 ${p.cpuKernelCore.toFixed(2)}`
+      : '刚启动，一秒后才有值',
+    p.sampled
+      ? `占 ${p.numCpu} 核的 ${p.cpuPercent.toFixed(1)}%。用户态高说明在算 SQL，内核态高说明在等 IO 或系统调用`
+      : ''));
+
+  grid.appendChild(statCell(
+    '内存',
+    fmtBytes(p.heapObjects),
+    `进程 ${fmtBytes(p.totalBytes)} · 已还 ${fmtBytes(p.released)}`,
+    '主值是活对象（真正在存数据）。进程值含预留与尚未归还的部分；下次 GC 目标 ' + fmtBytes(p.gcGoal)));
+
+  grid.appendChild(statCell(
+    '协程',
+    String(p.goroutines || 0),
+    `GC ${p.gcCycles || 0} 次 · 暂停 p95 ${fmtNs(p.gcPauseP95Ns)}`,
+    'goroutine 数持续上涨要怀疑连接泄漏；GC 暂停 p95 是「查询莫名多花几十毫秒」的常见来源'));
+  box.appendChild(grid);
+
+  const series = p.series || [];
+  if (series.length > 1) {
+    box.appendChild(sparkline(series, p.numCpu));
   } else {
-    lockBody.appendChild(el('div', 'lock-sec', '表锁'));
-    for (const t of tables) {
-      const row = el('div', 'lock-row');
-      row.appendChild(el('div', 'lock-name', t.name));
-      const holds = el('div', 'lock-holds');
-      for (const h of t.holders || []) {
-        const chip = el('span', 'lk ' + (h.mode === 'S' ? 'lk-s' : 'lk-x'), h.mode);
-        const who = el('span', 'lock-who', sessionShort(h.session));
-        const wrap = el('span', 'lock-holds');
-        wrap.appendChild(chip);
-        wrap.appendChild(who);
-        holds.appendChild(wrap);
-      }
-      row.appendChild(holds);
-      if ((t.waiters || []).length) {
-        const names = t.waiters.map(w => sessionShort(w.session)).join('、');
-        row.appendChild(el('div', 'lock-wait', '⏳ 等待中：' + names));
-      }
-      lockBody.appendChild(row);
-    }
+    box.appendChild(el('div', 'mon-none', '曲线需要至少两个采样点。'));
+  }
+}
+
+// CPU 曲线。纵轴按峰值自适应（下限 0.5 核）：
+// 固定用核数当上限的话，48 核机器上 0.1 核的曲线会完全贴底，什么形状都看不出。
+// 上限写在提示文字里，尺度信息不丢。
+function sparkline(points, maxCore) {
+  const W = 300, H = 44, pad = 2;
+  let peak = 0;
+  for (const pt of points) peak = Math.max(peak, pt.cpuCore || 0);
+  const max = Math.max(0.5, Math.ceil(peak * 1.15 * 10) / 10);
+  const n = points.length;
+  const x = i => (n === 1 ? 0 : (i / (n - 1)) * W);
+  const y = v => H - pad - Math.min(1, Math.max(0, v / max)) * (H - pad * 2);
+
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(points[i].cpuCore || 0).toFixed(1);
+  }
+  const last = points[n - 1].cpuCore || 0;
+
+  const wrap = el('div', 'proc-spark');
+  wrap.title = `最近 ${n} 个秒级采样点（约 ${n} 秒）· 峰值 ${peak.toFixed(2)} 核 · 纵轴 0 ~ ${max} 核`;
+  wrap.innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` +
+    `<line x1="0" y1="${y(max).toFixed(1)}" x2="${W}" y2="${y(max).toFixed(1)}" ` +
+    `stroke="var(--border-soft)" stroke-width="0.5" stroke-dasharray="3 3"/>` +
+    `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.2" ` +
+    `stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
+    `</svg>` +
+    `<span class="spark-tip">CPU 曲线 · 峰值 ${peak.toFixed(2)} · 现在 ${last.toFixed(2)} 核 · 纵轴 0~${max}</span>`;
+  return wrap;
+}
+
+const CP_REASON_TEXT = {
+  commits: '提交次数攒够',
+  seconds: '定时到点',
+  walMB: 'WAL 达阈值',
+  manual: '手动 CHECKPOINT',
+  flush: '手动落盘 / 退出前',
+  ddl: 'DDL 强制',
+};
+
+function renderIO(m) {
+  const io = m.io || {};
+  const f = io.fsync || {};
+  const cp = io.checkpoint || {};
+  const rt = io.rates || {};
+  const box = monEls.io;
+  box.innerHTML = '';
+
+  const row = (name, main, sub, tip, cls) => {
+    const r = el('div', 'io-row' + (cls ? ' ' + cls : ''));
+    if (tip) r.title = tip;
+    r.appendChild(el('span', 'io-k', name));
+    r.appendChild(el('span', 'io-v', main));
+    if (sub) r.appendChild(el('span', 'io-sub', sub));
+    return r;
+  };
+
+  // p95 超过 10ms 就算值得注意：这已经超过一次内存读的三个数量级
+  const fsyncHot = (f.p95Ns || 0) >= 10e6;
+  box.appendChild(row('fsync',
+    f.runs ? `${fmtNs(f.p50Ns)} / ${fmtNs(f.p95Ns)} / ${fmtNs(f.maxNs)}` : '—',
+    f.runs
+      ? `p50 / p95 / max · ${rt.fsyncPerSec || 0} 次/s 服务 ${rt.commitsPerSec || 0} 提交/s（5 秒均值）`
+      : '还没有写过盘',
+    'fsync 延迟就是提交的实际等待。组提交让 fsync 次数少于提交次数，两个数一比就是合并效果',
+    fsyncHot ? 'bad' : ''));
+
+  box.appendChild(row('WAL',
+    fmtBytes(f.liveBytes),
+    `累计写 ${fmtBytes(f.bytes)} · ${fmtBytes(rt.walBytesPerSec || 0)}/s`,
+    'WAL 涨到策略阈值会触发一次快照（默认 64 MB）'));
+
+  // 用 lastReason 判断「有没有真正写过」：lastNs=0 表示启动时空库那一轮，
+  // 它一张表都没写，不该显示成「0.00ms」。
+  box.appendChild(row('快照',
+    cp.lastReason ? `${fmtNs(cp.lastNs)} · ${fmtBytes(cp.lastBytes)}` : '—',
+    cp.lastReason
+      ? `原因 ${CP_REASON_TEXT[cp.lastReason] || cp.lastReason} · 累计 ${cp.runs} 次 · p95 ${fmtNs(cp.p95Ns)}`
+      : '还没写过快照',
+    '快照是整表重写，占磁盘带宽；fsync 突然变慢常常正好撞上它在写',
+    (cp.lastNs || 0) >= 200e6 ? 'warn' : ''));
+
+  const tables = io.tables || [];
+  const top = tables.slice(0, 3).map(t => `${t.name} ${fmtBytes(t.bytes)}`).join(' · ');
+  box.appendChild(row('数据',
+    `${tables.length} 表 / ${fmtBytes(io.totalBytes)}`,
+    top || '还没有表',
+    '各表数据文件（tables/*.snp）的大小'));
+}
+
+/* ---- 4. 锁明细 ---- */
+
+function renderLocks(m) {
+  const rows = m.locks || [];
+  const body = monEls.lockBody;
+  body.innerHTML = '';
+  monEls.lockSub.textContent = rows.length
+    ? `${rows.length} 把锁 · 按持有时长降序 · 点行展开事务详情`
+    : '当前没有表锁';
+
+  if (!rows.length) {
+    const tr = el('tr', 'mon-empty-row');
+    const td = el('td', '', '当前没有表锁（所有会话都空闲且没有事务）。');
+    td.colSpan = 8;
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
   }
 
-  const waiters = snap.waiters || [];
-  if (waiters.length) {
-    lockBody.appendChild(el('div', 'lock-sec', '等待队列'));
-    for (const w of waiters) {
-      const row = el('div', 'lock-row');
-      row.appendChild(el('div', 'lock-name', sessionShort(w.session)));
-      row.appendChild(el('div', 'lock-wait', '要锁：' + (w.tables || []).join('、')));
-      lockBody.appendChild(row);
-    }
-  }
+  rows.forEach((r, i) => {
+    const key = r.table + '|' + r.session;
+    const tr = el('tr', 'mon-lock-row');
+    if (monExpanded[key]) tr.classList.add('open');
 
-  lockMeta.textContent = `冲突次数 ${snap.conflicts || 0}` + (snap.lastBlock ? ` · 最近 ${snap.lastBlock}` : '');
+    // 表名 + 锁类型
+    const tdTable = el('td', 'c-table');
+    tdTable.appendChild(el('span', 'mon-table', r.table));
+    tr.appendChild(tdTable);
+
+    const tdMode = el('td', 'c-mode');
+    tdMode.appendChild(el('span', 'lk ' + (r.mode === 'S' ? 'lk-s' : 'lk-x'), r.mode));
+    tr.appendChild(tdMode);
+
+    const tdSess = el('td', 'c-sess mono');
+    tdSess.textContent = sessionShort(r.session);
+    tdSess.title = r.session;
+    tr.appendChild(tdSess);
+
+    // 已持有时长：核心指标，久了变黄/红，一眼扫出来
+    const tdHeld = el('td', 'c-held mono');
+    const heldCls = r.heldMs >= 30000 ? 'held bad' : (r.heldMs >= 5000 ? 'held warn' : 'held');
+    tdHeld.appendChild(el('span', heldCls, fmtMs(r.heldMs)));
+    tr.appendChild(tdHeld);
+
+    const tdState = el('td', 'c-state');
+    const running = r.txState === 'running';
+    tdState.appendChild(el('span', 'tx-state ' + (running ? 'st-run' : 'st-idle'),
+      running ? '执行中' : (r.txState ? '空闲' : '—')));
+    tr.appendChild(tdState);
+
+    const tdSql = el('td', 'c-sql mono');
+    const preview = (r.lastSql || '').slice(0, 70);
+    tdSql.textContent = preview || '—';
+    tdSql.title = r.lastSql || '';
+    tr.appendChild(tdSql);
+
+    const tdWait = el('td', 'c-wait');
+    if ((r.waiters || []).length) {
+      for (const w of r.waiters) {
+        const chip = el('button', 'wait-chip', `${sessionShort(w.session)}(${w.mode}, 等${fmtMs(w.waitedMs)})`);
+        chip.type = 'button';
+        chip.title = `会话 ${w.session} 在等 ${r.table} 的锁`;
+        chip.addEventListener('click', ev => {
+          ev.stopPropagation();
+          const other = body.querySelector(`tr[data-sess="${w.session}"]`);
+          if (other) {
+            other.classList.add('flash');
+            other.scrollIntoView({ block: 'center' });
+            setTimeout(() => other.classList.remove('flash'), 1200);
+          } else {
+            toast(`会话 ${sessionShort(w.session)} 只在等锁，没有持有任何锁`);
+          }
+        });
+        tdWait.appendChild(chip);
+      }
+    } else {
+      tdWait.appendChild(el('span', 'muted', '—'));
+    }
+    tr.appendChild(tdWait);
+
+    const tdAct = el('td', 'c-act');
+    const bKill = el('button', 'btn btn-sm btn-warn', 'Kill');
+    bKill.type = 'button';
+    bKill.title = r.txState === 'running'
+      ? '正在执行，无法立刻打断：标记取消，语句结束后自动回滚'
+      : '立刻回滚这个事务并释放锁';
+    bKill.addEventListener('click', ev => { ev.stopPropagation(); killSession(r.session, r); });
+    tdAct.appendChild(bKill);
+
+    const bExp = el('button', 'btn btn-sm btn-ghost', 'EXPLAIN');
+    bExp.type = 'button';
+    bExp.title = '把这条 SQL 放进编辑器并查看执行计划';
+    bExp.addEventListener('click', ev => { ev.stopPropagation(); explainSQL(r.lastSql); });
+    tdAct.appendChild(bExp);
+    tr.appendChild(tdAct);
+
+    tr.dataset.sess = r.session;
+    tr.addEventListener('click', () => {
+      monExpanded[key] = !monExpanded[key];
+      renderMonitor(monData);
+    });
+    body.appendChild(tr);
+
+    if (monExpanded[key]) {
+      const det = el('tr', 'mon-detail-row');
+      const td = el('td');
+      td.colSpan = 8;
+      const box = el('div', 'mon-detail');
+      const act = (m.activities || []).find(a => a.session === r.session) || {};
+      const line = (k, v) => {
+        const p = el('span', 'd-item');
+        p.appendChild(el('span', 'd-k', k));
+        p.appendChild(el('span', 'd-v', v));
+        box.appendChild(p);
+      };
+      line('会话', r.session);
+      line('事务已持续', fmtMs(act.txAgeMs));
+      line('空闲时长', fmtMs(act.txIdleMs) + '（距最后一条 SQL）');
+      line('已执行语句', act.txStmts === undefined ? '—' : String(act.txStmts));
+      line('涉及表', (act.tables || []).join(', ') || '—');
+      const sqlBox = el('div', 'd-sql mono', r.lastSql || '—');
+      box.appendChild(sqlBox);
+      td.appendChild(box);
+      det.appendChild(td);
+      body.appendChild(det);
+    }
+  });
+}
+
+async function killSession(id, row) {
+  const running = row && row.txState === 'running';
+  const msg = running
+    ? `会话 ${sessionShort(id)} 正在执行语句，引擎无法中途打断。\n会标记取消，等这条语句跑完后自动回滚事务。继续？`
+    : `回滚会话 ${sessionShort(id)} 的事务并释放它持有的锁？未提交的改动会丢掉。`;
+  if (!confirm(msg)) return;
+  try {
+    const r = await api('/api/monitor/kill', { session: id });
+    if (r && r.error) {
+      toast(r.error, true);
+      return;
+    }
+    toast(running ? '已标记取消，语句结束后回滚' : '已回滚并释放锁');
+    pollMonitor();
+  } catch (e) {
+    toast('Kill 失败：' + e.message, true);
+  }
+}
+
+function explainSQL(sqlText) {
+  if (!sqlText) {
+    toast('这个会话没有可用的 SQL', true);
+    return;
+  }
+  editor.value = sqlText;
+  toggleMonitor(false);
+  run('explain');
+}
+
+/* ---- 5. 慢SQL / 慢事务 ---- */
+
+function renderSlowSQL(m) {
+  const box = monEls.slowSql;
+  box.innerHTML = '';
+  const rows = m.slowSql || [];
+  if (!rows.length) {
+    box.appendChild(el('div', 'mon-none', '还没有执行记录。'));
+    return;
+  }
+  for (const r of rows) {
+    const item = el('div', 'mon-item' + (r.running ? ' running' : ''));
+    const top = el('div', 'mi-top');
+    top.appendChild(el('span', 'rw ' + (r.write ? 'rw-w' : 'rw-r'), r.write ? '写' : '读'));
+    top.appendChild(el('span', 'mi-took', fmtNs(r.tookNs)));
+    if (r.running) top.appendChild(el('span', 'mi-running', '还在跑'));
+    top.appendChild(el('span', 'mi-sess mono', sessionShort(r.session)));
+    item.appendChild(top);
+
+    const sql = el('div', 'mi-sql mono', r.sql || '—');
+    sql.title = r.sql || '';
+    item.appendChild(sql);
+
+    if ((r.tables || []).length) {
+      item.appendChild(el('div', 'mi-meta', '表：' + r.tables.join(', ')));
+    }
+    box.appendChild(item);
+  }
+}
+
+function renderSlowTx(m) {
+  const box = monEls.slowTx;
+  box.innerHTML = '';
+  const rows = m.slowTx || [];
+  if (!rows.length) {
+    box.appendChild(el('div', 'mon-none', '当前没有进行中的事务。'));
+    return;
+  }
+  for (const r of rows) {
+    const item = el('div', 'mon-item');
+    const top = el('div', 'mi-top');
+    top.appendChild(el('span', 'mi-sess mono', sessionShort(r.session)));
+    top.appendChild(el('span', 'tx-state ' + (r.state === 'running' ? 'st-run' : 'st-idle'),
+      r.state === 'running' ? '执行中' : '空闲'));
+    top.appendChild(el('span', 'mi-held', '持锁 ' + fmtMs(r.heldMs)));
+    top.appendChild(el('span', 'mi-idle', '空闲 ' + fmtMs(r.idleMs)));
+    item.appendChild(top);
+
+    const meta = el('div', 'mi-meta');
+    // 「事务开始时间」比「已持续多久」更适合对照日志，两个都给。
+    let started = '';
+    if (m.nowMs && r.txAgeMs > 0) {
+      const t = new Date(m.nowMs - r.txAgeMs);
+      started = '开始 ' + t.toLocaleTimeString('zh-CN', { hour12: false }) + ' · ';
+    }
+    meta.textContent = `${started}已持续 ${fmtMs(r.txAgeMs)} · ${r.stmts || 0} 条语句` +
+      ((r.locks || []).length ? ' · 锁 ' + r.locks.join(' ') : '');
+    item.appendChild(meta);
+
+    if (r.lastSql) {
+      const sql = el('div', 'mi-sql mono', r.lastSql);
+      sql.title = r.lastSql;
+      item.appendChild(sql);
+    }
+    box.appendChild(item);
+  }
+}
+
+/* ---- 6. 超时开关 ---- */
+
+const TIMEOUT_FIELDS = [
+  { key: 'slowSqlSec', name: '慢 SQL 超时', tip: '单条语句跑超过它就回滚所在事务（引擎不支持中途打断，是跑完再回滚）' },
+  { key: 'slowTxIdleSec', name: '慢事务超时', tip: '事务空闲（距最后一条 SQL）超过它就回滚，兜住「SQL 都快但不提交」' },
+  { key: 'lockWaitSec', name: '等锁超时', tip: '等表锁超过它放弃整个事务；不限时只靠死锁检测兜底' },
+  { key: 'queueWaitSec', name: '排队超时', tip: '排队等执行槽位超过它就快速失败（背压）' },
+];
+
+function renderTimeouts(t) {
+  // 只在第一次构建结构，之后只refresh 状态文字：每 2 秒重建输入框会把
+  // 正在输入的数字和光标一起冲掉。
+  if (!monTimeoutBuilt) {
+    monEls.timeouts.innerHTML = '';
+    for (const f of TIMEOUT_FIELDS) {
+      const row = el('div', 'to-row');
+      row.appendChild(el('span', 'to-name', f.name)).title = f.tip;
+
+      const inp = el('input', 'to-input');
+      inp.type = 'number';
+      inp.min = '0';
+      inp.max = '86400';
+      inp.step = '1';
+      inp.placeholder = '不限';
+      inp.id = 'to-' + f.key;
+      inp.setAttribute('aria-label', f.name + '（秒）');
+      inp.addEventListener('input', () => { monEls.timeoutHint.textContent = ''; });
+      row.appendChild(inp);
+
+      row.appendChild(el('span', 'to-unit', '秒'));
+      row.appendChild(el('span', 'to-state', ''));
+      monEls.timeouts.appendChild(row);
+    }
+    monTimeoutBuilt = true;
+  }
+  if (monSavingTimeouts) return; // 保存中不要覆盖用户刚输入的值
+  for (const f of TIMEOUT_FIELDS) {
+    const inp = document.getElementById('to-' + f.key);
+    if (!inp) continue;
+    const v = t[f.key] || 0;
+    // 用户正在改这一项时不要抢他的输入
+    if (document.activeElement !== inp) inp.value = v > 0 ? String(v) : '';
+    const row = inp.parentNode;
+    const st = row.querySelector('.to-state');
+    st.textContent = v > 0 ? '已开启' : '⚠ 不限';
+    st.className = 'to-state ' + (v > 0 ? 'on' : 'off');
+  }
+}
+
+async function saveTimeouts() {
+  if (monSavingTimeouts) return;
+  const body = {};
+  for (const f of TIMEOUT_FIELDS) {
+    const inp = document.getElementById('to-' + f.key);
+    const raw = inp ? parseInt(inp.value, 10) : 0;
+    const v = isNaN(raw) || raw < 0 ? 0 : Math.min(raw, 86400);
+    body[f.key] = v;
+  }
+  monSavingTimeouts = true;
+  monEls.timeoutHint.textContent = '保存中…';
+  try {
+    const r = await api('/api/monitor/timeouts', body);
+    if (r && r.error) {
+      monEls.timeoutHint.textContent = r.error;
+      return;
+    }
+    monEls.timeoutHint.textContent = r && r.persisted
+      ? '已保存到 config.json 并立即生效'
+      : '已生效（本次运行有效，没有配置文件可写）';
+    if (monData) monData.timeouts = body;
+    renderTimeouts(body);
+    toast('超时设置已应用');
+  } catch (e) {
+    monEls.timeoutHint.textContent = '保存失败：' + e.message;
+  } finally {
+    monSavingTimeouts = false;
+  }
 }
 
 function sessionShort(id) {
@@ -1160,14 +1719,111 @@ document.getElementById('btnClear').addEventListener('click', () => {
 });
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
-document.getElementById('btnLocks').addEventListener('click', () => toggleLocks());
-document.getElementById('btnLockClose').addEventListener('click', () => toggleLocks(false));
+document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
+document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
+document.getElementById('btnMonRefresh').addEventListener('click', () => pollMonitor());
+document.getElementById('btnMonSaveTimeouts').addEventListener('click', saveTimeouts);
 document.getElementById('btnCommit').addEventListener('click', () => txAction('commit'));
 document.getElementById('btnRollback').addEventListener('click', () => txAction('rollback'));
 
+/* ---------------- 危险操作确认（手打库名） ---------------- */
+
+// 当前库名：徽标上的文本就是服务端 /api/dbs 返回的 current。
+function currentDBName() {
+  return ((document.getElementById('dbBadge') || {}).textContent || '').trim();
+}
+
+// 两次 confirm() 在「手快、误双击、赶时间改配置」的时候基本等于没拦 ——
+// 而且它是浏览器原生弹框，视觉上和别的东西没区别（2026-10-28 那次就是这么丢的表）。
+// 手打库名要眼睛看着键盘一个个敲，几乎不可能顺手完成，这是 GitHub 删仓库那套。
+//
+//   confirmDanger({ title, desc, items:[{name, meta}], word, okText }) -> Promise<boolean>
+function confirmDanger(opt) {
+  const modal = document.getElementById('confirmModal');
+  const input = document.getElementById('cfInput');
+  const okBtn = document.getElementById('cfOk');
+  const hint = document.getElementById('cfHint');
+
+  document.getElementById('cfTitle').textContent = opt.title || '危险操作';
+  document.getElementById('cfDesc').textContent = opt.desc || '';
+  document.getElementById('cfWord').textContent = opt.word;
+  okBtn.textContent = opt.okText || '确认';
+
+  const list = document.getElementById('cfList');
+  list.innerHTML = '';
+  const items = opt.items || [];
+  for (const it of items) {
+    const row = el('div', 'cf-item');
+    row.appendChild(el('span', 'cf-name', it.name));
+    row.appendChild(el('span', 'cf-meta', it.meta || ''));
+    list.appendChild(row);
+  }
+  list.classList.toggle('hidden', items.length === 0);
+
+  input.value = '';
+  input.placeholder = opt.word;
+  input.classList.remove('ok');
+  hint.textContent = '';
+  hint.className = 'modal-hint';
+  okBtn.disabled = true;
+
+  modal.classList.remove('hidden');
+  input.focus();
+
+  return new Promise(resolve => {
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      modal.classList.add('hidden');
+      resolve(v);
+    };
+    const sync = () => {
+      const hit = input.value.trim() === opt.word;
+      okBtn.disabled = !hit;
+      input.classList.toggle('ok', hit);
+      if (hit) hint.textContent = '';
+    };
+    input.oninput = sync;
+    input.onkeydown = e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!okBtn.disabled) finish(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        // 别让全局 Esc 处理器顺手把底下的设置页也关掉
+        e.stopPropagation();
+        finish(false);
+      }
+    };
+    okBtn.onclick = () => { if (!okBtn.disabled) finish(true); };
+    document.getElementById('cfCancel').onclick = () => finish(false);
+    document.getElementById('cfClose').onclick = () => finish(false);
+    // 点遮罩也算取消：手滑点到外面不该有任何后果
+    modal.onclick = e => { if (e.target === modal) finish(false); };
+  });
+}
+
+// 把当前库的表整理成确认框里的清单（行数取自 schemaCache）
+function schemaItems() {
+  return schemaCache.map(t => ({ name: t.name, meta: (t.rows || 0) + ' 行' }));
+}
+
 // 这两个原来是顶栏按钮，现在收在设置页里（低频 + 一个会清库），实现不变
 async function loadSample() {
-  if (!confirm('将重建示例数据（departments / employees），当前所有表会被清空。继续？')) return;
+  const word = currentDBName() || 'godb';
+  const n = schemaCache.length;
+  const ok = await confirmDanger({
+    title: '载入示例数据',
+    desc: n
+      ? `当前库「${word}」里的 ${n} 张表会被删除，然后重建 departments / employees 并灌入示例数据。`
+      : `当前库「${word}」是空的，将创建 departments / employees 并灌入示例数据。`,
+    items: schemaItems(),
+    word,
+    okText: '清空并重建',
+  });
+  if (!ok) return;
   try {
     await api('/api/sample', {});
     await loadSchema();
@@ -1181,8 +1837,18 @@ async function loadSample() {
 }
 
 async function resetDatabase() {
-  const cur = (document.getElementById('dbBadge') || {}).textContent || '当前库';
-  if (!confirm(`确定要删除「${cur}」里的所有表吗？此操作不可撤销。`)) return;
+  const cur = currentDBName() || 'godb';
+  const n = schemaCache.length;
+  const ok = await confirmDanger({
+    title: '清空当前库',
+    desc: n
+      ? `「${cur}」里的 ${n} 张表会被全部删除。表结构和数据先进回收站，可以用命令行找回。`
+      : `「${cur}」里现在没有任何表。`,
+    items: schemaItems(),
+    word: cur,
+    okText: '清空',
+  });
+  if (!ok) return;
   try {
     await api('/api/reset', {});
     await loadSchema();
@@ -1251,8 +1917,24 @@ async function openHelp() {
 
 // 在帮助里当场补齐示例数据。这里不复用 loadSample()：那个会顺手把示例 SQL
 // 填进编辑器并执行，而用户此刻只是想看手册。
+//
+// 注意这个按钮在「缺示例表」时就会露出来，库里可能有自己的表 —— 那种情况下
+// /api/sample 会把它们全清掉，所以必须走手打库名那一套。
 btnHelpSample.addEventListener('click', async () => {
-  if (!confirm('将在当前库重建示例数据（departments / employees），当前库已有的表会被清空。继续？')) return;
+  const word = currentDBName() || 'godb';
+  const n = schemaCache.length;
+  if (n > 0) {
+    const ok = await confirmDanger({
+      title: '补齐示例数据',
+      desc: `当前库「${word}」里有 ${n} 张表，补齐示例会先全部删除，再重建 departments / employees。`,
+      items: schemaItems(),
+      word,
+      okText: '清空并重建',
+    });
+    if (!ok) return;
+  } else if (!confirm(`将在空的「${word}」里创建示例表 departments / employees，继续？`)) {
+    return;
+  }
   try {
     await api('/api/sample', {});
     await loadSchema();
@@ -1460,8 +2142,9 @@ function renderSettings() {
   dataActs.appendChild(resetBtn);
   settingsBody.appendChild(setRow('维护', dataActs));
   settingsBody.appendChild(el('div', 'set-hint',
-    '两条都会二次确认，且只作用于当前库（' +
-    ((document.getElementById('dbBadge') || {}).textContent || '当前库') + '）。'));
+    '两条都要手打库名才能确认（防手滑），且只作用于当前库（' +
+    ((document.getElementById('dbBadge') || {}).textContent || '当前库') +
+    '）。删掉的东西会先进回收站，停服后可用 -restore-trash 找回。'));
 
   /* ---- 落盘 ---- */
   settingsBody.appendChild(el('div', 'set-sec', '落盘节奏（checkpoint）'));
@@ -1635,7 +2318,11 @@ document.getElementById('btnSettings').addEventListener('click', openSettings);
 document.getElementById('btnSettingsClose').addEventListener('click', closeSettings);
 document.getElementById('btnSettingsSave').addEventListener('click', saveSettings);
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !settingsModal.classList.contains('hidden')) closeSettings();
+  // 确认框开着的时候 Esc 只该关它自己，别顺手把底下的设置页也关掉
+  // （设置页里的两个按钮都会弹这个确认框，叠在一起）。
+  const cfOpen = !document.getElementById('confirmModal').classList.contains('hidden');
+  if (e.key === 'Escape' && !cfOpen && !settingsModal.classList.contains('hidden')) closeSettings();
+  if (e.key === 'Escape' && monOpen) toggleMonitor(false);
 });
 
 /* ---------------- 窄屏：表结构抽屉 ---------------- */
@@ -1682,10 +2369,10 @@ document.addEventListener('keydown', e => {
   loadEditorHeight();
   autoSize();
   loadSchema();
-  loadLocks();
-  setInterval(loadLocks, 3000);
+  pollMonitor();
+  setInterval(pollMonitor, 2000);
   // 支持 #locks / #settings / #help 直接打开对应面板
-  if (location.hash === '#locks') toggleLocks(true);
+  if (location.hash === '#monitor' || location.hash === '#locks') toggleMonitor(true);
   if (location.hash === '#settings') openSettings();
   if (location.hash === '#help') openHelp();
 })();

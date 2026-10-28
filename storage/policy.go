@@ -77,14 +77,39 @@ func (s *Store) CheckpointStatsNow() CheckpointStats {
 	return st
 }
 
-// noteCheckpointLocked 在 checkpointLocked 成功后调用（已持 CommitMu）。
-func (s *Store) noteCheckpointLocked() {
+// noteCheckpointLocked 在 checkpointBodyLocked 成功后调用（已持 CommitMu）。
+//
+// reason 回答「这一次为什么写盘」，tookNs 是整轮耗时（拍快照 + 写盘 + 收尾），
+// bytes 是这一次实际写进磁盘的字节数。这三样是排查「提交为什么突然变慢」的
+// 第一手材料：fsync 慢的那几秒，往往正好有一次大快照在写。
+//
+// wrote 是这次真正写了多少张表。为空时（启动时空库、或所有表都没加载）
+// 只清零计数，不记耗时样本 —— 否则一次「什么也没写」的 0ns 会混进 p50，
+// 让面板上的「快照 p50」永远是假的零点几毫秒。
+func (s *Store) noteCheckpointLocked(reason string, tookNs, bytes int64, wrote int) {
 	s.cpLastNs.Store(time.Now().UnixNano())
 	s.cpSince.Store(0)
+	if wrote <= 0 {
+		// 一张表都没写：只清零计数（不然后台定时器会立刻再跑一次），
+		// 不算「落过一次盘」。
+		return
+	}
 	s.cpRuns.Add(1)
+	if s.cpRing != nil {
+		s.cpRing.add(tookNs)
+	}
+	s.cpDurNs.Store(tookNs)
+	s.cpBytes.Store(bytes)
+	s.cpStatMu.Lock()
+	s.cpLastReason = reason
+	if s.cpReasons == nil {
+		s.cpReasons = map[string]int64{}
+	}
+	s.cpReasons[reason]++
+	s.cpStatMu.Unlock()
 }
 
-// needCheckpointLocked 判断「现在该不该落盘」。
+// needCheckpointLocked 判断「现在该不该落盘」，并给出触发原因。
 //
 // 两条硬约束：提交次数攒够了 / WAL 涨到阈值了。后者无条件执行 ——
 // 不落盘就没法轮转 WAL，日志会无限长。
@@ -93,14 +118,16 @@ func (s *Store) noteCheckpointLocked() {
 // 重写 20 MB 的话写放大接近 2 万倍（实测）。所以大表要攒够比例、小表
 // 随便写；攒着的这段时间数据在 WAL 里，崩溃恢复照样不丢，只是重启时要
 // 多重放几条记录。
-func (s *Store) needCheckpointLocked() bool {
+func (s *Store) needCheckpointLocked() (bool, string) {
 	if b := s.cpWALBytes.Load(); b > 0 && s.wal != nil && s.wal.LiveBytes() >= b {
-		return true
+		return true, CPReasonWALMB
 	}
 	if n := s.cpCommits.Load(); n > 0 && s.cpSince.Load() >= n {
-		return s.worthWritingLocked()
+		if s.worthWritingLocked() {
+			return true, CPReasonCommits
+		}
 	}
-	return false
+	return false, ""
 }
 
 const (
@@ -203,7 +230,7 @@ func (s *Store) tickCheckpoint() {
 	if !s.worthWritingLocked() {
 		return
 	}
-	if _, err := s.tryCheckpointLocked(); err != nil {
+	if _, err := s.tryCheckpointLocked(CPReasonSeconds); err != nil {
 		// 落盘失败不能让后台 goroutine 退出，也不能更新时间和计数：
 		// 下一轮还会重试，同时把错误打到日志里。
 		log.Printf("自动落盘失败: %v", err)

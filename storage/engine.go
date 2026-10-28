@@ -82,6 +82,19 @@ type Store struct {
 	dirtyRows map[string]int64
 	// written 是累计写盘字节数（给 CHECKPOINT / 状态页看）
 	written atomic.Int64
+	// totalCommits 是进程启动以来的累计提交数。commits 只统计「当前 checkpoint
+	// 周期内的」提交，落盘就清零，不能拿来算每秒提交数。
+	totalCommits atomic.Int64
+
+	// IO 画像（见 ioprofile.go）：checkpoint 的耗时样本、上一次写了多少、
+	// 触发原因分布。cpLastNs 是「上次落盘时刻」，cpDurNs 是「上次耗时」，
+	// 两个别混用。
+	cpRing       *latRing
+	cpDurNs      atomic.Int64
+	cpBytes      atomic.Int64
+	cpStatMu     sync.Mutex
+	cpLastReason string
+	cpReasons    map[string]int64
 }
 
 // Open 打开数据目录：加载快照 → 重放 WAL → 立刻 checkpoints 并截断 WAL。
@@ -101,6 +114,8 @@ func Open(dir string, cat *catalog.Catalog, progress func(string)) (*Store, erro
 		dirty:     map[string]bool{},
 		dirtyRows: map[string]int64{},
 		loaded:    map[string]bool{},
+		cpRing:    newLatRing(cpSampleCap),
+		cpReasons: map[string]int64{},
 	}
 	for _, t := range cat.Tables {
 		s.Data[cleanName(t.Name)] = newTableData(t.Name)
@@ -461,8 +476,8 @@ func (tx *Tx) Scan(table string, fn func(ref Ref, row types.Row) error) error {
 type RowIter struct {
 	td   *TableData
 	o    *overlay
-	slot int  // 已提交部分的槽位游标
-	ins  int  // overlay 插入部分的游标；-1 表示还没开始 / 已结束
+	slot int // 已提交部分的槽位游标
+	ins  int // overlay 插入部分的游标；-1 表示还没开始 / 已结束
 	done bool
 	err  error
 }
@@ -1536,9 +1551,9 @@ func (tx *Tx) commitLocked() (int64, error) {
 		upd     []int       // 要原地替换的槽位
 		updRows []types.Row // 与 upd 对齐的新行
 		ins     []types.Row // 要分配新槽位的行
-		dirty  int64
-		seq    int64
-		seqSet bool
+		dirty   int64
+		seq     int64
+		seqSet  bool
 		// seqAbs 表示这个值来自 setval，要按绝对值覆盖（允许调低）；
 		// 否则按 nextval 的单调语义，只允许往上推。
 		seqAbs bool
@@ -1694,9 +1709,10 @@ func (tx *Tx) commitLocked() (int64, error) {
 	tx.n = 0
 
 	tx.st.commits++
+	tx.st.totalCommits.Add(1)
 	tx.st.cpSince.Add(1)
-	if tx.st.needCheckpointLocked() {
-		done, err := tx.st.tryCheckpointLocked()
+	if need, reason := tx.st.needCheckpointLocked(); need {
+		done, err := tx.st.tryCheckpointLocked(reason)
 		if err != nil {
 			return 0, err
 		}

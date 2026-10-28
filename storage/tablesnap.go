@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -66,17 +67,11 @@ func readTableSnapHeader(path string) (tableSnapHeaderInfo, error) {
 	}, nil
 }
 
-// writeTableSnap 原子写入一张表的全部行（tmp + fsync + rename）。
+// encodeTableSnap 把整张表编码成文件字节。
 //
 // 空槽（被删除、还没被复用的槽位）不写进文件：磁盘上永远是紧凑的，
 // 加载回来直接就是连续行号，不需要再压一次。
-func writeTableSnap(dir string, id int64, gen int64, rows []types.Row) (int64, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "tables"), 0o755); err != nil {
-		return 0, err
-	}
-	path := tableFileName(dir, id)
-	tmp := path + ".tmp"
-
+func encodeTableSnap(gen int64, rows []types.Row) []byte {
 	payload := make([]byte, 0, len(rows)*64)
 	n := 0
 	for _, r := range rows {
@@ -93,26 +88,60 @@ func writeTableSnap(dir string, id int64, gen int64, rows []types.Row) (int64, e
 	binary.LittleEndian.PutUint32(buf[16:], uint32(n))
 	binary.LittleEndian.PutUint32(buf[20:], crc32.Checksum(payload, crcTable))
 	copy(buf[tableSnapHeader:], payload)
+	return buf
+}
 
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
+// writeTableSnap 原子写入一张表的全部行（tmp + fsync + rename）。
+func writeTableSnap(dir string, id int64, gen int64, rows []types.Row) (int64, error) {
+	if err := os.MkdirAll(filepath.Join(dir, "tables"), 0o755); err != nil {
 		return 0, err
 	}
-	if _, err := f.Write(buf); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return 0, err
-	}
-	if err := f.Close(); err != nil {
-		return 0, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	buf := encodeTableSnap(gen, rows)
+	if err := writeFileAtomic(tableFileName(dir, id), buf); err != nil {
 		return 0, err
 	}
 	return int64(len(buf)), nil
+}
+
+// TableSnapPath 返回某张表数据文件的完整路径。
+// 回收站恢复要按 ID 直接操作文件，所以这里把命名规则暴露出去。
+func TableSnapPath(dir string, id int64) string { return tableFileName(dir, id) }
+
+// InstallTableSnap 把一份表数据写进 <data>/tables/，并把代次对齐到 gen。
+//
+// 回收站里的备份文件代次写的是 0（不参与当时的重放判断），直接拷回来会被
+// WAL 整段重放 —— 重放判据是 rec.Gen > 表代次，0 等于「什么记录都没包含」。
+// 所以恢复写入时必须盖成当前代次，表示「这份数据已包含该代次之前的一切」。
+func InstallTableSnap(dir string, id int64, data []byte, gen int64) (int64, error) {
+	if len(data) < tableSnapHeader || string(data[:8]) != tableSnapMagic {
+		return 0, fmt.Errorf("不是表数据文件（缺少 %s 文件头）", tableSnapMagic)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "tables"), 0o755); err != nil {
+		return 0, err
+	}
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	binary.LittleEndian.PutUint64(buf[8:], uint64(gen))
+	if err := writeFileAtomic(tableFileName(dir, id), buf); err != nil {
+		return 0, err
+	}
+	return int64(len(buf)), nil
+}
+
+// MetaGeneration 读 meta.json 里的当前代次（文件不存在返回 0）。
+func MetaGeneration(dir string) (int64, error) {
+	b, err := os.ReadFile(filepath.Join(dir, metaFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var m metaInfo
+	if err := json.Unmarshal(b, &m); err != nil {
+		return 0, fmt.Errorf("解析 %s 失败: %w", metaFile, err)
+	}
+	return m.Generation, nil
 }
 
 // readTableSnap 读出整张表的行，并按当前表结构对齐（列数不一致时补齐/截断）。

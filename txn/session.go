@@ -3,8 +3,10 @@ package txn
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"godb/hrtime"
@@ -55,8 +57,8 @@ type Session struct {
 	// execToken 是并发执行信号量的令牌（由 db 层注入）。
 	// 信号量按事务持有：BEGIN 时获取，COMMIT/ROLLBACK 时释放。
 	// 这样保证「持有表锁 ⊆ 持有信号量」，不会出现锁×信号量交叉死锁。
-	execToken   bool
-	releaseExec func()
+	execToken    bool
+	releaseExec  func()
 	_execAcquire func() (func(), error) // db 层注入的信号量获取函数
 
 	mu    sync.Mutex // 保证同一会话的请求串行执行
@@ -78,7 +80,37 @@ type Session struct {
 	// lastSeq 是会话级的最后一次序列值（lastval() 跨语句有效）。
 	lastSeq    int64
 	hasLastSeq bool
+
+	// cancel 是外部取消请求（监控面板 Kill / 客户端断开）。
+	// cancelCh 在 Cancel 时 close，用来唤醒正在排队等执行槽位的请求；
+	// 等锁的那一段靠 lock.Options.Canceled 回调读 cancel 标志。
+	// 用 atomic.Pointer 存通道：AcquireExecToken 持着 s.mu 时也要能读到它，
+	// 走 s.mu 就会自己锁自己。
+	cancel   atomic.Bool
+	cancelCh atomic.Pointer[chan struct{}]
+
+	// observe 是观测钩子（db 层注入，nil 表示关闭监控）。
+	// 只报告「等锁开始/结束」这类 db 层看不见的状态；执行与空闲由 db 层自己记。
+	observe func(state string, tables []string)
+
+	// txStart 是当前事务的开始时刻，txStmts 是本事务已提交的语句数。
+	// 只给监控面板算「事务持锁时长 / 空闲时长 / 已执行语句数」用。
+	// 用 atomic 存：db 层在 Exec 的 defer 里读它们时还持着 s.mu，
+	// 走 s.mu 会自己锁自己。
+	txStartUnix atomic.Int64
+	txStmts     atomic.Int64
 }
+
+// 观测钩子报告的状态。
+const (
+	ObsWaiting = "waiting" // 正在等表锁
+	ObsRunning = "running" // 正在执行语句
+	ObsIdle    = "idle"    // 空闲（等客户端发下一条）
+	// ObsTxEnd 是「事务结束」（提交 / 回滚 / 强制回滚都算）。
+	// 单独一个事件而不是靠 ObsIdle 推断：事务里空闲是常态，
+	// 用 idle 判断「还有没有事务」会把所有正常的长事务画成已结束。
+	ObsTxEnd = "txend"
+)
 
 // savepoint 是一个保存点：名字 + 当时的事务快照。
 type savepoint struct {
@@ -152,7 +184,8 @@ func normalizeSavepointName(name string) string {
 
 // NewSession 创建会话。
 func NewSession(id string, st *storage.Store, mgr *Manager, locks *lock.Manager, iso Isolation, opts lock.Options) *Session {
-	return &Session{
+	ch := make(chan struct{})
+	s := &Session{
 		ID:    id,
 		st:    st,
 		iso:   iso,
@@ -161,7 +194,96 @@ func NewSession(id string, st *storage.Store, mgr *Manager, locks *lock.Manager,
 		opts:  opts,
 		last:  time.Now(),
 	}
+	s.cancelCh.Store(&ch)
+	// 每个会话的锁等待都要能被自己的取消标志打断（面板 Kill）。
+	// opts 是值拷贝，各会话互不影响。
+	s.opts.Canceled = s.Canceled
+	return s
 }
+
+// ---- 取消 ----
+
+// Cancel 请求取消本会话当前的动作：排队中立刻退出，等锁中放弃并回滚，
+// 执行中则登记（保守版中断：语句跑完后由 db 层回收事务）。
+func (s *Session) Cancel() {
+	if s.cancel.CompareAndSwap(false, true) {
+		if p := s.cancelCh.Load(); p != nil {
+			close(*p)
+		}
+	}
+}
+
+// Canceled 是否已收到取消请求。
+func (s *Session) Canceled() bool { return s.cancel.Load() }
+
+// CancelCh 返回取消信号通道（close 即取消）。给排队等槽位的 select 用。
+func (s *Session) CancelCh() <-chan struct{} {
+	if p := s.cancelCh.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// ClearCancel 清掉取消标志并换一条新通道（Kill 处理完之后调用）。
+func (s *Session) ClearCancel() {
+	if !s.cancel.Swap(false) {
+		return
+	}
+	ch := make(chan struct{})
+	s.cancelCh.Store(&ch)
+}
+
+// ---- 观测 ----
+
+// SetObserve 注入观测钩子（db 层调用）。nil 表示不观测。
+func (s *Session) SetObserve(fn func(state string, tables []string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observe = fn
+}
+
+// notify 调观测钩子。钩子只做一次 map 写，不做 IO，不会长时间持锁。
+func (s *Session) notify(state string, tables []string) {
+	if s.observe != nil {
+		s.observe(state, tables)
+	}
+}
+
+// ObserveIdle 主动上报空闲（供 db 层在语句结束后收尾）。
+func (s *Session) ObserveIdle() { s.notify(ObsIdle, nil) }
+
+// TxInfo 返回事务元信息：是否在事务中、开始时刻、已执行语句数、空闲时长。
+// 不加 s.mu：db 层在 Exec 的 defer 里调用它，那时锁还持在自己手上。
+func (s *Session) TxInfo() (inTx bool, start time.Time, stmts int, idle time.Duration) {
+	ns := s.txStartUnix.Load()
+	if ns > 0 {
+		start = time.Unix(0, ns)
+	}
+	return s.tx != nil, start, int(s.txStmts.Load()), time.Since(s.last)
+}
+
+// NoteStmt 记一条完成的语句（事务内语句计数）。
+func (s *Session) NoteStmt() {
+	s.txStmts.Add(1)
+	s.last = time.Now()
+}
+
+// SetLockTimeout 热更新本会话的锁等待超时（<= 0 表示不限）。
+// 面板改「等锁超时」后，已经在等进行中的会话也要按新值走。
+func (s *Session) SetLockTimeout(d time.Duration) {
+	s.mu.Lock()
+	s.opts.Timeout = d
+	s.mu.Unlock()
+}
+
+// markTxStart 记事务开始时刻并把语句计数归零。
+func (s *Session) markTxStart() {
+	s.txStartUnix.Store(time.Now().UnixNano())
+	s.txStmts.Store(0)
+}
+
+// Canceled 时 lock 包需要的回调（避免每次取闭包分配）。
+func (s *Session) canceledFn() func() bool { return s.Canceled }
 
 // Lock 由执行层加锁，保证同一会话内语句不并发执行；同时刷新活动时间。
 func (s *Session) Lock() {
@@ -171,6 +293,10 @@ func (s *Session) Lock() {
 
 // Unlock 释放会话锁。
 func (s *Session) Unlock() { s.mu.Unlock() }
+
+// TryLock 尝试拿会话锁，拿不到说明这个会话正在执行语句。
+// 面板 Kill 与巡检靠它区分「正在跑」和「干等着」：前者只能标记，后者可以立刻回滚。
+func (s *Session) TryLock() bool { return s.mu.TryLock() }
 
 // InTx 是否处于显式事务中。
 func (s *Session) InTx() bool { return s.tx != nil }
@@ -202,14 +328,18 @@ func (s *Session) ResetLastWait() { s.lastWaitNs = 0 }
 // startTx 建立一个新事务并一次性拿到它需要的锁（保守 2PL）。
 func (s *Session) startTx(intents map[string]lock.Mode) error {
 	if s.iso == SerialLock {
+		s.notify(ObsWaiting, nil)
 		if err := s.mgr.Acquire(s.ID, s.opts.Timeout); err != nil {
+			s.notify(ObsIdle, nil)
 			return err
 		}
 		s.global = true
 		s.tx = s.st.Begin()
 		s.tx.User = s.User
+		s.markTxStart()
 		s.inheritLastSeq()
 		s.aborted = false
+		s.notify(ObsRunning, nil)
 		return nil
 	}
 
@@ -217,18 +347,35 @@ func (s *Session) startTx(intents map[string]lock.Mode) error {
 	tx.User = s.User
 	id, age := s.locks.NewTx(s.ID)
 	start := hrtime.Now()
+	s.notify(ObsWaiting, modeNames(intents))
 	if err := s.locks.AcquireAll(id, s.ID, age, intents, s.opts); err != nil {
 		tx.Rollback()
 		s.lastWaitNs = hrtime.Since(start)
+		s.notify(ObsIdle, nil)
 		return err
 	}
 	s.noteWait(start)
 	s.tx = tx
+	s.markTxStart()
 	s.inheritLastSeq()
 	s.lockTx = id
 	s.age = age
 	s.aborted = false
+	s.notify(ObsRunning, nil)
 	return nil
+}
+
+// modeNames 把「表 → 锁模式」的集合摊平成有序表名列表（观测与快照用）。
+func modeNames(mp map[string]lock.Mode) []string {
+	if len(mp) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(mp))
+	for name := range mp {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // inheritLastSeq 把会话级的 lastval 值带进新事务（lastval() 跨语句有效）。
@@ -261,11 +408,14 @@ func (s *Session) EnsureLocks(intents map[string]lock.Mode) error {
 		return nil
 	}
 	start := hrtime.Now()
+	s.notify(ObsWaiting, modeNames(need))
 	if err := s.locks.AcquireAll(s.lockTx, s.ID, s.age, need, s.opts); err != nil {
 		s.lastWaitNs = hrtime.Since(start)
+		s.notify(ObsIdle, nil)
 		return err
 	}
 	s.noteWait(start)
+	s.notify(ObsRunning, nil)
 	return nil
 }
 
@@ -299,6 +449,8 @@ func (s *Session) BeginStatement(intents map[string]lock.Mode) (*Stmt, error) {
 		return nil, err
 	}
 	s.Touch()
+	// 锁到位、语句即将交给执行引擎：从「等锁」切到「执行」。
+	s.notify(ObsRunning, modeNames(intents))
 	return &Stmt{s: s, auto: auto, mark: s.tx.Mark()}, nil
 }
 
@@ -402,6 +554,9 @@ func (s *Session) releaseAll() {
 	s.age = 0
 	s.aborted = false
 	s.savepoints = nil
+	s.txStartUnix.Store(0)
+	s.txStmts.Store(0)
+	s.notify(ObsTxEnd, nil)
 }
 
 // SetExecToken 注入并发执行信号量的获取/释放函数（db 层调用）。

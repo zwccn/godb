@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -32,16 +33,27 @@ func main() {
 	pgAddr := flag.String("pg", "127.0.0.1:6432", "PostgreSQL 协议监听地址（仅在首次生成配置文件时生效，留空表示不启用）")
 	pgLog := flag.String("pg-log", "", "把 PG 客户端发来的每条 SQL 追加写到该文件（排查兼容性问题用）")
 	iso := flag.String("isolation", "table", "并发控制模式：table（表级 S/X 锁）或 serial（全局串行）")
-	lockTimeout := flag.Duration("lock-timeout", 3*time.Second, "等待表锁的最长时间")
+	lockTimeout := flag.Duration("lock-timeout", 0, "等待表锁的最长时间（0 = 不限；仅在首次生成配置文件时生效）")
 	lockRetry := flag.Duration("lock-retry", 20*time.Millisecond, "等待表锁的轮询间隔")
 	deadlockDetect := flag.Bool("deadlock-detect", true, "等待成环时让最年轻的事务提前放弃")
 	deadlockAfter := flag.Duration("deadlock-after", 500*time.Millisecond, "等待多久后开始做死锁检测")
 	slow := flag.Duration("slow", 0, "把耗时超过该值的语句记进日志（如 200ms；0 表示不记录）")
+	restoreTrash := flag.String("restore-trash", "", "从回收站恢复一次备份后退出：给备份目录名，或 latest 表示最新一份")
 	showVersion := flag.Bool("version", false, "打印版本信息后退出")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(versionInfo())
+		return
+	}
+
+	// 回收站恢复是离线操作：直接改磁盘上的 catalog.json 和表文件，
+	// 运行中的进程内存里那份不会跟着变，所以必须在服务停止时跑。
+	if *restoreTrash != "" {
+		if err := runRestoreTrash(*dir, *restoreTrash); err != nil {
+			fmt.Fprintf(os.Stderr, "恢复失败: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -57,7 +69,7 @@ func main() {
 	//
 	// 先读配置再开库：HTTP 监听地址在配置里，要在 WAL 重放之前就把端口
 	// 占上并显示启动页（重放可能要几十秒，不能让浏览器一直连接被拒）。
-	seed := config.Seed(*addr, *pgAddr)
+	seed := config.Seed(*addr, *pgAddr, int(lockTimeout.Seconds()))
 	cfg, err := config.Load(*dir, seed, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "读取配置失败: %v\n", err)
@@ -94,7 +106,7 @@ func main() {
 	dbs, warns, err := db.OpenManager(*dir, db.Options{
 		Isolation: isolation,
 		Lock: lock.Options{
-			Timeout:        *lockTimeout,
+			Timeout:        lockWaitTimeout(conf.Timeouts.LockWaitSec),
 			Retry:          *lockRetry,
 			DeadlockDetect: *deadlockDetect,
 			DeadlockAfter:  *deadlockAfter,
@@ -114,8 +126,19 @@ func main() {
 	}
 	d := dbs.Default()
 	d.Store.SetCheckpointPolicy(storagePolicy(conf.Storage))
-	d.SetMaxConcurrent(conf.Performance.MaxConcurrent, conf.Performance.MaxQueued,
-		time.Duration(conf.Performance.WaitTimeoutMs)*time.Millisecond)
+	d.SetMaxConcurrent(conf.Performance.MaxConcurrent, conf.Performance.MaxQueued, 0)
+	d.SetTimeouts(db.TimeoutStatus{
+		SlowSQLSec:    conf.Timeouts.SlowSQLSec,
+		SlowTxIdleSec: conf.Timeouts.SlowTxIdleSec,
+		LockWaitSec:   conf.Timeouts.LockWaitSec,
+		QueueWaitSec:  conf.Timeouts.QueueWaitSec,
+	})
+
+	// 命令行 -lock-timeout 只作种子：配置文件里已经有等锁超时，之后以文件为准。
+	if *lockTimeout != 0 && int(lockTimeout.Seconds()) != conf.Timeouts.LockWaitSec {
+		log.Printf("注意: -lock-timeout 只在首次生成配置时生效，当前以配置文件为准（等锁超时 %s）",
+			secLabel(conf.Timeouts.LockWaitSec))
+	}
 
 	// 慢语句日志：诊断开关，走命令行，不进配置文件。
 	if *slow > 0 {
@@ -127,12 +150,21 @@ func main() {
 	}
 
 	if len(d.Tables()) == 0 && !*noSample {
-		gate.SetPhase("载入示例数据", "departments / employees")
-		init := d.Session("init")
-		if err := d.LoadSample(init); err != nil {
-			log.Printf("载入示例数据失败: %v", err)
+		// 只有「目录里根本没有 catalog.json」才算新库。
+		// 原来判的是 len(Tables()) == 0，等于把「catalog 被清空 / 读空」也当成新库：
+		// 一次异常重启就会把真实数据覆盖成样例（2026-10-28 真踩过，丢了两张表）。
+		if hasCatalog(*dir) {
+			log.Printf("注意: %s 里没有任何表，但 catalog.json 存在 —— 不自动载入示例数据。"+
+				"需要样例请用控制台的「载入示例数据」，误删可从 %s 恢复",
+				*dir, filepath.Join(*dir, storage.TrashDirName()))
 		} else {
-			log.Printf("已载入示例数据（departments / employees）")
+			gate.SetPhase("载入示例数据", "departments / employees")
+			init := d.Session("init")
+			if err := d.LoadSample(init); err != nil {
+				log.Printf("载入示例数据失败: %v", err)
+			} else {
+				log.Printf("已载入示例数据（departments / employees）")
+			}
 		}
 	}
 
@@ -161,8 +193,10 @@ func main() {
 		log.Printf("注意：命令行 -pg %s 已被配置文件覆盖（现为 %s），请到设置页修改",
 			seed.Network.PGAddr(), conf.Network.PGAddr())
 	}
-	log.Printf("并发控制: %s（锁超时 %s / 轮询 %s / 死锁检测 %v）",
-		isolation, *lockTimeout, *lockRetry, *deadlockDetect)
+	// 这里打的是**配置文件里的生效值**，不是命令行那个种子 —— 否则重启后
+	// 日志会写「锁超时 0s」，而实际在按文件里的值跑。
+	log.Printf("并发控制: %s（等锁超时 %s / 轮询 %s / 死锁检测 %v）",
+		isolation, secLabel(conf.Timeouts.LockWaitSec), *lockRetry, *deadlockDetect)
 	log.Printf("控制台: http://%s（%s）", state.HTTPAddr, listenScope(conf.Network.HTTPRemote))
 	if state.PGEnabled {
 		auth := "trust 认证，任意用户名、无密码"
@@ -260,6 +294,61 @@ func versionInfo() string {
 	return out
 }
 
+// hasCatalog 判断数据目录里是否已有表结构文件。
+//
+// 「目录里有没有 catalog.json」才是「这是不是一个新库」的判据。用表数判断会把
+// 「catalog 被清空 / 解析出 0 张表」也当成新库，从而静默覆盖真实数据。
+func hasCatalog(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "catalog.json"))
+	return err == nil
+}
+
+// runRestoreTrash 从回收站恢复一次备份并打印结果。恢复后需要重启服务才能看到表。
+func runRestoreTrash(dir, entry string) error {
+	log.Printf("数据目录: %s", dir)
+	// 先抢独占锁：拿不到说明还有 godb 在跑，这时改磁盘上的表文件会被它
+	// 内存里那份反向覆盖 —— 所以「请确认服务已停止」改成硬性检查，不靠人记。
+	unlock, err := db.LockDataDir(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	rep, err := db.RestoreTrash(dir, entry)
+	if err != nil {
+		return err
+	}
+	log.Printf("备份 %s（%s，原因 %s）", rep.Entry, rep.At, rep.Reason)
+	if len(rep.Restored) == 0 {
+		log.Printf("没有需要恢复的表")
+	}
+	for _, t := range rep.Restored {
+		if t.Bytes > 0 {
+			log.Printf("  已恢复 %s（%d 行，%s）", t.Name, t.Rows, humanBytes(t.Bytes))
+		} else {
+			log.Printf("  已恢复 %s（仅表结构，没有数据文件）", t.Name)
+		}
+	}
+	for _, name := range rep.Skipped {
+		log.Printf("  跳过 %s（同名表已存在，未覆盖）", name)
+	}
+	if len(rep.Restored) > 0 {
+		log.Printf("完成。代次已对齐到 %d，重启 godb 即可看到这些表", rep.Generation)
+	}
+	return nil
+}
+
+// humanBytes 把字节数格式化成便于阅读的形式（日志用）。
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 // oneLine 把多行 SQL 压成一行，便于日志里看。
 func oneLine(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
@@ -267,4 +356,22 @@ func oneLine(s string, max int) string {
 		s = s[:max] + "…"
 	}
 	return s
+}
+
+// lockWaitTimeout 把「秒，0 = 不限」翻译成 lock.Options.Timeout。
+// lock 包把 <= 0 都当不限，这里用 -1 明确表达，避免 0 被误当成「没设置」
+// 而被 db.Open 换成默认 3 秒。
+func lockWaitTimeout(sec int) time.Duration {
+	if sec <= 0 {
+		return -1
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// secLabel 把秒数渲染成人话（0 显示成「不限」），给启动日志用。
+func secLabel(sec int) string {
+	if sec <= 0 {
+		return "不限"
+	}
+	return (time.Duration(sec) * time.Second).String()
 }

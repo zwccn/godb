@@ -32,6 +32,10 @@ type Manager struct {
 
 	mu  sync.RWMutex
 	dbs map[string]*DB // 小写库名 → DB
+
+	// lock 是整个数据根目录的独占锁：一个进程一个目录，第二个进程直接起不来。
+	// 按库加锁是不够的 —— CREATE/DROP DATABASE、配置写入都在根上动文件。
+	lock *dirLock
 }
 
 // 库名规则和普通标识符一致：小写字母/数字/下划线，首字符不能是数字，最长 63。
@@ -46,9 +50,18 @@ var reservedDBNames = map[string]bool{"template0": true, "template1": true}
 // 默认库打不开是致命错误（整个服务没法用）；某个普通库打不开只记一条警告，
 // 不让一个坏库把服务拖垮 —— 那个库后续 Get 会报「does not exist」。
 func OpenManager(root string, o Options) (*Manager, []error, error) {
-	m := &Manager{root: root, opts: o, dbs: map[string]*DB{}}
+	// 独占锁必须在读 catalog 之前拿到：否则两个进程会同时在内存里改表结构，
+	// 各自 checkpoint，最后谁写坏了谁完全查不出来。
+	lk, err := lockDataDir(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	m := &Manager{root: root, opts: o, dbs: map[string]*DB{}, lock: lk}
 	def, err := m.openAt(syscat.DefaultDatabaseName, root)
 	if err != nil {
+		// 默认库打不开时整个服务起不来，锁要放掉，否则用户改完配置重试会被
+		// 自己上一把锁挡住（同进程内 flock 也会互斥）。
+		lk.Release()
 		return nil, nil, err
 	}
 	m.dbs[strings.ToLower(def.Name)] = def
@@ -256,6 +269,10 @@ func (m *Manager) Close() error {
 		if err := d.Close(); err != nil && first == nil {
 			first = err
 		}
+	}
+	// 所有库都落盘关闭之后再放锁，否则新进程可能在半关状态里读走一份残缺数据。
+	if err := m.lock.Release(); err != nil && first == nil {
+		first = err
 	}
 	return first
 }

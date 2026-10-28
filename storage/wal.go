@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
+	"godb/hrtime"
 	"godb/types"
 )
 
@@ -66,6 +68,12 @@ type Wal struct {
 	Frames   int64
 	Bytes    int64
 	SyncRuns int64 // 实际 fsync 次数（组提交效果看这个）
+
+	// syncRing 存每次 fsync 的耗时（纳秒），给监控面板算 p50/p95/max。
+	// lastSyncNs 是最近一次的耗时，单独存一份方便前端显示「刚才等了多久」。
+	// 访问都在 w.mu 内（SyncTo 的 leader 阶段 fsync 回到锁内才记录）。
+	syncRing   *latRing
+	lastSyncNs atomic.Int64
 }
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -96,7 +104,7 @@ func openWAL(dir string, gen int64) (*Wal, error) {
 			return nil, err
 		}
 	}
-	w := &Wal{path: path, f: f, gen: gen, liveBytes: st.Size()}
+	w := &Wal{path: path, f: f, gen: gen, liveBytes: st.Size(), syncRing: newLatRing(fsyncSampleCap)}
 	w.cond = sync.NewCond(&w.mu)
 	return w, nil
 }
@@ -168,9 +176,17 @@ func (w *Wal) SyncTo(seq int64) error {
 	for {
 		target := w.written
 		w.mu.Unlock()
+		t0 := hrtime.Now()
 		err := w.f.Sync()
+		took := hrtime.Since(t0)
 		w.mu.Lock()
 		w.SyncRuns++
+		// fsync 是 COMMIT 的关键路径，它的抖动直接变成客户端能感知的卡顿。
+		// 失败的那次也记：一次 200ms 的失败重试同样值得看见。
+		if w.syncRing != nil {
+			w.syncRing.add(took)
+		}
+		w.lastSyncNs.Store(took)
 		if err != nil {
 			w.syncErr = fmt.Errorf("fsync WAL 失败: %w", err)
 			break
@@ -187,6 +203,26 @@ func (w *Wal) SyncTo(seq int64) error {
 	err := w.syncErr
 	w.mu.Unlock()
 	return err
+}
+
+// SyncProfile 返回 fsync 延迟画像（给监控面板）。
+func (w *Wal) SyncProfile() FsyncProfile {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p := FsyncProfile{
+		Runs:       w.SyncRuns,
+		LastNs:     w.lastSyncNs.Load(),
+		Bytes:      w.Bytes,
+		LiveBytes:  w.liveBytes,
+		Frames:     w.Frames,
+		SyncedSeq:  w.synced,
+		WrittenSeq: w.written,
+	}
+	if w.syncRing != nil {
+		p.P50Ns, p.P95Ns, p.MaxNs = w.syncRing.stats()
+		p.RingSamples = w.syncRing.n
+	}
+	return p
 }
 
 // Rotate 轮转到指定代次：删掉旧文件、建新文件。
@@ -536,8 +572,8 @@ func (s *Store) replayWAL() error {
 		return nil
 	}
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
+		wg       sync.WaitGroup
+		mu       sync.Mutex
 		firstErr error
 	)
 	for _, tbl := range byTable {

@@ -17,7 +17,14 @@ import (
 )
 
 // 当前配置文件的版本号。将来字段语义变化时用它做迁移。
-const Version = 1
+//
+// v2：排队超时从 performance.waitTimeoutMs 挪到 timeouts.queueWaitSec，
+// 并把锁等待超时也收进 timeouts（监控面板要能开关全部四个超时）。
+//
+// v3：等锁 / 排队的出厂默认从 3 秒改成「不限」（0）。监控面板上四个超时
+// 现在出厂全是「不限」——它们都是「主动回滚或放弃用户请求」的保护，
+// 默认打开等于替用户做决定。
+const Version = 3
 
 // Storage 控制 checkpoint（落盘）的触发策略。
 //
@@ -74,8 +81,29 @@ type Performance struct {
 	// MaxQueued：排队上限，超过就快速失败（背压）。
 	// 0 = 不限排队（只靠 WaitTimeout 兜底）。
 	MaxQueued int `json:"maxQueued"`
-	// WaitTimeoutMs：排队最长等待（毫秒），超过快速失败。
-	WaitTimeoutMs int `json:"waitTimeoutMs"`
+
+	// WaitTimeoutMs 已废弃（v2 起由 Timeouts.QueueWaitSec 承担）。
+	// 保留字段只为读得懂 v1 的配置文件，Normalize 会把它搬走后清零。
+	WaitTimeoutMs int `json:"waitTimeoutMs,omitempty"`
+}
+
+// Timeouts 是监控面板底部的四个超时保护。
+//
+// 全部 0 = 不限：不限制并发、不主动回滚，让用户看着面板上的时长分布
+// 自己决定开哪一个、设多少。它们都是「保护」而不是「限制」，默认不开。
+//
+// 语义区分（这块最容易搞混）：
+//   - SlowSQLSec：单条语句（整批）执行超过它就回滚所在事务。引擎没有语句级
+//     中断点，所以是「跑完再回滚」，不打断正在消耗 CPU 的那条语句。
+//   - SlowTxIdleSec：事务空闲（距最后一条 SQL）超过它就回滚 —— 兜住
+//     「SQL 都快、但事务不提交」的情况，和 SlowSQLSec 不是一回事。
+//   - LockWaitSec：等表锁的最长时间，超过则放弃整个事务。
+//   - QueueWaitSec：排队等执行槽位的最长时间，超过则快速失败（背压）。
+type Timeouts struct {
+	SlowSQLSec    int `json:"slowSqlSec"`
+	SlowTxIdleSec int `json:"slowTxIdleSec"`
+	LockWaitSec   int `json:"lockWaitSec"`
+	QueueWaitSec  int `json:"queueWaitSec"`
 }
 
 // Config 是完整的配置文件内容。
@@ -85,6 +113,7 @@ type Config struct {
 	Network     Network     `json:"network"`
 	Auth        Auth        `json:"auth"`
 	Performance Performance `json:"performance"`
+	Timeouts    Timeouts    `json:"timeouts"`
 }
 
 // Default 返回出厂默认值。
@@ -110,7 +139,18 @@ func Default() Config {
 		Performance: Performance{
 			MaxConcurrent: 32,
 			MaxQueued:     256,
-			WaitTimeoutMs: 3000,
+		},
+		Timeouts: Timeouts{
+			// 四个超时出厂全部「不限」：它们都是「主动回滚别人事务」或
+			// 「直接拒绝请求」的开关，出厂就打开容易误伤长事务、批量导入
+			// 和首次建索引这类慢但是正常的操作。
+			// 卡住的时候面板上能直接看到谁在等、等了多久，再按需开。
+			SlowSQLSec:    0,
+			SlowTxIdleSec: 0,
+			// 等锁 / 排队也默认不限：死锁检测（等待图找环）仍然在跑，
+			// 互相等待的环会立刻打散，不需要靠超时兜底。
+			LockWaitSec:  0,
+			QueueWaitSec: 0,
 		},
 	}
 }
@@ -155,8 +195,19 @@ func (c *Config) Validate() error {
 	if c.Performance.MaxQueued < 0 || c.Performance.MaxQueued > 100000 {
 		return fmt.Errorf("「排队上限」必须在 0 到 100000 之间（0 = 不限）")
 	}
-	if c.Performance.WaitTimeoutMs < 0 || c.Performance.WaitTimeoutMs > 60000 {
-		return fmt.Errorf("「排队超时」必须在 0 到 60000 毫秒之间")
+	// 四个超时：0 = 不限，上限 24 小时（再大的值等于没设，但不必禁止）。
+	for _, f := range []struct {
+		name string
+		v    int
+	}{
+		{"慢 SQL 超时", c.Timeouts.SlowSQLSec},
+		{"慢事务超时", c.Timeouts.SlowTxIdleSec},
+		{"等锁超时", c.Timeouts.LockWaitSec},
+		{"排队超时", c.Timeouts.QueueWaitSec},
+	} {
+		if f.v < 0 || f.v > 86400 {
+			return fmt.Errorf("「%s」必须在 0 到 86400 秒之间（0 = 不限）", f.name)
+		}
 	}
 
 	if err := checkPort("HTTP 端口", c.Network.HTTPPort); err != nil {
@@ -197,6 +248,48 @@ func checkPort(label string, p int) error {
 // Normalize 补齐零值字段并去掉空白。
 func (c *Config) Normalize() {
 	if c.Version <= 0 {
+		c.Version = 1 // 没有版本号的都是 v1，走下面的迁移
+	}
+	if c.Version < 2 {
+		// v1 → v2：把「旧版的实际行为」固化成显式配置，别让升级悄悄放宽保护。
+		//
+		// 1) 排队超时：v1 存在 performance.waitTimeoutMs，缺失时为 0；
+		//    而旧代码在 <= 0 时会兜底 3 秒 —— 所以 0 要迁成 3，不是「不限」。
+		if c.Timeouts.QueueWaitSec == 0 {
+			sec := (c.Performance.WaitTimeoutMs + 500) / 1000
+			if sec < 1 {
+				sec = 3
+			}
+			c.Timeouts.QueueWaitSec = sec
+		}
+		// 2) 等锁超时：v1 里来自命令行 -lock-timeout，默认 3 秒。
+		if c.Timeouts.LockWaitSec == 0 {
+			c.Timeouts.LockWaitSec = 3
+		}
+		// 3) 并发上限：早期版本的配置文件里根本没有 performance 段，
+		//    读出来是 0（= 不限）。这里补成出厂默认 32/256 ——
+		//    「不限并发」不是当初的意图，只是字段还没被写进文件。
+		if c.Performance.MaxConcurrent == 0 && c.Performance.MaxQueued == 0 {
+			def := Default().Performance
+			c.Performance = def
+		}
+		c.Performance.WaitTimeoutMs = 0
+		c.Version = 2
+	}
+	if c.Version < 3 {
+		// v2 → v3：等锁 / 排队的出厂默认从 3 秒改成「不限」。
+		//
+		// v2 的 Default() 会把 3 原样写进每一个配置文件，于是「没动过」和
+		// 「手设 3 秒」在文件里长得一模一样。这里把恰好等于 3 的当成没动过
+		// 迁成 0，其它值（2、5、30…）原样保留 —— 那是用户真的选了。
+		//
+		// 想恢复 3 秒：到监控面板底部把数字填回去即可，会写进 config.json。
+		if c.Timeouts.LockWaitSec == 3 {
+			c.Timeouts.LockWaitSec = 0
+		}
+		if c.Timeouts.QueueWaitSec == 3 {
+			c.Timeouts.QueueWaitSec = 0
+		}
 		c.Version = Version
 	}
 	c.Auth.User = strings.TrimSpace(c.Auth.User)
@@ -218,8 +311,11 @@ func (c *Config) StorageWarnings() []string {
 //
 // httpAddr / pgAddr 是命令行传进来的 host:port，仅用于推导初始端口与
 // 远程开关；文件存在之后它们就被忽略。
-func Seed(httpAddr, pgAddr string) Config {
+func Seed(httpAddr, pgAddr string, lockWaitSec int) Config {
 	c := Default()
+	if lockWaitSec >= 0 {
+		c.Timeouts.LockWaitSec = lockWaitSec
+	}
 	if p, remote, ok := parseAddr(httpAddr); ok {
 		c.Network.HTTPPort, c.Network.HTTPRemote = p, remote
 	}

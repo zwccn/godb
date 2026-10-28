@@ -7,6 +7,7 @@
 //   node tools/ui_check.js
 // 需要本机有 Chrome（路径见 CHROME 常量），会自己起一个 headless 实例、跑完退出。
 const { spawn } = require('child_process');
+const fs = require('fs');
 const http = require('http');
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -58,6 +59,10 @@ class CDP {
 
 (async () => {
   const prof = 'C:/Users/Administrator/AppData/Local/Temp/godb-cdp';
+  // 每次都从干净的 profile 起步：这是个固定路径，上一次运行写下的 localStorage
+  // （皮肤、编辑器高度）会漏到这一次，表现为「拖编辑器加高」这条断言时好时坏
+  // —— 起始高度已经是视口上限时再拖也不涨，看着像功能坏了，其实是测试没隔离。
+  fs.rmSync(prof, { recursive: true, force: true });
   const chrome = spawn(CHROME, [
     '--headless=new', '--disable-gpu', '--hide-scrollbars',
     `--remote-debugging-port=${PORT}`, `--user-data-dir=${prof}`,
@@ -165,7 +170,14 @@ class CDP {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: er.x, y: er.y + 80, button: 'left', buttons: 0, clickCount: 1 });
     await sleep(200);
     const eh1 = await cdp.eval(`Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height)`);
-    check('拖编辑器底边能加高', Math.abs(eh1 - (eh0 + 80)) < 3, `${eh0}px → ${eh1}px`);
+    // 高度有上限（innerHeight - 320，给结果区留位），拖到顶就不该再涨：
+    // 期望值按「min(起点+80, 上限)」算，有空间时必须真的长大了才算过
+    const maxEh = await cdp.eval(`Math.max(180, window.innerHeight - 320)`);
+    const wantEh = Math.min(eh0 + 80, maxEh);
+    const hasRoom = eh0 + 60 <= maxEh;
+    check('拖编辑器底边能加高',
+      Math.abs(eh1 - wantEh) < 3 && (!hasRoom || eh1 > eh0 + 40),
+      `${eh0}px → ${eh1}px（目标 ${wantEh}，上限 ${maxEh}）`);
 
     // 高度应当被记住：刷新后还是这个高度（这是「拖完下次打开不用再拖」的承诺）
     check('高度写进 localStorage',

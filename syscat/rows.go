@@ -353,6 +353,24 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"connoinherit": bv(false), "conkey": sv(ckey), "confkey": sv(fkey),
 				}))
 			}
+			// CHECK：contype = 'c'，consrc/conbin 放表达式原文（psql \d 的 Check constraints）
+			for ci, expr := range tm.t.Checks {
+				name := fmt.Sprintf("%s_check", tm.t.Name)
+				if ci > 0 {
+					name = fmt.Sprintf("%s_check_%d", tm.t.Name, ci+1)
+				}
+				out = append(out, mk(def, map[string]types.Value{
+					"oid": iv(checkOIDBase + int(tm.oid)*10 + ci), "conname": sv(name),
+					"connamespace": iv(NamespacePublic), "contype": sv("c"),
+					"condeferrable": bv(false), "condeferred": bv(false), "convalidated": bv(true),
+					"conrelid": iv(int(tm.oid)), "contypid": iv(0), "conindid": iv(0),
+					"conparentid": iv(0), "confrelid": iv(0),
+					"confupdtype": sv(" "), "confdeltype": sv(" "), "confmatchtype": sv(" "),
+					"conislocal": bv(true), "coninhcount": iv(0), "connoinherit": bv(false),
+					"conkey": types.Null, "confkey": types.Null,
+					"consrc": sv(expr), "conbin": sv(expr),
+				}))
+			}
 		}
 		return out
 
@@ -1009,6 +1027,12 @@ func ConstraintDefByOID(cat *catalog.Catalog, oid int32) (string, bool) {
 			return fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s(%s)",
 				strings.Join(fk.Columns, ", "), ref, strings.Join(fk.RefColumns, ", ")), true
 		}
+		for ci, expr := range tm.t.Checks {
+			if int32(checkOIDBase+int(tm.oid)*10+ci) != oid {
+				continue
+			}
+			return "CHECK (" + expr + ")", true
+		}
 	}
 	return "", false
 }
@@ -1496,6 +1520,9 @@ var comparisonOperators = []struct {
 
 // fkOIDBase 是外键约束 OID 的起点，避开索引/唯一约束占用的区间。
 const fkOIDBase = 21000
+
+// checkOIDBase 是 CHECK 约束 OID 的起点。
+const checkOIDBase = 22000
 
 // refColNums 把列名列表转成 conkey/confkey 用的 "{1,2}" 形式。
 func refColNums(t *catalog.Table, cols []string) (string, error) {

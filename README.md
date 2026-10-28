@@ -431,7 +431,7 @@ mixed 的提升主要来自 range 查询变快（占 25%、原先单次几十毫
 | 全量 checkpoint | 66 ms | **46 ms** |
 | 冷启动（加载 5 万行） | 212 ms | **132 ms** |
 
-## 设置页（外观 / 数据 / 落盘节奏 / 端口 / 密码）
+## 设置页（外观 / 数据 / 落盘节奏 / 网络 / 性能 / 密码）
 
 控制台右上角「设置」打开，或直接访问 `/#settings`。服务器配置的**唯一来源**是数据目录下的
 `config.json`（原子写：tmp + fsync + rename），改完立即生效，不需要重启。
@@ -489,6 +489,23 @@ mixed 的提升主要来自 range 查询变快（占 25%、原先单次几十毫
 > 开了远程访问后如果还是连不上，多半是 Windows 防火墙没放行，例如：
 > `netsh advfirewall firewall add rule name="godb 8080" dir=in action=allow protocol=TCP localport=8080`
 
+### 性能（并发控制）
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `performance.maxConcurrent` | `32` | 同时执行 SQL 的 goroutine 上限（0 = 不限）。超出的排队等，不占内存 |
+| `performance.maxQueued` | `256` | 排队上限，超过**快速失败**（SQLSTATE `53300`） |
+| `performance.waitTimeoutMs` | `3000` | 排队最长等待（毫秒），超时**快速失败**（SQLSTATE `55P03`） |
+
+**信号量按事务持有**（不是按单条 SQL）：`BEGIN` 获取，`COMMIT/ROLLBACK` 释放。
+这是防止「锁×信号量交叉死锁」的必要设计——持有表锁 ⊆ 持有信号量。
+
+**注意**：显式事务的信号量占用时间 = 整个事务时长（含客户端处理时间）。
+`maxConcurrent=32` + 事务时长 55ms → 吞吐上限约 580 req/s。按业务形态调大即可。
+
+**超时叠加**：排队 `waitTimeoutMs` + 表锁等待 3s 是两层独立计时，最坏 ≈ `waitTimeoutMs + 3s`。
+业务层超时建议设 ≥ 8~10 秒，避免重试风暴。
+
 ### 密码
 
 只保护 **PostgreSQL 协议**：启用后客户端必须输入用户名 + 密码，服务端发
@@ -541,7 +558,7 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 | 扩展查询 `P/B/D/E/S/C/H`，含 `$1` 文本与二进制参数、**二进制结果集与 portal format code** | ✅ 参数与结果都支持 int2/4/8、float4/8、bool、numeric、timestamp[tz]、date、time、uuid、bytea、jsonb、文本类 |
 | `RowDescription` 带 PG 类型 OID（int4/int8/text/bool/float8/numeric/timestamp…） | ✅ |
 | `RowDescription` 的 `tableOID` / `attnum`（列的真实来源，客户端靠它判断结果集能否回写） | ✅ 表达式列按 PG 规矩给 0 |
-| 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 死锁、`55P03` 锁超时…） | ✅ |
+| 错误 `ErrorResponse` 带 SQLSTATE（`42P01` 表不存在、`23505` 唯一键、`40P01` 等待锁冲突、`55P03` 锁超时/排队超时、`53300` 队列满…） | ✅ |
 | 事务状态 `ReadyForQuery` 的 `I`/`T`/`E` | ✅ |
 | `SET` / `SHOW` / `version()` / `current_schema()` 等客户端探针 | ✅ 内置垫片 |
 | `DISCARD` / `RESET` / `DEALLOCATE`（连接池还连接前发的清理语句） | ✅ no-op 确认，tag 与 PG 一致 |

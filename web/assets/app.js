@@ -1538,6 +1538,17 @@ function renderSettings() {
     pgPort.disabled = !pgEnabled.checked;
   });
 
+  /* ---- 性能（并发控制） ---- */
+  const pf = d.performance || {};
+  settingsBody.appendChild(el('div', 'set-sec', '性能（并发控制）'));
+  settingsBody.appendChild(setRow('最大并发数', numInput('setPerfMaxConc', pf.maxConcurrent ?? 32, 0, 10000)));
+  settingsBody.appendChild(setRow('排队上限', numInput('setPerfMaxQueued', pf.maxQueued ?? 256, 0, 100000)));
+  settingsBody.appendChild(setRow('排队超时(ms)', numInput('setPerfWaitMs', pf.waitTimeoutMs ?? 3000, 100, 60000)));
+  settingsBody.appendChild(el('div', 'set-hint',
+    '同时执行 SQL 的上限（0 = 不限）：超出的排队等，不占内存。' +
+    '排队超过上限或超时会快速失败（SQLSTATE 53300/55P03），客户端能感知压力。' +
+    '显式事务占槽位到 COMMIT/ROLLBACK，事务多时可适当调大。'));
+
   /* ---- 安全 ---- */
   settingsBody.appendChild(el('div', 'set-sec', '安全（PostgreSQL 协议密码）'));
   const requirePw = checkInput('setRequirePw', d.auth.requirePassword);
@@ -1592,6 +1603,11 @@ async function saveSettings() {
       user: document.getElementById('setAuthUser').value.trim(),
       password: document.getElementById('setAuthPassword').value,
       clearPassword: false,
+    },
+    performance: {
+      maxConcurrent: val('setPerfMaxConc'),
+      maxQueued: val('setPerfMaxQueued'),
+      waitTimeoutMs: val('setPerfWaitMs'),
     },
   };
   setHint('保存中…', '');

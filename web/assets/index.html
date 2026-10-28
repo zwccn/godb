@@ -351,7 +351,7 @@ SELECT * FROM demo_tx ORDER BY id;</pre>
         <div class="help-lv-no">9</div>
         <div class="help-lv-body">
           <div class="help-lv-title">常用函数与类型</div>
-          <div class="help-lv-desc">够覆盖大部分报表写法；序列函数只在 <code>SERIAL</code> 建出的序列上有效。<code>interval</code> 按天/时/分/秒做时间加减（月/年按 30/365 天近似）。</div>
+          <div class="help-lv-desc">够覆盖大部分报表写法；序列函数只在 <code>SERIAL</code> 建出的序列上有效。<code>interval</code> 支持时间加减（月/年按日历精确计算）。</div>
           <div class="help-lv-syn"><span>字符串 <code>lower / upper / length / trim / lpad / rpad / replace / substring / position / concat / string_agg</code></span><span>日期 <code>extract</code> / <code>date_part</code> / <code>date_trunc</code> / <code>now</code> · <code>INTERVAL '1 day'</code> 与时间加减</span><span>序列 <code>nextval / currval / lastval</code></span><span>其他 <code>coalesce / nullif / greatest / least / random / regexp_matches / unnest</code></span><span>类型 <code>int / bigint / serial / numeric(p,s) / real / double precision / text / varchar(n) / boolean / date / timestamp / interval</code></span></div>
           <pre class="help-code">SELECT extract(year FROM now()) AS y,
        date_trunc('month', now()) AS m,
@@ -370,7 +370,7 @@ SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">诊断与维护</div>
           <div class="help-lv-desc">看计划、看落盘、看系统目录；<code>EXPLAIN ANALYZE</code> 会真的执行并给出每步行数与耗时。</div>
-          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span></div>
+          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span><span>监控 <code>pg_stat_database</code> / <code>pg_stat_user_tables</code> / <code>pg_stat_user_indexes</code> / <code>pg_stats</code></span></div>
           <pre class="help-code">EXPLAIN ANALYZE SELECT * FROM employees WHERE dept_id = 1;
 SHOW server_version;
 ANALYZE;

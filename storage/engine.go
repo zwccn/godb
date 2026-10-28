@@ -35,7 +35,10 @@ type Store struct {
 
 	wal     *Wal
 	commits int
-	txSeq   int64
+	// txSeq 用原子自增，Begin 可并发调用。故意用 atomic.Int64 而不是裸 int64：
+	// atomic.Int64 内含 align64，在 386/arm32 上也能保证 8 字节对齐，
+	// 裸 int64 字段会因为结构体布局而错位，32 位下 AddInt64 直接 panic。
+	txSeq atomic.Int64
 
 	// 分表快照的状态。key 一律是 cleanName(表名)。
 	tableGen  map[string]int64 // 该表的数据文件已包含到哪个 WAL 代次
@@ -54,7 +57,8 @@ type Store struct {
 	appliedGen  int64
 	snapshotGen int64
 	// Repaired 是启动时为对齐列结构而修复的单元格数（正常应为 0）。
-	Repaired int64
+	// WAL 重放可能并发累加，所以用 atomic.Int64（兼带 32 位下的 8 字节对齐）。
+	Repaired atomic.Int64
 
 	// 落盘策略与统计（可在运行中热改，见 policy.go）。
 	cpCommits  atomic.Int64
@@ -214,7 +218,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 	if gen > s.tableGen[key] {
 		s.tableGen[key] = gen
 	}
-	s.Repaired += int64(repaired)
+	s.Repaired.Add(int64(repaired))
 	td.Rows = rows
 	s.tableRows[key] = len(rows)
 	// 必须重建主键索引：否则重启后第一次写入看不到已有行，
@@ -355,7 +359,7 @@ func (s *Store) RowCount(name string) int {
 
 // Begin 开启一个事务。事务 ID 原子自增，可并发调用。
 func (s *Store) Begin() *Tx {
-	id := atomic.AddInt64(&s.txSeq, 1)
+	id := s.txSeq.Add(1)
 	return &Tx{
 		ID:  id,
 		st:  s,

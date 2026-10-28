@@ -92,7 +92,7 @@ func TestCrashBetweenCatalogSaveAndCheckpoint(t *testing.T) {
 	}
 	defer d2.Close()
 	assertRows(t, run(t, d2, "s", `SELECT a, b, c FROM w ORDER BY a`), []string{"1|x|<nil>", "2|y|<nil>"})
-	if d2.Store.Repaired == 0 {
+	if d2.Store.Repaired.Load() == 0 {
 		t.Fatal("应该记录到修复的单元格数")
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 
 	"godb/types"
 )
@@ -596,13 +595,13 @@ func (s *Store) applyRec(rec walRec) error {
 	switch rec.Op {
 	case opIns:
 		row, rep := castRow(t, rec.New)
-		atomic.AddInt64(&s.Repaired, int64(rep))
+		s.Repaired.Add(int64(rep))
 		td.Rows = append(td.Rows, row)
 		td.Live++
 		bumpSeq(t.SerialIdx(), td, row)
 	case opDel:
 		row, rep := castRow(t, rec.Old)
-		atomic.AddInt64(&s.Repaired, int64(rep))
+		s.Repaired.Add(int64(rep))
 		for i := range td.Rows {
 			if td.Rows[i] == nil {
 				continue
@@ -618,9 +617,9 @@ func (s *Store) applyRec(rec walRec) error {
 		}
 	case opUpd:
 		oldRow, rep := castRow(t, rec.Old)
-		atomic.AddInt64(&s.Repaired, int64(rep))
+		s.Repaired.Add(int64(rep))
 		newRow, rep2 := castRow(t, rec.New)
-		atomic.AddInt64(&s.Repaired, int64(rep2))
+		s.Repaired.Add(int64(rep2))
 		for i := range td.Rows {
 			if td.Rows[i] == nil {
 				continue

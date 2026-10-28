@@ -149,7 +149,7 @@ func (s *Store) migrateLegacySnapshot() error {
 				vals[i] = legacyValue(v)
 			}
 			row, rep := castRow(t, vals)
-			s.Repaired += int64(rep)
+			s.Repaired.Add(int64(rep))
 			rows = append(rows, row)
 		}
 		td.Rows = rows
@@ -387,7 +387,7 @@ type SnapshotInfo struct {
 func (s *Store) Info() SnapshotInfo {
 	info := SnapshotInfo{
 		Generation:   s.snapshotGen,
-		Repaired:     s.Repaired,
+		Repaired:     s.Repaired.Load(),
 		Tables:       len(s.Cat.Tables),
 		Written:      s.snapBytes,
 		WrittenTotal: s.written.Load(),

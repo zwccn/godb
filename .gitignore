@@ -9,6 +9,9 @@ godb
 # 运行时数据（WAL / 快照 / 表结构），首次启动会自动生成
 godb-data/
 godb-data.bak/
+# 带时间戳的备份（拉上游前手动做的）
+godb-data.bak-*/
+godb.exe.bak-*
 
 # 日志与临时文件
 *.log

@@ -63,6 +63,33 @@ func (e *Engine) planner(tx *storage.Tx) *Planner {
 	return p
 }
 
+// compileDML 编译 DML 里的表达式（UPDATE 的 SET 值 / WHERE、DELETE 的 WHERE）。
+//
+// 以前这些地方用包级 Compile(expr, sc)，它构造的 compileCtx 没有 planner，
+// 于是 `IN (子查询)` / 标量子查询 / `EXISTS` 一律报 "subqueries are not supported
+// in this context" —— 而 PG 在这些位置是允许子查询的（EF Core 的 ExecuteDelete
+// 就靠 `WHERE id IN (SELECT …)`，手写的数据清理也常用）。
+//
+// 安全性：UPDATE / DELETE 都是**先把目标行收集齐再写**，子查询在收集阶段逐行求值，
+// 看不到本语句改了一半的数据（不存在 Halloween 问题）。
+// 代价：相关子查询每行重开一次子计划，和 SELECT 里的标量子查询同一量级。
+func (e *Engine) compileDML(tx *storage.Tx, expr sql.Expr, sc Schema) (Eval, error) {
+	return compile(expr, &compileCtx{sc: sc, planner: e.planner(tx)})
+}
+
+// constDML 编译 INSERT ... VALUES 里的单值表达式：schema 为空（VALUES 不许引用列），
+// 但同样要允许子查询（`VALUES ((SELECT max(id)+1 FROM t))`）。
+func (e *Engine) constDML(tx *storage.Tx, expr sql.Expr) (types.Value, error) {
+	if expr == nil {
+		return types.Null, nil
+	}
+	ev, err := compile(expr, &compileCtx{planner: e.planner(tx)})
+	if err != nil {
+		return types.Null, err
+	}
+	return ev.Eval(nil)
+}
+
 // ExecStmt 执行一条非事务控制语句。
 func (e *Engine) ExecStmt(tx *storage.Tx, stmt sql.Statement) (*Result, error) {
 	switch s := stmt.(type) {
@@ -589,7 +616,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 				provided[targets[i]] = false
 				continue
 			}
-			v, err := CompileConst(expr)
+			v, err := e.constDML(tx, expr)
 			if err != nil {
 				return nil, err
 			}
@@ -1142,7 +1169,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			return nil, fmt.Errorf("multiple assignments to same column %q", a.Col)
 		}
 		seen[idx] = true
-		ev, err := Compile(a.Value, sc)
+		ev, err := e.compileDML(tx, a.Value, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -1151,7 +1178,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 
 	var pred Eval
 	if s.Where != nil {
-		p, err := Compile(s.Where, sc)
+		p, err := e.compileDML(tx, s.Where, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -1382,7 +1409,7 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 	}
 	var pred Eval
 	if s.Where != nil {
-		p, err := Compile(s.Where, sc)
+		p, err := e.compileDML(tx, s.Where, sc)
 		if err != nil {
 			return nil, err
 		}

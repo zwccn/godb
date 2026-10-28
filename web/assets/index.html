@@ -216,6 +216,7 @@ try {
           <div class="help-group-title">写入与结构</div>
           <ul>
             <li><code>INSERT ... VALUES</code> / <code>INSERT ... SELECT</code> / <code>ON CONFLICT DO NOTHING | DO UPDATE</code> · <code>RETURNING</code></li>
+            <li>子查询也能用在写语句里：<code>DELETE … WHERE id IN (SELECT …)</code>、<code>UPDATE … SET c = (SELECT …)</code></li>
             <li><code>UPDATE ... FROM 表</code> · <code>DELETE ... USING 表</code>（按关联条件批量改 / 删）</li>
             <li><code>CREATE</code> / <code>ALTER</code> / <code>DROP TABLE</code> · <code>TRUNCATE</code> · <code>COMMENT ON</code> · <code>GENERATED AS IDENTITY</code></li>
             <li><code>CREATE INDEX</code>（B+Tree）、主键 / 唯一 / 非空 / 外键 / 默认值 / CHECK</li>

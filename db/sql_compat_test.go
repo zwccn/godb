@@ -237,3 +237,66 @@ func TestTypedStringLiteral(t *testing.T) {
 		t.Fatalf("列名 date 被误当类型前缀：%q", got)
 	}
 }
+
+// DML 里的子查询：`WHERE id IN (SELECT …)` / `SET c = (SELECT …)` / `VALUES ((SELECT …))`。
+// 这些位置以前一律报 "subqueries are not supported in this context"（编译上下文没带 planner），
+// 而 PG 是允许的 —— EF Core 的 ExecuteDelete/ExecuteUpdate 就靠这个，手写的数据清理更常用。
+func TestDMLAllowsSubquery(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+
+	run(t, d, s, `CREATE TABLE dq_a (id int primary key, v text)`)
+	run(t, d, s, `CREATE TABLE dq_b (id int primary key, v text)`)
+	run(t, d, s, `INSERT INTO dq_a VALUES (1,'a'),(2,'b'),(3,'c')`)
+	run(t, d, s, `INSERT INTO dq_b VALUES (1,'B1'),(3,'B3')`)
+
+	val := func(sql string) string {
+		res := run(t, d, s, sql)
+		if len(res[0].Rows) == 0 {
+			return "(no rows)"
+		}
+		return fmt.Sprint(res[0].Rows[0][0])
+	}
+
+	// ① UPDATE 的 WHERE 用 IN (子查询)：只改 dq_b 里存在的 id
+	if n := run(t, d, s, `UPDATE dq_a SET v = 'hit' WHERE id IN (SELECT id FROM dq_b)`)[0].Affected; n != 2 {
+		t.Fatalf("UPDATE … WHERE id IN (子查询) 影响了 %d 行，期望 2", n)
+	}
+	if got := val(`SELECT v FROM dq_a WHERE id = 2`); got != "b" {
+		t.Fatalf("id=2 不该被改到，得到 %q", got)
+	}
+
+	// ② UPDATE 的 SET 值是相关子查询（引用本行的列）
+	run(t, d, s, `UPDATE dq_a SET v = (SELECT b.v FROM dq_b b WHERE b.id = dq_a.id) WHERE id = 3`)
+	if got := val(`SELECT v FROM dq_a WHERE id = 3`); got != "B3" {
+		t.Fatalf("SET 标量子查询结果 = %q，期望 B3", got)
+	}
+
+	// ③ DELETE 的 WHERE 用 NOT IN (子查询)
+	if n := run(t, d, s, `DELETE FROM dq_a WHERE id NOT IN (SELECT id FROM dq_b)`)[0].Affected; n != 1 {
+		t.Fatalf("DELETE … NOT IN (子查询) 删了 %d 行，期望 1", n)
+	}
+	if got := val(`SELECT count(*) FROM dq_a`); got != "2" {
+		t.Fatalf("删完应剩 2 行，实际 %q", got)
+	}
+
+	// ④ DELETE 的 WHERE 用 EXISTS
+	run(t, d, s, `INSERT INTO dq_a VALUES (9,'gone')`)
+	if n := run(t, d, s, `DELETE FROM dq_a WHERE EXISTS (SELECT 1 FROM dq_b b WHERE b.id = dq_a.id AND b.v = 'B1')`)[0].Affected; n != 1 {
+		t.Fatalf("DELETE … WHERE EXISTS 删了 %d 行，期望 1", n)
+	}
+
+	// ⑤ INSERT ... VALUES 里的标量子查询
+	run(t, d, s, `INSERT INTO dq_b VALUES ((SELECT max(id) + 1 FROM dq_b), 'B4')`)
+	if got := val(`SELECT v FROM dq_b WHERE id = 4`); got != "B4" {
+		t.Fatalf("INSERT VALUES (子查询) 插入的 v = %q，期望 B4", got)
+	}
+
+	// ⑥ 子查询读的是**本语句要改的表**时，也必须是「改之前」的视角：
+	//    按 v='a' 的行去改 v，不能边改边读到新值。
+	run(t, d, s, `CREATE TABLE dq_c (id int primary key, v text)`)
+	run(t, d, s, `INSERT INTO dq_c VALUES (1,'a'),(2,'a'),(3,'z')`)
+	if n := run(t, d, s, `UPDATE dq_c SET v = 'b' WHERE id IN (SELECT id FROM dq_c WHERE v = 'a')`)[0].Affected; n != 2 {
+		t.Fatalf("自引用子查询的 UPDATE 影响了 %d 行，期望 2", n)
+	}
+}

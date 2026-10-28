@@ -503,7 +503,8 @@ psql "host=127.0.0.1 port=6432 user=godb dbname=godb sslmode=disable"
 | `pg_catalog` / `information_schema` 系统目录 | ✅ 用虚拟表实现，见下节 |
 | 标量子查询 `(SELECT ...)` | ✅ 含相关子查询；多行会报 `more than one row` |
 | `FROM` 子查询、`UNION`/`INTERSECT`/`EXCEPT` | ✅ 客户端触发器页的查询需要 |
-| `IN`/`EXISTS` 子查询、窗口函数 | ❌（`WITH` 普通 CTE 是支持的） |
+| `IN`/`EXISTS` 子查询 | ✅ **DML 里也支持**（`DELETE … WHERE id IN (SELECT …)`、`UPDATE … SET c = (SELECT …)`、`INSERT … VALUES ((SELECT …))`） |
+| 窗口函数 | ❌（`WITH` 普通 CTE 是支持的） |
 | 括号联接组 `LEFT JOIN (a JOIN b ON …) x ON …` | ✅ 客户端刷对象树必需 |
 
 ### 数据网格能不能编辑：`tableOID` / `attnum`

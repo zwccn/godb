@@ -119,6 +119,79 @@ func appendOrderKey(dst []byte, v types.Value) []byte {
 	return append(dst, 0)
 }
 
+// DecodeOrderKey 把保序键解码回值序列（最多取 want 列；want<=0 表示全部）。
+// 用于覆盖索引扫描：命中键就能还原出索引列的值，不必回表。
+func DecodeOrderKey(key string, want int) ([]types.Value, bool) {
+	b := []byte(key)
+	var out []types.Value
+	for len(b) > 0 {
+		if want > 0 && len(out) >= want {
+			break
+		}
+		v, n, ok := decodeOrderValue(b)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, v)
+		b = b[n:]
+	}
+	return out, true
+}
+
+func decodeOrderValue(b []byte) (types.Value, int, bool) {
+	if len(b) == 0 {
+		return types.Null, 0, false
+	}
+	switch b[0] {
+	case ordInt:
+		if len(b) < 9 {
+			return types.Null, 0, false
+		}
+		u := binary.BigEndian.Uint64(b[1:9])
+		return types.Int(int64(u ^ (1 << 63))), 9, true
+	case ordFloat:
+		if len(b) < 9 {
+			return types.Null, 0, false
+		}
+		u := binary.BigEndian.Uint64(b[1:9])
+		if u&(1<<63) != 0 {
+			u &^= 1 << 63
+		} else {
+			u = ^u
+		}
+		return types.Float(math.Float64frombits(u)), 9, true
+	case ordBool:
+		if len(b) < 2 {
+			return types.Null, 0, false
+		}
+		return types.Bool(b[1] != 0), 2, true
+	case ordTime:
+		if len(b) < 9 {
+			return types.Null, 0, false
+		}
+		u := binary.BigEndian.Uint64(b[1:9])
+		return types.Value{K: types.KTime, I: int64(u ^ (1 << 63))}, 9, true
+	case ordText:
+		var s []byte
+		i := 1
+		for i < len(b) {
+			c := b[i]
+			if c == 0 {
+				if i+1 < len(b) && b[i+1] == 0xFF {
+					s = append(s, 0)
+					i += 2
+					continue
+				}
+				return types.Text(string(s)), i + 1, true
+			}
+			s = append(s, c)
+			i++
+		}
+		return types.Null, 0, false
+	}
+	return types.Null, 0, false
+}
+
 // TextPrefixRange 返回 `LIKE 'prefix%'` 对应的键区间（左闭右开）。
 //
 // 文本编码是「类型标签 + 内容 + 0x00」，所以 "abc" 的编码一定小于任何以它开头

@@ -502,6 +502,118 @@ func (it *RowIter) Next() (Ref, types.Row, bool) {
 	return Ref{}, nil, false
 }
 
+// HasOverlay 表上是否有本事务的写集。覆盖索引扫描用它判断能不能免归并。
+func (tx *Tx) HasOverlay(table string) bool {
+	return tx.ov[cleanName(table)] != nil
+}
+
+// CountLive 返回表在事务视角下的行数（已提交 Live + 本事务 overlay 净变化）。
+// `SELECT count(*) FROM t` 无 WHERE 时直接用它，不扫表。
+func (tx *Tx) CountLive(table string) int64 {
+	td := tx.st.Table(table)
+	if td == nil {
+		return 0
+	}
+	n := int64(td.Live)
+	o := tx.ov[cleanName(table)]
+	if o != nil {
+		for i := range o.ins {
+			if !o.insDel[i] {
+				n++
+			}
+		}
+		for slot := range o.del {
+			if slot < len(td.Rows) && td.Rows[slot] != nil {
+				n--
+			}
+		}
+	}
+	return n
+}
+
+// IndexEndpoint 取索引端点（max=false 最小，max=true 最大）上某列的值。
+// 用于 `min(col)` / `max(col)`：col 必须是索引首列，树序即列序；
+// 会与本事务 overlay 里新插/改过的行合并比较。找不到返回 ok=false（空表或全 NULL）。
+func (tx *Tx) IndexEndpoint(t *catalog.Table, ixName string, col int, max bool) (types.Value, bool, error) {
+	td := tx.st.Table(t.Name)
+	if td == nil {
+		return types.Null, false, fmt.Errorf("relation %q does not exist", t.Name)
+	}
+	tree := td.pk
+	if ixName != "" {
+		tree = td.IndexTree(ixName)
+	}
+	var best types.Value
+	var has bool
+	consider := func(v types.Value) {
+		if v.IsNull() {
+			return
+		}
+		if !has {
+			best, has = v, true
+			return
+		}
+		c, err := types.Compare(v, best)
+		if err != nil {
+			return
+		}
+		if (!max && c < 0) || (max && c > 0) {
+			best = v
+		}
+	}
+	if tree != nil {
+		cur := tree.first()
+		if max {
+			cur = tree.last()
+		}
+		for i := 0; i < 64; i++ {
+			var slot int
+			var ok bool
+			if max {
+				_, slot, ok = cur.prev()
+			} else {
+				_, slot, ok = cur.next()
+			}
+			if !ok {
+				break
+			}
+			row, exists := tx.Get(t.Name, Ref{Slot: slot})
+			if !exists {
+				continue
+			}
+			if col < 0 || col >= len(row) {
+				break
+			}
+			consider(row[col])
+			break // 索引首列有序，第一个存活行就是端点
+		}
+	}
+	// overlay 里的插入/更新可能更优
+	o := tx.ov[cleanName(t.Name)]
+	if o != nil {
+		for i, row := range o.ins {
+			if o.insDel[i] {
+				continue
+			}
+			if nr, ok := o.insUpd[i]; ok {
+				row = nr
+			}
+			if col < len(row) {
+				consider(row[col])
+			}
+		}
+		for slot, row := range o.upd {
+			if o.del[slot] {
+				continue
+			}
+			if col < len(row) {
+				consider(row[col])
+			}
+		}
+	}
+	return best, has, nil
+}
+
 // Get 按引用取一行（事务视角）。
 func (tx *Tx) Get(table string, ref Ref) (types.Row, bool) {
 	td := tx.st.Table(table)
@@ -819,6 +931,28 @@ func (s *IndexScanner) Next() (IndexHit, bool) {
 		return IndexHit{Ref: Ref{Slot: slot}, Row: row}, true
 	}
 	return IndexHit{}, false
+}
+
+// NextKeyed 返回索引键原文与槽位，**不做回表**。覆盖索引扫描用它：
+// 调用方从键还原列值。本事务 overlay 改过键的行不在这里出现，调用方需自行归并。
+func (s *IndexScanner) NextKeyed() (string, Ref, bool) {
+	if s.fini {
+		return "", Ref{}, false
+	}
+	for {
+		key, slot, ok := s.nextEntry()
+		if !ok {
+			s.fini = true
+			return "", Ref{}, false
+		}
+		if s.seen != nil {
+			if s.seen[slot] {
+				continue
+			}
+			s.seen[slot] = true
+		}
+		return key, Ref{Slot: slot}, true
+	}
 }
 
 // nextEntry 在树上走一步（按 desc 决定方向），跨区间时自动切到下一段。

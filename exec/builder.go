@@ -126,6 +126,11 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 	}
 
 	if aggMode {
+		if len(s.GroupBy) == 0 && s.Having == nil {
+			if fa, ok := p.tryFastAgg(s, items, sc); ok {
+				return fa, nil
+			}
+		}
 		return p.buildAggregate(s, items, op, sc)
 	}
 	return p.buildSimple(s, items, op, sc)
@@ -713,23 +718,36 @@ func (p *Planner) tryIndexScanBest(bt *sql.BaseTable, where sql.Expr, orderBy []
 	}
 	// 2) 同一索引：WHERE 区间本身就是有序的
 	if hasWhere && hasOrder && wPlan.ixName == oName && sameCols(wPlan.ixCols, oCols) {
+		if op, ok := p.tryCoverScan(bt, where, orderBy, items, wPlan.ixName, wPlan.ixCols, wPlan.rs, qual, false); ok {
+			return op, true
+		}
 		return newIndexRangeScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.rs, qual, p.Cat), true
 	}
 	// 3) 有序扫 + LIMIT 提前停
 	if hasOrder && hasLimit {
 		rs := []storage.KeyRange{{}}
+		if op, ok := p.tryCoverScan(bt, where, orderBy, items, oName, oCols, rs, qual, false); ok {
+			return op, true
+		}
 		return newIndexRangeScan(p.Tx, t, oName, oCols, oCols, rs, qual, p.Cat), true
 	}
 	// 4) WHERE 索引
 	if hasWhere {
 		if wPlan.isRange {
+			if op, ok := p.tryCoverScan(bt, where, nil, items, wPlan.ixName, wPlan.ixCols, wPlan.rs, qual, false); ok {
+				return op, true
+			}
 			return newIndexRangeScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.rs, qual, p.Cat), true
 		}
 		return newIndexScan(p.Tx, t, wPlan.ixName, wPlan.cols, wPlan.ixCols, wPlan.eq, qual, p.Cat), true
 	}
 	// 5) 只有 ORDER BY
 	if hasOrder {
-		return newIndexRangeScan(p.Tx, t, oName, oCols, oCols, []storage.KeyRange{{}}, qual, p.Cat), true
+		rs := []storage.KeyRange{{}}
+		if op, ok := p.tryCoverScan(bt, nil, orderBy, items, oName, oCols, rs, qual, false); ok {
+			return op, true
+		}
+		return newIndexRangeScan(p.Tx, t, oName, oCols, oCols, rs, qual, p.Cat), true
 	}
 	return nil, false
 }
@@ -1521,7 +1539,28 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 		}
 	}
 
-	if len(s.OrderBy) > 0 {
+	// DISTINCT + ORDER BY 能落在输出列上时：先去重再排序，可以 Top-N。
+	// 否则只能先排再去重（去重改行数，没法 Top-N）。
+	distinctFirst := false
+	var postKeys []sortKey
+	if s.Distinct && len(s.OrderBy) > 0 {
+		distinctFirst = true
+		for _, oi := range s.OrderBy {
+			ev, err := orderKeyOutput(oi, out)
+			if err != nil {
+				distinctFirst = false
+				postKeys = nil
+				break
+			}
+			nullsFirst := oi.Desc
+			if oi.NullsFirst != nil {
+				nullsFirst = *oi.NullsFirst
+			}
+			postKeys = append(postKeys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
+		}
+	}
+
+	if len(s.OrderBy) > 0 && !distinctFirst {
 		// 下层是索引扫描、并且 ORDER BY 正好是索引列的前缀时，行已经有序，
 		// 不必再排序（索引扫描按键升序输出，整体反向扫就是降序）。
 		if !orderCovered(op, s.OrderBy) {
@@ -1544,8 +1583,30 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 	op = &projectOp{child: op, exprs: exprs, sc: out}
 	if s.Distinct {
 		op = &distinctOp{child: op, sc: out}
+		if distinctFirst {
+			op = &sortOp{child: op, keys: postKeys, sc: out, topN: topNHint(s)}
+		}
 	}
 	return p.applyLimit(s, op)
+}
+
+// orderKeyOutput 在「输出行」上解析 ORDER BY 项（序号或输出列名）。
+// DISTINCT 之后排序用它：那时行已经是投影后的形状。
+func orderKeyOutput(oi *sql.OrderItem, out Schema) (Eval, error) {
+	if lit, ok := oi.Expr.(*sql.Literal); ok && lit.Val.K == types.KInt {
+		n := lit.Val.I
+		if n >= 1 && int(n) <= len(out) {
+			return &colEval{idx: int(n - 1), t: out[n-1].Type}, nil
+		}
+		return nil, fmt.Errorf("ORDER BY position %d is not in select list", n)
+	}
+	if ref, ok := oi.Expr.(*sql.ColumnRef); ok {
+		idx, typ, err := out.Resolve("", ref.Name)
+		if err == nil {
+			return &colEval{idx: idx, t: typ}, nil
+		}
+	}
+	return nil, fmt.Errorf("ORDER BY expression not available after DISTINCT")
 }
 
 // buildSetOp 构建 UNION / INTERSECT / EXCEPT。
@@ -1721,9 +1782,10 @@ func (p *Planner) orderKey(oi *sql.OrderItem, items []*sql.SelectItem, targetExp
 
 // topNHint 返回 Top-N 排序应保留的行数（LIMIT+OFFSET），0 表示不适用。
 //
-// 不适用：没有常量 LIMIT、带 DISTINCT（要先去重才能截断）、LIMIT 太大（堆不如全排）。
+// 不适用：没有常量 LIMIT、LIMIT 太大（堆不如全排）。
+// DISTINCT 也允许 Top-N：排序在去重之后做，行数已经稳定。
 func topNHint(s *sql.Select) int {
-	if s.Distinct || (s.Limit == nil && s.Offset == nil) {
+	if s.Limit == nil && s.Offset == nil {
 		return 0
 	}
 	limit, offset, err := constLimitOffset(s)

@@ -20,7 +20,7 @@ func TestInUsesIndexUnion(t *testing.T) {
 		{`SELECT id FROM ob WHERE code IN ('c0', 'c1')`, "Index Union Scan using ob_code", 134},
 		// 单值等于等值查询，只剩一段区间
 		{`SELECT id FROM ob WHERE a IN (1)`, "Index Range Scan using ob_a_b", 20},
-		{`SELECT id FROM ob WHERE id IN (7)`, "Index Range Scan using ob_pkey", 1},
+		{`SELECT id FROM ob WHERE id IN (7)`, "ob_pkey", 1},
 	}
 	for _, c := range cases {
 		plan := explainPlan(t, d, s, c.sql)

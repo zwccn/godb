@@ -3,6 +3,7 @@ package types
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,11 @@ func Cast(v Value, t Type) (Value, error) {
 			return Int(ns), nil
 		}
 	}
+	// NUMERIC / DECIMAL：精确十进制（KDecimal）
+	if strings.HasPrefix(strings.ToLower(t.Name), "numeric") ||
+		strings.HasPrefix(strings.ToLower(t.Name), "decimal") {
+		return castDecimal(v, t)
+	}
 	switch t.Kind {
 	case KInt:
 		switch v.K {
@@ -35,6 +41,12 @@ func Cast(v Value, t Type) (Value, error) {
 			return v, nil
 		case KFloat:
 			return Int(int64(math.Round(v.Float()))), nil
+		case KDecimal:
+			f, err := strconv.ParseFloat(v.S, 64)
+			if err != nil {
+				return Null, err
+			}
+			return Int(int64(math.Round(f))), nil
 		case KBool:
 			if v.Bool() {
 				return Int(1), nil
@@ -58,6 +70,8 @@ func Cast(v Value, t Type) (Value, error) {
 			return v, nil
 		case KInt:
 			return Float(float64(v.I)), nil
+		case KDecimal:
+			return Float(v.Float()), nil
 		case KText:
 			f, err := strconv.ParseFloat(strings.TrimSpace(v.S), 64)
 			if err != nil {
@@ -134,6 +148,62 @@ func ParseTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unrecognized time format")
+}
+
+// castDecimal 转成精确十进制。int 直接格式化，float 用最短往返再规范，
+// 文本按 numeric 解析。t.Scale > 0 时才按标度四舍五入。
+func castDecimal(v Value, t Type) (Value, error) {
+	scale := t.Scale
+	if scale < 0 {
+		scale = 0
+	}
+	toDecimal := func(s string) (Value, error) {
+		s, err := ParseDecimal(s)
+		if err != nil {
+			return Null, err
+		}
+		if scale == 0 {
+			return Decimal(s), nil
+		}
+		// 放大 10^scale 后四舍五入到整数，再缩小
+		r := DecimalRat(s)
+		pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
+		scaled := new(big.Rat).Mul(r, new(big.Rat).SetInt(pow))
+		num, den := scaled.Num(), scaled.Denom()
+		q, m := new(big.Int).QuoRem(num, den, new(big.Int))
+		twice := new(big.Int).Abs(m)
+		twice.Lsh(twice, 1)
+		if twice.Cmp(den) >= 0 {
+			if num.Sign() >= 0 {
+				q.Add(q, big.NewInt(1))
+			} else {
+				q.Sub(q, big.NewInt(1))
+			}
+		}
+		out := new(big.Rat).SetFrac(q, pow)
+		return Decimal(RatDecimal(out)), nil
+	}
+	switch v.K {
+	case KDecimal:
+		if scale == 0 {
+			return v, nil
+		}
+		return toDecimal(v.S)
+	case KInt:
+		return Decimal(strconv.FormatInt(v.I, 10)), nil
+	case KFloat:
+		return toDecimal(strconv.FormatFloat(v.Float(), 'f', -1, 64))
+	case KText:
+		s, err := ParseDecimal(v.S)
+		if err != nil {
+			return Null, fmt.Errorf("invalid input syntax for type numeric: %q", v.S)
+		}
+		if scale == 0 {
+			return Decimal(s), nil
+		}
+		return toDecimal(s)
+	}
+	return Null, fmt.Errorf("cannot cast type %s to %s", v.K, t.String())
 }
 
 // ParseInterval 解析 PG 风格的 interval 文本，返回纳秒数。

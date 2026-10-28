@@ -1926,13 +1926,20 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, er
 	case "count":
 		spec.Type = types.Type{Kind: types.KInt, Name: "bigint"}
 	case "sum":
-		if arg.Type().Kind == types.KInt {
+		switch arg.Type().Kind {
+		case types.KInt:
 			spec.Type = types.Type{Kind: types.KInt, Name: "bigint"}
-		} else {
+		case types.KDecimal:
+			spec.Type = types.Type{Kind: types.KDecimal, Name: "numeric"}
+		default:
 			spec.Type = types.Type{Kind: types.KFloat, Name: "double precision"}
 		}
 	case "avg":
-		spec.Type = types.Type{Kind: types.KFloat, Name: "double precision"}
+		if arg.Type().Kind == types.KDecimal {
+			spec.Type = types.Type{Kind: types.KDecimal, Name: "numeric"}
+		} else {
+			spec.Type = types.Type{Kind: types.KFloat, Name: "double precision"}
+		}
 	case "min", "max":
 		spec.Type = arg.Type()
 	}

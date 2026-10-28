@@ -2,6 +2,7 @@ package exec
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"godb/types"
@@ -54,8 +55,10 @@ func (a *countAcc) result() types.Value { return types.Int(a.n) }
 
 type sumAcc struct {
 	isFloat  bool
+	isDec    bool
 	i        int64
 	f        float64
+	dec      string // 精确十进制累加
 	seen     map[string]bool
 	distinct bool
 	has      bool
@@ -73,6 +76,19 @@ func (a *sumAcc) add(v types.Value) error {
 		a.seen[k] = true
 	}
 	a.has = true
+	if a.isDec {
+		s := v.TextForm()
+		if a.dec == "" {
+			a.dec = s
+			return nil
+		}
+		out, err := types.AddDecimal(a.dec, s)
+		if err != nil {
+			return err
+		}
+		a.dec = out
+		return nil
+	}
 	if a.isFloat {
 		f, err := toFloat(v)
 		if err != nil {
@@ -90,14 +106,14 @@ func (a *sumAcc) add(v types.Value) error {
 }
 
 func (a *sumAcc) result() types.Value {
-	if a.isFloat {
-		if !a.has {
-			return types.Null
-		}
-		return types.Float(a.f)
-	}
 	if !a.has {
 		return types.Null
+	}
+	if a.isDec {
+		return types.Decimal(a.dec)
+	}
+	if a.isFloat {
+		return types.Float(a.f)
 	}
 	return types.Int(a.i)
 }
@@ -105,6 +121,8 @@ func (a *sumAcc) result() types.Value {
 type avgAcc struct {
 	f        float64
 	n        int64
+	dec      string
+	isDec    bool
 	distinct bool
 	seen     map[string]bool
 }
@@ -120,6 +138,20 @@ func (a *avgAcc) add(v types.Value) error {
 		}
 		a.seen[k] = true
 	}
+	if a.isDec {
+		s := v.TextForm()
+		if a.dec == "" {
+			a.dec = s
+		} else {
+			out, err := types.AddDecimal(a.dec, s)
+			if err != nil {
+				return err
+			}
+			a.dec = out
+		}
+		a.n++
+		return nil
+	}
 	f, err := toFloat(v)
 	if err != nil {
 		return err
@@ -132,6 +164,13 @@ func (a *avgAcc) add(v types.Value) error {
 func (a *avgAcc) result() types.Value {
 	if a.n == 0 {
 		return types.Null
+	}
+	if a.isDec {
+		out, err := types.DivDecimal(a.dec, strconv.FormatInt(a.n, 10))
+		if err != nil {
+			return types.Null
+		}
+		return types.Decimal(out)
 	}
 	return types.Float(a.f / float64(a.n))
 }
@@ -186,13 +225,13 @@ func newAccum(spec *aggSpec) accum {
 		}
 		return a
 	case "sum":
-		a := &sumAcc{isFloat: spec.Type.Kind == types.KFloat, distinct: spec.Distinct}
+		a := &sumAcc{isFloat: spec.Type.Kind == types.KFloat, isDec: spec.Type.Kind == types.KDecimal, distinct: spec.Distinct}
 		if spec.Distinct {
 			a.seen = map[string]bool{}
 		}
 		return a
 	case "avg":
-		a := &avgAcc{distinct: spec.Distinct}
+		a := &avgAcc{isDec: spec.Type.Kind == types.KDecimal, distinct: spec.Distinct}
 		if spec.Distinct {
 			a.seen = map[string]bool{}
 		}

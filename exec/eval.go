@@ -475,6 +475,12 @@ func (e *binEval) Eval(row types.Row) (types.Value, error) {
 			return v, err
 		}
 	}
+	// NUMERIC 精确四则（有 decimal 参与就不用 float）
+	if isDecimalVal(lv) || isDecimalVal(rv) {
+		if v, ok, err := evalDecimalArith(e.op, lv, rv); ok {
+			return v, err
+		}
+	}
 	if e.t.Kind == types.KInt {
 		a, err := toInt(lv)
 		if err != nil {
@@ -1346,11 +1352,56 @@ func binType(op string, l, r types.Type) types.Type {
 	if l.Kind == types.KInt && r.Kind == types.KInt {
 		return types.Type{Kind: types.KInt, Name: "integer"}
 	}
+	// 有 decimal 参与的四则 → decimal（精确）
+	if l.Kind == types.KDecimal || r.Kind == types.KDecimal {
+		if op == "+" || op == "-" || op == "*" || op == "/" {
+			return types.Type{Kind: types.KDecimal, Name: "numeric"}
+		}
+	}
 	return types.Type{Kind: types.KFloat, Name: "double precision"}
 }
 
 func isIntervalType(t types.Type) bool {
 	return strings.EqualFold(t.Name, "interval")
+}
+
+// isDecimalVal 判断值是否是精确十进制。
+func isDecimalVal(v types.Value) bool { return v.K == types.KDecimal }
+
+// evalDecimalArith 精确四则：两边都转成 decimal 文本再算。
+func evalDecimalArith(op string, lv, rv types.Value) (types.Value, bool, error) {
+	if !isDecimalVal(lv) && !isDecimalVal(rv) {
+		return types.Null, false, nil
+	}
+	if op != "+" && op != "-" && op != "*" && op != "/" {
+		return types.Null, false, nil
+	}
+	a := decimalText(lv)
+	b := decimalText(rv)
+	var out string
+	var err error
+	switch op {
+	case "+":
+		out, err = types.AddDecimal(a, b)
+	case "-":
+		out, err = types.SubDecimal(a, b)
+	case "*":
+		out, err = types.MulDecimal(a, b)
+	case "/":
+		out, err = types.DivDecimal(a, b)
+	}
+	if err != nil {
+		return types.Null, true, err
+	}
+	return types.Decimal(out), true, nil
+}
+
+// decimalText 把任意数值转成 decimal 文本（decimal 直接用，其它用 TextForm）。
+func decimalText(v types.Value) string {
+	if v.K == types.KDecimal {
+		return v.S
+	}
+	return v.TextForm()
 }
 
 // evalTimeArith 处理 timestamp ± interval / interval ± interval / timestamp - timestamp。

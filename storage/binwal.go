@@ -19,13 +19,15 @@ import (
 //	3 bool     1 字节
 //	4 text     uint32 长度 + UTF-8 字节
 //	5 time     int64 UnixNano + int32 时区偏移（秒）
+//	6 decimal  uint32 长度 + 规范十进制文本（NUMERIC 精确值）
 const (
-	tagNull  byte = 0
-	tagInt   byte = 1
-	tagFloat byte = 2
-	tagBool  byte = 3
-	tagText  byte = 4
-	tagTime  byte = 5
+	tagNull    byte = 0
+	tagInt     byte = 1
+	tagFloat   byte = 2
+	tagBool    byte = 3
+	tagText    byte = 4
+	tagTime    byte = 5
+	tagDecimal byte = 6
 )
 
 func appendValue(b []byte, v types.Value) []byte {
@@ -46,6 +48,10 @@ func appendValue(b []byte, v types.Value) []byte {
 		return append(b, 0)
 	case types.KText:
 		b = append(b, tagText)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(v.S)))
+		return append(b, v.S...)
+	case types.KDecimal:
+		b = append(b, tagDecimal)
 		b = binary.LittleEndian.AppendUint32(b, uint32(len(v.S)))
 		return append(b, v.S...)
 	case types.KTime:
@@ -95,6 +101,16 @@ func readValue(b []byte, off int) (types.Value, int, error) {
 			return types.Null, off, fmt.Errorf("text 内容越界")
 		}
 		return types.Text(string(b[off : off+n])), off + n, nil
+	case tagDecimal:
+		if off+4 > len(b) {
+			return types.Null, off, fmt.Errorf("decimal 长度越界")
+		}
+		n := int(binary.LittleEndian.Uint32(b[off:]))
+		off += 4
+		if off+n > len(b) {
+			return types.Null, off, fmt.Errorf("decimal 内容越界")
+		}
+		return types.Decimal(string(b[off : off+n])), off + n, nil
 	case tagTime:
 		if off+12 > len(b) {
 			return types.Null, off, fmt.Errorf("time 越界")

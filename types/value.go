@@ -20,6 +20,7 @@ const (
 	KText
 	KBool
 	KTime
+	KDecimal // NUMERIC：S 存规范十进制文本，运算精确
 )
 
 func (k Kind) String() string {
@@ -34,6 +35,8 @@ func (k Kind) String() string {
 		return "boolean"
 	case KTime:
 		return "timestamp"
+	case KDecimal:
+		return "numeric"
 	case KNull:
 		return "unknown"
 	}
@@ -77,15 +80,21 @@ func Time(t time.Time) Value {
 }
 
 func (v Value) IsNull() bool    { return v.K == KNull }
-func (v Value) IsNumeric() bool { return v.K == KInt || v.K == KFloat }
+func (v Value) IsNumeric() bool { return v.K == KInt || v.K == KFloat || v.K == KDecimal }
 
-// Float 返回数值形态（非数值返回 NaN）。
+// Float 返回数值形态（非数值返回 NaN）。KDecimal 有损转换，仅在必须用 float 时用。
 func (v Value) Float() float64 {
 	switch v.K {
 	case KInt:
 		return float64(v.I)
 	case KFloat:
 		return math.Float64frombits(uint64(v.I))
+	case KDecimal:
+		f, err := strconv.ParseFloat(v.S, 64)
+		if err != nil {
+			return math.NaN()
+		}
+		return f
 	}
 	return math.NaN()
 }
@@ -122,6 +131,8 @@ func (v Value) TextForm() string {
 		// 读回去只剩 06:07:08 算数据丢失）。.999999 会去掉尾随的 0，
 		// 整秒仍输出 "…:08"，和 PG 的文本格式一致。
 		return v.Time().Format("2006-01-02 15:04:05.999999")
+	case KDecimal:
+		return v.S
 	case KText:
 		return v.S
 	}
@@ -147,6 +158,8 @@ func Compare(a, b Value) (int, error) {
 			return cmpInt(a.I, b.I), nil
 		case KFloat:
 			return cmpFloat(a.Float(), b.Float()), nil
+		case KDecimal:
+			return compareDecimal(a.S, b.S), nil
 		case KText:
 			return strings.Compare(a.S, b.S), nil
 		case KBool:
@@ -163,6 +176,10 @@ func Compare(a, b Value) (int, error) {
 		}
 	}
 	if a.IsNumeric() && b.IsNumeric() {
+		// 有 decimal 参与时走精确比较，避免 float 精度把 0.1+0.2 判成不等于 0.3
+		if a.K == KDecimal || b.K == KDecimal {
+			return compareDecimal(a.TextForm(), b.TextForm()), nil
+		}
 		return cmpFloat(a.Float(), b.Float()), nil
 	}
 	if a.K == KText {
@@ -223,6 +240,8 @@ func Same(a, b Value) bool {
 		return a.Bool() == b.Bool()
 	case KTime:
 		return a.I == b.I && a.z == b.z
+	case KDecimal:
+		return a.S == b.S
 	}
 	return false
 }
@@ -278,6 +297,8 @@ func AppendKey(b *strings.Builder, v Value) {
 		b.WriteString(v.S)
 	case KTime:
 		b.WriteString(strconv.FormatInt(v.I, 10))
+	case KDecimal:
+		b.WriteString(v.S)
 	}
 	b.WriteByte('|')
 }
@@ -301,6 +322,9 @@ func (v Value) MarshalJSON() ([]byte, error) {
 		return json.Marshal(v.S)
 	case KTime:
 		return json.Marshal(map[string]string{"$ts": v.Time().UTC().Format(time.RFC3339Nano)})
+	case KDecimal:
+		// 用字符串持久化：float 会丢精度，{"$n":"..."} 保证 round-trip 精确
+		return json.Marshal(map[string]string{"$n": v.S})
 	}
 	return []byte("null"), nil
 }
@@ -330,6 +354,10 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 				return err
 			}
 			*v = Float(fv)
+			return nil
+		}
+		if n, ok := m["$n"]; ok {
+			*v = Decimal(n)
 			return nil
 		}
 		return fmt.Errorf("cannot decode value %s", s)
@@ -380,6 +408,9 @@ func (v Value) Interface() interface{} {
 		// 读回去只剩 06:07:08 算数据丢失）。.999999 会去掉尾随的 0，
 		// 整秒仍输出 "…:08"，和 PG 的文本格式一致。
 		return v.Time().Format("2006-01-02 15:04:05.999999")
+	case KDecimal:
+		// 保持精确文本：转 float 会丢精度/出科学计数法（1234567890123.45 → 1.23e+12）
+		return v.S
 	}
 	return nil
 }

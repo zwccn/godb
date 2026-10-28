@@ -52,7 +52,7 @@ func ParseType(name string, args []int) (Type, error) {
 	case "double precision", "float8", "float":
 		t = Type{Kind: KFloat, Name: "double precision"}
 	case "numeric", "decimal":
-		t = Type{Kind: KFloat, Name: "numeric"}
+		t = Type{Kind: KDecimal, Name: "numeric"}
 	case "date":
 		t = Type{Kind: KTime, Name: "date"}
 	case "timestamp", "timestamp without time zone", "timestamptz", "timestamp with time zone", "datetime", "time_stamp":
@@ -93,7 +93,18 @@ func ParseType(name string, args []int) (Type, error) {
 			t.Len = args[0]
 			t.Name = fmt.Sprintf("%s(%d)", t.Name, args[0])
 		}
+	case KDecimal:
+		if n == "numeric" || n == "decimal" {
+			if len(args) >= 2 {
+				t.Prec, t.Scale = args[0], args[1]
+				t.Name = fmt.Sprintf("numeric(%d,%d)", args[0], args[1])
+			} else if len(args) == 1 {
+				t.Prec = args[0]
+				t.Name = fmt.Sprintf("numeric(%d)", args[0])
+			}
+		}
 	case KFloat:
+		// 保留旧分支：历史数据里 Kind 可能还是 float
 		if n == "numeric" || n == "decimal" {
 			if len(args) >= 2 {
 				t.Prec, t.Scale = args[0], args[1]

@@ -34,9 +34,8 @@ type scanOp struct {
 	table string
 	qual  string
 	sc    Schema
-	rows  []types.Row
-	i     int
-	// scanned 是 Open 时从堆表读进来的行数。它和 Profile 里的「输出行数」
+	it    *storage.RowIter
+	// scanned 是已经从堆表里读过的行数。它和 Profile 里的「输出行数」
 	// 是两回事：一次全表扫可能只往上吐一行。
 	scanned int
 	// notes 是规划器留下的解释（为什么没走索引、下推了什么条件）。
@@ -56,39 +55,44 @@ func (o *scanOp) Open() error {
 		return fmt.Errorf("internal error: table scan %q requires a transaction (plan was opened without one)", o.table)
 	}
 	t := o.begin()
-	o.rows = o.rows[:0]
-	o.i = 0
-	err := o.tx.Scan(o.table, func(_ storage.Ref, row types.Row) error {
-		o.rows = append(o.rows, row)
-		return nil
-	})
-	o.scanned = len(o.rows)
+	// 流式游标：上层要一行才走一步。`LIMIT 100` 取满就 Close，
+	// 不会把 60 万行全读进内存（旧实现 Open 就物化全表）。
+	o.it = o.tx.ScanIter(o.table)
+	o.scanned = 0
 	t.done(false)
-	return err
+	return nil
 }
 
 func (o *scanOp) Next() (types.Row, bool, error) {
 	t := o.begin()
-	if o.i >= len(o.rows) {
+	if o.it == nil {
 		t.done(false)
 		return nil, false, nil
 	}
-	r := o.rows[o.i]
-	o.i++
+	_, row, ok := o.it.Next()
+	if !ok {
+		if err := o.it.Err(); err != nil {
+			t.done(false)
+			return nil, false, err
+		}
+		t.done(false)
+		return nil, false, nil
+	}
+	o.scanned++
 	t.done(true)
-	return r, true, nil
+	return row, true, nil
 }
 
 // ExplainDetail 说明这次扫描读了多少行 —— 「扫 20 万行只出 1 行」一眼就能看出来。
 func (o *scanOp) ExplainDetail() []string {
-	out := []string{fmt.Sprintf("全表读入 %d 行", o.scanned)}
+	out := []string{fmt.Sprintf("已扫描 %d 行", o.scanned)}
 	if len(o.notes) > 0 {
 		out = append(out, o.notes...)
 	}
 	return out
 }
 
-func (o *scanOp) Close() error { o.rows = nil; return nil }
+func (o *scanOp) Close() error { o.it = nil; return nil }
 
 func (o *scanOp) Describe() string {
 	return fmt.Sprintf("Seq Scan on %s", o.table)

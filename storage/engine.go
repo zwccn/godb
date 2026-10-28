@@ -361,10 +361,11 @@ func (s *Store) RowCount(name string) int {
 func (s *Store) Begin() *Tx {
 	id := s.txSeq.Add(1)
 	return &Tx{
-		ID:  id,
-		st:  s,
-		ov:  map[string]*overlay{},
-		seq: map[string]int64{},
+		ID:        id,
+		st:        s,
+		ov:        map[string]*overlay{},
+		seq:       map[string]int64{},
+		seqForced: map[string]bool{},
 	}
 }
 
@@ -411,7 +412,11 @@ type Tx struct {
 	st  *Store
 	ov  map[string]*overlay
 	seq map[string]int64
-	n   int
+	// seqForced 记录哪些表的计数器是被 setval 直接设定过的。
+	// nextval 只能单调递增（防止重复发号），但 setval 允许调低，
+	// 所以提交时这两类要分开处理。
+	seqForced map[string]bool
+	n         int
 
 	// User 是发起本事务的登录名（current_user 回显；空串表示未知）。
 	User string
@@ -728,6 +733,17 @@ func (tx *Tx) NextSeq(table string) int64 {
 	tx.seq[k] = v
 	tx.lastSeq, tx.hasLastSeq = v, true
 	return v
+}
+
+// SetSeq 直接设定自增值（setval 用），不分配。
+// PG 的 setval(seq, n) 之后 nextval 返回 n+1，所以这里存的就是 n。
+// 与 NextSeq 的区别：setval 允许把计数器调低（这是它的主要用途，
+// 比如灌完数据后把序列拨回 max(id)），所以提交时要按绝对值覆盖。
+func (tx *Tx) SetSeq(table string, v int64) {
+	k := cleanName(table)
+	tx.seq[k] = v
+	tx.seqForced[k] = true
+	tx.lastSeq, tx.hasLastSeq = v, true
 }
 
 // SeqCurrent 返回自增计数器的当前值（不分配新值），
@@ -1480,6 +1496,7 @@ func sameCols(a, b []int) bool {
 func (tx *Tx) Rollback() {
 	tx.ov = map[string]*overlay{}
 	tx.seq = map[string]int64{}
+	tx.seqForced = map[string]bool{}
 	tx.n = 0
 }
 
@@ -1519,14 +1536,21 @@ func (tx *Tx) commitLocked() (int64, error) {
 		upd     []int       // 要原地替换的槽位
 		updRows []types.Row // 与 upd 对齐的新行
 		ins     []types.Row // 要分配新槽位的行
-		dirty   int64
-		seq     int64
-		seqSet  bool
+		dirty  int64
+		seq    int64
+		seqSet bool
+		// seqAbs 表示这个值来自 setval，要按绝对值覆盖（允许调低）；
+		// 否则按 nextval 的单调语义，只允许往上推。
+		seqAbs bool
 	}
 	var (
 		changes []*change
 		recs    []walRec
 	)
+	// covered 记录已经在 changes 里出现过的表。只有序列变更、没有行变更的
+	// 语句（纯 SELECT nextval()）不会进 tx.ov，需要在循环外补一条 change，
+	// 否则计数器既不更新也不落盘 —— 表现为 nextval 每次都返回同一个值。
+	covered := make(map[string]bool, len(names))
 	for _, name := range names {
 		o := tx.ov[name]
 		td := tx.st.Table(name)
@@ -1534,6 +1558,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 			return 0, fmt.Errorf("relation %q does not exist", name)
 		}
 		c := &change{table: name}
+		covered[name] = true
 		// 只遍历写集，不再扫全表：这是「提交成本与表大小无关」的关键。
 		if len(o.del) > 0 {
 			for slot := range o.del {
@@ -1575,8 +1600,22 @@ func (tx *Tx) commitLocked() (int64, error) {
 		c.dirty = int64(len(c.del) + len(c.upd) + len(c.ins))
 		if v, ok := tx.seq[name]; ok {
 			c.seq, c.seqSet = v, true
+			c.seqAbs = tx.seqForced[name]
 		}
 		changes = append(changes, c)
+	}
+
+	// 只有序列变更的表补一条空 change（没有行要写，只带 seq）。
+	// PostgreSQL 的 nextval 是非事务的：分配出去的值不能再发第二次，
+	// 所以即使语句是纯 SELECT，计数器也必须提交。
+	for name, v := range tx.seq {
+		if covered[name] {
+			continue
+		}
+		if tx.st.Table(name) == nil {
+			continue
+		}
+		changes = append(changes, &change{table: name, seq: v, seqSet: true, seqAbs: tx.seqForced[name]})
 	}
 
 	recs = append(recs, walRec{Tx: tx.ID, Op: opCommit})
@@ -1631,9 +1670,13 @@ func (tx *Tx) commitLocked() (int64, error) {
 			td.free = nil
 		}
 		if c.seqSet {
-			if c.seq == 0 {
+			switch {
+			case c.seqAbs:
+				// setval 的语义就是「把它设成这个值」，包括往下调
+				td.Seq = c.seq
+			case c.seq == 0:
 				td.Seq = 0
-			} else if c.seq > td.Seq {
+			case c.seq > td.Seq:
 				td.Seq = c.seq
 			}
 		}
@@ -1647,6 +1690,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 
 	tx.ov = map[string]*overlay{}
 	tx.seq = map[string]int64{}
+	tx.seqForced = map[string]bool{}
 	tx.n = 0
 
 	tx.st.commits++
@@ -1669,19 +1713,28 @@ func (tx *Tx) commitLocked() (int64, error) {
 
 // TxSnapshot 是写集的浅拷贝（行按不可变方式使用，拷贝即可靠）。
 type TxSnapshot struct {
-	ov  map[string]*overlay
-	seq map[string]int64
-	n   int
+	ov     map[string]*overlay
+	seq    map[string]int64
+	forced map[string]bool
+	n      int
 }
 
 // Mark 记录语句开始前的状态。
 func (tx *Tx) Mark() *TxSnapshot {
-	m := &TxSnapshot{ov: make(map[string]*overlay, len(tx.ov)), seq: map[string]int64{}, n: tx.n}
+	m := &TxSnapshot{
+		ov:     make(map[string]*overlay, len(tx.ov)),
+		seq:    make(map[string]int64, len(tx.seq)),
+		forced: make(map[string]bool, len(tx.seqForced)),
+		n:      tx.n,
+	}
 	for k, o := range tx.ov {
 		m.ov[k] = o.clone()
 	}
 	for k, v := range tx.seq {
 		m.seq[k] = v
+	}
+	for k := range tx.seqForced {
+		m.forced[k] = true
 	}
 	return m
 }
@@ -1690,18 +1743,27 @@ func (tx *Tx) Mark() *TxSnapshot {
 func (tx *Tx) RestoreTo(m *TxSnapshot) {
 	tx.ov = m.ov
 	tx.seq = m.seq
+	tx.seqForced = m.forced
 	tx.n = m.n
 }
 
 // Clone 复制一份快照。SAVEPOINT 用它：ROLLBACK TO 之后同一个保存点还能再回滚
 // 一次（PostgreSQL 允许），所以快照不能被子类「消费」掉。
 func (m *TxSnapshot) Clone() *TxSnapshot {
-	c := &TxSnapshot{ov: make(map[string]*overlay, len(m.ov)), seq: make(map[string]int64, len(m.seq)), n: m.n}
+	c := &TxSnapshot{
+		ov:     make(map[string]*overlay, len(m.ov)),
+		seq:    make(map[string]int64, len(m.seq)),
+		forced: make(map[string]bool, len(m.forced)),
+		n:      m.n,
+	}
 	for k, o := range m.ov {
 		c.ov[k] = o.clone()
 	}
 	for k, v := range m.seq {
 		c.seq[k] = v
+	}
+	for k := range m.forced {
+		c.forced[k] = true
 	}
 	return c
 }

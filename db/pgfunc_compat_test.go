@@ -300,3 +300,72 @@ func TestUpdateFromDeleteUsing(t *testing.T) {
 		t.Fatalf("关联表为空时不应更新任何行，实际 %s", got)
 	}
 }
+
+// nextval 必须在**只读语句**里也落盘。
+//
+// 之前 Commit 是遍历「有行变更的表」来构造变更集的，纯 SELECT 没有行变更，
+// 计数器既不更新也不进日志 —— 每条语句都返回同一个值，多个客户端会拿到
+// 重复的自增 ID。这里同时覆盖 setval 的两种语义。
+func TestSequencePersistsAcrossStatements(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE sq_t (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, v text)`)
+	run(t, d, s, `INSERT INTO sq_t (v) VALUES ('a'), ('b')`)
+
+	// 1) 连续两条独立语句，必须递增（修复前都是 3）
+	for want := 3; want <= 4; want++ {
+		res := run(t, d, s, `SELECT nextval('sq_t_id_seq')`)
+		if got := fmt.Sprint(res[0].Rows[0][0]); got != fmt.Sprint(want) {
+			t.Fatalf("第 %d 次 nextval = %s，期望 %d", want-2, got, want)
+		}
+	}
+
+	// 2) 显式事务里只有 SELECT，提交后同样生效
+	run(t, d, s, `BEGIN`)
+	if got := fmt.Sprint(run(t, d, s, `SELECT nextval('sq_t_id_seq')`)[0].Rows[0][0]); got != "5" {
+		t.Fatalf("事务内 nextval = %s，期望 5", got)
+	}
+	run(t, d, s, `COMMIT`)
+	if got := fmt.Sprint(run(t, d, s, `SELECT nextval('sq_t_id_seq')`)[0].Rows[0][0]); got != "6" {
+		t.Fatalf("提交后 nextval = %s，期望 6", got)
+	}
+
+	// 3) setval(seq, n)：下一次 nextval 是 n+1
+	if got := fmt.Sprint(run(t, d, s, `SELECT setval('sq_t_id_seq', 100)`)[0].Rows[0][0]); got != "100" {
+		t.Fatalf("setval 返回值 = %s，期望 100", got)
+	}
+	if got := fmt.Sprint(run(t, d, s, `SELECT nextval('sq_t_id_seq')`)[0].Rows[0][0]); got != "101" {
+		t.Fatalf("setval(100) 之后 nextval = %s，期望 101", got)
+	}
+
+	// 4) setval(seq, n, false)：n 本身还没被用掉，下一次就是 n；返回值仍是 n
+	if got := fmt.Sprint(run(t, d, s, `SELECT setval('sq_t_id_seq', 200, false)`)[0].Rows[0][0]); got != "200" {
+		t.Fatalf("setval 返回值 = %s，期望 200", got)
+	}
+	if got := fmt.Sprint(run(t, d, s, `SELECT nextval('sq_t_id_seq')`)[0].Rows[0][0]); got != "200" {
+		t.Fatalf("setval(200,false) 之后 nextval = %s，期望 200", got)
+	}
+
+	// 5) 计数器被推上去之后，自动 INSERT 不会撞主键
+	res := run(t, d, s, `INSERT INTO sq_t (v) VALUES ('c') RETURNING id`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "201" {
+		t.Fatalf("INSERT 拿到 id = %s，期望 201", got)
+	}
+
+	// 6) setval 允许把计数器往下调（灌完数据后拨回 max(id) 是常见用法）；
+	//    nextval 则只能单调递增，两者在提交时必须分开处理。
+	if got := fmt.Sprint(run(t, d, s, `SELECT setval('sq_t_id_seq', 2)`)[0].Rows[0][0]); got != "2" {
+		t.Fatalf("setval(2) 返回值 = %s，期望 2", got)
+	}
+	if got := fmt.Sprint(run(t, d, s, `SELECT nextval('sq_t_id_seq')`)[0].Rows[0][0]); got != "3" {
+		t.Fatalf("调低到 2 之后 nextval = %s，期望 3", got)
+	}
+
+	// 7) 非法值要拒绝，不能悄悄改坏计数器
+	if err := runErr(t, d, s, `SELECT setval('sq_t_id_seq', 0)`); err == nil {
+		t.Fatal("setval(0) 应当报错")
+	}
+	if err := runErr(t, d, s, `SELECT setval('no_such_seq', 1)`); err == nil {
+		t.Fatal("不存在的序列应当报错")
+	}
+}

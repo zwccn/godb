@@ -1266,6 +1266,56 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 			return types.Null, fmt.Errorf("relation %q does not exist", vals[0].TextForm())
 		}
 		return types.Int(v), nil
+	case "setval":
+		// setval(seq, n[, is_called])：直接把计数器设到 n。
+		// is_called=false 表示「n 还没被用掉」，下一次 nextval 返回 n 本身；
+		// 默认 true，下一次返回 n+1。我们的计数器语义是「已分配到的值」，
+		// 所以 is_called=false 时存 n-1。
+		if len(vals) < 2 || vals[0].IsNull() || vals[1].IsNull() {
+			return types.Null, fmt.Errorf("setval requires a sequence name and a value")
+		}
+		if e.tx == nil {
+			return types.Null, fmt.Errorf("setval is not available in this context")
+		}
+		table, ok := serialTable(e.cat, vals[0].TextForm())
+		if !ok {
+			return types.Null, fmt.Errorf("relation %q does not exist", vals[0].TextForm())
+		}
+		var n int64
+		switch vals[1].K {
+		case types.KInt:
+			n = vals[1].I
+		case types.KDecimal, types.KFloat:
+			n = int64(vals[1].Float())
+		default:
+			p, perr := strconv.ParseInt(strings.TrimSpace(vals[1].TextForm()), 10, 64)
+			if perr != nil {
+				return types.Null, fmt.Errorf("setval: value must be an integer")
+			}
+			n = p
+		}
+		if n < 1 {
+			return types.Null, fmt.Errorf("setval: value %d is out of bounds for sequence %q", n, vals[0].TextForm())
+		}
+		called := true
+		if len(vals) > 2 && !vals[2].IsNull() {
+			switch vals[2].K {
+			case types.KBool:
+				called = vals[2].Bool()
+			case types.KText:
+				switch strings.ToLower(strings.TrimSpace(vals[2].TextForm())) {
+				case "f", "false", "0", "off", "no":
+					called = false
+				}
+			}
+		}
+		// PG 的返回值始终是传入的 n（不管 is_called），所以先记下来
+		res := n
+		if !called {
+			n--
+		}
+		e.tx.SetSeq(table, n)
+		return types.Int(res), nil
 	case "lastval":
 		if e.tx == nil {
 			return types.Null, fmt.Errorf("lastval is not available in this context")
@@ -1318,7 +1368,7 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 		// PG 14 起 extract 返回 numeric；老版本是 double precision，
 		// 用 numeric 两边都能接受（Npgsql 的 GetDouble 会做转换）。
 		fe.t = types.Type{Kind: types.KFloat, Name: "numeric"}
-	case "currval", "lastval", "nextval":
+	case "currval", "lastval", "nextval", "setval":
 		fe.t = types.Type{Kind: types.KInt, Name: "bigint"}
 	case "abs", "round", "ceil", "ceiling", "floor", "greatest", "least", "coalesce", "nullif":
 		if len(args) > 0 {

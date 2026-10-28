@@ -1,17 +1,17 @@
-// Package lock 实现表级共享/排它锁（S/X），支持批量原子申请、等待重试、
+// Package lock 实现表级共享/排它锁（S/X），支持批量原子申请、事件通知等待、
 // 超时放弃与等待图死锁检测。
 //
 // 设计要点：
 //   - 锁粒度是「表」，模式只有 S（共享/读）和 X（排它/写）；
 //   - 一个事务对一张表最多持一把锁，只能把 S 升级成 X，不能降级；
 //   - 一次可以申请多张表，全部可授予才一次性授予（要么全给，要么一个不给）；
-//   - 拿不到就等：每 Retry 间隔重试一次，超过 Timeout 放弃；
+//   - 拿不到就挂起（sync.Cond 事件通知），锁释放时被唤醒——不再轮询，避免惊群；
+//   - 超时兜底：time.AfterFunc 在 Timeout 时广播唤醒，确保没人永久挂起；
 //   - 等待超过 DeadlockAfter 后检查等待图，成环时环里最年轻的事务自己放弃。
 package lock
 
 import (
 	"fmt"
-	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -150,6 +150,7 @@ type waitInfo struct {
 // Manager 是表级锁管理器。
 type Manager struct {
 	mu     sync.Mutex
+	cond   *sync.Cond // 锁释放时 Broadcast，唤醒等待者
 	tables map[string]map[int64]*Holder
 	waits  map[int64]*waitInfo
 	seq    int64
@@ -160,10 +161,12 @@ type Manager struct {
 
 // New 创建锁管理器。
 func New() *Manager {
-	return &Manager{
+	m := &Manager{
 		tables: map[string]map[int64]*Holder{},
 		waits:  map[int64]*waitInfo{},
 	}
+	m.cond = sync.NewCond(&m.mu)
+	return m
 }
 
 // NewTx 分配一个事务标识（同时作为优先级年龄，越大越年轻）。
@@ -174,16 +177,17 @@ func (m *Manager) NewTx(session string) (txID int64, age int64) {
 	return m.seq, m.seq
 }
 
-// AcquireAll 申请一批表锁，全部可授予才一起授予；否则等待。
+// AcquireAll 申请一批表锁，全部可授予才一起授予；否则挂起等待。
+//
+// 等待机制：sync.Cond 事件通知（锁释放时 Broadcast），不再轮询。
+// 超时兜底：time.AfterFunc 在 Timeout 时广播唤醒，确保没人永久挂起。
+// 死锁检测：每次被唤醒时若已等超过 DeadlockAfter，扫等待图找环。
 func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[string]Mode, opts Options) error {
 	if len(want) == 0 {
 		return nil
 	}
 	if opts.Timeout <= 0 {
 		opts = DefaultOptions()
-	}
-	if opts.Retry <= 0 {
-		opts.Retry = 20 * time.Millisecond
 	}
 	if opts.DeadlockAfter <= 0 {
 		opts.DeadlockAfter = 500 * time.Millisecond
@@ -192,34 +196,69 @@ func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[str
 	start := time.Now()
 	deadline := start.Add(opts.Timeout)
 
+	// 超时兜底：到点广播唤醒所有等待者，让他们检查 deadline。
+	// 没有这一步，cond.Wait() 可能永远醒不过来（对方也在等锁、没人 Release）。
+	timer := time.AfterFunc(opts.Timeout, func() {
+		m.mu.Lock()
+		m.cond.Broadcast()
+		m.mu.Unlock()
+	})
+	defer timer.Stop()
+
+	// 死锁检测定时器：等待超过 DeadlockAfter 后广播唤醒，触发等待图检测。
+	// 互相等待时没人 Release，只能靠这个定时器唤醒。
+	if opts.DeadlockDetect && opts.DeadlockAfter > 0 {
+		deadlockTimer := time.AfterFunc(opts.DeadlockAfter, func() {
+			m.mu.Lock()
+			m.cond.Broadcast()
+			m.mu.Unlock()
+		})
+		defer deadlockTimer.Stop()
+	}
+
+	m.mu.Lock()
 	for {
-		blocked, ok := m.tryAcquire(txID, session, age, want)
+		// 尝试获取（mu 已持有，用 locked 版本）
+		blocked, ok := m.tryAcquireLocked(txID, session, age, want)
 		if ok {
-			m.clearWait(txID)
+			delete(m.waits, txID)
+			m.mu.Unlock()
 			return nil
 		}
-		m.setWait(txID, session, age, want, start)
 
+		// 登记等待信息（供死锁检测与快照用）
+		if w, exists := m.waits[txID]; exists {
+			w.want = want
+		} else {
+			m.conflicts++
+			m.waits[txID] = &waitInfo{tx: txID, session: session, age: age, want: want, since: start}
+		}
+
+		// 死锁检测：等待超过 DeadlockAfter 后扫等待图
 		if opts.DeadlockDetect && time.Since(start) >= opts.DeadlockAfter {
-			if cycle, peers := m.findCycle(txID); cycle != nil && youngestIs(cycle, txID) {
-				m.clearWait(txID)
+			if cycle, peers := m.findCycleLocked(txID); cycle != nil && youngestIs(cycle, txID) {
+				delete(m.waits, txID)
+				m.mu.Unlock()
 				return &DeadlockError{Cycle: cycle, Peers: peers, Waited: time.Since(start)}
 			}
 		}
+
+		// 超时检查（放在 Wait 之前，避免错过 timer 广播）
 		if !time.Now().Before(deadline) {
-			m.clearWait(txID)
+			delete(m.waits, txID)
+			m.mu.Unlock()
 			return &TimeoutError{Waited: time.Since(start), Blocked: blocked}
 		}
-		time.Sleep(jitter(opts.Retry))
+
+		// 挂起等待：Release 时 Broadcast 唤醒，或 timer 到点唤醒。
+		// Wait 会释放 mu，唤醒后重新持有。
+		m.cond.Wait()
 	}
 }
 
-// tryAcquire 检查整批锁是否可授予，可以则一次性授予。
-// 返回被挡住的明细；ok 为 true 表示已授予。
-func (m *Manager) tryAcquire(txID int64, session string, age int64, want map[string]Mode) ([]Blocked, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+// tryAcquireLocked 检查整批锁是否可授予，可以则一次性授予。
+// 调用方必须持有 m.mu。返回被挡住的明细；ok 为 true 表示已授予。
+func (m *Manager) tryAcquireLocked(txID int64, session string, age int64, want map[string]Mode) ([]Blocked, bool) {
 	names := sortedKeys(want)
 	var blocked []Blocked
 
@@ -293,6 +332,8 @@ func (m *Manager) Release(txID int64) {
 		}
 	}
 	delete(m.waits, txID)
+	// 唤醒所有等待者：锁释放了，让他们重新尝试获取
+	m.cond.Broadcast()
 }
 
 // Held 返回某事务当前持有的表锁集合。
@@ -352,30 +393,10 @@ func (m *Manager) Snapshot() Snapshot {
 	return snap
 }
 
-func (m *Manager) setWait(txID int64, session string, age int64, want map[string]Mode, since time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if w, ok := m.waits[txID]; ok {
-		w.want = want
-		w.since = since
-		return
-	}
-	m.conflicts++ // 只统计“开始等待”的次数，不统计每次重试
-	m.waits[txID] = &waitInfo{tx: txID, session: session, age: age, want: want, since: since}
-}
-
-func (m *Manager) clearWait(txID int64) {
-	m.mu.Lock()
-	delete(m.waits, txID)
-	m.mu.Unlock()
-}
-
-// findCycle 从 startTx 出发在等待图里找环。
+// findCycleLocked 从 startTx 出发在等待图里找环。
+// 调用方必须持有 m.mu。
 // 节点只包含「正在等待」的事务；边为 等待者 → 挡住它的持有者（且该持有者也在等待）。
-func (m *Manager) findCycle(startTx int64) ([]int64, []string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+func (m *Manager) findCycleLocked(startTx int64) ([]int64, []string) {
 	edges := map[int64][]int64{}
 	for tx, w := range m.waits {
 		for name := range w.want {
@@ -443,9 +464,4 @@ func sortedKeys(mp map[string]Mode) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func jitter(d time.Duration) time.Duration {
-	f := 0.5 + rand.Float64()
-	return time.Duration(float64(d) * f)
 }

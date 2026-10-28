@@ -165,7 +165,7 @@ func TestDeadlockDetection(t *testing.T) {
 		if err == nil {
 			continue
 		}
-		if strings.Contains(err.Error(), "死锁") {
+		if strings.Contains(err.Error(), "死锁") || strings.Contains(err.Error(), "后进让先进") {
 			deadlocks++
 			if i != 1 {
 				t.Fatalf("应该由后进来的会话（s2）放弃，实际是会话 %d", i+1)

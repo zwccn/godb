@@ -7,6 +7,7 @@ import (
 	"godb/catalog"
 	"godb/sql"
 	"godb/syscat"
+	"godb/types"
 )
 
 // Describe 只做“编译”不执行，返回 SELECT 的输出列定义。
@@ -25,6 +26,10 @@ func Describe(cat *catalog.Catalog, stmt sql.Statement) (Schema, error) {
 func DescribeWith(cat *catalog.Catalog, info *DBInfo, stmt sql.Statement) (Schema, error) {
 	p := &Planner{Cat: cat, Info: info, compileOnly: true}
 	switch s := stmt.(type) {
+	case *sql.Explain:
+		// EXPLAIN 输出固定一列 "QUERY PLAN"。不处理的话 Describe 回 NoData、
+		// Execute 又发 DataRow，Npgsql 会报 "unexpected backend message DataRow"。
+		return Schema{{Qualifier: "", Name: "QUERY PLAN", Type: types.Type{Kind: types.KText, Name: "text"}}}, nil
 	case *sql.Select:
 		plan, err := p.BuildSelect(s)
 		if err != nil {

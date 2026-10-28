@@ -116,15 +116,17 @@ func (e *TimeoutError) Error() string {
 	return fmt.Sprintf("等待锁超时（已等 %s）：%s", e.Waited.Truncate(time.Millisecond), strings.Join(parts, "；"))
 }
 
-// DeadlockError 表示检测到等待环，本事务被判定为环里最年轻的而放弃。
+// DeadlockError 表示多个事务互相等待（等待环），本事务被判定为环里最年轻的而放弃。
+// 解决策略是「后进让先进」：最年轻的事务让位，避免长时间互等。
 type DeadlockError struct {
 	Cycle []int64
 	Peers []string
+	Waited time.Duration // 本次已等待时长
 }
 
 func (e *DeadlockError) Error() string {
-	return fmt.Sprintf("检测到死锁（等待环涉及 %d 个事务：%s），本事务被回滚，请重试",
-		len(e.Peers), strings.Join(e.Peers, " → "))
+	return fmt.Sprintf("等待锁冲突（已等 %s）：%d 个事务互相等待（%s），后进让先进，本事务被回滚，请改用原子写法或重试",
+		e.Waited.Truncate(time.Millisecond), len(e.Peers), strings.Join(e.Peers, " → "))
 }
 
 func shortSession(s string) string {
@@ -201,7 +203,7 @@ func (m *Manager) AcquireAll(txID int64, session string, age int64, want map[str
 		if opts.DeadlockDetect && time.Since(start) >= opts.DeadlockAfter {
 			if cycle, peers := m.findCycle(txID); cycle != nil && youngestIs(cycle, txID) {
 				m.clearWait(txID)
-				return &DeadlockError{Cycle: cycle, Peers: peers}
+				return &DeadlockError{Cycle: cycle, Peers: peers, Waited: time.Since(start)}
 			}
 		}
 		if !time.Now().Before(deadline) {

@@ -159,10 +159,28 @@ func castDecimal(v Value, t Type) (Value, error) {
 	if scale < 0 {
 		scale = 0
 	}
+	// 快速路径：文本已是目标标度的小数，跳过 big.Rat 舍入（批量写每行都要走这里）。
+	tryFast := func(s string) (Value, bool) {
+		if scale == 0 {
+			return Decimal(s), true
+		}
+		dot := strings.IndexByte(s, '.')
+		if dot < 0 {
+			return Null, false // 整数字符串，需要补小数位
+		}
+		frac := len(s) - dot - 1
+		if frac == scale {
+			return Decimal(s), true
+		}
+		return Null, false
+	}
 	toDecimal := func(s string) (Value, error) {
 		s, err := ParseDecimal(s)
 		if err != nil {
 			return Null, err
+		}
+		if v, ok := tryFast(s); ok {
+			return v, nil
 		}
 		if scale == 0 {
 			return Decimal(s), nil
@@ -187,8 +205,8 @@ func castDecimal(v Value, t Type) (Value, error) {
 	}
 	switch v.K {
 	case KDecimal:
-		if scale == 0 {
-			return v, nil
+		if v2, ok := tryFast(v.S); ok {
+			return v2, nil
 		}
 		return toDecimal(v.S)
 	case KInt:
@@ -199,6 +217,9 @@ func castDecimal(v Value, t Type) (Value, error) {
 		s, err := ParseDecimal(v.S)
 		if err != nil {
 			return Null, fmt.Errorf("invalid input syntax for type numeric: %q", v.S)
+		}
+		if v2, ok := tryFast(s); ok {
+			return v2, nil
 		}
 		if scale == 0 {
 			return Decimal(s), nil

@@ -1068,6 +1068,8 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 
 ## 已知限制
 
+- **不支持 `SELECT … FOR UPDATE` / `FOR SHARE`（行级锁）**。"先查后写"在并发下会因表锁
+  冲突而失败，请改用原子写法（见下方「先读后写」规则）。
 - 数据全部驻留内存，适合几十万行以内的演示/学习场景；没有页式存储和缓冲池。
 - 锁粒度只到表：一张表同一时刻只允许一个写者，读还会挡住写。行槽位已经稳定了（做行级锁的
   前提之一），但行级锁还要一套事务 ID + 可见性判断，属于另一个量级的改动。
@@ -1106,3 +1108,14 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
   需要新表时补 `syscat/syscat.go` 的 `specs` 与 `syscat/rows.go` 的生成逻辑即可。
 - `pg_get_indexdef` / `pg_get_constraintdef` 现在会返回真实定义（`\d` 的索引行不再只剩一个逗号），
   但 `pg_get_viewdef` / `pg_get_ruledef` / `pg_get_triggerdef` 仍是空串——本来也没有视图、规则和触发器。
+
+## 先读后写：请改用原子写法
+
+godb 没有行级锁（`FOR UPDATE`），事务内"先 SELECT 再 UPDATE 同一行"在并发下会因表锁冲突
+而失败（后进让先进）。**不要靠重试解决**——持续并发下重试仍是后进，照样被牺牲。
+
+| ❌ 不要这样写 | ✅ 改成 |
+|---|---|
+| 事务内 `SELECT` 再 `UPDATE` 同一行 | **单条原子 `UPDATE`**：`UPDATE room SET seats_left = seats_left - 1 WHERE id=1 AND seats_left > 0`，看影响行数判断成败 |
+| 依赖 `FOR UPDATE` 加锁 | 不支持，请用原子 `UPDATE` 或应用层串行化 |
+| 指望重试解决 `40P01` | **重试无效**，改用原子写法或应用层单写队列 |

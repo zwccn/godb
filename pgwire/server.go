@@ -980,10 +980,12 @@ func mapError(err error) (string, string) {
 		return "23505", msg
 	case strings.Contains(msg, "not-null constraint"):
 		return "23502", msg
-	case strings.Contains(msg, "死锁"):
-		return "40P01", msg
+	case strings.Contains(msg, "死锁") || strings.Contains(msg, "后进让先进"):
+		return "40P01", msg // 事务冲突回滚
 	case strings.Contains(msg, "等待锁超时"):
-		return "55P03", msg
+		return "55P03", msg // 锁等待超时
+	case strings.Contains(msg, "等待锁冲突"):
+		return "40P01", msg // 互等让位（DeadlockError）
 	case strings.Contains(msg, "aborted"):
 		return "25P02", msg
 	case strings.Contains(msg, "cannot run DDL inside"):

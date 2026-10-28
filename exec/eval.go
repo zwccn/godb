@@ -469,6 +469,12 @@ func (e *binEval) Eval(row types.Row) (types.Value, error) {
 	if lv.IsNull() || rv.IsNull() {
 		return types.Null, nil
 	}
+	// 时间 / interval 加减：interval 以纳秒存成 KInt
+	if e.op == "+" || e.op == "-" {
+		if v, ok, err := evalTimeArith(e.op, e.l.Type(), e.r.Type(), lv, rv); ok {
+			return v, err
+		}
+	}
 	if e.t.Kind == types.KInt {
 		a, err := toInt(lv)
 		if err != nil {
@@ -1317,10 +1323,78 @@ func binType(op string, l, r types.Type) types.Type {
 	case "||":
 		return types.Type{Kind: types.KText, Name: "text"}
 	}
+	// 时间 ± interval / interval ± interval / timestamp - timestamp
+	lIs, rIs := isIntervalType(l), isIntervalType(r)
+	if op == "+" || op == "-" {
+		switch {
+		case lIs && rIs:
+			return types.Type{Kind: types.KInt, Name: "interval"}
+		case lIs && !rIs:
+			// interval ± number：按 interval 扩缩
+			if l.Kind == types.KInt || l.Kind == types.KFloat {
+				return types.Type{Kind: types.KInt, Name: "interval"}
+			}
+		case !lIs && rIs:
+			if l.Kind == types.KTime {
+				return types.Type{Kind: types.KTime, Name: l.Name}
+			}
+		case l.Kind == types.KTime && r.Kind == types.KTime && op == "-":
+			// timestamp - timestamp → interval
+			return types.Type{Kind: types.KInt, Name: "interval"}
+		}
+	}
 	if l.Kind == types.KInt && r.Kind == types.KInt {
 		return types.Type{Kind: types.KInt, Name: "integer"}
 	}
 	return types.Type{Kind: types.KFloat, Name: "double precision"}
+}
+
+func isIntervalType(t types.Type) bool {
+	return strings.EqualFold(t.Name, "interval")
+}
+
+// evalTimeArith 处理 timestamp ± interval / interval ± interval / timestamp - timestamp。
+// interval 以纳秒存在 KInt 里。ok=false 表示不是时间运算，走普通算术。
+func evalTimeArith(op string, lt, rt types.Type, lv, rv types.Value) (types.Value, bool, error) {
+	lIs, rIs := isIntervalType(lt), isIntervalType(rt)
+	toNanos := func(v types.Value) int64 {
+		switch v.K {
+		case types.KInt:
+			return v.I
+		case types.KFloat:
+			return int64(v.Float())
+		}
+		return 0
+	}
+	switch {
+	case lIs && rIs:
+		a, b := toNanos(lv), toNanos(rv)
+		if op == "+" {
+			return types.Int(a + b), true, nil
+		}
+		return types.Int(a - b), true, nil
+	case !lIs && rIs && lt.Kind == types.KTime:
+		// timestamp ± interval
+		base := lv.Time()
+		delta := time.Duration(toNanos(rv))
+		if op == "-" {
+			delta = -delta
+		}
+		return types.Time(base.Add(delta)), true, nil
+	case lIs && !rIs && rt.Kind == types.KTime:
+		// interval + timestamp（加法交换）
+		if op != "+" {
+			return types.Null, true, fmt.Errorf("cannot subtract timestamp from interval")
+		}
+		return types.Time(rv.Time().Add(time.Duration(toNanos(lv)))), true, nil
+	case lt.Kind == types.KTime && rt.Kind == types.KTime && op == "-":
+		// timestamp - timestamp → interval（纳秒）
+		return types.Int(lv.Time().UnixNano() - rv.Time().UnixNano()), true, nil
+	case lIs && !rIs && (rt.Kind == types.KInt || rt.Kind == types.KFloat):
+		// interval * / ÷ 数值：只支持 + / - 时当数字纳秒（少见，按普通算术）
+		return types.Null, false, nil
+	}
+	return types.Null, false, nil
 }
 
 func toInt(v types.Value) (int64, error) {

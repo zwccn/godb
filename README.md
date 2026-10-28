@@ -59,7 +59,7 @@ go build -o godb.exe .
 | 连接 | `INNER` / `LEFT` / `RIGHT` / `CROSS JOIN`，多表串联；等值条件走哈希连接，其余走嵌套循环 |
 | 聚合 | `count(*)`、`count(x)`、`sum`、`avg`、`min`、`max`，支持 `DISTINCT` |
 | 表达式 | 算术 `+ - * / %`、位运算 `& \| #`、比较、`AND/OR/NOT`、`IS [NOT] NULL`、`IN`（含子查询）、`EXISTS (子查询)`、`BETWEEN`、`LIKE/ILIKE`、`CASE WHEN`、`CAST`/`::`（含 `information_schema.sql_identifier` 这类带 schema 的类型名）、**带类型前缀的字面量 `DATE '2024-01-01'` / `TIMESTAMP '…'` / `TIME '…'`**、数组下标 `a[i]`、`\|\|` |
-| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches/string_agg/lpad/rpad/random`；日期 `EXTRACT(field FROM x)` / `date_part` / `date_trunc`；序列 `nextval/currval/lastval/setval/pg_get_serial_sequence`；`unnest(array)`（SELECT 列表会展开成多行，或 `FROM unnest(...)`） |
+| 函数 | `lower/upper/length/trim/ltrim/rtrim/abs/round/ceil/floor/replace/substring/position/concat/coalesce/nullif/greatest/least/now/regexp_matches/string_agg/lpad/rpad/random`；日期 `EXTRACT(field FROM x)` / `date_part` / `date_trunc` / **`INTERVAL '1 day'` 与时间加减**（月/年按 30/365 天近似）；序列 `nextval/currval/lastval/setval/pg_get_serial_sequence`；`unnest(array)`（SELECT 列表会展开成多行，或 `FROM unnest(...)`） |
 | 事务 | `BEGIN`/`START TRANSACTION`（可带 `ISOLATION LEVEL …`、`READ ONLY/READ WRITE`）、`COMMIT`、`ROLLBACK`；**`SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`**（ORM 的嵌套事务靠它）；语句级原子性；崩溃恢复 |
 | 并发 | 表级 `S`/`X` 锁、严格两阶段封锁、锁等待与超时、等待图死锁检测 |
 | 类型 | `smallint/integer/bigint/serial/bigserial/numeric(p,s)/real/double precision/text/varchar(n)/char(n)/boolean/date/timestamp` |
@@ -392,16 +392,18 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -ldflags "-s -w
 
 用 PgBench（Npgsql，5 万行 `bench_items`，同机）压出来的分层很清楚：
 
-| 场景 | 吞吐 | 说明 |
-|---|---|---|
-| 主键点查（纯读） | 约 10.2k req/s | 读读相容，并发 32 到顶 |
-| 聚合 / 范围+排序 | 832 / 237 req/s | CPU 密集，锁不是主因 |
-| 单行 INSERT / UPDATE | 约 2.2k / 1.8k req/s | 写写在表上串行 |
-| **读写混合（60% 点查+25% 范围+写）** | **305 req/s** | 按分项加权理论约 840，**只剩约 36%** |
+| 场景 | 优化前 | **Top-N 后** | 说明 |
+|---|---|---|---|
+| 主键点查（纯读） | 约 10.2k req/s | **10.9k req/s** | 读读相容，并发 32 到顶 |
+| 聚合 | 832 req/s | （未重测） | CPU 密集，锁不是主因 |
+| 范围+排序+LIMIT | 237 req/s | **4,009 req/s** | P2 后走主键有序扫 + 提前停 |
+| 单行 INSERT / UPDATE | 约 2.2k / 1.8k req/s | （未重测） | 写写在表上串行 |
+| **读写混合** | **305 req/s** | **2,619 req/s** | 0 失败；p99 1739ms → 165ms |
 
-mixed 的 p50 仍不到 1ms，但 p95 约 650ms、p99 约 1.7s，另有少量 `55P03` 等锁超时。原因是**同一张表上读写互斥**：自动提交的 SELECT 持 S、写语句持 X，互相排队（见上文锁表）。
+mixed 的提升主要来自 range 查询变快（占 25%、原先单次几十毫秒拖住表锁）。
+**表锁读写互斥仍在**：p50 0.85ms 而 p95 65ms，长尾来自同表写串行 + fsync。
 
-**设计取舍（有意为之，不是 bug）**：对外规则保持「读 S / 写 X、持到事务结束」这一套 2PL，简单可讲、锁面板可查、等价 SERIALIZABLE。不在自动提交 SELECT 上改走「快照读/不拿 S」——那会让隔离行为按「有没有 BEGIN」分裂成两套，规则变难解释。若将来要做，应一次做成统一的快照隔离（MVCC），而不是两套并存；行级锁/完整 MVCC 都是另一个量级的改动（见「已知限制」）。当前 mixed 场景的吞吐缺口按上述原因理解即可。
+**设计取舍（有意为之，不是 bug）**：对外规则保持「读 S / 写 X、持到事务结束」这一套 2PL，简单可讲、锁面板可查、等价 SERIALIZABLE。不在自动提交 SELECT 上改走「快照读/不拿 S」——那会让隔离行为按「有没有 BEGIN」分裂成两套，规则变难解释。若将来要做，应一次做成统一的快照隔离（MVCC），而不是两套并存；行级锁/完整 MVCC 都是另一个量级的改动（见「已知限制」）。
 
 ### 内存占用：一个 Value 从 72 字节压到 32 字节
 

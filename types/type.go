@@ -57,8 +57,11 @@ func ParseType(name string, args []int) (Type, error) {
 		t = Type{Kind: KTime, Name: "date"}
 	case "timestamp", "timestamp without time zone", "timestamptz", "timestamp with time zone", "datetime", "time_stamp":
 		t = Type{Kind: KTime, Name: "timestamp"}
-	case "time", "timetz", "time without time zone", "time with time zone", "interval":
+	case "time", "timetz", "time without time zone", "time with time zone":
 		t = Type{Kind: KText, Name: n}
+	case "interval":
+		// interval 以「纳秒数」存进 KInt，配合时间加减（month/year 按 30/365 天近似）。
+		t = Type{Kind: KInt, Name: "interval"}
 	case "oid", "xid", "cid", "tid", "regproc", "regprocedure", "regoper", "regoperator":
 		t = Type{Kind: KInt, Name: n}
 	case "regclass", "regtype", "regnamespace", "regrole", "regconfig", "regdictionary":

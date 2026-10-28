@@ -316,11 +316,11 @@ RETURNING d.id, d.salary;</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">表结构与索引</div>
           <div class="help-lv-desc">索引是内存 B+Tree，建完立刻生效；等值、范围、<code>IN</code>、<code>ORDER BY</code> 免排序都会用到。结构改动在 <code>demo_ddl</code> 上。</div>
-          <div class="help-lv-syn"><span><code>ALTER TABLE ADD / DROP / RENAME COLUMN</code></span><span><code>RENAME TO</code></span><span><code>ALTER COLUMN TYPE</code></span><span><code>CREATE [UNIQUE] INDEX</code></span><span><code>DROP INDEX</code></span><span><code>PRIMARY KEY / UNIQUE / NOT NULL / DEFAULT / CHECK / FOREIGN KEY</code></span><span><code>GENERATED AS IDENTITY</code></span><span><code>COMMENT ON</code></span><span><code>TRUNCATE</code></span></div>
+          <div class="help-lv-syn"><span><code>ALTER TABLE ADD / DROP / RENAME COLUMN</code></span><span><code>RENAME TO</code></span><span><code>ALTER COLUMN TYPE</code></span><span><code>CREATE [UNIQUE] INDEX [IF NOT EXISTS]</code></span><span><code>DROP INDEX</code></span><span><code>PRIMARY KEY / UNIQUE / NOT NULL / DEFAULT / CHECK / FOREIGN KEY</code></span><span><code>GENERATED AS IDENTITY</code></span><span><code>COMMENT ON</code></span><span><code>TRUNCATE</code></span></div>
           <pre class="help-code">DROP TABLE IF EXISTS demo_ddl;
 CREATE TABLE demo_ddl (id int PRIMARY KEY, dept_id int, note text);
 ALTER TABLE demo_ddl ADD COLUMN email text;
-CREATE INDEX idx_demo_ddl_dept ON demo_ddl (dept_id);
+CREATE INDEX IF NOT EXISTS idx_demo_ddl_dept ON demo_ddl (dept_id);
 COMMENT ON TABLE demo_ddl IS '结构演示';
 TRUNCATE TABLE demo_ddl;</pre>
         </div>
@@ -351,16 +351,17 @@ SELECT * FROM demo_tx ORDER BY id;</pre>
         <div class="help-lv-no">9</div>
         <div class="help-lv-body">
           <div class="help-lv-title">常用函数与类型</div>
-          <div class="help-lv-desc">够覆盖大部分报表写法；序列函数只在 <code>SERIAL</code> 建出的序列上有效。</div>
-          <div class="help-lv-syn"><span>字符串 <code>lower / upper / length / trim / replace / substring / position / concat / string_agg</code></span><span>日期 <code>extract</code> / <code>date_part</code> / <code>date_trunc</code> / <code>now</code></span><span>序列 <code>nextval / currval / lastval</code></span><span>其他 <code>coalesce / nullif / greatest / least / regexp_matches</code></span><span>类型 <code>int / bigint / serial / numeric(p,s) / real / double precision / text / varchar(n) / boolean / date / timestamp</code></span></div>
+          <div class="help-lv-desc">够覆盖大部分报表写法；序列函数只在 <code>SERIAL</code> 建出的序列上有效。<code>interval</code> 按天/时/分/秒做时间加减（月/年按 30/365 天近似）。</div>
+          <div class="help-lv-syn"><span>字符串 <code>lower / upper / length / trim / lpad / rpad / replace / substring / position / concat / string_agg</code></span><span>日期 <code>extract</code> / <code>date_part</code> / <code>date_trunc</code> / <code>now</code> · <code>INTERVAL '1 day'</code> 与时间加减</span><span>序列 <code>nextval / currval / lastval</code></span><span>其他 <code>coalesce / nullif / greatest / least / random / regexp_matches / unnest</code></span><span>类型 <code>int / bigint / serial / numeric(p,s) / real / double precision / text / varchar(n) / boolean / date / timestamp / interval</code></span></div>
           <pre class="help-code">SELECT extract(year FROM now()) AS y,
        date_trunc('month', now()) AS m,
-       coalesce(nullif(title, ''), '未填') AS t,
+       lpad('1', 6, '0') AS code,
+       now() - INTERVAL '1 day' AS 昨天,
        salary
 FROM employees
 ORDER BY salary DESC LIMIT 5;
 
-SELECT count(*) AS n, round(avg(salary), 2) AS avg_pay FROM employees;</pre>
+SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行</pre>
         </div>
       </div>
 
@@ -369,10 +370,12 @@ SELECT count(*) AS n, round(avg(salary), 2) AS avg_pay FROM employees;</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">诊断与维护</div>
           <div class="help-lv-desc">看计划、看落盘、看系统目录；<code>EXPLAIN ANALYZE</code> 会真的执行并给出每步行数与耗时。</div>
-          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span></div>
+          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span></div>
           <pre class="help-code">EXPLAIN ANALYZE SELECT * FROM employees WHERE dept_id = 1;
 SHOW server_version;
-CHECKPOINT;</pre>
+ANALYZE;
+CHECKPOINT;
+SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
         </div>
       </div>
 

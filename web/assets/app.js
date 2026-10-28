@@ -183,6 +183,16 @@ SELECT * FROM demo_alter;          -- 新列按 DEFAULT 回填
 
 ALTER TABLE demo_alter DROP COLUMN level;
 SELECT * FROM demo_alter;`,
+  funcs: `-- 常用函数与 interval（不依赖示例表，可反复执行）
+SELECT random()                         AS r,
+       lpad('1', 6, '0')                AS code,
+       now() - INTERVAL '1 day'         AS 昨天此时,
+       DATE '2024-01-02' - INTERVAL '1 day' AS 前一天,
+       TIMESTAMP '2024-01-01 10:00:00' + INTERVAL '02:30:00' AS 加两个半小时;
+
+SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行
+
+SELECT pg_size_pretty(pg_database_size(current_database())) AS 库大小;`,
 };
 
 /* ---------------- 工具 ---------------- */
@@ -1199,6 +1209,7 @@ const EXAMPLE_META = [
   ['ddl', '新建表', 'SERIAL 主键、UNIQUE、DEFAULT now() 一次看全'],
   ['explain', '看执行计划', 'EXPLAIN 看优化器走索引还是全表扫'],
   ['alter', '改表结构', '加列再删列，DDL 立即生效'],
+  ['funcs', '函数与 interval', 'random / lpad / unnest / 时间加减 / 库大小，不依赖示例表'],
 ];
 
 function renderHelpExamples() {

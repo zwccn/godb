@@ -45,6 +45,10 @@ type tablePages struct {
 	// 文件大小会落后于实际用了多少页，推出来就会「重新分配一个还在用的页」。
 	hi uint32
 
+	// fm 是「哪一页还放得下」的空闲空间图。没有它的时候插入只往回看最后 8 页，
+	// 中间页被删出来的空洞永远用不上（表文件只涨不缩）。
+	fm *freeMap
+
 	// fpi 记录「自上次 checkpoint 以来，这一页有没有写过全页镜像」。
 	// 防页撕裂：8KB 落盘不是原子的（可能只写了前 4KB 就断电），CRC 只能**发现**
 	// 坏页、修不回来。所以每页在一次 checkpoint 之后**第一次**被改时，把整页
@@ -82,6 +86,7 @@ func openTablePages(path string, budget *memBudget, poolPages int) (*tablePages,
 		path:   path,
 		byPage: make(map[uint32][]int),
 		hi:     pf.pageCount(),
+		fm:     newFreeMap(),
 		fpi:    make(map[uint32]bool),
 	}
 	tp.raLast.Store(noPage)
@@ -210,7 +215,8 @@ func (b *pageBatch) last() (uint32, bool) {
 // flush 每页编码一次并写回页框，返回要写进 WAL 的全页镜像。
 func (b *pageBatch) flush() ([]pageImage, error) {
 	for _, id := range b.order {
-		buf := b.cache[id].encode()
+		p := b.cache[id]
+		buf := p.encode()
 		f, err := b.tp.fetch(id)
 		if err != nil {
 			return b.fpis, err
@@ -219,6 +225,8 @@ func (b *pageBatch) flush() ([]pageImage, error) {
 		copy(f.data, buf)
 		f.latch.Unlock()
 		b.tp.pool.unpin(f, true)
+		// 顺手更新空闲图：这一页现在还能放多少（整理之后的可用字节）
+		b.tp.fm.update(id, p.freeBytes(), p.liveCount())
 	}
 	if len(b.order) > 0 {
 		if last := b.order[len(b.order)-1]; last >= b.tp.nextPage {
@@ -359,6 +367,7 @@ func (b *pageBatch) putRows(rows []pendingRow) error {
 			local, err := p.insertOrCompact(row.tuple, uint32(row.slot))
 			if err == nil {
 				tp.loc[row.slot] = rowLoc{page: at.page, slot: uint16(local)}
+				tp.fm.update(at.page, p.freeBytes(), p.liveCount())
 				continue
 			}
 			if err != errPageFull {
@@ -375,6 +384,7 @@ func (b *pageBatch) putRows(rows []pendingRow) error {
 					tp.loc[row.slot] = rowLoc{page: cur, slot: uint16(local)}
 					tp.valid[row.slot] = true
 					tp.byPage[cur] = append(tp.byPage[cur], row.slot)
+					tp.fm.update(cur, p.freeBytes(), p.liveCount())
 					continue
 				}
 			}
@@ -407,6 +417,7 @@ func (b *pageBatch) putRows(rows []pendingRow) error {
 		tp.loc[row.slot] = rowLoc{page: page, slot: uint16(local)}
 		tp.valid[row.slot] = true
 		tp.byPage[page] = append(tp.byPage[page], row.slot)
+		tp.fm.update(page, p.freeBytes(), p.liveCount())
 	}
 	return nil
 }
@@ -513,26 +524,16 @@ func (tp *tablePages) removeFromPageIndex(rid int, at rowLoc) {
 
 // findPage 找一页能放下 size 字节的元组；都放不下就返回新页号（isNew）。
 func (tp *tablePages) findPage(size int) (uint32, bool, error) {
-	total := tp.hi
-	for i := 0; i < 8 && i < int(total); i++ {
-		page := total - 1 - uint32(i)
-		f, err := tp.fetch(page)
-		if err != nil {
-			return 0, false, err
-		}
-		f.latch.RLock()
-		p, err := decodeOrInitPage(f.data, page)
-		f.latch.RUnlock()
-		tp.pool.unpin(f, false)
-		if err != nil {
-			return 0, false, err
-		}
-		// liveCount()==0：这页只剩洞，整理一下就能用
-		if p.freeBytes() >= size+slotEntrySize || p.liveCount() == 0 {
-			return page, false, nil
-		}
+	// 空闲空间图按**真实空闲字节**分档（洞不算：洞要靠 VACUUM 整理出来），
+	// 所以「刚被 VACUUM 整理过的中间页」和「整页空的页」都能被挑到。
+	//
+	// 这里刻意不按「整理之后可用字节」分档：那样会把一堆只剩几百字节的碎片页
+	// 也算成「放得下」，插入就会一行换一页地跳，批量插入的页缓存全废
+	// （实测 20 万行插入 911ms → 1401ms，GC 占一半）。
+	if page, ok := tp.fm.find(size + slotEntrySize); ok {
+		return page, false, nil
 	}
-	return total, true, nil // 新页
+	return tp.hi, true, nil // 新页
 }
 
 // loadRows 读全表，按 RID 放进槽位数组（空洞是 nil）。
@@ -590,6 +591,10 @@ func (tp *tablePages) applyImage(page uint32, img []byte) error {
 	if page >= tp.hi {
 		tp.hi = page + 1
 	}
+	// 池里那个旧页框已经被丢掉，空闲图也要按新内容重算
+	if p, err := decodeOrInitPage(img, page); err == nil {
+		tp.fm.update(page, p.freeBytes(), p.liveCount())
+	}
 	return nil
 }
 
@@ -612,6 +617,7 @@ func (tp *tablePages) loadAll(fn func(slot int, tuple []byte) error) error {
 			return fmt.Errorf("第 %d 页损坏：%w", page, err)
 		}
 		tp.pool.unpin(f, false)
+		tp.fm.update(page, p.freeBytes(), p.liveCount())
 		for i := range p.slots {
 			tuple, ok := p.get(i)
 			if !ok {
@@ -649,6 +655,7 @@ func (tp *tablePages) reset() error {
 	tp.loc = nil
 	tp.valid = nil
 	tp.byPage = make(map[uint32][]int)
+	tp.fm.reset()
 	tp.nextPage = 0
 	tp.hi = 0
 	tp.raLast.Store(noPage)
@@ -695,6 +702,7 @@ func (tp *tablePages) vacuumPages() (int, []pageImage, error) {
 		copy(f.data, buf)
 		f.latch.Unlock()
 		tp.pool.unpin(f, true)
+		tp.fm.update(page, p.freeBytes(), p.liveCount())
 		compacted++
 	}
 	return compacted, fpis, nil
@@ -731,6 +739,7 @@ func (tp *tablePages) reclaim() (uint32, error) {
 			break // 只摘尾部连续的，中间的留着（页号不能重排）
 		}
 		tp.pool.drop(page)
+		tp.fm.remove(page)
 		if err := tp.pf.truncate(page); err != nil {
 			return trimmed, err
 		}

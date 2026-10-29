@@ -68,6 +68,12 @@ type page struct {
 	slots  []pageSlot
 	freeLo int
 	freeHi int
+	// liveN/liveSz 是「存活行数 / 存活元组字节」的增量计数。
+	// 空闲空间图每插一行都要问「这页还剩多少」，每次遍历槽位目录太贵
+	// （批量插入 20 万行就是上亿次循环），所以随 insert/del 维护。
+	// 只有 decodePage 会从槽位目录重算一次。
+	liveN  int
+	liveSz int
 }
 
 func newPage(id uint32) *page {
@@ -151,6 +157,12 @@ func decodePage(raw []byte) (*page, error) {
 			gid: binary.LittleEndian.Uint32(p.buf[off+4 : off+8]),
 		}
 	}
+	for i := range p.slots {
+		if p.slots[i].len > 0 {
+			p.liveN++
+			p.liveSz += int(p.slots[i].len)
+		}
+	}
 	if err := p.sanity(); err != nil {
 		return nil, err
 	}
@@ -227,16 +239,8 @@ func (p *page) freeBytes() int {
 	return p.freeHi - p.freeLo
 }
 
-// liveCount 是非空槽位的数量。
-func (p *page) liveCount() int {
-	n := 0
-	for _, s := range p.slots {
-		if s.len > 0 {
-			n++
-		}
-	}
-	return n
-}
+// liveCount 是非空槽位的数量（增量计数，O(1)）。
+func (p *page) liveCount() int { return p.liveN }
 
 // insert 往页里放一条元组，返回页内槽位号。优先复用空槽（页内不整理，
 // 但槽位号可以复用，避免目录无限增长）。
@@ -264,6 +268,8 @@ func (p *page) insert(tuple []byte, gid uint32) (int, error) {
 
 	p.freeHi -= len(tuple)
 	copy(p.buf[p.freeHi:], tuple)
+	p.liveN++
+	p.liveSz += len(tuple)
 	if reuse != pageNoSlot {
 		p.slots[reuse] = pageSlot{off: uint16(p.freeHi), len: uint16(len(tuple)), gid: gid}
 		return reuse, nil
@@ -295,6 +301,8 @@ func (p *page) del(slot int) error {
 	if p.slots[slot].len == 0 {
 		return nil
 	}
+	p.liveN--
+	p.liveSz -= int(p.slots[slot].len)
 	p.slots[slot] = pageSlot{}
 	return nil
 }
@@ -310,18 +318,24 @@ func (p *page) del(slot int) error {
 // 页里删一行只是把槽位长度置 0，字节还留在元组区 —— 这些洞只能靠 compact
 // 收回来。返回 0 表示这一页没有洞，不用整理。
 func (p *page) holeBytes() int {
-	used := 0
-	for _, s := range p.slots {
-		if s.len == 0 {
-			continue
-		}
-		used += int(s.len)
-	}
-	free := p.freeHi - pageHeaderSize - len(p.slots)*slotEntrySize
-	if free < 0 {
+	h := p.freeAfterCompact() - p.freeBytes()
+	if h < 0 {
 		return 0
 	}
-	return free - used
+	return h
+}
+
+// liveBytes 是存活元组占的字节（不含已删的洞、不含槽位目录）。
+func (p *page) liveBytes() int { return p.liveSz }
+
+// freeAfterCompact 是「整理一次之后能用的字节」。
+//
+// 这才是「这一页还能不能塞下一行」的正确答案：`freeBytes()` 只看目录尾和数据区头
+// 之间的空隙，删掉的元组留在数据区里算不进空隙 —— 而整理会把它们收回来。
+// 空闲空间图（FSM）必须按这个值分档，否则「整页删空」的页会被当成满页，
+// 插入就永远只会往后开新页。
+func (p *page) freeAfterCompact() int {
+	return PageSize - p.liveBytes() - p.freeLo
 }
 
 func (p *page) compact() {

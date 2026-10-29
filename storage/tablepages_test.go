@@ -149,6 +149,11 @@ func TestTablePagesGrowAcrossPages(t *testing.T) {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
+	// 先刷一遍再数文件页数：脏页在池里时文件长度会落后（空闲图之后按逻辑页分配，
+	// 不再靠「插入时读旧页」把页挤出去，所以文件比 hi 落后是正常的）
+	if _, err := tp.flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	if tp.pageCount() < 4 {
 		t.Fatalf("60 行 × %d 字节只用了 %d 页，分页逻辑没生效", len(big), tp.pageCount())
 	}

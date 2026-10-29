@@ -157,6 +157,24 @@ class CDP {
     const t5b = await runSql(`EXPLAIN SELECT dept_id FROM employees WHERE dept_id > 0`);
     check('覆盖索引或索引扫描', /Index/.test(t5b), t5b.slice(0, 100));
 
+    // 0.4) 顶栏状态：空闲不占位（药丸隐藏），事务中露出来且圆点提示跟着变
+    await runSql(`BEGIN; UPDATE employees SET salary = salary WHERE id = 1;`);
+    const txOn = await cdp.eval(`(() => {
+      const p = document.getElementById('txPill');
+      const d = document.getElementById('monDot');
+      return { pillShown: !p.classList.contains('hidden'), tip: d ? d.title : '', text: p.textContent };
+    })()`);
+    check('进事务：药丸露出 + 圆点提示含「事务中」',
+      txOn.pillShown && /事务中/.test(txOn.tip), txOn.text + ' / ' + txOn.tip);
+    await runSql(`ROLLBACK;`);
+    const txOff = await cdp.eval(`(() => {
+      const p = document.getElementById('txPill');
+      const d = document.getElementById('monDot');
+      return { pillHidden: p.classList.contains('hidden'), tip: d ? d.title : '' };
+    })()`);
+    check('回滚后：药丸隐藏 + 圆点提示回到「空闲」',
+      txOff.pillHidden && /空闲/.test(txOff.tip), txOff.tip);
+
     // 0.5) 编辑器高度：默认够高、能拖、双击回自动
     check('CodeMirror 已接管编辑区（语法高亮 + 补全）',
       await cdp.eval(`!!document.querySelector('.CodeMirror') && !!window.CodeMirror`),
@@ -595,13 +613,31 @@ class CDP {
         hasSample: btns.indexOf('载入示例数据') >= 0,
         hasReset: btns.indexOf('清空当前库') >= 0,
         secs: [...body.querySelectorAll('.set-sec')].map(s => s.textContent.trim()),
+        // 空闲药丸已撤：空闲是常态，靠圆的绿点 + hover 文字表达
+        idlePillHidden: (() => {
+          const p = document.getElementById('txPill');
+          return !!p && (p.classList.contains('hidden') || getComputedStyle(p).display === 'none');
+        })(),
+        dotSize: (() => {
+          const d = document.getElementById('monDot');
+          if (!d) return 0;
+          return Math.round(d.getBoundingClientRect().width);
+        })(),
+        dotTip: (() => {
+          const d = document.getElementById('monDot');
+          return d ? (d.title || '') : '';
+        })(),
       };
     })()`);
     check('顶栏清瘦：不再挂皮肤/字号/示例数据/清库',
       !setUi.barHasTheme && !setUi.barHasData, setUi.barText);
     // 0.2.0 起「锁状态」换成「监控」（面板里带锁/慢 SQL/超时开关）
-    check('顶栏仍保留 库/空闲/监控/设置',
-      ['库', '空闲', '监控', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
+    check('顶栏仍保留 库/监控/设置',
+      ['库', '监控', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
+    check('空闲状态不占顶栏（药丸隐藏，靠圆点表达）', setUi.idlePillHidden,
+      setUi.idlePillHidden ? '药丸已隐藏' : '药丸仍显示');
+    check('监控圆点够大且有 hover 文字', setUi.dotSize >= 10 && setUi.dotTip.length > 0,
+      setUi.dotSize + 'px / ' + setUi.dotTip);
     check('设置页有 4 个带名字的皮肤卡片',
       setUi.picks === 4 && setUi.pickNames.join('/') === '深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);

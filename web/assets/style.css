@@ -1212,7 +1212,15 @@ table.grid td.bool { color: var(--warn-text); }
 .mon-dot.yellow { background: var(--warn); box-shadow: 0 0 0 3px rgba(217, 164, 65, .16); }
 .mon-dot.red { background: var(--danger); box-shadow: 0 0 0 3px rgba(240, 97, 109, .18); animation: monPulse 1.4s ease-in-out infinite; }
 @keyframes monPulse { 50% { box-shadow: 0 0 0 7px rgba(240, 97, 109, .04); } }
-.topbar .mon-dot { width: 7px; height: 7px; margin-right: 5px; }
+/* 顶栏这颗点就是「有没有事」的唯一指示：空闲药丸撤了，靠它 + hover 文字。
+   10px 是肉眼在 100% 缩放下也能分清绿/黄/红的尺寸，外圈 3px 光晕做呼吸感。 */
+.topbar .mon-dot {
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  transition: transform 0.12s ease;
+}
+#btnMonitor:hover .mon-dot { transform: scale(1.25); }
 
 /* ---- 1. 水位条 ---- */
 .mon-water {

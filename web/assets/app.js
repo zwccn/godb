@@ -120,6 +120,9 @@ applyFontScale(currentFsPct(), false);
 let schemaCache = [];
 // 当前会话是否有未提交的事务（DDL 不能在事务里执行）。
 let txActive = false;
+// 顶栏圆点要同时反映「系统健康」和「事务状态」，两边都会更新它，
+// 所以把最近一次的事务状态记下来，谁先到都能拼出正确的提示文字。
+let lastTx = { active: false, aborted: false, changes: 0 };
 // 展开了字段的表名。表树默认只显示到表级（和 Navicat 一样），
 // 展开状态自己记着，否则每次刷新/轮询都会把用户展开的字段收回去。
 const expandedTables = new Set();
@@ -1043,6 +1046,7 @@ const monEls = {
   updated: document.getElementById('monUpdated'),
   dot: document.getElementById('monDot'),
   badge: document.getElementById('monBadge'),
+  btn: document.getElementById('btnMonitor'),
 };
 
 let monOpen = false;
@@ -1094,7 +1098,7 @@ function renderMonBadge(m) {
   const w = m.water || {};
   const lvl = w.level || 'green';
   monEls.dot.className = 'mon-dot ' + lvl;
-  monEls.dot.title = lvl === 'green' ? '健康' : (lvl === 'yellow' ? '有排队或槽位已满' : '排队触顶或锁成瓶颈');
+  syncTopDot();
   const n = (w.wait || 0) + (w.queue || 0);
   if (n > 0) {
     monEls.badge.textContent = String(n);
@@ -1102,6 +1106,25 @@ function renderMonBadge(m) {
   } else {
     monEls.badge.classList.add('hidden');
   }
+}
+
+// 圆点 hover 的文字：健康状态 + 事务状态一起给。
+// 原来顶栏单独挂一个「空闲」药丸，可「空闲」正是默认状态、说了等于没说；
+// 颜色本来就一眼能看出没问题，文字放到 tooltip 里，省下顶栏宽度。
+function syncTopDot() {
+  if (!monEls.dot) return;
+  const lvl = monEls.dot.className.indexOf('yellow') >= 0 ? 'yellow'
+    : (monEls.dot.className.indexOf('red') >= 0 ? 'red' : 'green');
+  const health = lvl === 'green' ? '健康'
+    : (lvl === 'yellow' ? '有排队或槽位已满' : '排队触顶或锁成瓶颈');
+  let st = '空闲';
+  if (lastTx.active) {
+    st = lastTx.aborted ? '事务已中止' : ('事务中 · ' + lastTx.changes + ' 行未提交');
+  }
+  const tip = health + ' · ' + st;
+  monEls.dot.title = tip;
+  // 圆点只有 10px，hover 命中区太小；按钮整体也带上同一句，鼠标落在文字上也能看到。
+  if (monEls.btn) monEls.btn.title = '监控 · ' + tip;
 }
 
 function renderMonitor(m) {
@@ -1694,11 +1717,18 @@ function updateTx(tx) {
       txPill.className = 'pill pill-active';
       document.getElementById('btnCommit').classList.remove('hidden');
     }
+    // 事务打开是「有事发生」，药丸必须露出来（它挂着持锁数、未提交行数）
+    txPill.classList.remove('hidden');
   } else {
     txBar.classList.add('hidden');
+    // 「空闲」是默认状态，顶栏圆点绿色就等于说完了，留着只是占地方。
+    // 药丸只在真的有事（事务中 / 已中止）时才出现。
     txPill.textContent = '空闲';
     txPill.className = 'pill pill-idle';
+    txPill.classList.add('hidden');
   }
+  lastTx = { active: !!tx.active, aborted: !!tx.aborted, changes: tx.changes || 0 };
+  syncTopDot();
 }
 
 async function txAction(action) {

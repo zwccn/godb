@@ -121,6 +121,9 @@ type bufPool struct {
 
 	hits, misses, evicts, flushes int64
 	pinnedBlocked                 int64
+
+	// onEvict 在一页被淘汰（或从池里摘掉）时回调，给上层「把行从内存里放掉」用。
+	onEvict func(page uint32)
 }
 
 func newBufPool(pf *pageFile, cap int) *bufPool {
@@ -132,7 +135,19 @@ func newBufPool(pf *pageFile, cap int) *bufPool {
 
 // fetch 取一页并把它钉住（pins++）。调用方用完必须 unpin。
 // 拿到手后还要自己加 f.latch（读 RLock / 写 Lock）。
+const noPage = ^uint32(0)
+
+// fetch 取一页；如果顺手淘汰了别的页，在**放开池锁之后**通知上层
+// （回调要改行数据，不能攥着池锁做）。
 func (bp *bufPool) fetch(id uint32) (*bufFrame, error) {
+	f, evicted, err := bp.fetchLocked(id)
+	if err == nil && evicted != noPage && bp.onEvict != nil {
+		bp.onEvict(evicted)
+	}
+	return f, err
+}
+
+func (bp *bufPool) fetchLocked(id uint32) (*bufFrame, uint32, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -140,7 +155,7 @@ func (bp *bufPool) fetch(id uint32) (*bufFrame, error) {
 		f.pins++
 		f.ref = true
 		bp.hits++
-		return f, nil
+		return f, noPage, nil
 	}
 	bp.misses++
 
@@ -168,26 +183,32 @@ func (bp *bufPool) fetch(id uint32) (*bufFrame, error) {
 		}
 		if !found {
 			bp.pinnedBlocked++
-			return nil, errPoolBusy
+			return nil, noPage, errPoolBusy
 		}
 		bp.evicts++
 	}
 
 	// 淘汰的是脏页：先刷掉再复用（禁止 steal 的副作用就是这个刷盘点）
+	evicted := noPage
 	if !fresh {
 		if victim.dirty {
 			if err := bp.pf.writePage(victim.id, victim.data); err != nil {
-				return nil, err
+				return nil, noPage, err
 			}
 			bp.flushes++
 			victim.dirty = false
 		}
+		evicted = victim.id
 		delete(bp.frames, victim.id)
 	}
 
 	data, err := bp.pf.readPage(id)
 	if err != nil {
-		return nil, err
+		return nil, noPage, err
+	}
+	// 校验一次（魔数 + CRC）：换入路径按槽位直取元组，不会再去 decode 整页
+	if err := verifyPage(data); err != nil {
+		return nil, noPage, err
 	}
 	copy(victim.data, data)
 	victim.id = id
@@ -200,7 +221,7 @@ func (bp *bufPool) fetch(id uint32) (*bufFrame, error) {
 	} else {
 		bp.ring = append(bp.ring, victim)
 	}
-	return victim, nil
+	return victim, evicted, nil
 }
 
 // unpin 放掉钉子；dirty 表示这次改过页内容。
@@ -213,6 +234,14 @@ func (bp *bufPool) unpin(f *bufFrame, dirty bool) {
 		f.dirty = true
 	}
 	bp.mu.Unlock()
+}
+
+// has 报告某页是不是还在池里（换出时用：池里的是「热页」，留着）。
+func (bp *bufPool) has(id uint32) bool {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	_, ok := bp.frames[id]
+	return ok
 }
 
 // dirtyCount 返回池里还有多少脏页（checkpoint 用它决定要不要真去刷）。

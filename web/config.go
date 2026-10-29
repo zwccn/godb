@@ -122,6 +122,17 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	next.Network = req.Network
 	next.Performance = req.Performance
 	next.Timeouts = req.Timeouts
+	// 缓冲池页数：0 = 用默认值，负数没意义，上限给个「别把内存吃光」的边界。
+	// 注意它**不是热配置**（缓冲池在表第一次打开时创建），改完要重启。
+	if next.Storage.BufferPoolPages < 0 {
+		next.Storage.BufferPoolPages = 0
+	}
+	if next.Storage.BufferPoolPages > 1048576 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "每张表保留的缓冲池页数最多 1048576 页（8GB）",
+		})
+		return
+	}
 	next.Auth.RequirePassword = req.Auth.RequirePassword
 	next.Auth.User = req.Auth.User
 	if req.Auth.ClearPassword {

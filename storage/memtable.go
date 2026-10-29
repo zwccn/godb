@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"godb/catalog"
 	"godb/types"
@@ -16,8 +17,9 @@ import (
 // （改一行只需删一个键、插一个键），不必每次提交都整表重建。
 type TableData struct {
 	Name string
-	// Rows 是槽位数组，空槽为 nil。Live 是非空行数。
-	Rows []types.Row
+	// rows 是槽位数组。nil 表示「这个槽没有驻留的行」——可能是被删了，
+	// 也可能是被换出到页文件了（见 rowAt 的判定）。Live 是真实行数。
+	rows []types.Row
 	Live int
 	// free 是可复用的空槽（LIFO）。只在提交时压入/弹出，事务内删除的行
 	// 仍然占着槽位（它只是被标记成删了），所以事务内插入不会复用自己刚删的槽。
@@ -45,6 +47,27 @@ type TableData struct {
 	// checkpoint 时按槽位去重（同一行改多次只留最后一次）再写页。
 	pendingSlots []int
 	pendingRows  []types.Row
+	// gone 记录「自上次 checkpoint 以来被删掉的槽位」。
+	//
+	// 行会被换出（rows[slot]=nil），光看 nil 分不清「删了」和「不在内存里」，
+	// 这张位图就是补上的那一个 bit。checkpoint 之后清空（删除已经写进页里）。
+	gone []bool
+
+	// fullSync 表示整表内容都变了（DDL 重写列），checkpoint 要把每一行都写回页，
+	// 而不是只写 pending 里那几个槽。
+	fullSync bool
+
+	// tbl 是 catalog 里的表定义 —— 从页里解码行要用它对齐列与类型。
+	tbl *catalog.Table
+
+	// pageMu 让「换入换出」和「checkpoint 写页」不撞车：
+	// 读路径取 RLock（可能触发缓冲池淘汰），checkpoint/vacuum 取 Lock
+	// （这期间不许淘汰，否则脏页可能在镜像落盘前就被刷出去）。
+	pageMu sync.RWMutex
+
+	evictCalls   int
+	evictSkipped int
+
 	// dir/id 记下来，是为了「第一次写的时候才开文件」——
 	// 只读表不产生 .dat，少一堆空文件。
 	dir string
@@ -56,20 +79,150 @@ func newTableData(name string) *TableData {
 }
 
 // attachPages 给表挂上页文件（幂等）。id <= 0 表示这张表还没拿到稳定 ID。
-func (td *TableData) attachPages(dir string, id int64) error {
+//
+// t 是 catalog 里的表定义：从页里换入行时要靠它对齐列与类型。
+func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, poolPages int) error {
+	if t != nil {
+		td.tbl = t
+	}
 	if id <= 0 {
 		return nil
 	}
-	if td.pages != nil || td.dir == dir && td.id == id {
+	if td.pages != nil {
 		return nil
 	}
-	tp, err := openTablePages(tablePagePath(dir, id), defaultTablePoolPages)
+	if td.dir == dir && td.id == id {
+		return nil
+	}
+	if poolPages <= 0 {
+		poolPages = defaultTablePoolPages
+	}
+	tp, err := openTablePages(tablePagePath(dir, id), poolPages)
 	if err != nil {
 		return err
 	}
+	// 缓冲池淘汰一页时，把这一页上的行从内存里放掉 —— 这就是「换出」。
+	tp.onEvict = td.evictPage
 	td.pages = tp
 	td.dir, td.id = dir, id
 	return nil
+}
+
+// evictPage 是缓冲池淘汰一页时的回调：把这一页上的行从内存里放掉。
+//
+// 两种情况必须保留：表里还有没落盘的改动（pending / fullSync）——
+// 那些行只存在于内存里（或只在 pending 里），页文件上的还是旧版本。
+func (td *TableData) evictPage(page uint32) {
+	td.evictCalls++
+	if len(td.pendingSlots) > 0 || td.fullSync || td.pages == nil {
+		td.evictSkipped++
+		return
+	}
+	for _, slot := range td.pages.byPage[page] {
+		if slot >= 0 && slot < len(td.rows) {
+			td.rows[slot] = nil
+		}
+	}
+}
+
+// rowAt 取一个槽位的行：内存里有就直接给，没有就从页文件换进来。
+//
+// 第二个返回值为 false 表示「这个槽没有行」（删了 / 从来没存在过）。
+func (td *TableData) rowAt(slot int) (types.Row, bool) {
+	if slot < 0 || slot >= len(td.rows) {
+		return nil, false
+	}
+	if r := td.rows[slot]; r != nil {
+		return r, true
+	}
+	if slot < len(td.gone) && td.gone[slot] {
+		return nil, false
+	}
+	if td.pages == nil || td.tbl == nil {
+		return nil, false
+	}
+	td.pageMu.RLock()
+	tuple, ok := td.pages.get(slot)
+	td.pageMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	row, _, err := decodeRowTuple(tuple, td.tbl)
+	if err != nil {
+		return nil, false
+	}
+	td.rows[slot] = row
+	return row, true
+}
+
+// hasRow 判断一个槽位上到底有没有行（不管在不在内存里）。
+func (td *TableData) hasRow(slot int) bool {
+	if slot < 0 || slot >= len(td.rows) {
+		return false
+	}
+	if td.rows[slot] != nil {
+		return true
+	}
+	if slot < len(td.gone) && td.gone[slot] {
+		return false
+	}
+	return td.pages != nil && slot < len(td.pages.valid) && td.pages.valid[slot]
+}
+
+// setRow 写入一个槽位的行（只在包内用：提交、重放、DDL 改写）。
+func (td *TableData) setRow(slot int, row types.Row) {
+	for len(td.rows) <= slot {
+		td.rows = append(td.rows, nil)
+	}
+	td.rows[slot] = row
+	if slot < len(td.gone) {
+		td.gone[slot] = false
+	}
+}
+
+// dropRow 在内存里标掉一个槽位（删除）。真正的删除要到 checkpoint 才写进页。
+func (td *TableData) dropRow(slot int) {
+	if slot >= 0 && slot < len(td.rows) {
+		td.rows[slot] = nil
+	}
+	for len(td.gone) <= slot {
+		td.gone = append(td.gone, false)
+	}
+	if slot >= 0 {
+		td.gone[slot] = true
+	}
+}
+
+// SlotCount 是槽位数组的长度（行号上界，不是行数 —— 行数看 Live）。
+func (td *TableData) SlotCount() int { return len(td.rows) }
+
+// RowAt 是对外的 rowAt（给 db / exec 层用）。
+func (td *TableData) RowAt(slot int) (types.Row, bool) { return td.rowAt(slot) }
+
+// SetRow 是对外的 setRow（DDL 按下标重写行时用）。
+func (td *TableData) SetRow(slot int, row types.Row) { td.setRow(slot, row) }
+
+// MarkFullSync 标「整表都要重写」：DDL 改列之后每行内容都可能变，
+// 只写 pending 那几个槽会漏（例如 ADD COLUMN ... DEFAULT 的值）。
+func (td *TableData) MarkFullSync() { td.markFullSync() }
+
+// markFullSync 标「整表都要重写」：DDL 改列之后每行内容都可能变，
+// 只写 pending 那几个槽会漏（例如 ADD COLUMN ... DEFAULT 的值）。
+func (td *TableData) markFullSync() {
+	td.fullSync = true
+	td.pendingSlots = nil
+	td.pendingRows = nil
+}
+
+// HasResidentRows 报告还有多少行驻留在内存里（监控/测试用）。
+func (td *TableData) ResidentRows() int {
+	n := 0
+	for _, r := range td.rows {
+		if r != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // notePending 记下这次提交改了哪些行，等 checkpoint 成批写页。
@@ -89,17 +242,39 @@ func (td *TableData) notePending(slots []int, rows []types.Row) {
 func (td *TableData) dropPending() {
 	td.pendingSlots = nil
 	td.pendingRows = nil
+	td.fullSync = false
+	td.gone = nil
 }
 
 // drainPending 把待落盘行按槽位合并（最后一次为准），编码成页里存的元组。
+//
+// 三种来源：pending（逐行改动）、gone（删除）、fullSync（DDL 重写整表）。
+// 这里**不清空状态** —— 写页成功之后调用 clearPending 才算落地，
+// 中途失败下次 checkpoint 还能重试。
 func (td *TableData) drainPending() ([]int, []pendingRow, error) {
-	if len(td.pendingSlots) == 0 {
+	if len(td.pendingSlots) == 0 && !td.fullSync && len(td.gone) == 0 {
 		return nil, nil, nil
 	}
 	final := make(map[int]types.Row, len(td.pendingSlots))
+	if td.fullSync {
+		// 整表重写：每一行都要写回去（行可能被换出，走 rowAt 取回来）
+		for i := 0; i < len(td.rows); i++ {
+			if r, ok := td.rowAt(i); ok {
+				final[i] = r
+			} else {
+				final[i] = nil
+			}
+		}
+	}
+	for slot := range td.gone {
+		if td.gone[slot] {
+			final[slot] = nil
+		}
+	}
 	for i, slot := range td.pendingSlots {
 		final[slot] = td.pendingRows[i]
 	}
+
 	dels := make([]int, 0, len(final))
 	puts := make([]pendingRow, 0, len(final))
 	for slot, row := range final {
@@ -116,9 +291,15 @@ func (td *TableData) drainPending() ([]int, []pendingRow, error) {
 	// 排序只为让「同一批改动」产生同样的页布局（可复现、便于对比文件）
 	sort.Ints(dels)
 	sort.Slice(puts, func(i, j int) bool { return puts[i].slot < puts[j].slot })
+	return dels, puts, nil
+}
+
+// clearPending 在改动确实写进页之后清掉待落盘状态。
+func (td *TableData) clearPending() {
 	td.pendingSlots = nil
 	td.pendingRows = nil
-	return dels, puts, nil
+	td.fullSync = false
+	td.gone = nil
 }
 
 // pageLoad 从页文件读回全表（槽位号 == RID，不能重排）。
@@ -142,25 +323,77 @@ func (td *TableData) pageStage() ([]pageImage, error) {
 		return nil, err
 	}
 	if len(dels) == 0 && len(puts) == 0 {
+		td.clearPending()
 		return nil, nil
 	}
-	return td.pages.write(dels, puts)
+	fpis, err := td.pages.write(dels, puts)
+	if err != nil {
+		return nil, err
+	}
+	td.clearPending()
+	return fpis, nil
 }
 
-// pageFlush 刷脏页 + 清 FPI 标记（只在镜像已经写进 WAL 之后调用）。
+// pageFlush 刷脏页 + 清 FPI 标记（只在镜像已经写进 WAL 之后调用），
+// 然后把不在缓冲池里的页的行从内存里放掉。
 func (td *TableData) pageFlush() (int, error) {
 	if td.pages == nil {
 		return 0, nil
 	}
-	return td.pages.checkpoint()
+	n, err := td.pages.checkpoint()
+	if err != nil {
+		return n, err
+	}
+	td.trimResident()
+	return n, nil
 }
+
+// trimResident 把「不在缓冲池里」的页上的行从内存里放掉。
+//
+// 时机很关键：只有「内存和磁盘一致」时才能放（否则放掉的是唯一副本）。
+// 所以它在 checkpoint 刷完页之后调用，并且有 pending/fullSync 时直接跳过。
+//
+// 留在池里的是「热页」——它们马上可能还要用，放着能省一次读盘。
+func (td *TableData) trimResident() {
+	if td.pages == nil || len(td.pendingSlots) > 0 || td.fullSync {
+		return
+	}
+	for page, slots := range td.pages.byPage {
+		if td.pages.pool.has(page) {
+			continue
+		}
+		for _, slot := range slots {
+			if slot >= 0 && slot < len(td.rows) {
+				td.rows[slot] = nil
+			}
+		}
+	}
+}
+
+// PageCountDebug 是页数（测试/诊断用）。
+func (td *TableData) PageCountDebug() int {
+	if td.pages == nil {
+		return 0
+	}
+	return int(td.pages.pf.pageCount())
+}
+
+// TrimResident 是对外的 trimResident（测试/诊断用）。
+func (td *TableData) TrimResident() { td.trimResident() }
 
 // pageDirty 报告还有多少改动没落盘（待写入的行 + 池里的脏页）。
 func (td *TableData) pageDirty() int {
 	if td.pages == nil {
 		return 0
 	}
-	return len(td.pendingSlots) + td.pages.dirtyPages()
+	n := len(td.pendingSlots) + td.pages.dirtyPages()
+	if td.fullSync {
+		n++
+	}
+	if len(td.gone) > 0 {
+		n++
+	}
+	return n
 }
 
 // closePages 关掉页文件（DROP TABLE / 表被换掉时）。
@@ -176,16 +409,19 @@ func (td *TableData) alloc() int {
 	if n := len(td.free); n > 0 {
 		slot := td.free[n-1]
 		td.free = td.free[:n-1]
+		if slot < len(td.gone) {
+			td.gone[slot] = false
+		}
 		return slot
 	}
-	td.Rows = append(td.Rows, nil)
-	return len(td.Rows) - 1
+	td.rows = append(td.rows, nil)
+	return len(td.rows) - 1
 }
 
 // release 释放槽位（末尾且无其它空槽时直接截断数组）。
 func (td *TableData) release(slot int) {
-	if slot == len(td.Rows)-1 && len(td.free) == 0 {
-		td.Rows = td.Rows[:slot]
+	if slot == len(td.rows)-1 && len(td.free) == 0 {
+		td.rows = td.rows[:slot]
 		return
 	}
 	td.free = append(td.free, slot)
@@ -195,12 +431,12 @@ func (td *TableData) release(slot int) {
 func (td *TableData) Recompute() {
 	td.Live = 0
 	td.free = td.free[:0]
-	for i, r := range td.Rows {
-		if r == nil {
-			td.free = append(td.free, i)
+	for i := range td.rows {
+		if td.hasRow(i) {
+			td.Live++
 			continue
 		}
-		td.Live++
+		td.free = append(td.free, i)
 	}
 }
 
@@ -222,12 +458,14 @@ func (td *TableData) CompactRows() {
 		return
 	}
 	rows := make([]types.Row, 0, td.Live)
-	for _, r := range td.Rows {
-		if r != nil {
+	for i := range td.rows {
+		// 被换出的行也要取回来，否则压缩会把它们当成空槽丢掉
+		if r, ok := td.rowAt(i); ok {
 			rows = append(rows, r)
 		}
 	}
-	td.Rows = rows
+	td.gone = nil
+	td.rows = rows
 	td.free = nil
 	td.Live = len(rows)
 }
@@ -241,11 +479,13 @@ func (td *TableData) RebuildIndex(t *catalog.Table) {
 	pk := t.PKIdxes()
 	tree := newBTree()
 	buf := make([]byte, 0, 32)
-	for i, r := range td.Rows {
-		if r == nil {
+	for i := range td.rows {
+		// 走 rowAt：被换出的行会从页里换回来（换进来的又可能被淘汰，
+		// 所以这里不能直接读 td.rows）
+		r, ok := td.rowAt(i)
+		if !ok {
 			continue
 		}
-		var ok bool
 		buf, ok = AppendOrderKeyInto(buf[:0], r, pk)
 		if !ok {
 			continue
@@ -300,8 +540,9 @@ func (td *TableData) RebuildSecond(t *catalog.Table) {
 		next[n] = newBTree()
 	}
 	buf := make([]byte, 0, 32)
-	for i, r := range td.Rows {
-		if r == nil {
+	for i := 0; i < len(td.rows); i++ {
+		r, ok := td.rowAt(i) // 被换出的行要换回来才能建索引
+		if !ok {
 			continue
 		}
 		for j, name := range names {
@@ -335,8 +576,9 @@ func (td *TableData) RebuildUniqueKeys(t *catalog.Table) {
 		next[colsSig(g)] = newBTree()
 	}
 	buf := make([]byte, 0, 32)
-	for i, r := range td.Rows {
-		if r == nil {
+	for i := 0; i < len(td.rows); i++ {
+		r, ok := td.rowAt(i)
+		if !ok {
 			continue
 		}
 		for _, g := range groups {

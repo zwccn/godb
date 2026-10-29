@@ -111,7 +111,8 @@ func main() {
 			DeadlockDetect: *deadlockDetect,
 			DeadlockAfter:  *deadlockAfter,
 		},
-		Progress: func(msg string) { gate.SetPhase("打开数据库", msg) },
+		Progress:        func(msg string) { gate.SetPhase("打开数据库", msg) },
+		BufferPoolPages: conf.Storage.BufferPoolPages,
 	})
 	if err != nil {
 		gate.SetPhase("启动失败", err.Error())

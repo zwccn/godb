@@ -413,7 +413,11 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		if err := t.Validate(); err != nil {
 			return nil, err
 		}
-		for i, row := range td.Rows {
+		for i := 0; i < td.SlotCount(); i++ {
+			row, ok := td.RowAt(i) // 被换出的行也要取回来
+			if !ok {
+				continue
+			}
 			v := defVal
 			if newCol.Serial {
 				td.Seq++
@@ -422,8 +426,10 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 			newRow := make(types.Row, 0, len(row)+1)
 			newRow = append(newRow, row...)
 			newRow = append(newRow, v)
-			td.Rows[i] = newRow
+			td.SetRow(i, newRow)
 		}
+		// 每行都多了一列，整表要重写回页（否则新列的默认值只活在内存里）
+		td.MarkFullSync()
 		td.RebuildIndex(t)
 	case "drop_column":
 		idx, ok := t.ColumnIdx(act.Name)
@@ -459,12 +465,20 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 			t.Indexes = kept
 			note = fmt.Sprintf("同时删除了依赖该列的索引：%s", strings.Join(dropped, ", "))
 		}
-		for i, row := range td.Rows {
+		for i := 0; i < td.SlotCount(); i++ {
+			row, ok := td.RowAt(i)
+			if !ok {
+				continue
+			}
+			if idx >= len(row) {
+				continue
+			}
 			newRow := make(types.Row, 0, len(row)-1)
 			newRow = append(newRow, row[:idx]...)
 			newRow = append(newRow, row[idx+1:]...)
-			td.Rows[i] = newRow
+			td.SetRow(i, newRow)
 		}
+		td.MarkFullSync()
 		td.RebuildIndex(t)
 	case "rename_column":
 		idx, ok := t.ColumnIdx(act.Name)
@@ -499,7 +513,11 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		for i, row := range td.Rows {
+		for i := 0; i < td.SlotCount(); i++ {
+			row, ok := td.RowAt(i)
+			if !ok {
+				continue
+			}
 			if idx >= len(row) {
 				continue
 			}
@@ -508,8 +526,9 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 				return nil, err
 			}
 			row[idx] = nv
-			td.Rows[i] = row
+			td.SetRow(i, row)
 		}
+		td.MarkFullSync()
 		// 只换类型，别把约束丢了。之前这里用 NewColumn 重建列定义，
 		// NOT NULL / UNIQUE / DEFAULT / SERIAL 全被清掉，主键和索引因为
 		// 存在 catalog.Table 的索引里反而留了下来 —— 表设计器改个类型就会
@@ -1811,8 +1830,12 @@ func (e *Engine) checkUniqueIndexData(t *catalog.Table, cols []string, name stri
 		}
 		pos = append(pos, ci)
 	}
-	seen := make(map[string]bool, len(td.Rows))
-	for _, row := range td.Rows {
+	seen := make(map[string]bool, td.Live)
+	for i := 0; i < td.SlotCount(); i++ {
+		row, ok := td.RowAt(i)
+		if !ok {
+			continue
+		}
 		vals, ok := groupValues(row, pos)
 		if !ok {
 			continue // 含 NULL 的行不参与唯一性判断

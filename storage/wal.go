@@ -610,7 +610,7 @@ func (s *Store) replayWAL() error {
 		if !ok {
 			continue
 		}
-		if err := td.attachPages(s.Dir, t.ID); err != nil {
+		if err := td.attachPages(s.Dir, t.ID, t, s.PoolPages); err != nil {
 			return fmt.Errorf("还原页镜像失败: %w", err)
 		}
 		if err := td.pages.applyImage(rec.Page, rec.Img); err != nil {
@@ -715,8 +715,8 @@ func (s *Store) applyRec(rec walRec) error {
 
 	// growTo 保证槽位数组够长（重放遇到的槽位号可能超出当前长度）
 	growTo := func(slot int) {
-		for len(td.Rows) <= slot {
-			td.Rows = append(td.Rows, nil)
+		for len(td.rows) <= slot {
+			td.rows = append(td.rows, nil)
 		}
 	}
 
@@ -728,22 +728,22 @@ func (s *Store) applyRec(rec walRec) error {
 			// 幂等：往指定槽位赋值。重放两遍结果一样，
 			// 所以「页已刷盘、meta 还没记代次」时多放一遍也无害。
 			growTo(rec.Slot)
-			if td.Rows[rec.Slot] == nil {
+			if !td.hasRow(rec.Slot) {
 				td.Live++
 			}
-			td.Rows[rec.Slot] = row
+			td.setRow(rec.Slot, row)
 			// 内存改了、页还没改：标成待落盘，下次 checkpoint 才写得进去
 			td.notePending([]int{rec.Slot}, []types.Row{row})
 		} else {
-			td.Rows = append(td.Rows, row)
+			td.rows = append(td.rows, row)
 			td.Live++
-			td.notePending([]int{len(td.Rows) - 1}, []types.Row{row})
+			td.notePending([]int{len(td.rows) - 1}, []types.Row{row})
 		}
 		bumpSeq(t.SerialIdx(), td, row)
 	case opDel:
 		if rec.Slot >= 0 {
-			if rec.Slot < len(td.Rows) && td.Rows[rec.Slot] != nil {
-				td.Rows[rec.Slot] = nil
+			if td.hasRow(rec.Slot) {
+				td.dropRow(rec.Slot)
 				td.Live--
 				td.notePending([]int{rec.Slot}, []types.Row{nil})
 			}
@@ -751,15 +751,16 @@ func (s *Store) applyRec(rec walRec) error {
 		}
 		row, rep := castRow(t, rec.Old)
 		s.Repaired.Add(int64(rep))
-		for i := range td.Rows {
-			if td.Rows[i] == nil {
+		for i := 0; i < len(td.rows); i++ {
+			cur, ok := td.rowAt(i)
+			if !ok {
 				continue
 			}
-			if types.RowSame(td.Rows[i], row) {
+			if types.RowSame(cur, row) {
 				// 置空而不是搬移：重放一条删除就是 O(1)，
 				// 搬移会让「重放 N 条删除」退化成 O(n²)。收尾的 RebuildIndex
 				// 会顺手把空槽登记进 free。
-				td.Rows[i] = nil
+				td.dropRow(i)
 				td.Live--
 				break
 			}
@@ -771,15 +772,16 @@ func (s *Store) applyRec(rec walRec) error {
 		s.Repaired.Add(int64(rep2))
 		if rec.Slot >= 0 {
 			growTo(rec.Slot)
-			td.Rows[rec.Slot] = newRow
+			td.setRow(rec.Slot, newRow)
 			td.notePending([]int{rec.Slot}, []types.Row{newRow})
 		} else {
-			for i := range td.Rows {
-				if td.Rows[i] == nil {
+			for i := 0; i < len(td.rows); i++ {
+				cur, ok := td.rowAt(i)
+				if !ok {
 					continue
 				}
-				if types.RowSame(td.Rows[i], oldRow) {
-					td.Rows[i] = newRow
+				if types.RowSame(cur, oldRow) {
+					td.setRow(i, newRow)
 					break
 				}
 			}

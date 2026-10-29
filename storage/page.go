@@ -81,6 +81,39 @@ func newPage(id uint32) *page {
 }
 
 // decodePage 把磁盘上的字节解析成 page（校验魔数与 CRC）。
+// verifyPage 只校验魔数与 CRC，不建页结构。
+//
+// 换入路径（rowAt → pages.get）按槽位直取元组、不解整页，所以校验要挪到
+// 「页从文件读进池」这一刻做一次 —— 比每行解一遍整页便宜两个数量级。
+func verifyPage(raw []byte) error {
+	if len(raw) != PageSize {
+		return errPageShort
+	}
+	zero := true
+	for _, b := range raw {
+		if b != 0 {
+			zero = false
+			break
+		}
+	}
+	if zero {
+		return nil // 文件尾之后的新页，还没写过
+	}
+	if string(raw[0:4]) != pageMagic {
+		return errPageMagic
+	}
+	want := binary.LittleEndian.Uint32(raw[24:28])
+	tmp := make([]byte, PageSize)
+	copy(tmp, raw)
+	for i := 24; i < 28; i++ {
+		tmp[i] = 0
+	}
+	if crc32.Checksum(tmp, crcTable) != want {
+		return errPageCRC
+	}
+	return nil
+}
+
 func decodePage(raw []byte) (*page, error) {
 	if len(raw) != PageSize {
 		return nil, errPageShort

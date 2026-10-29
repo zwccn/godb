@@ -2526,7 +2526,14 @@ function renderSettings() {
   settingsBody.appendChild(setRow('每隔多少秒', numInput('setCpSeconds', d.storage.checkpointSeconds, 0, 86400), '秒'));
   settingsBody.appendChild(setRow('WAL 超过', numInput('setCpWALMB', d.storage.checkpointWalMB, 0, 65536), 'MB'));
   settingsBody.appendChild(el('div', 'set-hint',
-    '三条任一满足就落盘（写快照 + 轮转 WAL），填 0 表示关闭该条。提交时的 fsync 始终同步执行，不受这里影响。'));
+    '三条任一满足就落盘（刷脏页 + 轮转 WAL），填 0 表示关闭该条。提交时的 fsync 始终同步执行，不受这里影响。'));
+
+  /* ---- 内存（行换出） ---- */
+  settingsBody.appendChild(el('div', 'set-sec', '内存（缓冲池）'));
+  settingsBody.appendChild(setRow('每张表保留', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
+  settingsBody.appendChild(el('div', 'set-hint',
+    '一页 8KB。行可以换出：表比缓冲池大时，久未访问的页会被淘汰、对应的行从内存里放掉，' +
+    '下次访问再从页文件读回来。默认 1024 页 = 8MB/表；改完要重启才生效。'));
 
   const cp = rt.checkpoint || {};
   const stats = el('div', 'set-stats');
@@ -2647,6 +2654,7 @@ async function saveSettings() {
       checkpointCommits: val('setCpCommits'),
       checkpointSeconds: val('setCpSeconds'),
       checkpointWalMB: val('setCpWALMB'),
+      bufferPoolPages: val('setPoolPages'),
     },
     network: {
       httpPort: val('setHTTPPort'),

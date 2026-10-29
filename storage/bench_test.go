@@ -35,7 +35,7 @@ func benchTable(n, withSecondary int) (*TableData, *catalog.Table) {
 			types.Text("note"),
 		}
 	}
-	td.Rows = rows
+	td.rows = rows
 	return td, t
 }
 
@@ -64,11 +64,11 @@ func BenchmarkResliceRows(b *testing.B) {
 	td, _ := benchTable(200000, 0)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		newRows := make([]types.Row, 0, len(td.Rows))
-		for _, row := range td.Rows {
+		newRows := make([]types.Row, 0, len(td.rows))
+		for _, row := range td.rows {
 			newRows = append(newRows, row)
 		}
-		if len(newRows) != len(td.Rows) {
+		if len(newRows) != len(td.rows) {
 			b.Fatal("bad length")
 		}
 	}
@@ -82,7 +82,7 @@ func BenchmarkKeyEncode200k(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		vals := make([]types.Value, len(pk))
 		n := 0
-		for _, row := range td.Rows {
+		for _, row := range td.rows {
 			for j, ci := range pk {
 				vals[j] = row[ci]
 			}
@@ -90,7 +90,7 @@ func BenchmarkKeyEncode200k(b *testing.B) {
 				n++
 			}
 		}
-		if n != len(td.Rows) {
+		if n != len(td.rows) {
 			b.Fatal("bad count")
 		}
 	}

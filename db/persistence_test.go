@@ -177,8 +177,11 @@ func TestTruncatedWALFrame(t *testing.T) {
 // 所以这里每个 worker 写自己的表，让提交真正并发。
 func TestGroupCommitCoalescesFsync(t *testing.T) {
 	d := newTestDB(t)
-	const workers = 8
-	const perWorker = 6 // 48 次提交，低于自动 checkpoint 阈值 128
+	// 16 路并发、96 次提交（低于自动 checkpoint 阈值 128）。
+	// 并发度给高一点：组提交是「谁先到谁做一次 fsync」的竞态，路数太少时
+	// 前一个 fsync 可能已经做完、后一个才来，合并率取决于机器 fsync 有多快。
+	const workers = 16
+	const perWorker = 6
 	for i := 0; i < workers; i++ {
 		run(t, d, "s", fmt.Sprintf(`CREATE TABLE gc%d (id SERIAL PRIMARY KEY, v INTEGER)`, i))
 	}
@@ -671,4 +674,39 @@ func TestPageFileKeepsAllColumnTypes(t *testing.T) {
 	})
 	// 行数、主键索引、自增序列也要一起活过来
 	assertRows(t, run(t, d2, "s", `SELECT count(*) FROM kinds`), []string{"2"})
+}
+
+// DDL 改列之后整表内容都变了：必须整表写回页，而不是只写 pending 里那几个槽。
+// （ADD COLUMN ... DEFAULT 的默认值只存在于内存里，漏了就会在重启后变 NULL。）
+func TestAlterTableColumnPersists(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	s := "s"
+	run(t, d, s, `CREATE TABLE ad (id INTEGER PRIMARY KEY)`)
+	run(t, d, s, `INSERT INTO ad VALUES (1),(2),(3)`)
+	run(t, d, s, `CHECKPOINT`)
+
+	run(t, d, s, `ALTER TABLE ad ADD COLUMN tag TEXT DEFAULT 'x'`)
+	run(t, d, s, `CHECKPOINT`)
+	assertRows(t, run(t, d, s, `SELECT id, tag FROM ad ORDER BY id`),
+		[]string{"1|x", "2|x", "3|x"})
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	// 重启后（只从页文件读）默认值也必须在
+	assertRows(t, run(t, d2, s, `SELECT id, tag FROM ad ORDER BY id`),
+		[]string{"1|x", "2|x", "3|x"})
+
+	// 删列同样要落盘
+	run(t, d2, s, `ALTER TABLE ad DROP COLUMN tag`)
+	run(t, d2, s, `CHECKPOINT`)
+	if err := d2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d3 := openDir(t, dir)
+	defer d3.Close()
+	assertRows(t, run(t, d3, s, `SELECT count(*) FROM ad`), []string{"3"})
 }

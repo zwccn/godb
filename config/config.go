@@ -38,6 +38,15 @@ type Storage struct {
 	CheckpointSeconds int `json:"checkpointSeconds"`
 	// CheckpointWALMB：WAL 增长到多少 MB 触发，0 表示关闭。
 	CheckpointWALMB int `json:"checkpointWalMB"`
+	// BufferPoolPages 是**每张表**的缓冲池页数（8KB/页）。
+	//
+	// 行能换出之后，它决定单表最多留多少「热页」的行在内存里：
+	// 1024 页 = 8MB/表，表比这大时，很久没访问的页会被淘汰、对应的行
+	// 从内存里放掉，下次访问再从页文件读回来。
+	//
+	// 0 表示用默认值（1024）。**改完要重启才生效**（缓冲池在表第一次
+	// 打开时创建），不像落盘节奏那样能热改。
+	BufferPoolPages int `json:"bufferPoolPages"`
 }
 
 // Network 控制两个监听端口。
@@ -124,6 +133,7 @@ func Default() Config {
 			CheckpointCommits: 128,
 			CheckpointSeconds: 60,
 			CheckpointWALMB:   64,
+			BufferPoolPages:   1024,
 		},
 		Network: Network{
 			HTTPPort:   8080,

@@ -923,6 +923,24 @@ class CDP {
     check('设置：「保存并应用」成功后自动关闭 + 提示',
       saved.closed && saved.shown && /已保存/.test(saved.toast), JSON.stringify(saved));
 
+    // 缓冲池页数：行能换出之后，这个值决定「每张表留多少热页的行在内存里」。
+    // 改完要重启才生效，但值本身必须存得住（不然用户以为没保存）。
+    await cdp.eval(`openSettings()`);
+    await sleep(700);
+    const pool0 = await cdp.eval(`(() => { const n = document.getElementById('setPoolPages'); return n ? n.value : null; })()`);
+    check('设置页有「缓冲池页数」字段', pool0 !== null && pool0 !== '', String(pool0));
+    await cdp.eval(`document.getElementById('setPoolPages').value = '512'`);
+    await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
+    await sleep(1200);
+    await cdp.eval(`openSettings()`);
+    await sleep(700);
+    const pool1 = await cdp.eval(`document.getElementById('setPoolPages').value`);
+    check('缓冲池页数能存住（512）', pool1 === '512', `保存前 ${pool0} → 重新打开 ${pool1}`);
+    // 还原成默认值，别把测试的副作用留在配置文件里
+    await cdp.eval(`document.getElementById('setPoolPages').value = '1024'`);
+    await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
+    await sleep(1000);
+
     // 3) 历史面板
     await cdp.eval(`openHistory()`);
     await sleep(300);

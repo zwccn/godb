@@ -110,8 +110,12 @@ func (s *Store) TrashTables(reason string, names []string) (string, error) {
 			continue
 		}
 		td := s.Data[key]
-		rows := make([]types.Row, len(td.Rows))
-		copy(rows, td.Rows)
+		rows := make([]types.Row, 0, td.Live)
+		for i := 0; i < td.SlotCount(); i++ {
+			if r, ok := td.rowAt(i); ok { // 被换出的行也要取回来
+				rows = append(rows, r)
+			}
+		}
 		pending = append(pending, pendingTable{def: t, rows: rows, live: td.Live})
 	}
 	s.loadMu.RUnlock()

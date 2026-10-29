@@ -154,7 +154,7 @@ func (s *Store) worthWritingLocked() bool {
 	var totalRows int64
 	for key, td := range s.Data {
 		if td != nil && s.loaded[key] {
-			totalRows += int64(len(td.Rows))
+			totalRows += int64(td.SlotCount())
 		}
 	}
 	if totalRows*bytesPerRow <= minCheckpointBytes {

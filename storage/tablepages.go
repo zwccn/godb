@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,6 +50,9 @@ type tablePages struct {
 	// 镜像塞进 WAL；恢复时先用镜像还原整页，再重放逻辑记录。
 	fpi map[uint32]bool
 
+	// onEvict 在缓冲池淘汰某页时回调（上层用它把这一页的行从内存里放掉）。
+	onEvict func(page uint32)
+
 	// decodes 统计「解码了多少次页」。这是写路径的核心成本指标：
 	// 按行写 → 行数 次；按页批量写 → 页数 次。测试用它守住回归。
 	decodes int64
@@ -70,6 +74,12 @@ func openTablePages(path string, poolPages int) (*tablePages, error) {
 		byPage: make(map[uint32][]int),
 		hi:     pf.pageCount(),
 		fpi:    make(map[uint32]bool),
+	}
+	// 池淘汰一页 → 通知上层（TableData 把这一页上的行从内存里放掉）
+	tp.pool.onEvict = func(page uint32) {
+		if tp.onEvict != nil {
+			tp.onEvict(page)
+		}
 	}
 	return tp, nil
 }
@@ -344,6 +354,11 @@ func (b *pageBatch) putRows(rows []pendingRow) error {
 }
 
 // get 读一行（返回副本）。
+//
+// 只按槽位目录取那一段字节，**不解码整页**：一行一行扫的时候，按页解码会让
+// 每行都付一次「解码整页 ~120 个元组」的钱（实测 20 万行扫描 1.2s → 改成
+// 现在这样是几十毫秒）。页头的 CRC 在页从文件读进池时校验一次，所以这里
+// 不必再验。
 func (tp *tablePages) get(slot int) ([]byte, bool) {
 	if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
 		return nil, false
@@ -354,13 +369,21 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 		return nil, false
 	}
 	defer tp.pool.unpin(f, false)
+
 	f.latch.RLock()
 	defer f.latch.RUnlock()
-	p, err := decodeOrInitPage(f.data, at.page)
-	if err != nil {
+	off := pageHeaderSize + int(at.slot)*slotEntrySize
+	if off+slotEntrySize > len(f.data) {
 		return nil, false
 	}
-	return p.get(int(at.slot))
+	tOff := int(binary.LittleEndian.Uint16(f.data[off:]))
+	tLen := int(binary.LittleEndian.Uint16(f.data[off+2:]))
+	if tLen == 0 || tOff+tLen > len(f.data) {
+		return nil, false
+	}
+	out := make([]byte, tLen)
+	copy(out, f.data[tOff:tOff+tLen])
+	return out, true
 }
 
 // del 删一行（单行便捷入口，内部走批量路径）。

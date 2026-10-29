@@ -80,6 +80,10 @@ type Store struct {
 	// 只改一两行就重写整张表的代价太大（实测 2 万行的表改一行要写 0.97 MB），
 	// 所以攒够比例再落盘，中间靠 WAL 兜底。
 	dirtyRows map[string]int64
+	// PoolPages 是「每张表」的缓冲池页数（0 = 默认 1024 页 = 8MB）。
+	// 行能换出之后，这个值就是单表内存里最多能留多少个「热页」的行。
+	PoolPages int
+
 	// written 是累计写盘字节数（给 CHECKPOINT / 状态页看）
 	written atomic.Int64
 	// totalCommits 是进程启动以来的累计提交数。commits 只统计「当前 checkpoint
@@ -101,12 +105,25 @@ type Store struct {
 // Open 打开（或初始化）数据目录。progress 可为 nil，用于汇报启动阶段
 // （「载入快照」「WAL 重放」这类），启动页会把它显示出来。
 func Open(dir string, cat *catalog.Catalog, progress func(string)) (*Store, error) {
+	return OpenWith(dir, cat, progress, 0)
+}
+
+// OpenWith 和 Open 一样，只是能指定「每张表的缓冲池页数」。
+// poolPages <= 0 表示用默认值（1024 页 = 8MB/表）。
+//
+// 测试靠它把池子压到 2~3 页，逼出「行换出 → 再从页里换回来」这条路径；
+// 生产环境用默认值（真正的全局内存预算还没做，见 README 已知限制）。
+func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages int) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
+	}
+	if poolPages <= 0 {
+		poolPages = defaultTablePoolPages
 	}
 	s := &Store{
 		Dir:       dir,
 		Cat:       cat,
+		PoolPages: poolPages,
 		Data:      map[string]*TableData{},
 		tableGen:  map[string]int64{},
 		tableRows: map[string]int{},
@@ -242,7 +259,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 	}
 	// 页文件是唯一的数据来源：按 RID 把行放回槽位数组。
 	// 槽位号必须与页里记的一致 —— 索引里存的就是它。
-	if err := td.attachPages(s.Dir, t.ID); err != nil {
+	if err := td.attachPages(s.Dir, t.ID, t, s.PoolPages); err != nil {
 		s.loadErr = err
 		s.loaded[key] = true
 		return
@@ -254,7 +271,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 		rows = nil
 	}
 	s.Repaired.Add(int64(repaired))
-	td.Rows = rows
+	td.rows = rows
 	// 必须重建主键索引：否则重启后第一次写入看不到已有行，
 	// 重复主键会被放过去（索引要等到下一次提交才重建）。
 	td.RebuildIndex(t)
@@ -537,11 +554,12 @@ func (it *RowIter) Next() (Ref, types.Row, bool) {
 		return Ref{}, nil, false
 	}
 	// 1) 已提交的槽位数组
-	for it.td != nil && it.slot < len(it.td.Rows) {
+	for it.td != nil && it.slot < it.td.SlotCount() {
 		i := it.slot
 		it.slot++
-		row := it.td.Rows[i]
-		if row == nil {
+		// 行可能被换出到页文件了，rowAt 会把它换回来
+		row, ok := it.td.rowAt(i)
+		if !ok {
 			continue // 空槽（被删除后还没被复用）
 		}
 		if it.o != nil {
@@ -597,7 +615,7 @@ func (tx *Tx) CountLive(table string) int64 {
 			}
 		}
 		for slot := range o.del {
-			if slot < len(td.Rows) && td.Rows[slot] != nil {
+			if td.hasRow(slot) {
 				n--
 			}
 		}
@@ -704,11 +722,8 @@ func (tx *Tx) Get(table string, ref Ref) (types.Row, bool) {
 		}
 		return o.ins[ref.Slot], true
 	}
-	if ref.Slot >= len(td.Rows) {
+	if ref.Slot < 0 || ref.Slot >= td.SlotCount() {
 		return nil, false
-	}
-	if td.Rows[ref.Slot] == nil {
-		return nil, false // 已删除的空槽
 	}
 	if o != nil {
 		if o.del[ref.Slot] {
@@ -718,7 +733,8 @@ func (tx *Tx) Get(table string, ref Ref) (types.Row, bool) {
 			return nr, true
 		}
 	}
-	return td.Rows[ref.Slot], true
+	// 可能被换出了：rowAt 会从页文件换回来；也没有就是空槽
+	return td.rowAt(ref.Slot)
 }
 
 // Insert 在事务内插入一行。
@@ -1623,10 +1639,11 @@ func (tx *Tx) commitLocked() (int64, error) {
 		// 只遍历写集，不再扫全表：这是「提交成本与表大小无关」的关键。
 		if len(o.del) > 0 {
 			for slot := range o.del {
-				if slot < 0 || slot >= len(td.Rows) || td.Rows[slot] == nil {
+				old, ok := td.rowAt(slot) // 可能已被换出，换回来再删
+				if !ok {
 					continue
 				}
-				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Slot: slot, Old: td.Rows[slot]})
+				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Slot: slot, Old: old})
 				c.del = append(c.del, slot)
 			}
 			sort.Ints(c.del) // map 遍历无序，排一下让 WAL 记录可复现
@@ -1639,11 +1656,15 @@ func (tx *Tx) commitLocked() (int64, error) {
 			sort.Ints(slots)
 			for _, slot := range slots {
 				// 既删又改：删优先（否则会给一个马上要消失的槽位换行）
-				if o.del[slot] || slot < 0 || slot >= len(td.Rows) || td.Rows[slot] == nil {
+				if o.del[slot] {
+					continue
+				}
+				old, ok := td.rowAt(slot)
+				if !ok {
 					continue
 				}
 				nr := o.upd[slot]
-				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Slot: slot, Old: td.Rows[slot], New: nr})
+				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Slot: slot, Old: old, New: nr})
 				c.upd = append(c.upd, slot)
 				c.updRows = append(c.updRows, nr)
 			}
@@ -1716,7 +1737,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 		// 记下这批改动的行：checkpoint 时成批写进页（这里不写页 ——
 		// 每行编解码整页会让提交慢一个量级，见 notePending 的注释）。
 		if t != nil && (len(c.del) > 0 || len(c.upd) > 0 || len(c.ins) > 0) {
-			if err := td.attachPages(tx.st.Dir, t.ID); err != nil {
+			if err := td.attachPages(tx.st.Dir, t.ID, t, tx.st.PoolPages); err != nil {
 				return 0, err
 			}
 			slots := make([]int, 0, len(c.del)+len(c.upd)+len(c.ins))
@@ -1739,32 +1760,35 @@ func (tx *Tx) commitLocked() (int64, error) {
 		// 换行（原地替换）不改变槽位，所以索引里的槽位号一直有效 ——
 		// 这是「提交成本与表大小无关」的另一半。
 		for _, slot := range c.del {
-			if slot >= len(td.Rows) || td.Rows[slot] == nil {
+			old, ok := td.rowAt(slot)
+			if !ok {
 				continue
 			}
-			td.IndexDelete(t, slot, td.Rows[slot])
-			td.Rows[slot] = nil
+			td.IndexDelete(t, slot, old)
+			td.dropRow(slot)
 			td.Live--
 			td.release(slot)
 		}
 		for i, slot := range c.upd {
-			if slot >= len(td.Rows) || td.Rows[slot] == nil {
+			old, ok := td.rowAt(slot)
+			if !ok {
 				continue
 			}
-			td.IndexUpdate(t, slot, td.Rows[slot], c.updRows[i])
-			td.Rows[slot] = c.updRows[i]
+			td.IndexUpdate(t, slot, old, c.updRows[i])
+			td.setRow(slot, c.updRows[i])
 		}
 		for i, row := range c.ins {
 			slot := c.insSlots[i]
 			td.IndexInsert(t, slot, row)
-			td.Rows[slot] = row
+			td.setRow(slot, row)
 			td.Live++
 		}
 		// 整表清空（TRUNCATE / 全表 DELETE）后把槽位数组一起放掉：
 		// 否则空数组会一直占着 len(Rows) 那么大的指针空间，扫描也白跑一遍。
-		if td.Live == 0 && len(td.Rows) > 0 {
-			td.Rows = nil
+		if td.Live == 0 && len(td.rows) > 0 {
+			td.rows = nil
 			td.free = nil
+			td.gone = nil
 			// 全表清空：页文件也缩回去，否则空表还占着几个 GB
 			if td.pages != nil {
 				td.dropPending()

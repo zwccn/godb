@@ -60,15 +60,19 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 			continue
 		}
 		rep := VacuumReport{Table: t.Name}
+		// 整理期间不许读路径换页（整理要改页内容，镜像还没落盘）
+		td.pageMu.Lock()
 
 		// 1) 先把待落盘行写进页，否则整理的是旧内容
 		fpis, err := td.pageStage()
 		if err != nil {
+			td.pageMu.Unlock()
 			return out, err
 		}
 		// 2) 逐页整理（只搬元组字节，不动槽位目录）
 		n, more, err := td.pages.vacuumPages()
 		if err != nil {
+			td.pageMu.Unlock()
 			return out, err
 		}
 		rep.Compacted = n
@@ -81,19 +85,23 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 				recs = append(recs, walRec{Gen: gen, Op: opFPI, Table: t.Name, Slot: -1, Page: img.page, Img: img.data})
 			}
 			if _, err := s.wal.Append(recs); err != nil {
+				td.pageMu.Unlock()
 				return out, err
 			}
 			if err := s.wal.SyncTo(s.wal.Written()); err != nil {
+				td.pageMu.Unlock()
 				return out, err
 			}
 		}
 
 		// 4) 刷脏页
 		if _, err := td.pageFlush(); err != nil {
+			td.pageMu.Unlock()
 			return out, err
 		}
 		// 5) 回收尾部空页
 		rec, err := td.pages.reclaim()
+		td.pageMu.Unlock()
 		if err != nil {
 			return out, err
 		}

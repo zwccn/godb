@@ -166,12 +166,6 @@ func (s *Store) Flush() error {
 	return s.forceCheckpointLocked(CPReasonFlush)
 }
 
-// stagedFPI 是一张表在这一轮 checkpoint 里产生的全页镜像。
-type stagedFPI struct {
-	table string
-	imgs  []pageImage
-}
-
 // checkpointBodyLocked 走完一整轮：刷脏页 → 写 meta → 轮转 WAL。
 //
 // 为什么整轮都在 CommitMu 里（而不是像以前那样把写盘挪出去）：
@@ -196,12 +190,12 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 		gen = s.wal.Gen()
 	}
 
-	// 2) 把待落盘行写进页（只改池里的页，还没落盘），收集全页镜像。
+	// 2) 逐表：待落盘行写进页 → 全页镜像写 WAL → 刷脏页。
 	//
-	// 这一步必须和「刷脏页」分开：镜像要先写进 WAL，页才能落盘。反过来
-	// （先刷页、后写镜像）一旦断电把页写了一半，就没有任何东西能修它。
+	// 顺序不能反：镜像必须先落盘，页才能落盘（反了就是断电把页写了一半、
+	// 却没有任何东西能修）。整段持 pageMu 写锁：这期间读路径不许换页，
+	// 否则刚写进池的脏页可能在镜像落盘前被淘汰刷出去。
 	var (
-		staged   []stagedFPI
 		flushed  []string
 		pages    int
 		bytes    int64
@@ -210,52 +204,39 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 	for _, t := range s.Cat.Tables {
 		key := cleanName(t.Name)
 		td := s.Data[key]
-		if td == nil || !s.loaded[key] {
+		if td == nil || !s.loaded[key] || td.pageDirty() == 0 {
 			continue
 		}
-		if td.pageDirty() == 0 {
-			continue
-		}
+		td.pageMu.Lock()
 		fpis, err := td.pageStage()
+		if err != nil {
+			td.pageMu.Unlock()
+			firstErr = err
+			break
+		}
+		if len(fpis) > 0 && s.wal != nil {
+			recs := make([]walRec, 0, len(fpis))
+			for _, img := range fpis {
+				recs = append(recs, walRec{Gen: gen, Op: opFPI, Table: t.Name, Slot: -1, Page: img.page, Img: img.data})
+			}
+			if _, err := s.wal.Append(recs); err != nil {
+				td.pageMu.Unlock()
+				return err
+			}
+			if err := s.wal.SyncTo(s.wal.Written()); err != nil {
+				td.pageMu.Unlock()
+				return err
+			}
+		}
+		n, err := td.pageFlush()
+		td.pageMu.Unlock()
 		if err != nil {
 			firstErr = err
 			break
 		}
-		if len(fpis) > 0 {
-			staged = append(staged, stagedFPI{table: t.Name, imgs: fpis})
-		}
+		pages += n
+		bytes += int64(n) * PageSize
 		flushed = append(flushed, key)
-	}
-
-	// 3) 全页镜像先写进 WAL：断电把头 4KB 写下去了、后 4KB 没写，
-	//    恢复时靠这份镜像把整页还原，再重放逻辑记录。
-	if firstErr == nil && len(staged) > 0 && s.wal != nil {
-		recs := make([]walRec, 0, len(staged)*4)
-		for _, st := range staged {
-			for _, img := range st.imgs {
-				recs = append(recs, walRec{Gen: gen, Op: opFPI, Table: st.table, Slot: -1, Page: img.page, Img: img.data})
-			}
-		}
-		if _, err := s.wal.Append(recs); err != nil {
-			return err
-		}
-		if err := s.wal.SyncTo(s.wal.Written()); err != nil {
-			return err
-		}
-	}
-
-	// 4) 刷脏页（只有到这一步，页才真的写进文件）。
-	if firstErr == nil {
-		for _, key := range flushed {
-			td := s.Data[key]
-			n, err := td.pageFlush()
-			if err != nil {
-				firstErr = err
-				break
-			}
-			pages += n
-			bytes += int64(n) * PageSize
-		}
 	}
 
 	// 5) 写 meta：记下「磁盘已经覆盖到哪个代次」+ 每表行数。

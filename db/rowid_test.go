@@ -62,13 +62,13 @@ func TestDeletedSlotGetsReused(t *testing.T) {
 	if td.Live != 4 {
 		t.Fatalf("删除后 Live 应为 4，实际 %d", td.Live)
 	}
-	if len(td.Rows) != 5 {
-		t.Fatalf("删除不该搬移其它行，槽位数组应仍是 5，实际 %d", len(td.Rows))
+	if td.SlotCount() != 5 {
+		t.Fatalf("删除不该搬移其它行，槽位数组应仍是 5，实际 %d", td.SlotCount())
 	}
 
 	run(t, d, s, `INSERT INTO ru VALUES (6,'v6')`)
-	if len(td.Rows) != 5 {
-		t.Fatalf("插入应复用空槽，槽位数组仍应是 5，实际 %d", len(td.Rows))
+	if td.SlotCount() != 5 {
+		t.Fatalf("插入应复用空槽，槽位数组仍应是 5，实际 %d", td.SlotCount())
 	}
 	if td.Live != 5 {
 		t.Fatalf("插入后 Live 应为 5，实际 %d", td.Live)
@@ -152,8 +152,8 @@ func TestTruncateThenInsert(t *testing.T) {
 	if td.Live != 0 {
 		t.Fatalf("TRUNCATE 后 Live 应为 0，实际 %d", td.Live)
 	}
-	if len(td.Rows) != 0 {
-		t.Fatalf("全表清空后应该把槽位数组一起放掉，实际长度 %d", len(td.Rows))
+	if td.SlotCount() != 0 {
+		t.Fatalf("全表清空后应该把槽位数组一起放掉，实际长度 %d", td.SlotCount())
 	}
 	assertRows(t, run(t, d, s, `SELECT count(*) FROM tr`), []string{"0"})
 
@@ -172,8 +172,8 @@ func TestRowCountUsesLiveSlots(t *testing.T) {
 	}
 	run(t, d, s, `DELETE FROM ct WHERE id <= 10`)
 	td := d.Store.Table("ct")
-	if len(td.Rows) != 30 || td.Live != 20 {
-		t.Fatalf("应该有 30 个槽位、20 行，实际 %d / %d", len(td.Rows), td.Live)
+	if td.SlotCount() != 30 || td.Live != 20 {
+		t.Fatalf("应该有 30 个槽位、20 行，实际 %d / %d", td.SlotCount(), td.Live)
 	}
 	assertRows(t, run(t, d, s, `SELECT count(*) FROM ct`), []string{"20"})
 	// 客户端拿的 reltuples 也是这个数

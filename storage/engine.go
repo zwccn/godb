@@ -1568,6 +1568,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 		upd     []int       // 要原地替换的槽位
 		updRows []types.Row // 与 upd 对齐的新行
 		ins     []types.Row // 要分配新槽位的行
+		insSlots []int      // 与 ins 对齐：WAL 记录要带槽位号（重放幂等的前提）
 		dirty   int64
 		seq     int64
 		seqSet  bool
@@ -1597,7 +1598,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 				if slot < 0 || slot >= len(td.Rows) || td.Rows[slot] == nil {
 					continue
 				}
-				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Old: td.Rows[slot]})
+				recs = append(recs, walRec{Tx: tx.ID, Op: opDel, Table: td.Name, Slot: slot, Old: td.Rows[slot]})
 				c.del = append(c.del, slot)
 			}
 			sort.Ints(c.del) // map 遍历无序，排一下让 WAL 记录可复现
@@ -1614,7 +1615,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 					continue
 				}
 				nr := o.upd[slot]
-				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Old: td.Rows[slot], New: nr})
+				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Slot: slot, Old: td.Rows[slot], New: nr})
 				c.upd = append(c.upd, slot)
 				c.updRows = append(c.updRows, nr)
 			}
@@ -1626,8 +1627,13 @@ func (tx *Tx) commitLocked() (int64, error) {
 			if nr, ok := o.insUpd[i]; ok {
 				row = nr
 			}
-			recs = append(recs, walRec{Tx: tx.ID, Op: opIns, Table: td.Name, New: row})
+			// 槽位在这里就定下来（而不是留到应用阶段）：WAL 记录要带 RID，
+			// 重放才能「往同一个槽位赋值」，从而幂等 —— 页刷盘与 meta 代次
+			// 之间就不需要严格排序了。
+			slot := td.alloc()
 			c.ins = append(c.ins, row)
+			c.insSlots = append(c.insSlots, slot)
+			recs = append(recs, walRec{Tx: tx.ID, Op: opIns, Table: td.Name, Slot: slot, New: row})
 		}
 		c.dirty = int64(len(c.del) + len(c.upd) + len(c.ins))
 		if v, ok := tx.seq[name]; ok {
@@ -1655,6 +1661,15 @@ func (tx *Tx) commitLocked() (int64, error) {
 	if len(recs) > 1 && tx.st.wal != nil {
 		s, err := tx.st.wal.Append(recs)
 		if err != nil {
+			// 槽位已经分配出去了，WAL 写不进去就得还回去，
+			// 否则这些槽位既不在 free 里、也没有行，永久漏掉。
+			for _, c := range changes {
+				if td := tx.st.Table(c.table); td != nil {
+					for i := len(c.insSlots) - 1; i >= 0; i-- {
+						td.release(c.insSlots[i])
+					}
+				}
+			}
 			return 0, err
 		}
 		seq = s
@@ -1689,8 +1704,8 @@ func (tx *Tx) commitLocked() (int64, error) {
 			td.IndexUpdate(t, slot, td.Rows[slot], c.updRows[i])
 			td.Rows[slot] = c.updRows[i]
 		}
-		for _, row := range c.ins {
-			slot := td.alloc()
+		for i, row := range c.ins {
+			slot := c.insSlots[i]
 			td.IndexInsert(t, slot, row)
 			td.Rows[slot] = row
 			td.Live++

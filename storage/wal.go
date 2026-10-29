@@ -27,9 +27,20 @@ const (
 	opUpd    byte = 2
 	opDel    byte = 3
 	opCommit byte = 4
+	// opFPI 是「整页镜像」：8KB 页落盘不是原子的，断电可能只写了一半。
+	// 每页在两次 checkpoint 之间**第一次**被修改时，把它改之前的整页写进
+	// WAL（排在逻辑记录之前）；恢复时先用镜像还原整页，再重放逻辑记录。
+	opFPI byte = 5
 )
 
 // walRec 是一条 WAL 记录。行操作带旧/新行镜像，提交记录作为事务边界。
+//
+// Slot 是这条记录作用的槽位号（RID）。带上它有两个好处：
+//   - 重放是**幂等**的：往同一个槽位赋值，重放两遍结果一样。这让我们不必在
+//     「页刷盘」和「meta 记代次」之间做严格排序 —— 崩在中间重放一遍也无害。
+//   - 重放不用按行内容全表扫描匹配（原来每条记录 O(n)，恢复慢）。
+//
+// Slot < 0 表示旧格式记录（没有槽位号），重放时退回按行内容匹配。
 //
 // Gen 是"代次号"：每次 checkpoint 之后 WAL 会轮转到新一代。
 // 重放时只应用 Gen 大于快照代次的记录，从根上避免"快照已包含、WAL 又重放一遍"
@@ -39,8 +50,13 @@ type walRec struct {
 	Gen   int64
 	Op    byte
 	Table string
+	Slot  int
 	Old   types.Row
 	New   types.Row
+
+	// Img 是 opFPI 记录携带的整页镜像（防页撕裂），Page 是它属于哪一页。
+	Img  []byte
+	Page uint32
 }
 
 // Wal 是追加写的日志文件。
@@ -314,6 +330,16 @@ func appendFrame(b []byte, rec *walRec) []byte {
 	tbl := []byte(rec.Table)
 	b = binary.LittleEndian.AppendUint16(b, uint16(len(tbl)))
 	b = append(b, tbl...)
+	b = binary.AppendUvarint(b, uint64(rec.Slot+1)) // +1：commit/FPI 记录用 -1
+	if rec.Op == opFPI {
+		b = binary.LittleEndian.AppendUint32(b, rec.Page)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(rec.Img)))
+		b = append(b, rec.Img...)
+		payload := b[start+8:]
+		binary.LittleEndian.PutUint32(b[start:], uint32(len(payload)))
+		binary.LittleEndian.PutUint32(b[start+4:], crc32.Checksum(payload, crcTable))
+		return b
+	}
 	if rec.Op == opDel || rec.Op == opUpd {
 		b = appendRow(b, rec.Old)
 	}
@@ -365,6 +391,28 @@ func decodeFrame(b []byte, off int) (*walRec, int, error) {
 	}
 	rec.Table = string(payload[p : p+tl])
 	p += tl
+	if p >= len(payload) {
+		return nil, off, fmt.Errorf("WAL 帧缺少槽位号")
+	}
+	sv, sn := binary.Uvarint(payload[p:])
+	if sn <= 0 {
+		return nil, off, fmt.Errorf("WAL 帧槽位号损坏")
+	}
+	rec.Slot = int(sv) - 1
+	p += sn
+	if rec.Op == opFPI {
+		if p+8 > len(payload) {
+			return nil, off, fmt.Errorf("WAL 帧的页镜像头不完整")
+		}
+		rec.Page = binary.LittleEndian.Uint32(payload[p:])
+		imgLen := int(binary.LittleEndian.Uint32(payload[p+4:]))
+		p += 8
+		if imgLen < 0 || p+imgLen > len(payload) {
+			return nil, off, fmt.Errorf("WAL 帧的页镜像越界")
+		}
+		rec.Img = payload[p : p+imgLen]
+		return rec, off + n, nil
+	}
 	if rec.Op == opDel || rec.Op == opUpd {
 		row, next, err := readRowValues(payload, p)
 		if err != nil {
@@ -443,7 +491,8 @@ func readLegacyJSON(r io.Reader) ([]walRec, error) {
 		if err := dec.Decode(&lr); err != nil {
 			break
 		}
-		rec := walRec{Tx: lr.Tx, Table: lr.Table}
+		// 旧格式没有槽位号 → -1，重放时退回按行内容匹配
+		rec := walRec{Tx: lr.Tx, Table: lr.Table, Slot: -1}
 		switch lr.Op {
 		case "ins":
 			rec.Op = opIns
@@ -628,14 +677,39 @@ func (s *Store) applyRec(rec walRec) error {
 	s.loadMu.Lock()
 	s.dirty[key] = true
 	s.loadMu.Unlock()
+
+	// growTo 保证槽位数组够长（重放遇到的槽位号可能超出当前长度）
+	growTo := func(slot int) {
+		for len(td.Rows) <= slot {
+			td.Rows = append(td.Rows, nil)
+		}
+	}
+
 	switch rec.Op {
 	case opIns:
 		row, rep := castRow(t, rec.New)
 		s.Repaired.Add(int64(rep))
-		td.Rows = append(td.Rows, row)
-		td.Live++
+		if rec.Slot >= 0 {
+			// 幂等：往指定槽位赋值。重放两遍结果一样，
+			// 所以「页已刷盘、meta 还没记代次」时多放一遍也无害。
+			growTo(rec.Slot)
+			if td.Rows[rec.Slot] == nil {
+				td.Live++
+			}
+			td.Rows[rec.Slot] = row
+		} else {
+			td.Rows = append(td.Rows, row)
+			td.Live++
+		}
 		bumpSeq(t.SerialIdx(), td, row)
 	case opDel:
+		if rec.Slot >= 0 {
+			if rec.Slot < len(td.Rows) && td.Rows[rec.Slot] != nil {
+				td.Rows[rec.Slot] = nil
+				td.Live--
+			}
+			return nil
+		}
 		row, rep := castRow(t, rec.Old)
 		s.Repaired.Add(int64(rep))
 		for i := range td.Rows {
@@ -656,13 +730,18 @@ func (s *Store) applyRec(rec walRec) error {
 		s.Repaired.Add(int64(rep))
 		newRow, rep2 := castRow(t, rec.New)
 		s.Repaired.Add(int64(rep2))
-		for i := range td.Rows {
-			if td.Rows[i] == nil {
-				continue
-			}
-			if types.RowSame(td.Rows[i], oldRow) {
-				td.Rows[i] = newRow
-				break
+		if rec.Slot >= 0 {
+			growTo(rec.Slot)
+			td.Rows[rec.Slot] = newRow
+		} else {
+			for i := range td.Rows {
+				if td.Rows[i] == nil {
+					continue
+				}
+				if types.RowSame(td.Rows[i], oldRow) {
+					td.Rows[i] = newRow
+					break
+				}
 			}
 		}
 		// UPDATE 也可能把自增列改成更大的值

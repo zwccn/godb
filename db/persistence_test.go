@@ -634,3 +634,41 @@ func TestWALReplayMultiTable(t *testing.T) {
 	assertRows(t, run(t, d2, s, `SELECT id, v FROM m2`), []string{"1|b1x"})
 	assertRows(t, run(t, d2, s, `SELECT id, v FROM m3 ORDER BY id`), []string{"1|c1", "3|c3"})
 }
+
+// 重放必须是幂等的：同一条 WAL 记录应用两遍，结果与一遍完全相同。
+//
+// 这是页式存储里「页刷盘」与「meta 记代次」之间不做严格排序的前提 ——
+// 崩在中间时，某些页已经包含了 WAL 里的改动，重放会把它们再应用一次。
+func TestWALReplayIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	run(t, d, "s", `CREATE TABLE idem (id INTEGER PRIMARY KEY, v TEXT)`)
+	run(t, d, "s", `INSERT INTO idem VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')`)
+	run(t, d, "s", `UPDATE idem SET v = 'B改' WHERE id = 2`)
+	run(t, d, "s", `DELETE FROM idem WHERE id = 4`)
+	run(t, d, "s", `INSERT INTO idem VALUES (6,'f')`)
+
+	if err := d.Store.Close(); err != nil { // 只关 WAL，不写快照
+		t.Fatal(err)
+	}
+
+	// 把整段 WAL 再追加一遍：相当于「同一个提交被重放两次」
+	walPath := filepath.Join(dir, "wal.log")
+	b, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) == 0 {
+		t.Fatal("WAL 是空的，测试前提不成立")
+	}
+	if err := os.WriteFile(walPath, append(append([]byte{}, b...), b...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	// 行数、内容都必须与「只重放一遍」一致，不能翻倍
+	assertRows(t, run(t, d2, "s", `SELECT count(*) FROM idem`), []string{"5"})
+	assertRows(t, run(t, d2, "s", `SELECT id, v FROM idem ORDER BY id`),
+		[]string{"1|a", "2|B改", "3|c", "5|e", "6|f"})
+}

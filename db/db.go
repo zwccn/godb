@@ -32,7 +32,8 @@ type Options struct {
 	// Progress 是启动阶段回调（「载入快照」「WAL 重放」…），可为 nil。
 	// 启动页用它显示恢复进度；单库测试里留空即可。
 	Progress func(msg string)
-	// BufferPoolPages 是「每张表」的缓冲池页数（0 = 默认 1024 页 = 8MB）。
+	// BufferPoolPages 是「全库共享」的缓冲池页数（0 = 默认 1024 页 = 8MB，
+	// 所有表的页框加在一起）。
 	// 行能换出之后，它决定单表最多留多少热页的行在内存里。
 	// 测试把它压到个位数，用来逼出「换出 → 再从页里换回来」这条路径。
 	BufferPoolPages int

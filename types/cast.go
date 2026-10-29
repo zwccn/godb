@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// hasPrefixFold 是不分配内存的前缀比较（strings.HasPrefix(strings.ToLower(...))
+// 每调一次就分配一个字符串；解码路径上每个值都要过一遍）。
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	return strings.EqualFold(s[:len(prefix)], prefix)
+}
+
 // Cast 把值显式/隐式转换为目标类型。NULL 始终保持 NULL。
 func Cast(v Value, t Type) (Value, error) {
 	if v.K == KNull {
@@ -17,7 +26,10 @@ func Cast(v Value, t Type) (Value, error) {
 	// 数组：内部统一用 PG 的数组文本（'{1,2,3}'）表示，不做逐元素转换。
 	// 必须放在下面的前缀匹配之前 —— "numeric[]" 也以 "numeric" 开头，
 	// 不先返回就会被当成标量 numeric，拿整个 "{1,2}" 去解析而报错。
-	if strings.HasSuffix(strings.ToLower(t.Name), "[]") {
+	// 注意这里**不要** ToLower：方括号不是字母，大小写无关的只有类型的字面名，
+	// 而 ToLower 每行每列都会分配一个新字符串 —— 换入的行走一次 Cast，
+	// 20 万行就是上百万次分配（这里是解码路径最大的单点开销）。
+	if strings.HasSuffix(t.Name, "[]") {
 		if v.K == KText {
 			return v, nil
 		}
@@ -41,8 +53,7 @@ func Cast(v Value, t Type) (Value, error) {
 		}
 	}
 	// NUMERIC / DECIMAL：精确十进制（KDecimal）
-	if strings.HasPrefix(strings.ToLower(t.Name), "numeric") ||
-		strings.HasPrefix(strings.ToLower(t.Name), "decimal") {
+	if hasPrefixFold(t.Name, "numeric") || hasPrefixFold(t.Name, "decimal") {
 		return castDecimal(v, t)
 	}
 	switch t.Kind {

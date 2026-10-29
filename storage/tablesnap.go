@@ -139,7 +139,7 @@ func InstallTableSnap(dir string, id int64, data []byte) (int64, error) {
 		p = next
 	}
 
-	tp, err := openTablePages(tablePagePath(dir, id), defaultTablePoolPages)
+	tp, err := openTablePages(tablePagePath(dir, id), nil, defaultPoolPages)
 	if err != nil {
 		return 0, err
 	}

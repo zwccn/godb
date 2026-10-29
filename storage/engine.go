@@ -80,9 +80,10 @@ type Store struct {
 	// 只改一两行就重写整张表的代价太大（实测 2 万行的表改一行要写 0.97 MB），
 	// 所以攒够比例再落盘，中间靠 WAL 兜底。
 	dirtyRows map[string]int64
-	// PoolPages 是「每张表」的缓冲池页数（0 = 默认 1024 页 = 8MB）。
-	// 行能换出之后，这个值就是单表内存里最多能留多少个「热页」的行。
-	PoolPages int
+	// Budget 是**全库共享**的页框预算（所有表的缓冲池加在一起）。
+	// 以前这里是「每张表的页数」，20 张表的库等于偷偷用了 160MB；
+	// 现在超预算时由「框最多的那张表」先吐一页出来（见 memBudget）。
+	Budget *memBudget
 
 	// written 是累计写盘字节数（给 CHECKPOINT / 状态页看）
 	written atomic.Int64
@@ -108,22 +109,18 @@ func Open(dir string, cat *catalog.Catalog, progress func(string)) (*Store, erro
 	return OpenWith(dir, cat, progress, 0)
 }
 
-// OpenWith 和 Open 一样，只是能指定「每张表的缓冲池页数」。
-// poolPages <= 0 表示用默认值（1024 页 = 8MB/表）。
+// OpenWith 和 Open 一样，只是能指定「全库共享的缓冲池页数」。
+// poolPages <= 0 表示用默认值（1024 页 = 8MB，**所有表合计**）。
 //
-// 测试靠它把池子压到 2~3 页，逼出「行换出 → 再从页里换回来」这条路径；
-// 生产环境用默认值（真正的全局内存预算还没做，见 README 已知限制）。
+// 测试靠它把池子压到 2~3 页，逼出「行换出 → 再从页里换回来」这条路径。
 func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages int) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	if poolPages <= 0 {
-		poolPages = defaultTablePoolPages
-	}
 	s := &Store{
 		Dir:       dir,
 		Cat:       cat,
-		PoolPages: poolPages,
+		Budget:    newMemBudget(poolPages),
 		Data:      map[string]*TableData{},
 		tableGen:  map[string]int64{},
 		tableRows: map[string]int{},
@@ -259,7 +256,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 	}
 	// 页文件是唯一的数据来源：按 RID 把行放回槽位数组。
 	// 槽位号必须与页里记的一致 —— 索引里存的就是它。
-	if err := td.attachPages(s.Dir, t.ID, t, s.PoolPages); err != nil {
+	if err := td.attachPages(s.Dir, t.ID, t, s.Budget); err != nil {
 		s.loadErr = err
 		s.loaded[key] = true
 		return
@@ -1607,15 +1604,15 @@ func (tx *Tx) commitLocked() (int64, error) {
 	sort.Strings(names)
 
 	type change struct {
-		table   string
-		del     []int       // 要删除的槽位
-		upd     []int       // 要原地替换的槽位
-		updRows []types.Row // 与 upd 对齐的新行
-		ins     []types.Row // 要分配新槽位的行
-		insSlots []int      // 与 ins 对齐：WAL 记录要带槽位号（重放幂等的前提）
-		dirty   int64
-		seq     int64
-		seqSet  bool
+		table    string
+		del      []int       // 要删除的槽位
+		upd      []int       // 要原地替换的槽位
+		updRows  []types.Row // 与 upd 对齐的新行
+		ins      []types.Row // 要分配新槽位的行
+		insSlots []int       // 与 ins 对齐：WAL 记录要带槽位号（重放幂等的前提）
+		dirty    int64
+		seq      int64
+		seqSet   bool
 		// seqAbs 表示这个值来自 setval，要按绝对值覆盖（允许调低）；
 		// 否则按 nextval 的单调语义，只允许往上推。
 		seqAbs bool
@@ -1737,7 +1734,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 		// 记下这批改动的行：checkpoint 时成批写进页（这里不写页 ——
 		// 每行编解码整页会让提交慢一个量级，见 notePending 的注释）。
 		if t != nil && (len(c.del) > 0 || len(c.upd) > 0 || len(c.ins) > 0) {
-			if err := td.attachPages(tx.st.Dir, t.ID, t, tx.st.PoolPages); err != nil {
+			if err := td.attachPages(tx.st.Dir, t.ID, t, tx.st.Budget); err != nil {
 				return 0, err
 			}
 			slots := make([]int, 0, len(c.del)+len(c.upd)+len(c.ins))

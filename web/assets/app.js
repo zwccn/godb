@@ -2530,10 +2530,11 @@ function renderSettings() {
 
   /* ---- 内存（行换出） ---- */
   settingsBody.appendChild(el('div', 'set-sec', '内存（缓冲池）'));
-  settingsBody.appendChild(setRow('每张表保留', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
+  settingsBody.appendChild(setRow('全库共享', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
   settingsBody.appendChild(el('div', 'set-hint',
-    '一页 8KB。行可以换出：表比缓冲池大时，久未访问的页会被淘汰、对应的行从内存里放掉，' +
-    '下次访问再从页文件读回来。默认 1024 页 = 8MB/表；改完要重启才生效。'));
+    '一页 8KB，所有表的页框加在一起不超过这个数（不是每张表各一份）。行可以换出：' +
+    '表比缓冲池大时，久未访问的页会被淘汰、对应的行从内存里放掉，下次访问再从页文件读回来。' +
+    '默认 1024 页 = 8MB；改完要重启才生效。'));
 
   const cp = rt.checkpoint || {};
   const stats = el('div', 'set-stats');

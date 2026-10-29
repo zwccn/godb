@@ -15,7 +15,7 @@ func tupleN(i int) []byte { return []byte(fmt.Sprintf(`{"id":%d}`, i)) }
 
 func TestTablePagesRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t1.dat")
-	tp, err := openTablePages(path, 8)
+	tp, err := openTablePages(path, nil, 8)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestTablePagesRoundTrip(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	tp2, err := openTablePages(path, 8)
+	tp2, err := openTablePages(path, nil, 8)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestTablePagesRoundTrip(t *testing.T) {
 
 func TestTablePagesOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t2.dat")
-	tp, err := openTablePages(path, 4)
+	tp, err := openTablePages(path, nil, 4)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestTablePagesOverwrite(t *testing.T) {
 
 func TestTablePagesDeleteAndReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t3.dat")
-	tp, err := openTablePages(path, 4)
+	tp, err := openTablePages(path, nil, 4)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestTablePagesDeleteAndReload(t *testing.T) {
 	}
 	tp.close()
 
-	tp2, err := openTablePages(path, 4)
+	tp2, err := openTablePages(path, nil, 4)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestTablePagesDeleteAndReload(t *testing.T) {
 
 func TestTablePagesGrowAcrossPages(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t4.dat")
-	tp, err := openTablePages(path, 3)
+	tp, err := openTablePages(path, nil, 3)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestTablePagesGrowAcrossPages(t *testing.T) {
 
 func TestTablePagesReset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t5.dat")
-	tp, err := openTablePages(path, 4)
+	tp, err := openTablePages(path, nil, 4)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestTablePagesReset(t *testing.T) {
 // 之后再改就不用了；镜像必须是「改之前」的样子（恢复时先用它还原，再重放）。
 func TestTablePagesFullPageImage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fpi.dat")
-	tp, err := openTablePages(path, 4)
+	tp, err := openTablePages(path, nil, 4)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestTablePagesFullPageImage(t *testing.T) {
 // 这条比计时稳（计时在 CI 上抖），但能抓住「又退回按行写」的回归。
 func TestTablePagesBatchDecodesPerPage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "batch.dat")
-	tp, err := openTablePages(path, 64)
+	tp, err := openTablePages(path, nil, 64)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestTablePagesBatchDecodesPerPage(t *testing.T) {
 // 删除同样要按页批量：删 2000 行只解码「页数」次，而不是 2000 次。
 func TestTablePagesDelBatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "del.dat")
-	tp, err := openTablePages(path, 64)
+	tp, err := openTablePages(path, nil, 64)
 	if err != nil {
 		t.Fatalf("openTablePages: %v", err)
 	}

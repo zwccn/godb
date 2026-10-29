@@ -62,10 +62,10 @@ type pageSlot struct {
 
 // page 是一张表的某一页在内存里的镜像。
 type page struct {
-	id    uint32
-	lsn   uint64
-	buf   []byte // 定长 PageSize，元组数据就在里面原地读写
-	slots []pageSlot
+	id     uint32
+	lsn    uint64
+	buf    []byte // 定长 PageSize，元组数据就在里面原地读写
+	slots  []pageSlot
 	freeLo int
 	freeHi int
 }
@@ -89,26 +89,28 @@ func verifyPage(raw []byte) error {
 	if len(raw) != PageSize {
 		return errPageShort
 	}
+	// 全零 = 文件尾之后的新页（一次看 8 字节，别逐字节比）
 	zero := true
-	for _, b := range raw {
-		if b != 0 {
+	for i := 0; i+8 <= PageSize; i += 8 {
+		if binary.LittleEndian.Uint64(raw[i:]) != 0 {
 			zero = false
 			break
 		}
 	}
 	if zero {
-		return nil // 文件尾之后的新页，还没写过
+		return nil
 	}
 	if string(raw[0:4]) != pageMagic {
 		return errPageMagic
 	}
+	// CRC 覆盖整页、但算之前要把 crc 字段本身清零。以前是「拷一份再清零再算」
+	// （每次读页多一次 8KB 分配 + 拷贝），现在分三段续算，省掉那份拷贝。
 	want := binary.LittleEndian.Uint32(raw[24:28])
-	tmp := make([]byte, PageSize)
-	copy(tmp, raw)
-	for i := 24; i < 28; i++ {
-		tmp[i] = 0
-	}
-	if crc32.Checksum(tmp, crcTable) != want {
+	var zeros [4]byte
+	sum := crc32.Update(0, crcTable, raw[0:24])
+	sum = crc32.Update(sum, crcTable, zeros[:])
+	sum = crc32.Update(sum, crcTable, raw[28:])
+	if sum != want {
 		return errPageCRC
 	}
 	return nil

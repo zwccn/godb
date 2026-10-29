@@ -38,7 +38,7 @@ type Storage struct {
 	CheckpointSeconds int `json:"checkpointSeconds"`
 	// CheckpointWALMB：WAL 增长到多少 MB 触发，0 表示关闭。
 	CheckpointWALMB int `json:"checkpointWalMB"`
-	// BufferPoolPages 是**每张表**的缓冲池页数（8KB/页）。
+	// BufferPoolPages 是**全库共享**的缓冲池页数（8KB/页，所有表加在一起）。
 	//
 	// 行能换出之后，它决定单表最多留多少「热页」的行在内存里：
 	// 1024 页 = 8MB/表，表比这大时，很久没访问的页会被淘汰、对应的行

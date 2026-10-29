@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"godb/catalog"
 	"godb/types"
@@ -65,6 +66,11 @@ type TableData struct {
 	// （这期间不许淘汰，否则脏页可能在镜像落盘前就被刷出去）。
 	pageMu sync.RWMutex
 
+	// evictBlocked 和 pageMu 写锁同进同出：全库共享预算之后，**别的表**的
+	// 读也可能淘汰本表的页（跨表回收），光靠本表的 pageMu 拦不住，
+	// 所以给缓冲池一个「这张表正在写页」的标志，让它只淘汰干净页。
+	evictBlocked atomic.Bool
+
 	// dir/id 记下来，是为了「第一次写的时候才开文件」——
 	// 只读表不产生 .dat，少一堆空文件。
 	dir string
@@ -78,7 +84,8 @@ func newTableData(name string) *TableData {
 // attachPages 给表挂上页文件（幂等）。id <= 0 表示这张表还没拿到稳定 ID。
 //
 // t 是 catalog 里的表定义：从页里换入行时要靠它对齐列与类型。
-func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, poolPages int) error {
+// budget 是**全库共享**的页框预算（nil = 不参与预算，固定小池）。
+func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, budget *memBudget) error {
 	if t != nil {
 		td.tbl = t
 	}
@@ -91,18 +98,28 @@ func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, poolPag
 	if td.dir == dir && td.id == id {
 		return nil
 	}
-	if poolPages <= 0 {
-		poolPages = defaultTablePoolPages
-	}
-	tp, err := openTablePages(tablePagePath(dir, id), poolPages)
+	tp, err := openTablePages(tablePagePath(dir, id), budget, defaultPoolPages)
 	if err != nil {
 		return err
 	}
 	// 缓冲池淘汰一页时，把这一页上的行从内存里放掉 —— 这就是「换出」。
 	tp.onEvict = td.evictPage
+	// checkpoint / VACUUM 期间别让别的表把我的脏页刷出去
+	tp.guardEvict(td.evictBlocked.Load)
 	td.pages = tp
 	td.dir, td.id = dir, id
 	return nil
+}
+
+// lockPages 拿页的独占权（checkpoint / VACUUM 用）：这期间本表不许换页落盘。
+func (td *TableData) lockPages() {
+	td.pageMu.Lock()
+	td.evictBlocked.Store(true)
+}
+
+func (td *TableData) unlockPages() {
+	td.evictBlocked.Store(false)
+	td.pageMu.Unlock()
 }
 
 // evictPage 是缓冲池淘汰一页时的回调：把这一页上的行从内存里放掉。
@@ -137,6 +154,15 @@ func (td *TableData) rowAt(slot int) (types.Row, bool) {
 		return nil, false
 	}
 	td.pageMu.RLock()
+	// 顺序扫描时一次性把整页的行解出来：否则每一行都要「取页 → 加锁 → 查表 →
+	// 拷元组」走一遍（20 万行扫描里这一项比读页本身还贵）。
+	if page, seq := td.pages.seqRead(slot); seq {
+		td.materializePage(page)
+		if r := td.rows[slot]; r != nil {
+			td.pageMu.RUnlock()
+			return r, true
+		}
+	}
 	tuple, ok := td.pages.get(slot)
 	td.pageMu.RUnlock()
 	if !ok {
@@ -148,6 +174,36 @@ func (td *TableData) rowAt(slot int) (types.Row, bool) {
 	}
 	td.rows[slot] = row
 	return row, true
+}
+
+// materializePage 把一整页的行解码进内存（顺序扫描专用）。
+//
+// 只在「顺着读」的时候做：点查命中某一行时把整页 100 多行都解出来纯属浪费。
+// 跳过已删除的槽位（valid/gone 是权威），否则会把删掉的行「解回来」。
+func (td *TableData) materializePage(page uint32) {
+	if td.pages == nil || td.tbl == nil {
+		return
+	}
+	_ = td.pages.visitPage(page, func(slot int, tuple []byte) error {
+		if slot < 0 || slot >= len(td.rows) || td.rows[slot] != nil {
+			return nil
+		}
+		if slot < len(td.pages.valid) && !td.pages.valid[slot] {
+			return nil
+		}
+		if slot < len(td.gone) && td.gone[slot] {
+			return nil
+		}
+		row, _, err := decodeRowTuple(tuple, td.tbl)
+		if err != nil {
+			return nil
+		}
+		td.rows[slot] = row
+		return nil
+	})
+	// 物化之后这些行不会再走 tp.get，所以「顺序指针 + 预取窗口」要在这里推进一步，
+	// 否则扫描会卡在「物化一页就断掉」的循环里（下一页判不出是顺序读）。
+	td.pages.maybePrefetch(page)
 }
 
 // hasRow 判断一个槽位上到底有没有行（不管在不在内存里）。
@@ -339,6 +395,9 @@ func (td *TableData) pageFlush() (int, error) {
 	if err != nil {
 		return n, err
 	}
+	// checkpoint 期间为了「镜像先于页落盘」暂时超了预算（脏页不许提前刷出去），
+	// 现在镜像已经在 WAL 里、页也刷完了，把超出预算的框还回去。
+	td.pages.shrink()
 	td.trimResident()
 	return n, nil
 }
@@ -747,4 +806,13 @@ func colsSig(cols []int) string {
 		b.WriteString(strconv.Itoa(ci))
 	}
 	return b.String()
+}
+
+// PoolStats 返回缓冲池的统计（测试/监控用）。
+func (td *TableData) PoolStats() (cap, resident, used, total int, prefetched, evicts int64) {
+	if td.pages == nil {
+		return 0, 0, 0, 0, 0, 0
+	}
+	s := td.pages.pool.stats()
+	return s.Cap, s.Resident, int(s.Used), int(s.Total), s.Prefetched, s.Evicts
 }

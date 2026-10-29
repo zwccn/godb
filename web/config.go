@@ -129,7 +129,7 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if next.Storage.BufferPoolPages > 1048576 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "每张表保留的缓冲池页数最多 1048576 页（8GB）",
+			"error": "缓冲池页数（全库共享）最多 1048576 页（8GB）",
 		})
 		return
 	}

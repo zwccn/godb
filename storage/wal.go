@@ -610,7 +610,7 @@ func (s *Store) replayWAL() error {
 		if !ok {
 			continue
 		}
-		if err := td.attachPages(s.Dir, t.ID, t, s.PoolPages); err != nil {
+		if err := td.attachPages(s.Dir, t.ID, t, s.Budget); err != nil {
 			return fmt.Errorf("还原页镜像失败: %w", err)
 		}
 		if err := td.pages.applyImage(rec.Page, rec.Img); err != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 
 	"godb/catalog"
 	"godb/types"
@@ -53,12 +54,20 @@ type tablePages struct {
 	// onEvict 在缓冲池淘汰某页时回调（上层用它把这一页的行从内存里放掉）。
 	onEvict func(page uint32)
 
+	// raLast 是「上一次读到哪一页」，raNext 是「预取窗口到哪一页为止」。
+	// 顺序预取靠它们判断访问是不是连续的、窗口用完没有。
+	// noPage 表示还没有上一次。用 atomic：读路径多 goroutine 并发。
+	raLast atomic.Uint32
+	raNext atomic.Uint32
+
 	// decodes 统计「解码了多少次页」。这是写路径的核心成本指标：
 	// 按行写 → 行数 次；按页批量写 → 页数 次。测试用它守住回归。
 	decodes int64
 }
 
-func openTablePages(path string, poolPages int) (*tablePages, error) {
+// openTablePages 打开一张表的页文件。budget 为 nil 表示不参与全局预算
+// （离线工具：备份导入时用一个固定大小的临时池）。
+func openTablePages(path string, budget *memBudget, poolPages int) (*tablePages, error) {
 	// 全新库第一次写表时 tables/ 目录还不存在，先建出来
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -69,12 +78,13 @@ func openTablePages(path string, poolPages int) (*tablePages, error) {
 	}
 	tp := &tablePages{
 		pf:     pf,
-		pool:   newBufPool(pf, poolPages),
+		pool:   newBufPool(pf, budget, poolPages),
 		path:   path,
 		byPage: make(map[uint32][]int),
 		hi:     pf.pageCount(),
 		fpi:    make(map[uint32]bool),
 	}
+	tp.raLast.Store(noPage)
 	// 池淘汰一页 → 通知上层（TableData 把这一页上的行从内存里放掉）
 	tp.pool.onEvict = func(page uint32) {
 		if tp.onEvict != nil {
@@ -82,6 +92,54 @@ func openTablePages(path string, poolPages int) (*tablePages, error) {
 		}
 	}
 	return tp, nil
+}
+
+// guardEvict 由 TableData 注入：这张表在 checkpoint / VACUUM 期间
+// 不许把脏页刷出去（全页镜像还没进 WAL）。
+func (tp *tablePages) guardEvict(fn func() bool) { tp.pool.evictBlocked = fn }
+
+// maybePrefetch 判断这次读是不是「顺着往后走」，是就预取后面几页。
+//
+// 判据只看页号：RID 递增扫描（全表扫、范围扫、建索引）页号基本单调；
+// 点查（主键命中某一行）页号乱跳，这里自然不会触发。
+func (tp *tablePages) maybePrefetch(page uint32) {
+	prev := tp.raLast.Swap(page)
+	if prev == noPage || page != prev+1 {
+		// 不是顺着走（点查、范围跳页）：窗口作废，下次连续读可以从当前位置重开
+		tp.raNext.Store(page + 1)
+		return
+	}
+	// 窗口里还有没读完的页就不重复预取 —— 否则每跨一页都发一次读，
+	// 等于把「一次读 8 页」拆回「一页读一次」，白折腾。
+	if page < tp.raNext.Load() {
+		return
+	}
+	depth := defaultPrefetchDepth
+	if depth <= 0 {
+		return
+	}
+	if bp := tp.pool.budget; bp != nil {
+		// 有富余就只读到富余为止（别为了预取去挤掉 8 页）；
+		// 一点富余都没有也照常预取 8 页 —— 扫描是一去不回头的，
+		// 刚读过的页马上就可以让位，这正是预取要利用的地方。
+		if free := bp.freePages(); free > 0 && free < depth {
+			depth = free
+		}
+	}
+	hi := tp.hi
+	ids := make([]uint32, 0, depth)
+	for i := 1; i <= depth; i++ {
+		p := page + uint32(i)
+		if p >= hi {
+			break
+		}
+		ids = append(ids, p)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	tp.raNext.Store(page + 1 + uint32(len(ids)))
+	tp.pool.prefetch(ids)
 }
 
 func (tp *tablePages) pageCount() uint32 { return tp.pf.pageCount() }
@@ -369,6 +427,8 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 		return nil, false
 	}
 	defer tp.pool.unpin(f, false)
+	// 顺序预取：当前页还钉着（不会被预取挤掉），顺手把后面几页读进池
+	tp.maybePrefetch(at.page)
 
 	f.latch.RLock()
 	defer f.latch.RUnlock()
@@ -384,6 +444,55 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 	out := make([]byte, tLen)
 	copy(out, f.data[tOff:tOff+tLen])
 	return out, true
+}
+
+// visitPage 解出某一页上的所有行：回调 (RID, 元组)。
+//
+// 元组是页缓冲里的切片，只在回调期间有效（调用方要么当场解码，要么自己拷走）。
+// 顺序扫描时上层用它一次物化整页的行，省掉「每行一次取页 + 拷元组」。
+func (tp *tablePages) visitPage(page uint32, fn func(slot int, tuple []byte) error) error {
+	f, err := tp.fetch(page)
+	if err != nil {
+		return err
+	}
+	defer tp.pool.unpin(f, false)
+	f.latch.RLock()
+	defer f.latch.RUnlock()
+	p, err := decodeOrInitPage(f.data, page)
+	if err != nil {
+		return err
+	}
+	for i := range p.slots {
+		tuple, ok := p.get(i)
+		if !ok {
+			continue
+		}
+		if err := fn(int(p.slots[i].gid), tuple); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pageOf 返回一个 RID 所在的页；第二个返回值表示这个槽位有没有行。
+func (tp *tablePages) pageOf(slot int) (uint32, bool) {
+	if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
+		return 0, false
+	}
+	return tp.loc[slot].page, true
+}
+
+// seqRead 判断「这一行所在的页是不是顺着刚才那页读的」（顺序扫描的信号）。
+func (tp *tablePages) seqRead(slot int) (uint32, bool) {
+	page, ok := tp.pageOf(slot)
+	if !ok {
+		return 0, false
+	}
+	prev := tp.raLast.Load()
+	if prev != noPage && (page == prev || page == prev+1) {
+		return page, true
+	}
+	return page, false
 }
 
 // del 删一行（单行便捷入口，内部走批量路径）。
@@ -451,6 +560,19 @@ func (tp *tablePages) loadRows(t *catalog.Table) ([]types.Row, int, error) {
 	return rows, repaired, nil
 }
 
+// shrink 把超出全局预算的页框还回去（checkpoint 之后调用：这时池里的页
+// 都已经落盘，淘汰不需要写盘，纯粹是「把多借的内存还掉」）。
+func (tp *tablePages) shrink() int {
+	n := 0
+	for tp.pool.overBudget() > 0 {
+		if !tp.pool.tryEvictOne() {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // dirtyPages 返回池里还有多少脏页。
 func (tp *tablePages) dirtyPages() int { return tp.pool.dirtyCount() }
 
@@ -476,6 +598,8 @@ func (tp *tablePages) loadAll(fn func(slot int, tuple []byte) error) error {
 	n := tp.pf.pageCount()
 	tp.byPage = make(map[uint32][]int, n)
 	for page := uint32(0); page < n; page++ {
+		// 启动加载也是顺序读，顺手预取（大表启动能省掉一截 syscall 往返）
+		tp.maybePrefetch(page)
 		f, err := tp.fetch(page)
 		if err != nil {
 			return fmt.Errorf("读第 %d 页：%w", page, err)
@@ -514,7 +638,11 @@ func (tp *tablePages) loadAll(fn func(slot int, tuple []byte) error) error {
 func (tp *tablePages) flush() (int, error) { return tp.pool.flushAll() }
 
 // reset 清空整张表（TRUNCATE）：页文件重来，目录清空。
+//
+// 池里的页框也必须一起放掉 —— 否则文件截到 0 页之后，池里还留着旧页，
+// 下一次插入会「命中」那些旧内容，把删掉的行又写回去。
 func (tp *tablePages) reset() error {
+	tp.pool.releaseAll()
 	if err := tp.pf.truncate(0); err != nil {
 		return err
 	}
@@ -523,6 +651,7 @@ func (tp *tablePages) reset() error {
 	tp.byPage = make(map[uint32][]int)
 	tp.nextPage = 0
 	tp.hi = 0
+	tp.raLast.Store(noPage)
 	return nil
 }
 
@@ -614,7 +743,11 @@ func (tp *tablePages) reclaim() (uint32, error) {
 	return trimmed, nil
 }
 
-func (tp *tablePages) close() error { return tp.pf.close() }
+// close 关表：先刷脏页、把页框退回预算，再关文件。
+func (tp *tablePages) close() error {
+	tp.pool.closePool()
+	return tp.pf.close()
+}
 
 // ---- 行编解码 ----
 //
@@ -637,12 +770,47 @@ func encodeRowTuple(row types.Row) ([]byte, error) {
 	return buf, nil
 }
 
+// decodeRowTuple 解码一行。
+//
+// 直接解进目标 types.Row，不像以前那样先攒一个 []types.Value 再拷一遍：
+// 换出之后每一行都要走这条路，20 万行扫描光这个中间切片就是 20 万次分配
+// （profile 里 mallocgc + GC 占掉四分之一时间）。
 func decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
-	vals, _, err := readRowValues(tuple, 0)
-	if err != nil {
-		return nil, 0, fmt.Errorf("行解码失败：%w", err)
+	if len(tuple) < 4 {
+		return nil, 0, fmt.Errorf("行解码失败：行头越界")
 	}
-	// 按当前表结构对齐：列数变了、类型换了（ALTER TABLE）都在这里兜住
-	row, rep := castRow(t, vals)
-	return row, rep, nil
+	n := int(binary.LittleEndian.Uint32(tuple))
+	cols := len(t.Columns)
+	row := make(types.Row, cols)
+	repaired := 0
+	if n != cols {
+		if n > cols {
+			repaired = n - cols
+		} else {
+			repaired = cols - n
+		}
+	}
+	off := 4
+	for i := 0; i < n; i++ {
+		v, next, err := readValue(tuple, off)
+		if err != nil {
+			return nil, 0, fmt.Errorf("行解码失败：%w", err)
+		}
+		off = next
+		if i >= cols {
+			continue // 列被删了：多出来的值丢掉（repaired 已经记过）
+		}
+		// 对齐当前表结构：列数变了、类型换了（ALTER TABLE）都在这里兜住
+		cv, err := types.Cast(v, t.Columns[i].Type())
+		if err != nil {
+			row[i] = types.Null
+			repaired++
+			continue
+		}
+		row[i] = cv
+	}
+	for i := n; i < cols; i++ {
+		row[i] = types.Null // 列是新加的：老行没有这一列
+	}
+	return row, repaired, nil
 }

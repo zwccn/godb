@@ -207,10 +207,10 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 		if td == nil || !s.loaded[key] || td.pageDirty() == 0 {
 			continue
 		}
-		td.pageMu.Lock()
+		td.lockPages()
 		fpis, err := td.pageStage()
 		if err != nil {
-			td.pageMu.Unlock()
+			td.unlockPages()
 			firstErr = err
 			break
 		}
@@ -220,16 +220,16 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 				recs = append(recs, walRec{Gen: gen, Op: opFPI, Table: t.Name, Slot: -1, Page: img.page, Img: img.data})
 			}
 			if _, err := s.wal.Append(recs); err != nil {
-				td.pageMu.Unlock()
+				td.unlockPages()
 				return err
 			}
 			if err := s.wal.SyncTo(s.wal.Written()); err != nil {
-				td.pageMu.Unlock()
+				td.unlockPages()
 				return err
 			}
 		}
 		n, err := td.pageFlush()
-		td.pageMu.Unlock()
+		td.unlockPages()
 		if err != nil {
 			firstErr = err
 			break

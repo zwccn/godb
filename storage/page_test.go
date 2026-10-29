@@ -140,7 +140,7 @@ func TestPageFileAndPool(t *testing.T) {
 	}
 	defer pf.close()
 
-	pool := newBufPool(pf, 2)
+	pool := newBufPool(pf, nil, 2)
 	// 写两页
 	for id := uint32(0); id < 2; id++ {
 		f, err := pool.fetch(id)
@@ -198,7 +198,7 @@ func TestPoolEvictsDirtyPage(t *testing.T) {
 	}
 	defer pf.close()
 
-	pool := newBufPool(pf, 2)
+	pool := newBufPool(pf, nil, 2)
 	write := func(id uint32, body string) {
 		f, err := pool.fetch(id)
 		if err != nil {

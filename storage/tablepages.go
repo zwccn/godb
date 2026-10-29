@@ -3,6 +3,8 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 
 	"godb/catalog"
@@ -50,6 +52,10 @@ type tablePages struct {
 }
 
 func openTablePages(path string, poolPages int) (*tablePages, error) {
+	// 全新库第一次写表时 tables/ 目录还不存在，先建出来
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
 	pf, err := openPageFile(path)
 	if err != nil {
 		return nil, err

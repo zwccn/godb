@@ -32,10 +32,67 @@ type TableData struct {
 
 	// unique 是非主键 UNIQUE 列组的索引：列组签名（"1,3"）→ B+Tree。
 	unique map[string]*btree
+
+	// pages 是页式堆文件（第 1 期）。Rows 仍然是内存里的权威副本，
+	// 提交时按行 write-through 到页里，checkpoint 只刷脏页。
+	// nil 表示这张表还没挂上（新建但没写过、或从没落地）。
+	pages *tablePages
+	// dir/id 记下来，是为了「第一次写的时候才开文件」——
+	// 只读表不产生 .dat，少一堆空文件。
+	dir string
+	id  int64
 }
 
 func newTableData(name string) *TableData {
 	return &TableData{Name: name, pk: newBTree()}
+}
+
+// attachPages 给表挂上页文件（幂等）。id <= 0 表示这张表还没拿到稳定 ID。
+func (td *TableData) attachPages(dir string, id int64) error {
+	if id <= 0 {
+		return nil
+	}
+	if td.pages != nil || td.dir == dir && td.id == id {
+		return nil
+	}
+	tp, err := openTablePages(tablePagePath(dir, id), defaultTablePoolPages)
+	if err != nil {
+		return err
+	}
+	td.pages = tp
+	td.dir, td.id = dir, id
+	return nil
+}
+
+// pagePut 把一行写进页文件（第 1 期只写不读，见 engine 里的说明）。
+func (td *TableData) pagePut(slot int, row types.Row) error {
+	if td.pages == nil || row == nil {
+		return nil
+	}
+	tuple, err := encodeRowTuple(row)
+	if err != nil {
+		return err
+	}
+	// TODO(第 1 期·待接)：put 返回的全页镜像要写进 WAL，防页撕裂。
+	_, err = td.pages.put(slot, tuple)
+	return err
+}
+
+// pageDel 把一行从页文件里摘掉。
+func (td *TableData) pageDel(slot int) error {
+	if td.pages == nil {
+		return nil
+	}
+	_, err := td.pages.del(slot)
+	return err
+}
+
+// closePages 关掉页文件（DROP TABLE / 表被换掉时）。
+func (td *TableData) closePages() {
+	if td.pages != nil {
+		_ = td.pages.close()
+		td.pages = nil
+	}
 }
 
 // alloc 分配一个槽位（优先复用空槽）。

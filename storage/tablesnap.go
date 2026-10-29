@@ -35,6 +35,12 @@ func tableFileName(dir string, id int64) string {
 	return filepath.Join(dir, "tables", fmt.Sprintf("t%06d.snp", id))
 }
 
+// tablePagePath 是「页式堆文件」的路径：和 .snp 用同一个表 ID，
+// 只是后缀不同，DROP 之后 ID 也不复用，不会互相覆盖。
+func tablePagePath(dir string, id int64) string {
+	return filepath.Join(dir, "tables", fmt.Sprintf("t%06d.dat", id))
+}
+
 // tableSnapHeaderInfo 是文件头里读出来的元信息。
 type tableSnapHeaderInfo struct {
 	Generation int64
@@ -184,6 +190,15 @@ func readTableSnap(dir string, id int64, t *catalog.Table) ([]types.Row, int64, 
 // removeTableSnap 删除某张表的数据文件（DROP TABLE 之后由 checkpoint 调用）。
 func removeTableSnap(dir string, id int64) error {
 	err := os.Remove(tableFileName(dir, id))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// removeTablePages 删掉页式堆文件（DROP TABLE）。
+func removeTablePages(dir string, id int64) error {
+	err := os.Remove(tablePagePath(dir, id))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

@@ -18,6 +18,11 @@ import (
 //     「页正在读入却被别的 goroutine 拿去用」这类竞态根本不存在。
 //     真到了瓶颈再挪到锁外（届时需要 per-frame 的 loading 状态），现在不值得。
 
+// defaultTablePoolPages 是单表缓冲池的默认页数（1024 × 8KB = 8MB）。
+// 第 1 期 Rows 仍然全驻内存，池子只承担「页的写回缓存」，所以不必给太大；
+// 第 2 期让行可换出时，这里要改成按 config.storage.bufferPoolMB 在表间分配。
+const defaultTablePoolPages = 1024
+
 var errPoolBusy = errors.New("storage: 缓冲池里没有可淘汰的页（全被钉住了）")
 
 // pageFile 是一张表的页文件：第 n 页在 n*PageSize 处。

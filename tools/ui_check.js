@@ -599,8 +599,9 @@ class CDP {
     })()`);
     check('顶栏清瘦：不再挂皮肤/字号/示例数据/清库',
       !setUi.barHasTheme && !setUi.barHasData, setUi.barText);
-    check('顶栏仍保留 库/空闲/锁状态/设置',
-      ['库', '空闲', '锁状态', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
+    // 0.2.0 起「锁状态」换成「监控」（面板里带锁/慢 SQL/超时开关）
+    check('顶栏仍保留 库/空闲/监控/设置',
+      ['库', '空闲', '监控', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
     check('设置页有 4 个带名字的皮肤卡片',
       setUi.picks === 4 && setUi.pickNames.join('/') === '深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);

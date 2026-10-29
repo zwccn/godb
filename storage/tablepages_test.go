@@ -257,3 +257,53 @@ func TestTablePagesFullPageImage(t *testing.T) {
 		t.Fatalf("checkpoint 后第一次删行也要带镜像，实际 %d", len(imgs))
 	}
 }
+
+// 批量写的关键断言：**解码次数跟「碰到多少页」走，不跟「改了多少行」走**。
+// 这条比计时稳（计时在 CI 上抖），但能抓住「又退回按行写」的回归。
+func TestTablePagesBatchDecodesPerPage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "batch.dat")
+	tp, err := openTablePages(path, 64)
+	if err != nil {
+		t.Fatalf("openTablePages: %v", err)
+	}
+	defer tp.close()
+
+	const n = 2000
+	rows := make([]pendingRow, n)
+	for i := 0; i < n; i++ {
+		rows[i] = pendingRow{slot: i, tuple: tupleN(i)}
+	}
+	before := tp.decodes
+	if _, err := tp.putBatch(rows); err != nil {
+		t.Fatalf("putBatch: %v", err)
+	}
+	batchDecodes := tp.decodes - before
+	pages := int(tp.hi)
+	if batchDecodes > int64(pages)+2 {
+		t.Fatalf("%d 行批量写解码了 %d 次，应该约等于页数 %d", n, batchDecodes, pages)
+	}
+	if pages == 0 {
+		t.Fatal("一页都没分配")
+	}
+
+	// 对照：逐行写同样多的行，解码次数≈行数
+	const m = 200
+	before = tp.decodes
+	for i := n; i < n+m; i++ {
+		if _, err := tp.put(i, tupleN(i)); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	perRow := tp.decodes - before
+	if perRow < m/2 {
+		t.Fatalf("逐行写 %d 行只解码 %d 次，说明 put 没走单行路径？", m, perRow)
+	}
+	t.Logf("批量 %d 行解码 %d 次 / %d 页；逐行 %d 行解码 %d 次", n, batchDecodes, pages, m, perRow)
+
+	// 内容正确性抽查
+	for _, i := range []int{0, n / 2, n - 1, n + m - 1} {
+		if b, ok := tp.get(i); !ok || !bytes.Equal(b, tupleN(i)) {
+			t.Fatalf("第 %d 行读不回来 (ok=%v)", i, ok)
+		}
+	}
+}

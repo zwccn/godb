@@ -49,6 +49,10 @@ type tablePages struct {
 	// 坏页、修不回来。所以每页在一次 checkpoint 之后**第一次**被改时，把整页
 	// 镜像塞进 WAL；恢复时先用镜像还原整页，再重放逻辑记录。
 	fpi map[uint32]bool
+
+	// decodes 统计「解码了多少次页」。这是写路径的核心成本指标：
+	// 按行写 → 行数 次；按页批量写 → 页数 次。测试用它守住回归。
+	decodes int64
 }
 
 func openTablePages(path string, poolPages int) (*tablePages, error) {
@@ -122,100 +126,146 @@ func (tp *tablePages) ensure(slot int) {
 	}
 }
 
-// put 写入一行（RID = slot）。已有位置就覆盖，没有就找地方插。
-func (tp *tablePages) put(slot int, tuple []byte) ([]pageImage, error) {
-	if len(tuple) > MaxTupleSize {
-		return nil, errTupleTooLarge
-	}
-	tp.ensure(slot)
-	var fpis []pageImage
+// pendingRow 是一条待写入的行：RID + 已编码的元组。
+type pendingRow struct {
+	slot  int
+	tuple []byte
+}
 
-	// 已经有位置：先删旧元组（长度可能变了），再把新元组插同一页
-	if tp.valid[slot] {
-		at := tp.loc[slot]
-		img, err := tp.noteFPI(at.page)
+// put 写入一行（单行便捷入口，内部走批量路径）。
+func (tp *tablePages) put(slot int, tuple []byte) ([]pageImage, error) {
+	return tp.putBatch([]pendingRow{{slot: slot, tuple: tuple}})
+}
+
+// putBatch 批量写入：**同一页只解码一次、编码一次**。
+//
+// 这一点是性能命门：一次提交里改了多少行并不重要，重要的是**碰到了多少页**。
+// 按行写的话（每行 decode 整页 + encode 整页 + 8KB CRC），5 万行插入要 279s；
+// 按页批量后同样的数据只做「页数」次编解码。
+//
+// 返回值是要写进 WAL 的全页镜像（每页在本次 checkpoint 周期内只出现一次）。
+func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	cache := make(map[uint32]*page, 8) // 本轮解码过的页
+	var order []uint32                 // 按首次出现的顺序写回，输出稳定
+	var fpis []pageImage
+	fpiDone := make(map[uint32]bool, 8)
+
+	// getPage：拿一页的解码结果；第一次碰到这页时顺手取全页镜像
+	getPage := func(id uint32) (*page, error) {
+		if p, ok := cache[id]; ok {
+			return p, nil
+		}
+		img, err := tp.noteFPI(id)
 		if err != nil {
 			return nil, err
 		}
-		if img != nil {
-			fpis = append(fpis, pageImage{page: at.page, data: img})
+		if img != nil && !fpiDone[id] {
+			fpis = append(fpis, pageImage{page: id, data: img})
+			fpiDone[id] = true
 		}
-		f, err := tp.fetch(at.page)
+		f, err := tp.fetch(id)
 		if err != nil {
 			return nil, err
+		}
+		p, err := decodeOrInitPage(f.data, id)
+		tp.pool.unpin(f, false)
+		if err != nil {
+			return nil, err
+		}
+		tp.decodes++
+		cache[id] = p
+		order = append(order, id)
+		return p, nil
+	}
+
+	for _, row := range rows {
+		if len(row.tuple) > MaxTupleSize {
+			return nil, errTupleTooLarge
+		}
+		tp.ensure(row.slot)
+
+		// 已经有位置：先删旧的（长度可能变了），再插新的
+		if tp.valid[row.slot] {
+			at := tp.loc[row.slot]
+			p, err := getPage(at.page)
+			if err != nil {
+				return nil, err
+			}
+			_ = p.del(int(at.slot))
+			local, err := p.insertOrCompact(row.tuple, uint32(row.slot))
+			if err == nil {
+				tp.loc[row.slot] = rowLoc{page: at.page, slot: uint16(local)}
+				continue
+			}
+			if err != errPageFull {
+				return nil, err
+			}
+			tp.valid[row.slot] = false
+			tp.removeFromPageIndex(row.slot, at)
+		}
+
+		// 找个能放下的页：先试「上一轮用的页」，再让 findPage 找一个，最后开新页
+		if len(order) > 0 {
+			cur := order[len(order)-1]
+			if p, err := getPage(cur); err == nil {
+				if local, err := p.insertOrCompact(row.tuple, uint32(row.slot)); err == nil {
+					tp.loc[row.slot] = rowLoc{page: cur, slot: uint16(local)}
+					tp.valid[row.slot] = true
+					tp.byPage[cur] = append(tp.byPage[cur], row.slot)
+					continue
+				}
+			}
+		}
+		page, isNew, err := tp.findPage(len(row.tuple))
+		if err != nil {
+			return nil, err
+		}
+		if isNew {
+			tp.hi = page + 1
+		}
+		p, err := getPage(page)
+		if err != nil {
+			return nil, err
+		}
+		local, err := p.insertOrCompact(row.tuple, uint32(row.slot))
+		if err != nil {
+			// 兜底：开一个全新的页，一定放得下
+			page = tp.hi
+			tp.hi++
+			p, err = getPage(page)
+			if err != nil {
+				return nil, err
+			}
+			local, err = p.insertOrCompact(row.tuple, uint32(row.slot))
+			if err != nil {
+				return nil, err
+			}
+		}
+		tp.loc[row.slot] = rowLoc{page: page, slot: uint16(local)}
+		tp.valid[row.slot] = true
+		tp.byPage[page] = append(tp.byPage[page], row.slot)
+	}
+
+	// 每页只编码一次，再一次性写回页框
+	for _, id := range order {
+		p := cache[id]
+		buf := p.encode()
+		f, err := tp.fetch(id)
+		if err != nil {
+			return fpis, err
 		}
 		f.latch.Lock()
-		p, err := decodeOrInitPage(f.data, at.page)
-		if err != nil {
-			f.latch.Unlock()
-			tp.pool.unpin(f, false)
-			return nil, err
-		}
-		_ = p.del(int(at.slot))
-		local, err := p.insertOrCompact(tuple, uint32(slot))
-		if err == nil {
-			if local != int(at.slot) {
-				// 页内整理/复用让位置变了，目录跟着改
-				tp.loc[slot] = rowLoc{page: at.page, slot: uint16(local)}
-			}
-			copy(f.data, p.encode())
-			f.latch.Unlock()
-			tp.pool.unpin(f, true)
-			return fpis, nil
-		}
-		// 这页放不下：删掉旧元组后换一页
-		copy(f.data, p.encode())
+		copy(f.data, buf)
 		f.latch.Unlock()
 		tp.pool.unpin(f, true)
-		if err == errPageFull {
-			tp.valid[slot] = false
-			tp.removeFromPageIndex(slot, at)
-		} else {
-			return nil, err
+	}
+	if len(order) > 0 {
+		if last := order[len(order)-1]; last >= tp.nextPage {
+			tp.nextPage = last
 		}
-	}
-
-	// 找一页能塞下的：从后往前找几页，都满了就开新页
-	page, isNew, err := tp.findPage(len(tuple))
-	if err != nil {
-		return nil, err
-	}
-	if isNew {
-		tp.hi = page + 1
-	}
-	img, err := tp.noteFPI(page)
-	if err != nil {
-		return nil, err
-	}
-	if img != nil {
-		fpis = append(fpis, pageImage{page: page, data: img})
-	}
-	f, err := tp.fetch(page)
-	if err != nil {
-		return nil, err
-	}
-	f.latch.Lock()
-	p, err := decodeOrInitPage(f.data, page)
-	if err != nil {
-		f.latch.Unlock()
-		tp.pool.unpin(f, false)
-		return nil, err
-	}
-	local, err := p.insertOrCompact(tuple, uint32(slot))
-	if err != nil {
-		f.latch.Unlock()
-		tp.pool.unpin(f, false)
-		return nil, err
-	}
-	copy(f.data, p.encode())
-	f.latch.Unlock()
-	tp.pool.unpin(f, true)
-
-	tp.loc[slot] = rowLoc{page: page, slot: uint16(local)}
-	tp.valid[slot] = true
-	tp.byPage[page] = append(tp.byPage[page], slot)
-	if page >= tp.nextPage {
-		tp.nextPage = page
 	}
 	return fpis, nil
 }

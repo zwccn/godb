@@ -17,7 +17,7 @@ import (
 //	14  flags    uint16   // 预留
 //	16  lsn      uint64   // 最近一次修改它的 WAL 位置
 //	24  crc      uint32   // 整页校验（算之前先把这 4 字节清零）
-//	28  slot[0]  {off uint16, len uint16}   // len == 0 表示这个槽是空的
+//	28  slot[0]  {off uint16, len uint16, gid uint32}  // len == 0 表示这个槽是空的
 //	    ...
 //	    freeHi: 元组区从这里往前长
 //
@@ -30,7 +30,7 @@ const (
 
 	pageMagic      = "GDBP"
 	pageHeaderSize = 28
-	slotEntrySize  = 4
+	slotEntrySize  = 8 // off(2) + len(2) + gid(4)：带全局槽位号，重开表时能把行目录重建出来
 
 	// MaxTupleSize 是单条元组的上限：一页放不下两行就没法「一页至少存两行」，
 	// 页内整理的自由度也会消失。超了直接报错，而不是悄悄写坏页。
@@ -54,6 +54,10 @@ var (
 type pageSlot struct {
 	off uint16
 	len uint16 // 0 表示空槽（行被删了），槽位号仍可复用
+	// gid 是「全局槽位号」——也就是索引里存的 RID。页内位置（page, slot）会随
+	// 整理/搬迁变化，但 RID 永远不变，所以必须落在页里，重开表时才能把
+	// 「RID → 页内位置」这张目录重建出来。
+	gid uint32
 }
 
 // page 是一张表的某一页在内存里的镜像。
@@ -109,12 +113,32 @@ func decodePage(raw []byte) (*page, error) {
 		p.slots[i] = pageSlot{
 			off: binary.LittleEndian.Uint16(p.buf[off : off+2]),
 			len: binary.LittleEndian.Uint16(p.buf[off+2 : off+4]),
+			gid: binary.LittleEndian.Uint32(p.buf[off+4 : off+8]),
 		}
 	}
 	if err := p.sanity(); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// decodeOrInitPage：文件尾之后读上来的是全零缓冲，那不是「坏页」而是「还没写过」，
+// 按新页初始化。真正校验失败（非零但不是合法页）才报错。
+func decodeOrInitPage(raw []byte, id uint32) (*page, error) {
+	if len(raw) != PageSize {
+		return nil, errPageShort
+	}
+	zero := true
+	for _, b := range raw {
+		if b != 0 {
+			zero = false
+			break
+		}
+	}
+	if zero {
+		return newPage(id), nil
+	}
+	return decodePage(raw)
 }
 
 // sanity 是「防坏页」的最后一道闸：解析出来的边界必须自洽，否则后面的
@@ -152,6 +176,7 @@ func (p *page) encode() []byte {
 		off := pageHeaderSize + i*slotEntrySize
 		binary.LittleEndian.PutUint16(p.buf[off:off+2], s.off)
 		binary.LittleEndian.PutUint16(p.buf[off+2:off+4], s.len)
+		binary.LittleEndian.PutUint32(p.buf[off+4:off+8], s.gid)
 	}
 	binary.LittleEndian.PutUint32(p.buf[24:28], 0)
 	sum := crc32.Checksum(p.buf, crcTable)
@@ -180,7 +205,7 @@ func (p *page) liveCount() int {
 
 // insert 往页里放一条元组，返回页内槽位号。优先复用空槽（页内不整理，
 // 但槽位号可以复用，避免目录无限增长）。
-func (p *page) insert(tuple []byte) (int, error) {
+func (p *page) insert(tuple []byte, gid uint32) (int, error) {
 	if len(tuple) == 0 {
 		return pageNoSlot, errTupleTooLarge
 	}
@@ -205,10 +230,10 @@ func (p *page) insert(tuple []byte) (int, error) {
 	p.freeHi -= len(tuple)
 	copy(p.buf[p.freeHi:], tuple)
 	if reuse != pageNoSlot {
-		p.slots[reuse] = pageSlot{off: uint16(p.freeHi), len: uint16(len(tuple))}
+		p.slots[reuse] = pageSlot{off: uint16(p.freeHi), len: uint16(len(tuple)), gid: gid}
 		return reuse, nil
 	}
-	p.slots = append(p.slots, pageSlot{off: uint16(p.freeHi), len: uint16(len(tuple))})
+	p.slots = append(p.slots, pageSlot{off: uint16(p.freeHi), len: uint16(len(tuple)), gid: gid})
 	p.freeLo += slotEntrySize
 	return len(p.slots) - 1, nil
 }
@@ -263,8 +288,8 @@ func (p *page) compact() {
 
 // insertOrCompact 先直接插，页满就整理一次再插。表格数据「删一批、插一批」
 // 的时候全靠它把空洞用起来，否则页会越开越多。
-func (p *page) insertOrCompact(tuple []byte) (int, error) {
-	slot, err := p.insert(tuple)
+func (p *page) insertOrCompact(tuple []byte, gid uint32) (int, error) {
+	slot, err := p.insert(tuple, gid)
 	if err == nil || err != errPageFull {
 		return slot, err
 	}
@@ -273,5 +298,5 @@ func (p *page) insertOrCompact(tuple []byte) (int, error) {
 	if p.freeBytes() == before {
 		return pageNoSlot, errPageFull
 	}
-	return p.insert(tuple)
+	return p.insert(tuple, gid)
 }

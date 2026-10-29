@@ -12,7 +12,7 @@ func TestPageInsertGetDelete(t *testing.T) {
 	rows := [][]byte{[]byte(`{"a":1}`), []byte(`{"b":"两"}`), []byte(`{"c":null}`)}
 	slots := make([]int, len(rows))
 	for i, r := range rows {
-		s, err := p.insert(r)
+		s, err := p.insert(r, uint32(i))
 		if err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
@@ -37,7 +37,7 @@ func TestPageInsertGetDelete(t *testing.T) {
 		t.Fatalf("删除后 liveCount = %d，期望 2", p.liveCount())
 	}
 	// 槽位号要复用：删了哪个，下一个就填哪个，目录不能无限长
-	s, err := p.insert([]byte(`{"d":4}`))
+	s, err := p.insert([]byte(`{"d":4}`), 99)
 	if err != nil {
 		t.Fatalf("reuse insert: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestPageEncodeDecode(t *testing.T) {
 	p.lsn = 123456789
 	payload := [][]byte{[]byte(`{"id":1,"name":"张一"}`), []byte(`{"id":2}`)}
 	for _, r := range payload {
-		if _, err := p.insert(r); err != nil {
+		if _, err := p.insert(r, uint32(len(p.slots))); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}
@@ -82,7 +82,7 @@ func TestPageEncodeDecode(t *testing.T) {
 
 func TestPageDetectCorruption(t *testing.T) {
 	p := newPage(1)
-	if _, err := p.insert([]byte(`{"x":1}`)); err != nil {
+	if _, err := p.insert([]byte(`{"x":1}`), 0); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	raw := p.encode()
@@ -99,7 +99,7 @@ func TestPageDetectCorruption(t *testing.T) {
 func TestPageRejectsOversizeTuple(t *testing.T) {
 	p := newPage(1)
 	big := make([]byte, MaxTupleSize+1)
-	if _, err := p.insert(big); err != errTupleTooLarge {
+	if _, err := p.insert(big, 0); err != errTupleTooLarge {
 		t.Fatalf("超长行返回 %v，期望 %v", err, errTupleTooLarge)
 	}
 }
@@ -109,7 +109,7 @@ func TestPageCompactReclaimsHoles(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 512)
 	slots := make([]int, 0, 8)
 	for i := 0; i < 8; i++ {
-		s, err := p.insertOrCompact(payload)
+		s, err := p.insertOrCompact(payload, uint32(i))
 		if err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
@@ -148,7 +148,7 @@ func TestPageFileAndPool(t *testing.T) {
 			t.Fatalf("fetch %d: %v", id, err)
 		}
 		p := newPage(id)
-		if _, err := p.insert([]byte(`{"id":` + string(rune('0'+id)) + `}`)); err != nil {
+		if _, err := p.insert([]byte(`{"id":` + string(rune('0'+id)) + `}`), id); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		copy(f.data, p.encode())
@@ -205,7 +205,7 @@ func TestPoolEvictsDirtyPage(t *testing.T) {
 			t.Fatalf("fetch %d: %v", id, err)
 		}
 		p := newPage(id)
-		if _, err := p.insert([]byte(body)); err != nil {
+		if _, err := p.insert([]byte(body), id); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		f.latch.Lock()

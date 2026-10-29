@@ -308,6 +308,8 @@ function initCodeMirror() {
     extraKeys: {
       'Ctrl-Enter': () => run(),
       'Cmd-Enter': () => run(),
+      'Shift-Ctrl-F': () => formatSQL(),
+      'Shift-Cmd-F': () => formatSQL(),
       'Ctrl-Space': 'autocomplete',
       Tab: c => c.replaceSelection('  ', 'end'),
     },
@@ -708,11 +710,65 @@ async function run(prefix) {
 
 function setRunning(on) {
   const btn = document.getElementById('btnRun');
+  const label = document.getElementById('btnRunText');
   btn.disabled = on;
-  btn.textContent = on ? '执行中…' : '执行';
-  if (!on) {
-    btn.innerHTML = '执行 <kbd>Ctrl</kbd>+<kbd>Enter</kbd>';
+  btn.classList.toggle('is-running', on);
+  // 只改文字节点：按钮里还有图标和快捷键，整体重写 innerHTML 会把它们冲掉
+  if (label) label.textContent = on ? '执行中…' : '执行';
+  btn.title = on ? '正在执行…' : '执行 SQL · Ctrl+Enter';
+}
+
+/* 美化 SQL：有选中就只美化选中那段，没选中整段。
+   排版规则在 sql-format.js 里（本地实现，零依赖）；它宁可返回 null
+   也不吐半截 SQL，所以这里拿不到结果就原样保留 + 提示。 */
+function formatSQL() {
+  const fmt = window.GodbFormat && window.GodbFormat.format;
+  if (!fmt) { toast('美化模块没加载起来，刷新一下页面', true); return; }
+
+  const all = editor.value;
+  if (!all.trim()) { toast('编辑器是空的'); return; }
+
+  const apply = (src) => {
+    const out = fmt(src);
+    if (out == null) {
+      toast('括号或引号没配对，先补全再美化（内容没动）', true);
+      return null;
+    }
+    if (out === src) { toast('已经是规整的写法了'); return null; }
+    return out;
+  };
+
+  if (cm) {
+    const sel = cm.getSelection();
+    const out = apply(sel && sel.trim() ? sel : all);
+    if (out == null) return;
+    if (sel && sel.trim()) {
+      cm.replaceSelection(out, 'around');
+    } else {
+      // 整篇替换走 replaceRange（一次 undo 就能回退），别用 setValue —— 那个会清掉撤销栈
+      cm.operation(() => {
+        cm.replaceRange(out, { line: 0, ch: 0 }, cm.posFromIndex(all.length));
+      });
+    }
+    onEditorChange();
+    toast(sel && sel.trim() ? '已美化选中的 SQL' : '已美化 SQL');
+    cm.focus();
+    return;
   }
+
+  // 退回原生 textarea：execCommand 替换能保住撤销栈
+  const start = editorEl.selectionStart;
+  const end = editorEl.selectionEnd;
+  const hasSel = end > start;
+  const out = apply(hasSel ? all.slice(start, end) : all);
+  if (out == null) return;
+  editorEl.focus();
+  editorEl.setSelectionRange(start, end);
+  let done = false;
+  try { done = document.execCommand('insertText', false, out); } catch (e) { done = false; }
+  if (!done) editorEl.setRangeText(out, start, end, 'end');
+  onEditorChange();
+  toast(hasSel ? '已美化选中的 SQL' : '已美化 SQL');
 }
 
 /* ---------------- 渲染结果 ---------------- */
@@ -1902,6 +1958,7 @@ document.getElementById('btnClear').addEventListener('click', () => {
   editor.focus();
 });
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
+document.getElementById('btnFormat').addEventListener('click', formatSQL);
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
 document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
@@ -2170,6 +2227,12 @@ editorEl.addEventListener('keydown', ev => {
   if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
     ev.preventDefault();
     run();
+    return;
+  }
+  // Ctrl+Shift+F：美化。注意 Shift 会让 ev.key 变成 'F'
+  if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === 'F' || ev.key === 'f')) {
+    ev.preventDefault();
+    formatSQL();
     return;
   }
   if (ev.key === 'Tab') {

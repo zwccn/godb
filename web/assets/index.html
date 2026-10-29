@@ -93,9 +93,15 @@ try {
           <button id="btnHelp" class="icon-btn help-btn" type="button"
                   title="帮助：示例查询、支持的语法、快捷键" aria-label="帮助">?</button>
           <div class="editor-label">SQL 编辑器</div>
-          <button id="btnRun" class="btn btn-primary btn-sm">执行 <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button>
+          <button id="btnRun" class="btn btn-run" type="button" title="执行 SQL · Ctrl+Enter">
+            <span class="run-ico" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" focusable="false"><path d="M4.6 2.5v11L13.2 8z" fill="currentColor"/></svg></span>
+            <span class="run-spin" aria-hidden="true"></span>
+            <span id="btnRunText" class="run-label">执行</span>
+            <span class="run-keys" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+          </button>
         </div>
         <div class="editor-actions">
+          <button id="btnFormat" class="btn btn-ghost btn-sm" title="美化 SQL：子句换行、关键字大写、列表对齐（Ctrl+Shift+F）">美化</button>
           <button id="btnHistory" class="btn btn-ghost btn-sm" title="最近执行过的 SQL">历史</button>
           <button id="btnExplain" class="btn btn-ghost btn-sm" title="加 EXPLAIN 前缀执行">执行计划</button>
           <button id="btnClear" class="btn btn-ghost btn-sm">清空</button>
@@ -568,6 +574,7 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
       <div class="set-sec">快捷键与小技巧</div>
       <div class="help-keys">
         <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 执行</span>
+        <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 美化 SQL（有选中就只美化选中那几行）</span>
         <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 唤出补全（中文输入法会抢这个键，直接打字也会自动弹）</span>
         <span><kbd>Esc</kbd> 关掉补全 / 弹窗</span>
         <span>拖编辑器底边改高度，双击恢复自动</span>
@@ -684,6 +691,7 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
 <script src="/vendor/codemirror/addon/hint/show-hint.js"></script>
 <script src="/vendor/codemirror/addon/display/placeholder.js"></script>
 <script src="/sql-hint.js"></script>
+<script src="/sql-format.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

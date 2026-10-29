@@ -102,6 +102,54 @@ class CDP {
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
+    // 0.1) 执行按钮是「主操作」的样子：图标 + 快捷键提示 + 渐变（普通按钮长得都一样，
+    //      这一颗要一眼能认出来）。单独断言是因为它曾经被 setRunning 用 innerHTML 冲掉过。
+    const runBtn = await cdp.eval(`(() => {
+      const b = document.getElementById('btnRun');
+      const cs = getComputedStyle(b);
+      return {
+        icon: !!b.querySelector('.run-ico svg'),
+        keys: (b.querySelector('.run-keys') || {}).textContent || '',
+        grad: cs.backgroundImage.indexOf('gradient') >= 0,
+        radius: cs.borderRadius,
+      };
+    })()`);
+    check('执行按钮：图标 + 快捷键 + 渐变主按钮',
+      runBtn.icon && /Ctrl/.test(runBtn.keys) && runBtn.grad,
+      `${runBtn.keys} / 圆角 ${runBtn.radius}`);
+
+    // 执行中恢复：按钮内容不能被整体重写（否则图标/快捷键丢失）
+    await cdp.eval(`setRunning(true)`);
+    const running = await cdp.eval(`(() => {
+      const b = document.getElementById('btnRun');
+      return { label: document.getElementById('btnRunText').textContent,
+               spin: !!b.querySelector('.run-spin'),
+               disabled: b.disabled };
+    })()`);
+    await cdp.eval(`setRunning(false)`);
+    const back = await cdp.eval(`document.getElementById('btnRunText').textContent`);
+    check('执行中：文字变「执行中…」且按钮结构不被冲掉',
+      running.label === '执行中…' && running.spin && running.disabled && back === '执行',
+      `${running.label} → ${back}`);
+
+    // 0.1b) 美化 SQL：子句换行 + 关键字大写，字符串里的内容一个字都不能动
+    await cdp.eval(`cm.setValue("select id,name from t where a='it''s' and b=1 order by id")`);
+    await cdp.eval(`document.getElementById('btnFormat').click()`);
+    const fmted = await cdp.eval(`cm.getValue()`);
+    check('美化：子句换行 + 关键字大写 + 字符串原样',
+      /^SELECT id,/.test(fmted) && /\nFROM t\n/.test(fmted) &&
+        /'it''s'/.test(fmted) && /ORDER BY id/.test(fmted),
+      JSON.stringify(fmted).slice(0, 140));
+
+    // 括号没配对就一个字都不改（宁可不动，也不要吐出半截 SQL 让人再改回去）
+    await cdp.eval(`cm.setValue("select * from t where (a = 1")`);
+    await cdp.eval(`document.getElementById('btnFormat').click()`);
+    const broken = await cdp.eval(`cm.getValue()`);
+    check('美化：括号不配对时保持原样', broken === 'select * from t where (a = 1', JSON.stringify(broken));
+
+    const fmtKey = await cdp.eval(`!!((cm.getOption('extraKeys') || {})['Shift-Ctrl-F'])`);
+    check('美化：Ctrl+Shift+F 已绑定', fmtKey === true, String(fmtKey));
+
     // 0.2)「执行计划」按钮：只解释查询，别把 BEGIN/UPDATE 也套上 EXPLAIN
     //      （以前是 split(';') 全量加前缀，事务演示一按就报 only supports SELECT）
     const planText = () => cdp.eval(`(document.getElementById('results').textContent || '').replace(/\\s+/g, ' ')`);

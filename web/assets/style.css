@@ -433,14 +433,15 @@ body {
 }
 
 /* ---------- 主操作按钮：编辑器「执行」 ---------- */
-/* 复用 .btn-primary + .btn-sm 的色与形，只多一个 9px 的播放三角 + 执行中的转圈。
-   三角用 currentColor（就是按钮的 --on-accent），不另配颜色 —— 多一种色就会跑调。 */
+/* 配色跟帮助弹窗的「知道了」同一套（.btn 的 bg-2 + border + 正文色），不用主色填充 ——
+   蓝底白字在编辑器旁边太压人。区分「主操作」只靠那枚 9px 播放三角（accent 色），
+   执行中换成同尺寸转圈，其余完全等同普通按钮。 */
 .btn-run {
   display: inline-flex;
   align-items: center;
   gap: 5px;
 }
-.btn-run .run-ico { display: inline-flex; align-items: center; }
+.btn-run .run-ico { display: inline-flex; align-items: center; color: var(--accent); }
 .btn-run .run-spin { display: none; }
 .btn-run.is-running .run-ico { display: none; }
 .btn-run.is-running .run-spin {
@@ -448,7 +449,7 @@ body {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  border: 1.5px solid currentColor;
+  border: 1.5px solid var(--accent);
   border-top-color: transparent;
   animation: run-spin .7s linear infinite;
 }

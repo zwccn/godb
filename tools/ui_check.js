@@ -102,31 +102,35 @@ class CDP {
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
-    // 0.1) 执行按钮：扁平主色 + 一个 9px 播放三角（跟文字同色）+ 执行中转圈。
-    //      做过渐变+发光+快捷键药丸的版本，都被判「太抢眼」退回；这几条防止又长回去。
+    // 0.1) 执行按钮：配色跟帮助弹窗的「知道了」一致（不填主色），只靠一枚 9px 播放三角
+    //      标记主操作。做过渐变+发光、主色填充、快捷键药丸三版，都被判「太重」退回。
     const runBtn = await cdp.eval(`(() => {
       const b = document.getElementById('btnRun');
       const cs = getComputedStyle(b);
-      const peer = getComputedStyle(document.getElementById('btnSettingsSave'));
+      const peer = getComputedStyle(document.getElementById('btnHelpDone'));
       const ico = b.querySelector('.run-ico svg');
-      const icoCs = ico ? getComputedStyle(ico) : null;
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--accent)';
+      document.body.appendChild(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
       return {
         icon: !!ico,
         icoW: ico ? Math.round(ico.getBoundingClientRect().width) : 0,
-        icoColor: ico ? icoCs.color : '',
-        textColor: cs.color,
+        icoColor: ico ? getComputedStyle(ico).color : '',
+        accent: accent,
         kbds: b.querySelectorAll('kbd').length,
         grad: cs.backgroundImage.indexOf('gradient') >= 0,
         shadow: cs.boxShadow,
-        radius: cs.borderRadius,
-        sameAsPeer: cs.backgroundColor === peer.backgroundColor && cs.borderRadius === peer.borderRadius,
+        sameAsPeer: cs.backgroundColor === peer.backgroundColor &&
+          cs.color === peer.color && cs.borderRadius === peer.borderRadius,
       };
     })()`);
-    check('执行按钮：扁平主色 + 播放图标 + 不再挂快捷键药丸',
+    check('执行按钮：与「知道了」同色 + 一枚 accent 播放三角',
       runBtn.icon && runBtn.icoW >= 8 && runBtn.icoW <= 12 &&
-        runBtn.icoColor === runBtn.textColor && runBtn.kbds === 0 &&
-        !runBtn.grad && runBtn.shadow === 'none' && runBtn.sameAsPeer,
-      `图标 ${runBtn.icoW}px / kbd ${runBtn.kbds} 个 / 圆角 ${runBtn.radius} / 阴影 ${runBtn.shadow}`);
+        runBtn.icoColor === runBtn.accent && runBtn.kbds === 0 && !runBtn.grad &&
+        runBtn.shadow === 'none' && runBtn.sameAsPeer,
+      `图标 ${runBtn.icoW}px / kbd ${runBtn.kbds} 个 / 阴影 ${runBtn.shadow} / 与知道了同色 ${runBtn.sameAsPeer}`);
 
     // 执行中：图标让位给转圈，结束后再换回来（按钮结构不能被整体重写）
     await cdp.eval(`setRunning(true)`);

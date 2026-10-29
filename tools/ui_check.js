@@ -596,12 +596,20 @@ class CDP {
     // 顶栏只留高频入口，皮肤/字号/示例数据/清库都进设置页
     const setUi = await cdp.eval(`(() => {
       const bar = document.querySelector('.top-actions');
+      const top = document.querySelector('.topbar');
       const body = document.getElementById('settingsBody');
       const picks = [...body.querySelectorAll('.theme-pick')];
       const active = body.querySelector('.theme-pick[aria-pressed="true"]');
       const btns = [...body.querySelectorAll('button')].map(b => b.textContent.trim());
       return {
-        barText: bar.textContent.replace(/\\s+/g, ' ').trim(),
+        // 库选择在品牌右边（左侧），不在 .top-actions 里了 → 断言看整个顶栏
+        barText: top.textContent.replace(/\\s+/g, ' ').trim(),
+        // 库选择必须落在右半区（动作区）之前：切换库是上下文，不是操作
+        dbPickLeftOfActions: (() => {
+          const db = top.querySelector('.db-pick');
+          if (!db || !bar) return false;
+          return db.compareDocumentPosition(bar) === Node.DOCUMENT_POSITION_FOLLOWING;
+        })(),
         barHasTheme: !!bar.querySelector('.theme-pick, .theme-dot, .fs-ctl'),
         barHasData: !!document.getElementById('btnSample') || !!document.getElementById('btnReset'),
         picks: picks.length,
@@ -634,6 +642,8 @@ class CDP {
     // 0.2.0 起「锁状态」换成「监控」（面板里带锁/慢 SQL/超时开关）
     check('顶栏仍保留 库/监控/设置',
       ['库', '监控', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
+    check('库选择在顶栏左侧（品牌右边，动作区之前）', setUi.dbPickLeftOfActions,
+      setUi.dbPickLeftOfActions ? '在左' : '仍在右侧动作区');
     check('空闲状态不占顶栏（药丸隐藏，靠圆点表达）', setUi.idlePillHidden,
       setUi.idlePillHidden ? '药丸已隐藏' : '药丸仍显示');
     check('监控圆点够大且有 hover 文字', setUi.dotSize >= 10 && setUi.dotTip.length > 0,

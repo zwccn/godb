@@ -2105,6 +2105,14 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
   gap: 6px;
 }
 
+/* 库选择在左边和品牌成一组（切库是「我在哪个库」的上下文，不是「操作」），
+   用一条细竖线和 logo 分开，免得两个东西糊在一起。 */
+.topbar > .db-pick {
+  margin-left: 2px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-soft);
+}
+
 .db-pick-label {
   font-size: calc(10.5px * var(--fs));
   letter-spacing: .6px;

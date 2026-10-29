@@ -46,13 +46,15 @@ try {
       <h1>godb</h1>
     </div>
   </div>
+  <!-- 库选择跟着品牌放左边：切换库是「上下文」，不是「操作」；
+       右边只留状态和入口（事务药丸 / 监控 / 设置），扫一眼就知道有没有事。 -->
+  <div class="db-pick" title="当前数据库">
+    <span class="db-pick-label">库</span>
+    <select id="dbSelect" aria-label="数据库" title="切换数据库"></select>
+    <button id="btnDBs" class="btn btn-ghost btn-sm" type="button" title="管理数据库（新建 / 删除）">管理</button>
+  </div>
   <div class="top-actions">
-    <div class="db-pick" title="当前数据库">
-      <span class="db-pick-label">库</span>
-      <select id="dbSelect" aria-label="数据库" title="切换数据库"></select>
-      <button id="btnDBs" class="btn btn-ghost btn-sm" type="button" title="管理数据库（新建 / 删除）">管理</button>
-    </div>
-    <!-- 顶栏只留「随时要看 / 随手要切」的东西：库、事务状态、监控、设置。
+    <!-- 顶栏只留「随时要看 / 随手要切」的东西：事务状态、监控、设置。
          皮肤、字号、载入示例数据、清空数据库都是低频操作，收进设置页。
          事务药丸默认隐藏：空闲是常态，顶栏圆点绿色已经说明了；
          只有进入事务 / 事务中止时才露出来（那时它有持锁数和未提交行数）。 -->

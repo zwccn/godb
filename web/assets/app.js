@@ -34,10 +34,13 @@ const txPill = document.getElementById('txPill');
 // ---------- 皮肤 ----------
 // 颜色全在 CSS 变量里，这里只负责切 html[data-theme]，并把选择记在本机。
 const THEME_KEY = 'godb.theme';
-// 顺序即设置页里的展示顺序；深色是默认值
+// 第一次打开用哪套皮肤。深色是 CSS 里的 :root（不加属性），所以「默认」和
+// 「无属性」不是一回事：选深色会主动清掉属性，首次访问则要先写上 data-theme="steel"。
+const DEFAULT_THEME = 'steel';
+// 顺序即设置页里的展示顺序；默认的那套排第一
 const THEME_LIST = [
-  { id: 'dark', name: '深色' },
   { id: 'steel', name: '科技灰' },
+  { id: 'dark', name: '深色' },
   { id: 'sky', name: '淡蓝' },
   { id: 'taro', name: '芋紫' },
   { id: 'mint', name: '薄荷绿' },
@@ -45,7 +48,7 @@ const THEME_LIST = [
 const THEMES = THEME_LIST.map(t => t.id);
 
 function applyTheme(name, save) {
-  if (!THEMES.includes(name)) name = 'dark';
+  if (!THEMES.includes(name)) name = DEFAULT_THEME;
   // 深色是默认值，挂在 :root 上，所以不加属性即可
   if (name === 'dark') {
     document.documentElement.removeAttribute('data-theme');
@@ -67,7 +70,9 @@ document.addEventListener('click', ev => {
   const pick = ev.target.closest && ev.target.closest('.theme-pick');
   if (pick) applyTheme(pick.dataset.theme, true);
 });
-// 进入页面时按上次的选择点亮按钮（属性已经由 head 里的内联脚本设好了）
+// 进入页面时按上次的选择点亮按钮（属性已经由 head 里的内联脚本设好了）。
+// 兜底是 'dark' 而不是 DEFAULT_THEME：属性缺省等于深色（:root 就是那套变量），
+// 首次访问的 'steel' 由内联脚本写上去。
 applyTheme(document.documentElement.getAttribute('data-theme') || 'dark', false);
 
 // ---------- 字号 ----------

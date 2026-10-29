@@ -9,7 +9,9 @@
    ?theme=sky 这种链接参数只对本次生效，不写进本机偏好。 */
 try {
   var q = new URLSearchParams(location.search).get('theme');
-  var t = q || localStorage.getItem('godb.theme');
+  /* 首次访问没有偏好时用科技灰（steel）；它和「深色」一样要显式写属性，
+     因为 :root 是深色那套变量。 */
+  var t = q || localStorage.getItem('godb.theme') || 'steel';
   if (t && t !== 'dark') document.documentElement.setAttribute('data-theme', t);
 } catch (e) {}
 /* 字号同理：先设好 --fs，避免大字号先按默认画一帧。 */

@@ -858,7 +858,7 @@ class CDP {
         brand.shadow === 'none' && brand.bgImage === 'none' && /^GoDB/.test(brand.title),
       `${brand.text} · DB 色 ${brand.dbColor} · title ${brand.title}`);
     check('设置页有 5 个带名字的皮肤卡片',
-      setUi.picks === 5 && setUi.pickNames.join('/') === '深色/科技灰/淡蓝/芋紫/薄荷绿',
+      setUi.picks === 5 && setUi.pickNames.join('/') === '科技灰/深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);
 
     // 科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）

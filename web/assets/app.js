@@ -3316,7 +3316,7 @@ function openHistory() {
   const hint = document.getElementById('historyHint');
   const list = loadHistory();
   body.innerHTML = '';
-  hint.textContent = list.length ? `共 ${list.length} 条（本机浏览器保存）` : '';
+  hint.textContent = list.length ? `共 ${list.length} 条 · 本机保存` : '';
   if (!list.length) {
     body.appendChild(el('div', 'hist-empty', '还没有执行过 SQL。'));
   }

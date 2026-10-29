@@ -858,6 +858,24 @@ class CDP {
     // 3) 历史面板
     await cdp.eval(`openHistory()`);
     await sleep(300);
+
+    // 620px 的时候一条 SELECT 会被折成三四段，读起来像碎片 → 放宽到 860px，
+    // 时间列定宽让多条记录的时间戳对齐成一列
+    const hist = await cdp.eval(`(() => {
+      const card = document.querySelector('#historyModal .modal-card');
+      const item = document.querySelector('.hist-item');
+      const sql = document.querySelector('.hist-sql');
+      return {
+        w: Math.round(card.getBoundingClientRect().width),
+        items: document.querySelectorAll('.hist-item').length,
+        cols: item ? getComputedStyle(item).gridTemplateColumns : '',
+        clamp: sql ? getComputedStyle(sql).webkitLineClamp : '',
+      };
+    })()`);
+    check('历史弹窗够宽（≥820px）+ 时间列定宽 + SQL 两行截断',
+      hist.w >= 820 && hist.items > 0 && /^74px /.test(hist.cols) && hist.clamp === '2',
+      `${hist.w}px / ${hist.items} 条 / 列 ${hist.cols} / clamp ${hist.clamp}`);
+
     await cdp.eval(`document.getElementById('historyModal').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await sleep(200);
     check('历史：点遮罩后仍然打开', await cdp.eval(`!document.getElementById('historyModal').classList.contains('hidden')`));

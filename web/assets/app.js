@@ -1312,7 +1312,8 @@ function updateDiagSub() {
   if (monEls.diagSub) monEls.diagSub.textContent = sub[monTab] || '';
 }
 
-// 空表不画表格：一行居中提示 + 卡片自己缩高（见 .mon-panel.is-empty）。
+// 空表不画表格：一行居中提示，占位高度和三行表格差不多（见 .mon-ok 的
+// min-height），免得切 Tab 时卡片忽高忽低。
 function setPanelEmpty(panel, ok, empty, text) {
   panel.classList.toggle('is-empty', empty);
   ok.classList.toggle('hidden', !empty);
@@ -2803,9 +2804,9 @@ function renderSettings() {
   settingsBody.appendChild(el('div', 'set-sec', '内存（缓冲池）'));
   settingsBody.appendChild(setRow('全库共享', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
   settingsBody.appendChild(el('div', 'set-hint',
-    '一页 8KB，所有表的页框加在一起不超过这个数（不是每张表各一份）。行可以换出：' +
-    '表比缓冲池大时，久未访问的页会被淘汰、对应的行从内存里放掉，下次访问再从页文件读回来。' +
-    '默认 1024 页 = 8MB；改完要重启才生效。'));
+    '一页 8KB，所有表的页框加在一起不超过这个数（不是每张表各一份）。池子满后久未访问的页' +
+    '会被淘汰、对应的行从内存里放掉，下次访问再从页文件读回来。' +
+    '默认 4096 页 = 32MB；改完要重启才生效。'));
 
   const cp = rt.checkpoint || {};
   const stats = el('div', 'set-stats');

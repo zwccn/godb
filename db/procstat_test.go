@@ -14,7 +14,7 @@ func TestProcSamplerProducesData(t *testing.T) {
 	if d.proc == nil {
 		t.Fatal("采样器没有初始化")
 	}
-	p, _ := d.proc.stats()
+	p, _, _ := d.proc.stats()
 	if p.NumCPU <= 0 {
 		t.Errorf("NumCPU = %d，应该是本机核数", p.NumCPU)
 	}
@@ -28,7 +28,7 @@ func TestProcSamplerProducesData(t *testing.T) {
 	// CPU 靠两次采样的差值，等后台 ticker 跑两轮。
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		p, _ = d.proc.stats()
+		p, _, _ = d.proc.stats()
 		if p.Sampled && len(p.Series) >= 2 {
 			break
 		}

@@ -1413,6 +1413,34 @@ table.grid td.bool { color: var(--warn-text); }
   color: var(--text-3);
 }
 .mon-head-actions { display: flex; align-items: center; gap: 4px; }
+/* 齿轮按下时保持「亮着」：浮层是绝对定位的，不给按钮状态的话
+   用户分不清「没打开」还是「打开了但被别的东西挡住」。 */
+.icon-btn.on { color: var(--accent); background: var(--bg-2); }
+
+/* ---- 规则配置浮层（挂在齿轮下面） ---- */
+.mon-set {
+  position: absolute;
+  top: 42px;
+  right: 14px;
+  z-index: 40;
+  width: 340px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  overflow: hidden;
+}
+.mon-set-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 8px 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: calc(12px * var(--fs));
+  color: var(--text);
+}
+.mon-set-body { padding: 10px 12px 12px; }
+.mon-set .mon-timeouts { padding: 0; grid-template-columns: 1fr; gap: 8px; }
 
 .mon-body {
   flex: 1 1 auto;
@@ -1540,6 +1568,62 @@ table.grid td.bool { color: var(--warn-text); }
   color: var(--text);
 }
 .mon-sub { font-size: calc(11px * var(--fs)); color: var(--text-3); }
+
+/* ---- 4. 诊断区：Tab 三合一 ----
+   三块表格都是「有事才有内容」，平铺时没数据的会白占两屏。
+   做成 Tab 后横向宽度全给锁明细（8 列），纵向只留当前那一个的高度。 */
+.mon-tabs { display: flex; align-items: center; gap: 2px; }
+.mon-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-3);
+  font-size: calc(12px * var(--fs));
+  font-family: inherit;
+  cursor: pointer;
+}
+.mon-tab:hover { color: var(--text); background: var(--row-hover); }
+.mon-tab.active {
+  color: var(--text);
+  background: var(--bg-2);
+  border-color: var(--border);
+  font-weight: 600;
+}
+/* 条数：0 就不显示数字，但 Tab 本身始终在 —— 藏起来的诊断项等于没监控 */
+.mon-tab-n {
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  font-weight: 500;
+  color: var(--text-3);
+}
+.mon-tab-n:empty { display: none; }
+.mon-tab.active .mon-tab-n { color: var(--text-2); }
+/* 有人在等锁时计数变红：Tab 可以切走，事不能看不见 */
+.mon-tab-n.alert {
+  color: var(--danger-text);
+  font-weight: 700;
+  animation: monPulse 1.4s ease-in-out infinite;
+}
+
+/* 有内容时给表格区一个下限（约三行）：锁明细 8 列、慢SQL 4 列，两者行数一多一少，
+   切 Tab 时下面的卡片高度会来回跳，跳一下视线就丢一次位置。
+   空态不给下限 —— 那是有意收缩到一行（见 .is-empty）。 */
+.mon-panel { min-height: calc(120px * var(--fs)); }
+
+/* 空态：表格整块收起来，只留一行话。卡片高度自然缩到 40px 上下。 */
+.mon-panel.is-empty { min-height: 0; }
+.mon-panel.is-empty .mon-lockwrap,
+.mon-panel.is-empty .mon-tw { display: none; }
+.mon-ok {
+  padding: 13px 12px;
+  text-align: center;
+  font-size: calc(12px * var(--fs));
+  color: var(--text-3);
+}
 
 /* ---- 3. 锁明细表 ---- */
 .mon-lockwrap { overflow-x: auto; }
@@ -1746,9 +1830,36 @@ table.grid td.bool { color: var(--warn-text); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 曲线：CPU 一条线 + 内存一片面积。高度从 44 提到 76 —— 44 在 1600 宽的卡片里
+   就是一条几乎平的细线，「刚才有没有尖峰」根本看不出来。 */
 .proc-spark { padding: 2px 12px 9px; }
-.proc-spark svg { width: 100%; height: 44px; display: block; }
-.spark-tip { font-family: var(--mono); font-size: calc(10.5px * var(--fs)); color: var(--text-3); }
+.proc-spark svg { width: 100%; height: 76px; display: block; }
+
+/* 吞吐与连接：两行小图叠在一张卡里（QPS/TPS 一行、连接数一行）。
+   每行 64px：比进程资源那块矮一点，因为它是两行，加起来反而更高。 */
+.mon-spark { padding: 2px 12px 8px; }
+.mon-spark svg { width: 100%; height: 64px; display: block; }
+/* 图例两行（CPU / 内存各一行），不再挤在一行里换行 ——
+   挤成一行时「（轴 …）」会被折到下一行，看着像两句没说完的话。 */
+.spark-tip {
+  display: grid;
+  gap: 1px;
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-3);
+}
+.spark-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* 图例色块：和线上颜色一一对应，不然两条线分不清谁是谁 */
+.spark-k {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.spark-k.cpu { background: var(--accent); }
+.spark-k.mem { background: var(--ok); opacity: .55; }
+.spark-k.conn { background: var(--warn); }
 
 .io-row {
   display: flex;

@@ -138,8 +138,9 @@ try {
   </section>
 </main>
 
-<!-- 监控面板：四块 + 底部超时开关，按「卡在哪 / 谁持有 / 持多久 / 是哪种慢」排布。
-     全屏而不是抽屉：锁明细有 8 列，窄抽屉里横着滚谁都看不清。 -->
+<!-- 监控面板：三层水位 / 进程与存储 / 诊断（Tab 三合一），按「卡在哪 → 资源够不够 →
+     慢在哪」排布。全屏而不是抽屉：锁明细有 8 列，窄抽屉里横着滚谁都看不清。
+     超时开关是全局安全配置、不是监控数据，收进右上角齿轮，别跟指标抢纵向空间。 -->
 <section id="monPanel" class="mon hidden" aria-label="监控面板">
   <div class="mon-head">
     <div class="mon-title">
@@ -148,8 +149,24 @@ try {
       <span class="mon-updated" id="monUpdated"></span>
     </div>
     <div class="mon-head-actions">
+      <button id="btnMonSettings" class="icon-btn" title="规则配置：四个超时开关">⚙</button>
       <button id="btnMonRefresh" class="icon-btn" title="立即刷新">⟳</button>
       <button id="btnMonClose" class="icon-btn" title="关闭（Esc）">×</button>
+    </div>
+  </div>
+
+  <!-- 规则配置浮层：挂在齿轮下面，点空白或 Esc 收起 -->
+  <div class="mon-set hidden" id="monSetPop" role="dialog" aria-label="规则配置">
+    <div class="mon-set-head">
+      <span>规则配置</span>
+      <button class="icon-btn" id="btnMonSetClose" title="收起">×</button>
+    </div>
+    <div class="mon-set-body">
+      <div class="mon-timeouts" id="monTimeouts"></div>
+      <div class="mon-tfoot">
+        <span class="mon-hint" id="monTimeoutHint">默认全为「不限」；0 或留空 = 不限制</span>
+        <button class="btn btn-primary btn-sm" id="btnMonSaveTimeouts" type="button">保存并应用</button>
+      </div>
     </div>
   </div>
 
@@ -160,29 +177,15 @@ try {
     <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
     <div class="mon-layers" id="monLayers"></div>
 
-    <!-- 3. 锁明细：谁持有、持多久、事务在忙还是闲着、谁在等 -->
+    <!-- 3. 吞吐走势：QPS / TPS / 连接数。
+         水位是瞬时快照，这里是走势 —— 「刚才那阵子忙成什么样、什么时候掉下去的」
+         只有曲线答得出来。和进程资源用同一个秒级节拍，横轴天然对齐。 -->
     <section class="mon-card">
       <div class="mon-card-head">
-        <span>锁明细</span>
-        <span class="mon-sub" id="monLockSub">按持有时长降序 · 点行展开事务详情</span>
+        <span>吞吐与连接</span>
+        <span class="mon-sub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
       </div>
-      <div class="mon-lockwrap">
-        <table class="mon-locks">
-          <thead>
-            <tr>
-              <th class="c-table">表名</th>
-              <th class="c-mode">锁</th>
-              <th class="c-sess">持有者</th>
-              <th class="c-held">已持有时长</th>
-              <th class="c-state">事务状态</th>
-              <th class="c-sql">最后一条 SQL</th>
-              <th class="c-wait">等待者</th>
-              <th class="c-act">操作</th>
-            </tr>
-          </thead>
-          <tbody id="monLockBody"></tbody>
-        </table>
-      </div>
+      <div class="mon-rate" id="monRate"></div>
     </section>
 
     <!-- 4. 资源：进程自身 + 存储 IO。
@@ -205,13 +208,50 @@ try {
       </section>
     </div>
 
-    <!-- 5. 慢SQL / 慢事务：两个并列 Top N，都是紧凑表格，点行看详情 -->
-    <div class="mon-two">
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>慢 SQL</span>
-          <span class="mon-sub">Top 10 · 按执行耗时 · 点行看详情</span>
+    <!-- 5. 诊断：慢 SQL / 慢事务 / 锁明细 三合一，Tab 切换。
+         三块都是「有问题才有内容」的表格，平铺时没数据的三块会白占两屏。
+         锁明细 8 列必须独占整行宽，所以不做左右并排。
+         Tab 上带条数，空的不藏起来 —— 看不到的东西等于没监控。 -->
+    <section class="mon-card mon-diag">
+      <div class="mon-card-head">
+        <div class="mon-tabs" id="monTabs" role="tablist" aria-label="诊断视图">
+          <button class="mon-tab" type="button" role="tab" data-tab="sql" aria-selected="false">
+            慢 SQL<b class="mon-tab-n" id="monTabSqlN"></b>
+          </button>
+          <button class="mon-tab" type="button" role="tab" data-tab="tx" aria-selected="false">
+            慢事务<b class="mon-tab-n" id="monTabTxN"></b>
+          </button>
+          <button class="mon-tab" type="button" role="tab" data-tab="lock" aria-selected="false">
+            锁明细<b class="mon-tab-n" id="monTabLockN"></b>
+          </button>
         </div>
+        <span class="mon-sub" id="monDiagSub"></span>
+      </div>
+
+      <!-- 4a. 锁明细：谁持有、持多久、事务在忙还是闲着、谁在等 -->
+      <div class="mon-panel" data-panel="lock" id="monTabLock" role="tabpanel">
+        <div class="mon-lockwrap">
+          <table class="mon-locks">
+            <thead>
+              <tr>
+                <th class="c-table">表名</th>
+                <th class="c-mode">锁</th>
+                <th class="c-sess">持有者</th>
+                <th class="c-held">已持有时长</th>
+                <th class="c-state">事务状态</th>
+                <th class="c-sql">最后一条 SQL</th>
+                <th class="c-wait">等待者</th>
+                <th class="c-act">操作</th>
+              </tr>
+            </thead>
+            <tbody id="monLockBody"></tbody>
+          </table>
+        </div>
+        <div class="mon-ok hidden" id="monLockOk">当前没有表锁，所有会话都空闲</div>
+      </div>
+
+      <!-- 4b. 慢 SQL -->
+      <div class="mon-panel hidden" data-panel="sql" id="monTabSql" role="tabpanel">
         <div class="mon-tw">
           <table class="mon-slow">
             <thead>
@@ -225,12 +265,11 @@ try {
             <tbody id="monSlowSQL"></tbody>
           </table>
         </div>
-      </section>
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>慢事务</span>
-          <span class="mon-sub">Top 10 · 按持锁时长 · 点行看详情</span>
-        </div>
+        <div class="mon-ok hidden" id="monSqlOk">还没有执行记录</div>
+      </div>
+
+      <!-- 4c. 慢事务 -->
+      <div class="mon-panel hidden" data-panel="tx" id="monTabTx" role="tabpanel">
         <div class="mon-tw">
           <table class="mon-slow">
             <thead>
@@ -245,19 +284,7 @@ try {
             <tbody id="monSlowTx"></tbody>
           </table>
         </div>
-      </section>
-    </div>
-
-    <!-- 5. 超时开关：默认全「不限」，看着上面的时长分布自己决定开哪个 -->
-    <section class="mon-card" id="monTimeoutCard">
-      <div class="mon-card-head">
-        <span>超时开关</span>
-        <span class="mon-sub">默认全为「不限」；0 或留空 = 不限制</span>
-      </div>
-      <div class="mon-timeouts" id="monTimeouts"></div>
-      <div class="mon-tfoot">
-        <span class="mon-hint" id="monTimeoutHint"></span>
-        <button class="btn btn-primary btn-sm" id="btnMonSaveTimeouts" type="button">保存并应用</button>
+        <div class="mon-ok hidden" id="monTxOk">当前没有进行中的事务</div>
       </div>
     </section>
   </div>

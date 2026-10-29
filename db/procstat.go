@@ -135,13 +135,24 @@ type procSampler struct {
 	series []ProcPoint
 	pos    int
 	filled bool
+
+	// ---- 吞吐（见 rates.go）----
+	// 语句/事务累计数的基线，用差值得到每秒速率。
+	lastStmts int64
+	lastXact  int64
+	curConns  int
+	// thru 是 throughput 的缩写，避开上面 IO 速率用的 ratePos。
+	thruSeries []RatePoint
+	thruPos    int
+	thruFilled bool
 }
 
 func newProcSampler() *procSampler {
 	p := &procSampler{
-		pauseRing: newRing(gcPauseCap),
-		series:    make([]ProcPoint, procSeriesCap),
-		index:     map[string]int{},
+		pauseRing:  newRing(gcPauseCap),
+		series:     make([]ProcPoint, procSeriesCap),
+		thruSeries: make([]RatePoint, rateSeriesCap),
+		index:      map[string]int{},
 	}
 	p.initMetrics()
 	p.cur.NumCPU = runtime.NumCPU()
@@ -284,6 +295,10 @@ func (p *procSampler) tick(d *DB) {
 	if p.pos == 0 {
 		p.filled = true
 	}
+
+	// ---- 吞吐（QPS / TPS / 连接数，见 rates.go）----
+	// 和上面同一个节拍：两条曲线横轴一致，对着看才有意义。
+	p.tickRates(d, now)
 }
 
 // readPauses 把 GC 暂停直方图的增量转成样本。
@@ -336,7 +351,7 @@ func (p *procSampler) readPauses() {
 }
 
 // stats 返回一份快照（含按时间正序展开的曲线）。
-func (p *procSampler) stats() (ProcStats, IORates) {
+func (p *procSampler) stats() (ProcStats, IORates, RateStats) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := p.cur
@@ -355,7 +370,7 @@ func (p *procSampler) stats() (ProcStats, IORates) {
 			out.Series = append(out.Series, p.series[(start+i)%len(p.series)])
 		}
 	}
-	return out, p.avgRates()
+	return out, p.avgRates(), p.rateStatsLocked()
 }
 
 // avgRates 返回最近若干秒的速率平均值。

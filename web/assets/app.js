@@ -1219,7 +1219,19 @@ const monEls = {
   water: document.getElementById('monWater'),
   layers: document.getElementById('monLayers'),
   lockBody: document.getElementById('monLockBody'),
-  lockSub: document.getElementById('monLockSub'),
+  lockOk: document.getElementById('monLockOk'),
+  sqlOk: document.getElementById('monSqlOk'),
+  txOk: document.getElementById('monTxOk'),
+  diagSub: document.getElementById('monDiagSub'),
+  tabs: document.getElementById('monTabs'),
+  tabN: {
+    lock: document.getElementById('monTabLockN'),
+    sql: document.getElementById('monTabSqlN'),
+    tx: document.getElementById('monTabTxN'),
+  },
+  setPop: document.getElementById('monSetPop'),
+  setBtn: document.getElementById('btnMonSettings'),
+  rates: document.getElementById('monRate'),
   proc: document.getElementById('monProc'),
   io: document.getElementById('monIO'),
   slowSql: document.getElementById('monSlowSQL'),
@@ -1239,11 +1251,88 @@ let monExpanded = {}; // key = 表名|会话 → 展开详情
 let monTimeoutBuilt = false;
 let monSavingTimeouts = false;
 
+// 诊断区的 Tab。'' 表示「还没选过」——第一次打开时自动落到有内容的那个，
+// 之后尊重用户的选择（每 2 秒轮询不能把人家正在看的 Tab 抢走）。
+let monTab = '';
+let monTabAuto = true;
+
+// 顺序 = 页面上的顺序。锁明细放最后：它是「出事才看」的，平时先看慢SQL/慢事务。
+const MON_TABS = ['sql', 'tx', 'lock'];
+
 function toggleMonitor(force) {
   monOpen = force === undefined ? !monOpen : force;
   monPanel.classList.toggle('hidden', !monOpen);
   document.body.classList.toggle('mon-open', monOpen);
   if (monOpen) pollMonitor();
+  else setMonSettings(false);
+}
+
+// 把诊断区切到某个 Tab。manual=true 表示用户点的，记下来不再自动改。
+function setMonTab(name, manual) {
+  if (MON_TABS.indexOf(name) < 0) name = MON_TABS[0];
+  if (manual) monTabAuto = false;
+  monTab = name;
+  for (const b of monEls.tabs.querySelectorAll('.mon-tab')) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  for (const p of monPanel.querySelectorAll('.mon-panel')) {
+    p.classList.toggle('hidden', p.dataset.panel !== name);
+  }
+  updateDiagSub();
+}
+
+function monCounts() {
+  const m = monData || {};
+  return {
+    lock: (m.locks || []).length,
+    sql: (m.slowSql || []).length,
+    tx: (m.slowTx || []).length,
+  };
+}
+
+// Tab 右侧的说明文字 + 锁明细上的条数。
+// 只有锁明细带数字：「3 把锁」是个量，看得出规模；慢SQL/慢事务是 Top N 列表，
+// 数字只是「记录了几条」，挂在 Tab 上容易被读成「有 N 个问题」，先不显示。
+function updateDiagSub() {
+  const n = monCounts();
+  const waiting = (monData && monData.locks || []).some(r => (r.waiters || []).length);
+  const sub = {
+    lock: n.lock ? `${n.lock} 把锁 · 按持有时长降序 · 点行展开事务详情` : '当前没有表锁',
+    sql: n.sql ? `Top ${Math.min(n.sql, 10)} · 按执行耗时 · 点行看详情` : '还没有执行记录',
+    tx: n.tx ? `Top ${Math.min(n.tx, 10)} · 按持锁时长 · 点行看详情` : '当前没有进行中的事务',
+  };
+  for (const k of MON_TABS) {
+    const b = monEls.tabN[k];
+    if (!b) continue;
+    b.textContent = k === 'lock' && n.lock ? String(n.lock) : '';
+    b.classList.toggle('alert', k === 'lock' && waiting);
+  }
+  if (monEls.diagSub) monEls.diagSub.textContent = sub[monTab] || '';
+}
+
+// 空表不画表格：一行居中提示 + 卡片自己缩高（见 .mon-panel.is-empty）。
+function setPanelEmpty(panel, ok, empty, text) {
+  panel.classList.toggle('is-empty', empty);
+  ok.classList.toggle('hidden', !empty);
+  if (empty && text) ok.textContent = text;
+}
+
+/* 规则配置浮层：超时开关是全局安全配置，不是监控数据，
+   常年铺在页面最底部只会让人在告警时往下滚。收进右上角齿轮。 */
+function monSettingsOpen() {
+  return !!(monEls.setPop && !monEls.setPop.classList.contains('hidden'));
+}
+
+function setMonSettings(open) {
+  if (!monEls.setPop) return;
+  monEls.setPop.classList.toggle('hidden', !open);
+  if (monEls.setBtn) monEls.setBtn.classList.toggle('on', open);
+  if (open) {
+    const first = monEls.timeouts.querySelector('input');
+    if (first) first.focus();
+  }
 }
 
 // 把毫秒渲染成人话。锁明细里的时长是面板的核心指标，不能只显示 0。
@@ -1316,12 +1405,20 @@ function renderMonitor(m) {
   monEls.updated.textContent = new Date(m.nowMs || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
   renderWater(m.water || {});
   renderLayers(m.layers || {});
+  renderRates(m);
   renderProc(m);
   renderIO(m);
   renderLocks(m);
   renderSlowSQL(m);
   renderSlowTx(m);
   renderTimeouts(m.timeouts || {});
+  if (!monTab) {
+    // 第一次打开：有锁就直接看锁明细（它最先出事），否则落在第一个 Tab。
+    const n = monCounts();
+    setMonTab(n.lock ? 'lock' : 'sql', false);
+  } else {
+    updateDiagSub();
+  }
 }
 
 /* ---- 1. 水位条 ---- */
@@ -1408,7 +1505,119 @@ function renderLayers(layers) {
   }
 }
 
-/* ---- 3. 资源：进程自身 + 存储 IO ---- */
+/* ---- 3. 吞吐与连接：QPS / TPS / 连接数 ---- */
+
+// 三个数回答「库有多忙」，和上面三层的「卡在哪」是不同的问题：
+// 三层是瞬时的、告诉你现在哪里堵着；这里是走势、告诉你刚才忙成什么样。
+// 排障时最有用的组合是「等锁数一直不为 0 + QPS 掉到地板」——
+// 那不是没人来，是全被锁住了。
+function renderRates(m) {
+  const r = m.rates || {};
+  const box = monEls.rates;
+  if (!box) return;
+  box.innerHTML = '';
+  const pts = r.series || [];
+
+  const grid = el('div', 'proc-grid');
+  grid.appendChild(statCell(
+    'QPS',
+    r.sampled ? String(r.qps) : '—',
+    `峰值 ${r.peakQps || 0} · 语句/秒`,
+    '每秒成功执行的语句数，不含 BEGIN/COMMIT —— 和会话详情里的「语句数」同口径'));
+  grid.appendChild(statCell(
+    'TPS',
+    r.sampled ? String(r.tps) : '—',
+    `峰值 ${r.peakTps || 0} · 事务/秒`,
+    '每秒结束的事务数（提交 + 回滚）。QPS 高 TPS 低 = 每条语句一个自动提交事务；QPS 低 TPS 高 = 空事务多'));
+  grid.appendChild(statCell(
+    '连接',
+    String(r.conns || 0),
+    `峰值 ${r.peakConns || 0} · 会话数`,
+    '当前会话数（控制台 HTTP + PG 连接）。只涨不降要怀疑连接泄漏'));
+  box.appendChild(grid);
+
+  if (pts.length < 2) {
+    box.appendChild(el('div', 'mon-none', '曲线需要至少两个采样点（一秒一个）。'));
+    return;
+  }
+
+  box.appendChild(sparkLines(pts, [
+    { get: pt => pt.qps, color: 'var(--accent)', width: 1.4 },
+    // TPS 用虚线：自动提交时 QPS 和 TPS 完全相等，两条实线会重叠成一条，
+    // 看着像「TPS 没画出来」。虚线叠在实线上，两条都在。
+    { get: pt => pt.tps, color: 'var(--ok)', width: 1.2, opacity: 0.9, dash: '5 3' },
+  ], {
+    mode: 'zero',
+    legend: '<span class="spark-row"><i class="spark-k cpu"></i>QPS<i class="spark-k mem"></i>TPS（虚线）</span>',
+    tip: '两条线共用纵轴：都是「每秒次数」，量级天生可比。QPS 远高于 TPS 说明基本是自动提交',
+  }));
+
+  box.appendChild(sparkLines(pts, [
+    { get: pt => pt.conns, color: 'var(--warn)', width: 1.2 },
+  ], {
+    mode: 'range',
+    legend: '<span class="spark-row"><i class="spark-k conn"></i>连接数</span>',
+    tip: '纵轴取这段区间的上下界：连接数平时几乎不动，从 0 起画就只是一条贴顶直线',
+  }));
+}
+
+// 折线图。两条归一化策略：
+//   mode='zero'  —— 从 0 起，上限按峰值自适应。适合「0 本身有意义」的量（QPS/TPS、CPU 核数）。
+//   mode='range' —— 取区间上下界。适合「平时几乎不动」的量（连接数、堆大小），
+//                   否则一条贴顶直线，涨 20% 都看不出来。
+// 波动小于 2% 判为持平，把上下界人为撑开，避免把噪声画成锯齿。
+function sparkLines(points, lines, opt) {
+  const H = (opt && opt.height) || 56;
+  const W = 640, padT = 8, padB = 6;
+  const n = points.length;
+  let lo = 0, hi = 1;
+
+  if (opt.mode === 'zero') {
+    let peak = 0;
+    for (const l of lines) for (const pt of points) peak = Math.max(peak, l.get(pt) || 0);
+    hi = Math.max(1, Math.ceil(peak * 1.15));
+  } else {
+    let vlo = Infinity, vhi = 0;
+    for (const pt of points) {
+      const v = lines[0].get(pt) || 0;
+      if (v < vlo) vlo = v;
+      if (v > vhi) vhi = v;
+    }
+    if (!isFinite(vlo)) vlo = 0;
+    if (vhi - vlo <= Math.max(1, vhi * 0.02)) {
+      lo = Math.max(0, vhi - 1);
+      hi = vhi + 1;
+    } else {
+      const pad = (vhi - vlo) * 0.15;
+      lo = Math.max(0, vlo - pad);
+      hi = vhi + pad;
+    }
+  }
+
+  const X = i => (n === 1 ? 0 : (i / (n - 1)) * W);
+  const Y = v => H - padB - Math.min(1, Math.max(0, (v - lo) / (hi - lo || 1))) * (H - padT - padB);
+
+  let paths = '';
+  for (const l of lines) {
+    let d = '';
+    for (let i = 0; i < n; i++) {
+      d += (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(l.get(points[i]) || 0).toFixed(1);
+    }
+    paths += `<path d="${d}" fill="none" stroke="${l.color}" stroke-width="${l.width || 1.3}"` +
+      ` stroke-opacity="${l.opacity || 1}" stroke-linejoin="round" stroke-linecap="round"` +
+      (l.dash ? ` stroke-dasharray="${l.dash}"` : '') +
+      ` vector-effect="non-scaling-stroke"/>`;
+  }
+
+  const wrap = el('div', 'mon-spark');
+  if (opt.tip) wrap.title = opt.tip;
+  wrap.innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>` +
+    `<span class="spark-tip">${opt.legend || ''}</span>`;
+  return wrap;
+}
+
+/* ---- 4. 资源：进程自身 + 存储 IO ---- */
 
 function fmtBytes(n) {
   if (!n || n < 0) return '0 B';
@@ -1469,34 +1678,63 @@ function renderProc(m) {
   }
 }
 
-// CPU 曲线。纵轴按峰值自适应（下限 0.5 核）：
-// 固定用核数当上限的话，48 核机器上 0.1 核的曲线会完全贴底，什么形状都看不出。
-// 上限写在提示文字里，尺度信息不丢。
+// CPU + 内存曲线。两条线各自归一化，绝不共用一个纵轴：
+// 「几核」和「几 MB」量级差好几个数量级，共轴的话内存会把 CPU 压成一条贴底直线。
+// CPU 轴从 0 起（0 核是有意义的），按峰值自适应（下限 0.5 核）：固定用核数当上限的话，
+// 48 核机器上 0.1 核的曲线会完全贴底，什么形状都看不出；上限写在提示文字里，尺度不丢。
+// 内存轴取「这段区间的上下界」而不是从 0 起：堆基本是平的，从 0 起就只有一条贴顶的线，
+// 泄漏那种缓慢爬升反而看不出来。
 function sparkline(points, maxCore) {
-  const W = 300, H = 44, pad = 2;
-  let peak = 0;
-  for (const pt of points) peak = Math.max(peak, pt.cpuCore || 0);
+  const W = 640, H = 76, padT = 8, padB = 6;
+  let peak = 0, memLo = Infinity, memHi = 0;
+  for (const pt of points) {
+    peak = Math.max(peak, pt.cpuCore || 0);
+    const h = pt.heapBytes || 0;
+    memLo = Math.min(memLo, h);
+    memHi = Math.max(memHi, h);
+  }
+  if (!isFinite(memLo)) memLo = 0;
   const max = Math.max(0.5, Math.ceil(peak * 1.15 * 10) / 10);
+  // 波动小于 2% 就当平的：不然噪声被放大成锯齿，看着像内存过山车
+  const flat = memHi - memLo < Math.max(memHi * 0.02, 64 * 1024);
+  const memSpan = flat ? 0 : (memHi - memLo);
   const n = points.length;
   const x = i => (n === 1 ? 0 : (i / (n - 1)) * W);
-  const y = v => H - pad - Math.min(1, Math.max(0, v / max)) * (H - pad * 2);
+  const inner = H - padT - padB;
+  const y = v => H - padB - Math.min(1, Math.max(0, v / max)) * inner;
+  const yMem = v => flat || !memSpan
+    ? padT + inner / 2
+    : H - padB - ((v - memLo) / memSpan) * inner;
 
-  let d = '';
+  let dCpu = '', dMem = '';
   for (let i = 0; i < n; i++) {
-    d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(points[i].cpuCore || 0).toFixed(1);
+    dCpu += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(points[i].cpuCore || 0).toFixed(1);
+    dMem += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + yMem(points[i].heapBytes || 0).toFixed(1);
   }
-  const last = points[n - 1].cpuCore || 0;
+  const last = points[n - 1] || {};
+  const cpuNow = last.cpuCore || 0;
+  const memNow = last.heapBytes || 0;
 
   const wrap = el('div', 'proc-spark');
-  wrap.title = `最近 ${n} 个秒级采样点（约 ${n} 秒）· 峰值 ${peak.toFixed(2)} 核 · 纵轴 0 ~ ${max} 核`;
+  wrap.title = `最近 ${n} 个秒级采样点（约 ${n} 秒）。CPU 纵轴 0~${max} 核；`
+    + `内存纵轴 ${flat ? '持平' : fmtBytes(memLo) + '~' + fmtBytes(memHi)}。`
+    + '两条线各自归一化，只比形状不比高低。';
   wrap.innerHTML =
     `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` +
     `<line x1="0" y1="${y(max).toFixed(1)}" x2="${W}" y2="${y(max).toFixed(1)}" ` +
     `stroke="var(--border-soft)" stroke-width="0.5" stroke-dasharray="3 3"/>` +
-    `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.2" ` +
+    `<path d="${dMem}" fill="none" stroke="var(--ok)" stroke-opacity="0.7" stroke-width="1" ` +
+    `stroke-linejoin="round" stroke-dasharray="${flat ? '2 3' : '0'}" ` +
+    `vector-effect="non-scaling-stroke"/>` +
+    `<path d="${dCpu}" fill="none" stroke="var(--accent)" stroke-width="1.4" ` +
     `stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
     `</svg>` +
-    `<span class="spark-tip">CPU 曲线 · 峰值 ${peak.toFixed(2)} · 现在 ${last.toFixed(2)} 核 · 纵轴 0~${max}</span>`;
+    `<span class="spark-tip">` +
+    `<span class="spark-row"><i class="spark-k cpu"></i>CPU 峰值 ${peak.toFixed(2)} · 现在 ${cpuNow.toFixed(2)} 核` +
+    `（纵轴 0~${max}）</span>` +
+    `<span class="spark-row"><i class="spark-k mem"></i>内存 峰值 ${fmtBytes(memHi)} · 现在 ${fmtBytes(memNow)}` +
+    (flat ? '（波动小于 2%，按持平画）' : `（纵轴 ${fmtBytes(memLo)}~${fmtBytes(memHi)}）`) +
+    `</span></span>`;
   return wrap;
 }
 
@@ -1581,19 +1819,18 @@ function renderIO(m) {
 function renderLocks(m) {
   const rows = m.locks || [];
   const body = monEls.lockBody;
+  const panel = document.getElementById('monTabLock');
   body.innerHTML = '';
-  monEls.lockSub.textContent = rows.length
-    ? `${rows.length} 把锁 · 按持有时长降序 · 点行展开事务详情`
-    : '当前没有表锁';
 
   if (!rows.length) {
-    const tr = el('tr', 'mon-empty-row');
-    const td = el('td', '', '当前没有表锁（所有会话都空闲且没有事务）。');
-    td.colSpan = 8;
-    tr.appendChild(td);
-    body.appendChild(tr);
+    // 一行居中提示就够，别留一张只有表头的空表格占掉半屏
+    setPanelEmpty(panel, monEls.lockOk, true,
+      '当前没有表锁，所有会话都空闲（有事务或等锁时会自动展开）');
+    updateDiagSub();
     return;
   }
+  setPanelEmpty(panel, monEls.lockOk, false);
+  updateDiagSub();
 
   rows.forEach((r, i) => {
     const key = r.table + '|' + r.session;
@@ -1750,12 +1987,16 @@ function fmtCount(n) {
 // 一行一个样本。表格只放「扫一眼够用」的四列，其余全在详情里。
 function renderSlowSQL(m) {
   const box = monEls.slowSql;
+  const panel = document.getElementById('monTabSql');
   box.innerHTML = '';
   const rows = m.slowSql || [];
   if (!rows.length) {
-    box.appendChild(emptyRow(4, '还没有执行记录。'));
+    setPanelEmpty(panel, monEls.sqlOk, true, '还没有执行记录（跑几条 SQL 就会出现）');
+    updateDiagSub();
     return;
   }
+  setPanelEmpty(panel, monEls.sqlOk, false);
+  updateDiagSub();
   rows.forEach((r, i) => {
     const tr = el('tr');
     if (r.running) tr.classList.add('running');
@@ -1773,12 +2014,16 @@ function renderSlowSQL(m) {
 
 function renderSlowTx(m) {
   const box = monEls.slowTx;
+  const panel = document.getElementById('monTabTx');
   box.innerHTML = '';
   const rows = m.slowTx || [];
   if (!rows.length) {
-    box.appendChild(emptyRow(5, '当前没有进行中的事务。'));
+    setPanelEmpty(panel, monEls.txOk, true, '当前没有进行中的事务（BEGIN 之后会出现在这里）');
+    updateDiagSub();
     return;
   }
+  setPanelEmpty(panel, monEls.txOk, false);
+  updateDiagSub();
   rows.forEach((r, i) => {
     const tr = el('tr');
     tr.title = '点击查看详情';
@@ -1793,15 +2038,6 @@ function renderSlowTx(m) {
     tr.addEventListener('click', () => openSlowDetail('tx', i));
     box.appendChild(tr);
   });
-}
-
-// 空表占位：跨列一行，不然 tbody 里没 tr 会塌成一条边。
-function emptyRow(cols, text) {
-  const tr = el('tr');
-  const td = el('td', 'mon-none', text);
-  td.colSpan = cols;
-  tr.appendChild(td);
-  return tr;
 }
 
 /* ---- 5.1 详情：点一行看「到底慢在哪」 ---- */
@@ -2109,6 +2345,24 @@ document.getElementById('btnMonitor').addEventListener('click', () => toggleMoni
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
 document.getElementById('btnMonRefresh').addEventListener('click', () => pollMonitor());
 document.getElementById('btnMonSaveTimeouts').addEventListener('click', saveTimeouts);
+
+// 齿轮：点开 / 再点收起；点浮层外面也收起（点到输入框里不算外面）
+document.getElementById('btnMonSettings').addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  setMonSettings(!monSettingsOpen());
+});
+document.getElementById('btnMonSetClose').addEventListener('click', () => setMonSettings(false));
+monPanel.addEventListener('click', (ev) => {
+  if (!monSettingsOpen()) return;
+  if (monEls.setPop.contains(ev.target) || monEls.setBtn.contains(ev.target)) return;
+  setMonSettings(false);
+});
+
+// 诊断区 Tab
+monEls.tabs.addEventListener('click', (ev) => {
+  const b = ev.target.closest('.mon-tab');
+  if (b) setMonTab(b.dataset.tab, true);
+});
 document.getElementById('btnCommit').addEventListener('click', () => txAction('commit'));
 document.getElementById('btnRollback').addEventListener('click', () => txAction('rollback'));
 
@@ -2730,6 +2984,8 @@ document.addEventListener('keydown', e => {
   // （设置页里的两个按钮都会弹这个确认框，叠在一起）。
   const cfOpen = !document.getElementById('confirmModal').classList.contains('hidden');
   if (e.key === 'Escape' && !cfOpen && !settingsModal.classList.contains('hidden')) closeSettings();
+  // Esc 先收浮层，再关面板（一层一层退，别一下全关掉）
+  if (e.key === 'Escape' && monSettingsOpen()) { setMonSettings(false); return; }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
 });
 

@@ -514,6 +514,9 @@ type Monitor struct {
 	Counters Counters      `json:"counters"`
 	Proc     ProcStats     `json:"proc"`
 	IO       IOProfile     `json:"io"`
+	// Rates 是吞吐走势（QPS / TPS / 连接数）。和 Proc 分开：一个是「机器够不够」，
+	// 一个是「库有多忙」，排障时看的是两个不同的问题。
+	Rates RateStats `json:"rates"`
 	// ClockGranNs 是本机时钟步进：前端把小于它的时长显示成「<0.20ms」，
 	// 不然一堆 0.00ms 会让人以为测量坏了。
 	ClockGranNs int64 `json:"clockGranNs"`
@@ -795,9 +798,10 @@ func (d *DB) Monitor(t TimeoutStatus) Monitor {
 
 	// ---- 进程与存储资源（第一档：全标准库）----
 	if d.proc != nil {
-		proc, rates := d.proc.stats()
+		proc, rates, thru := d.proc.stats()
 		m.Proc = proc
 		m.IO.Rates = rates
+		m.Rates = thru
 	}
 	if d.Store != nil {
 		m.IO.Fsync = d.Store.FsyncProfile()

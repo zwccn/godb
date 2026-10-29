@@ -239,6 +239,9 @@ type DB struct {
 
 	// act 是监控面板的数据源（会话活动状态机 + 时长样本 + 慢 SQL 记录）。
 	act *recorder
+	// stmtTotal 是累计执行成功的语句数（不含 BEGIN/COMMIT 这类事务控制语句，
+	// 口径和 sess.NoteStmt 一致）。监控面板的 QPS 靠它两次采样求差。
+	stmtTotal atomic.Int64
 	// proc 是进程/存储资源的秒级采样器（第一档：全标准库，零 cgo）。
 	proc *procSampler
 	// timeouts 是面板底部的四个超时开关，热更新（0 = 不限）。
@@ -568,8 +571,11 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 		}
 		// 事务控制语句不计入「已执行语句数」：面板上那个数字要回答
 		// 「这个事务干了几件事」，BEGIN/COMMIT 本身不算事。
+		// stmtTotal 是 QPS 的数据源，同一口径：口径分叉的话，
+		// 面板上的 QPS 会和会话详情里的语句数对不上。
 		if _, isTxCtl := st.(*sql.TxStmt); !isTxCtl {
 			sess.NoteStmt()
+			d.stmtTotal.Add(1)
 		}
 		out = append(out, res)
 	}

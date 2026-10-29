@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"godb/catalog"
@@ -17,6 +18,8 @@ type VacuumReport struct {
 	// Pages 是整理之后的页数，Bytes 是页文件大小。
 	Pages int
 	Bytes int64
+	// IndexesRebuilt 是顺手重建的索引个数（空叶占比过阈值时才会做）。
+	IndexesRebuilt int
 }
 
 // Vacuum 整理表数据：页内空洞回收 + 尾部空页回收。
@@ -104,6 +107,13 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 		td.unlockPages()
 		if err != nil {
 			return out, err
+		}
+		// 6) 索引碎片：删除只摘键不合并页，空叶攒多了就顺手整棵重建
+		//    （必须在放开 pageMu 之后做：重建要走 rowAt，那是读锁）
+		if td.IndexFragmented() {
+			td.RebuildIndex(t)
+			rep.IndexesRebuilt = len(td.indexTrees)
+			log.Printf("表 %s：索引空叶过多，已顺手重建（%d 个）", t.Name, rep.IndexesRebuilt)
 		}
 		rep.Reclaimed = int(rec)
 

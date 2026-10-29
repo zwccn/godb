@@ -176,3 +176,37 @@ func TestIndexFilesCleanedUp(t *testing.T) {
 		t.Fatalf("DROP TABLE 之后索引文件应清空，实际 %d", got)
 	}
 }
+
+// 大批删除之后 VACUUM 要顺手重建碎片索引（延迟合并只摘键、不合并页）。
+func TestVacuumRebuildsFragmentedIndex(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{Lock: testOptions().Lock})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	run(t, d, "s", `CREATE TABLE vf (id INTEGER PRIMARY KEY, v TEXT)`)
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO vf VALUES `)
+	for i := 1; i <= 3000; i++ {
+		if i > 1 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, "(%d,'v%d')", i, i)
+	}
+	run(t, d, "s", sb.String())
+	run(t, d, "s", `CHECKPOINT`)
+	td := d.Store.Table("vf")
+	before := td.IndexPages()
+	run(t, d, "s", `DELETE FROM vf WHERE id > 100`)
+	run(t, d, "s", `CHECKPOINT`)
+	run(t, d, "s", `VACUUM vf`)
+	after := td.IndexPages()
+	t.Logf("索引页：删前 %d，删后 VACUUM %d", before, after)
+	if after == 0 || after >= before {
+		t.Fatalf("VACUUM 之后索引没缩小：%d → %d", before, after)
+	}
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM vf`), []string{"100"})
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM vf WHERE id = 100`), []string{"1"})
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM vf WHERE id = 101`), []string{"0"})
+}

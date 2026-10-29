@@ -1609,24 +1609,58 @@ table.grid td.bool { color: var(--warn-text); }
   animation: monPulse 1.4s ease-in-out infinite;
 }
 
-/* 有内容时给表格区一个下限（约三行）：锁明细 8 列、慢SQL 4 列，两者行数一多一少，
-   切 Tab 时下面的卡片高度会来回跳，跳一下视线就丢一次位置。 */
-.mon-panel { min-height: calc(120px * var(--fs)); }
+/* 三张表都按 10 行一页（见 app.js 的 MON_PAGE_SIZE）。卡片高度因此是固定的
+   「表头 + 10 行 + 分页条」，没数据时也占同样的高度：切 Tab、翻页、数据从 0 条
+   变 1 条时下面的卡片都不动。行高随 --fs 缩放，所以整体乘 --fs
+   （326 = 表头 27 + 10 行 × 27 + 分页条 30，按 --fs=1 折算）。
+   flex 是为了让内容少的时候表格区不拉伸、分页条贴底（margin-top:auto），
+   否则 pager 会紧跟在一两行数据后面悬在半空。 */
+.mon-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(326px * var(--fs));
+}
+.mon-panel > .mon-lockwrap,
+.mon-panel > .mon-tw,
+.mon-panel > .mon-ok { flex: 1 1 auto; }
 
-/* 空态：表格整块收起来，只留一行话 —— 但这一行要撑到和三行表格差不多高
-   （下限同样保留），否则切 Tab 时卡片从 193px 掉到 97px，下面的卡片跟着跳。 */
+/* 空态：表格整块收起来，只留一行话，垂直居中在这 10 行的高度里。 */
 .mon-panel.is-empty .mon-lockwrap,
 .mon-panel.is-empty .mon-tw { display: none; }
 .mon-ok {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: calc(120px * var(--fs));
   padding: 13px 12px;
   text-align: center;
   font-size: calc(12px * var(--fs));
   color: var(--text-3);
 }
+
+/* 分页条：不到一页时藏着（给 JS 的 hidden），否则才占这一行。 */
+.mon-pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: auto;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border-soft);
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
+}
+.pg-info { margin-right: auto; font-variant-numeric: tabular-nums; }
+.pg-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: calc(11px * var(--fs));
+  cursor: pointer;
+}
+.pg-btn:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
+.pg-btn:disabled { opacity: .4; cursor: default; }
 
 /* ---- 3. 锁明细表 ---- */
 .mon-lockwrap { overflow-x: auto; }

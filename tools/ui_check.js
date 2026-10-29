@@ -1039,6 +1039,37 @@ class CDP {
       wide.w > 200 && wide.toggle === 'none' && !wide.cls,
       `侧栏 ${wide.w}px，☰ ${wide.toggle}`);
 
+    // 诊断区三张表：10 行一页，空态和满页一样高 —— 高度不一致，切 Tab / 翻页就会跳。
+    // 数据是注入的（走 renderSlowSQL 同一条路径），不依赖库里真有多少条慢 SQL。
+    const pg = await cdp.eval(`(() => {
+      toggleMonitor(true);
+      setMonTab('sql', true);
+      const panel = document.getElementById('monTabSql');
+      const pager = document.getElementById('monSqlPager');
+      const body = document.getElementById('monSlowSQL');
+      const setRows = n => {
+        monData = { slowSql: Array.from({ length: n }, (_, i) => ({
+          tookNs: 1e6, scanned: 10, write: false, sql: 'SELECT ' + i })) };
+        renderSlowSQL(monData);
+        return Math.round(panel.getBoundingClientRect().height);
+      };
+      const emptyH = setRows(0);
+      const fullH = setRows(15);
+      const pageRows = body.querySelectorAll('tr').length;
+      pager.querySelectorAll('button')[1].click();
+      return {
+        emptyH, fullH, pageRows,
+        page2Rows: body.querySelectorAll('tr').length,
+        page2First: body.querySelector('tr').textContent,
+        pagerText: pager.textContent,
+      };
+    })()`);
+    check('诊断区空态与满页同高', pg.emptyH === pg.fullH && pg.emptyH > 300,
+      `空 ${pg.emptyH}px / 满 ${pg.fullH}px`);
+    check('一页只放 10 行', pg.pageRows === 10, `${pg.pageRows} 行`);
+    check('翻页从第 11 条起', pg.page2Rows === 5 && pg.page2First.includes('SELECT 10'),
+      `${pg.page2Rows} 行，首行 "${pg.page2First}"`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

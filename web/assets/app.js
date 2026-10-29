@@ -1236,6 +1236,11 @@ const monEls = {
   io: document.getElementById('monIO'),
   slowSql: document.getElementById('monSlowSQL'),
   slowTx: document.getElementById('monSlowTx'),
+  pager: {
+    lock: document.getElementById('monLockPager'),
+    sql: document.getElementById('monSqlPager'),
+    tx: document.getElementById('monTxPager'),
+  },
   timeouts: document.getElementById('monTimeouts'),
   timeoutHint: document.getElementById('monTimeoutHint'),
   db: document.getElementById('monDB'),
@@ -1300,8 +1305,8 @@ function updateDiagSub() {
   const waiting = (monData && monData.locks || []).some(r => (r.waiters || []).length);
   const sub = {
     lock: n.lock ? `${n.lock} 把锁 · 按持有时长降序 · 点行展开事务详情` : '当前没有表锁',
-    sql: n.sql ? `Top ${Math.min(n.sql, 10)} · 按执行耗时 · 点行看详情` : '还没有执行记录',
-    tx: n.tx ? `Top ${Math.min(n.tx, 10)} · 按持锁时长 · 点行看详情` : '当前没有进行中的事务',
+    sql: n.sql ? `共 ${n.sql} 条 · 按执行耗时 · 点行看详情` : '还没有执行记录',
+    tx: n.tx ? `共 ${n.tx} 条 · 按持锁时长 · 点行看详情` : '当前没有进行中的事务',
   };
   for (const k of MON_TABS) {
     const b = monEls.tabN[k];
@@ -1312,12 +1317,61 @@ function updateDiagSub() {
   if (monEls.diagSub) monEls.diagSub.textContent = sub[monTab] || '';
 }
 
-// 空表不画表格：一行居中提示，占位高度和三行表格差不多（见 .mon-ok 的
+// 空表不画表格：一行居中提示，占位高度和一页 10 行差不多（见 .mon-panel 的
 // min-height），免得切 Tab 时卡片忽高忽低。
 function setPanelEmpty(panel, ok, empty, text) {
   panel.classList.toggle('is-empty', empty);
   ok.classList.toggle('hidden', !empty);
   if (empty && text) ok.textContent = text;
+}
+
+/* ---- 诊断区表格分页 ----
+   三张表都按 10 行一页：慢SQL 环最多 256 条，全平铺会把面板拉成一屏半，而真正
+   要看的永远是前几条。页码按 Tab 各存一份 —— 切走再切回来还在原来那页。 */
+const MON_PAGE_SIZE = 10;
+const monPage = { sql: 0, tx: 0, lock: 0 };
+
+// 取当前页的行。rows 是后端给的完整列表，这里只切片、不重新请求。
+// 页码越界（数据变少 / 翻到最后一页后记录被挤掉）时收到最后一页，不留空页。
+function monPageRows(kind, rows) {
+  const pages = Math.max(1, Math.ceil(rows.length / MON_PAGE_SIZE));
+  if (monPage[kind] > pages - 1) monPage[kind] = pages - 1;
+  if (monPage[kind] < 0) monPage[kind] = 0;
+  const start = monPage[kind] * MON_PAGE_SIZE;
+  return { slice: rows.slice(start, start + MON_PAGE_SIZE), start, pages, total: rows.length };
+}
+
+// 分页条。只要有一行数据就显示，一页装得下时两个按钮都禁用 —— 这样「表格区」
+// 的高度是恒定的（表头 + 10 行 + 这一条），数据从 3 条变 15 条、切 Tab、翻页
+// 都不会让卡片长高或缩水。空态才藏起来（那时整块由 .mon-ok 占位）。
+function renderPager(kind, pages, total) {
+  const box = monEls.pager[kind];
+  if (!box) return;
+  box.innerHTML = '';
+  if (!total) {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  box.appendChild(el('span', 'pg-info',
+    `第 ${monPage[kind] + 1}/${pages} 页 · 共 ${total} 条`));
+
+  const go = delta => {
+    monPage[kind] += delta;
+    // 只重画这一张表：翻页跟其它卡片无关，没必要整块重渲染（那还会让
+    // 正在展开的锁详情、其它表格的滚动位置一起闪一下）。
+    const draw = { lock: renderLocks, sql: renderSlowSQL, tx: renderSlowTx }[kind];
+    if (draw && monData) draw(monData);
+  };
+  const mk = (label, disabled, delta) => {
+    const b = el('button', 'pg-btn', label);
+    b.type = 'button';
+    b.disabled = disabled;
+    b.addEventListener('click', () => go(delta));
+    box.appendChild(b);
+  };
+  mk('‹ 上一页', monPage[kind] <= 0, -1);
+  mk('下一页 ›', monPage[kind] >= pages - 1, +1);
 }
 
 /* 规则配置浮层：超时开关是全局安全配置，不是监控数据，
@@ -1823,8 +1877,10 @@ function renderLocks(m) {
   const panel = document.getElementById('monTabLock');
   body.innerHTML = '';
 
+  const pg = monPageRows('lock', rows);
+  renderPager('lock', pg.pages, pg.total);
+
   if (!rows.length) {
-    // 一行居中提示就够，别留一张只有表头的空表格占掉半屏
     setPanelEmpty(panel, monEls.lockOk, true,
       '当前没有表锁，所有会话都空闲（有事务或等锁时会自动展开）');
     updateDiagSub();
@@ -1833,7 +1889,7 @@ function renderLocks(m) {
   setPanelEmpty(panel, monEls.lockOk, false);
   updateDiagSub();
 
-  rows.forEach((r, i) => {
+  pg.slice.forEach((r, i) => {
     const key = r.table + '|' + r.session;
     const tr = el('tr', 'mon-lock-row');
     if (monExpanded[key]) tr.classList.add('open');
@@ -1991,6 +2047,10 @@ function renderSlowSQL(m) {
   const panel = document.getElementById('monTabSql');
   box.innerHTML = '';
   const rows = m.slowSql || [];
+
+  const pg = monPageRows('sql', rows);
+  renderPager('sql', pg.pages, pg.total);
+
   if (!rows.length) {
     setPanelEmpty(panel, monEls.sqlOk, true, '还没有执行记录（跑几条 SQL 就会出现）');
     updateDiagSub();
@@ -1998,7 +2058,7 @@ function renderSlowSQL(m) {
   }
   setPanelEmpty(panel, monEls.sqlOk, false);
   updateDiagSub();
-  rows.forEach((r, i) => {
+  pg.slice.forEach((r, i) => {
     const tr = el('tr');
     if (r.running) tr.classList.add('running');
     tr.title = '点击查看详情';
@@ -2008,7 +2068,9 @@ function renderSlowSQL(m) {
     tr.appendChild(el('td', 'c-num', r.scanned > 0 ? fmtCount(r.scanned) : '—'));
     const sql = el('td', 'c-sql', r.sql || '—');
     tr.appendChild(sql);
-    tr.addEventListener('click', () => openSlowDetail('sql', i));
+    // 详情按「完整列表」的下标定位：openSlowDetail 拿的是 monData.slowSql[idx]，
+    // 用页内下标会把第 2 页的第 1 行打开成第 1 页的第 1 行。
+    tr.addEventListener('click', () => openSlowDetail('sql', pg.start + i));
     box.appendChild(tr);
   });
 }
@@ -2018,6 +2080,10 @@ function renderSlowTx(m) {
   const panel = document.getElementById('monTabTx');
   box.innerHTML = '';
   const rows = m.slowTx || [];
+
+  const pg = monPageRows('tx', rows);
+  renderPager('tx', pg.pages, pg.total);
+
   if (!rows.length) {
     setPanelEmpty(panel, monEls.txOk, true, '当前没有进行中的事务（BEGIN 之后会出现在这里）');
     updateDiagSub();
@@ -2025,7 +2091,7 @@ function renderSlowTx(m) {
   }
   setPanelEmpty(panel, monEls.txOk, false);
   updateDiagSub();
-  rows.forEach((r, i) => {
+  pg.slice.forEach((r, i) => {
     const tr = el('tr');
     tr.title = '点击查看详情';
     tr.appendChild(el('td', 'c-sess mono', sessionShort(r.session)));
@@ -2036,7 +2102,7 @@ function renderSlowTx(m) {
     tr.appendChild(el('td', 'c-num', fmtMs(r.heldMs)));
     tr.appendChild(el('td', 'c-num', fmtMs(r.idleMs)));
     tr.appendChild(el('td', 'c-sql mono', r.lastSql || '—'));
-    tr.addEventListener('click', () => openSlowDetail('tx', i));
+    tr.addEventListener('click', () => openSlowDetail('tx', pg.start + i));
     box.appendChild(tr);
   });
 }

@@ -34,6 +34,43 @@ type Options struct {
 	Progress func(msg string)
 }
 
+// execVacuum 处理 VACUUM [table]。
+//
+// 整理页内空洞 + 回收尾部空页，**不动 RID**（索引里存的就是槽位号）。
+// 和 PostgreSQL 一样不能在事务块里跑：它改的是磁盘上的页，回滚不了。
+func (d *DB) execVacuum(sess *txn.Session, v *sql.Vacuum) (*exec.Result, error) {
+	if sess.InTx() {
+		return nil, fmt.Errorf("VACUUM cannot run inside a transaction block")
+	}
+	start := hrtime.Now()
+	reps, err := d.Store.Vacuum(v.Table)
+	if err != nil {
+		return nil, err
+	}
+	res := &exec.Result{
+		Command: "VACUUM",
+		Tag:     "VACUUM",
+		Columns: []exec.Column{
+			{Name: "table", Type: "text"},
+			{Name: "pages_compacted", Type: "bigint"},
+			{Name: "pages_reclaimed", Type: "bigint"},
+			{Name: "pages", Type: "bigint"},
+			{Name: "bytes", Type: "bigint"},
+		},
+		TookNs: hrtime.Since(start),
+	}
+	for _, r := range reps {
+		res.Rows = append(res.Rows, []interface{}{
+			r.Table, int64(r.Compacted), int64(r.Reclaimed), int64(r.Pages), r.Bytes,
+		})
+	}
+	res.RowCount = len(res.Rows)
+	if len(res.Rows) == 0 {
+		res.Message = "没有需要整理的表（都没落过盘）"
+	}
+	return res, nil
+}
+
 // execCheckpoint 处理 CHECKPOINT / FLUSH 语句：把 WAL 刷盘并写一份全量快照。
 func (d *DB) execCheckpoint(sess *txn.Session) (*exec.Result, error) {
 	if sess.InTx() {
@@ -511,6 +548,9 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 
 	if _, ok := st.(*sql.Checkpoint); ok {
 		return d.execCheckpoint(sess)
+	}
+	if v, ok := st.(*sql.Vacuum); ok {
+		return d.execVacuum(sess, v)
 	}
 	// ANALYZE：收集简单统计（行数、列基数），写进 syscat 供 pg_stats / pg_stat 使用。
 	if an, ok := st.(*sql.Analyze); ok {

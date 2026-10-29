@@ -504,6 +504,51 @@ func (tp *tablePages) reset() error {
 	return nil
 }
 
+// vacuumPages 逐页整理空洞（把删掉的行占的字节收回来），返回整理过的页数
+// 和要写进 WAL 的全页镜像。
+//
+// 只搬元组字节，不动槽位目录 —— 所以 RID（槽位号）在这一步完全不受影响，
+// 索引、loc 目录、byPage 都不用改。
+func (tp *tablePages) vacuumPages() (int, []pageImage, error) {
+	n := tp.pf.pageCount()
+	var fpis []pageImage
+	compacted := 0
+	for page := uint32(0); page < n; page++ {
+		f, err := tp.fetch(page)
+		if err != nil {
+			return compacted, fpis, err
+		}
+		f.latch.RLock()
+		p, err := decodeOrInitPage(f.data, page)
+		f.latch.RUnlock()
+		if err != nil {
+			tp.pool.unpin(f, false)
+			return compacted, fpis, err
+		}
+		if p.holeBytes() == 0 {
+			tp.pool.unpin(f, false)
+			continue
+		}
+		// 防撕裂：改这一页之前先取整页镜像（和写入路径同一套规则）
+		img, err := tp.noteFPI(page)
+		if err != nil {
+			tp.pool.unpin(f, false)
+			return compacted, fpis, err
+		}
+		if img != nil {
+			fpis = append(fpis, pageImage{page: page, data: img})
+		}
+		p.compact()
+		buf := p.encode()
+		f.latch.Lock()
+		copy(f.data, buf)
+		f.latch.Unlock()
+		tp.pool.unpin(f, true)
+		compacted++
+	}
+	return compacted, fpis, nil
+}
+
 // reclaim 回收「整页都是空的」页：把它们从文件里摘掉（第 3 期的 VACUUM 用）。
 // 现在只整理文件尾部：中间的空页留在原位（页号不能动，RID 目录指着它）。
 func (tp *tablePages) reclaim() (uint32, error) {

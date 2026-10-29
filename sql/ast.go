@@ -126,6 +126,10 @@ type Truncate struct{ Table string }
 // 它不改数据，只影响持久化时机。
 type Checkpoint struct{}
 
+// Vacuum 对应 VACUUM [table]：整理页内空洞、回收尾部空页。
+// Table 为空表示「所有已加载的表」。
+type Vacuum struct{ Table string }
+
 // Analyze 对应 ANALYZE [table, ...]：godb 没有统计信息，识别后直接成功。
 type Analyze struct{}
 
@@ -354,6 +358,7 @@ func (*CreateTable) stmtNode()    {}
 func (*DropTable) stmtNode()      {}
 func (*AlterTable) stmtNode()     {}
 func (*Truncate) stmtNode()       {}
+func (*Vacuum) stmtNode()         {}
 func (*Checkpoint) stmtNode()     {}
 func (*Analyze) stmtNode()        {}
 func (*Show) stmtNode()           {}

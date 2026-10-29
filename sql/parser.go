@@ -186,6 +186,25 @@ func (p *parser) parseStatement() (Statement, error) {
 	case "CHECKPOINT", "FLUSH":
 		p.pos++
 		return &Checkpoint{}, nil
+	case "VACUUM":
+		p.pos++
+		// VACUUM 后面可以带一个表名（PG 里还能带 FULL/ANALYZE 之类，
+		// 这里只认表名，其它修饰词直接跳过 —— 别让客户端因此报语法错误）。
+		v := &Vacuum{}
+		for p.peek().Kind == Word {
+			w := strings.ToUpper(p.peek().Text)
+			if w == "FULL" || w == "FREEZE" || w == "VERBOSE" || w == "ANALYZE" {
+				p.pos++
+				continue
+			}
+			name, err := p.tableName()
+			if err != nil {
+				return nil, err
+			}
+			v.Table = name
+			break
+		}
+		return v, nil
 	case "ANALYZE":
 		p.pos++
 		// ANALYZE [VERBOSE] [tbl | (tbl, ...)]：我们没有统计信息，接受并忽略

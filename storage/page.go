@@ -270,6 +270,25 @@ func (p *page) del(slot int) error {
 // 只有 off 会变 —— 这也正是「槽位目录 + 变长元组」的意义。
 //
 // 先搬到临时缓冲区再整体写回：直接原地搬，A 的目标位置可能压在还没搬的 B 上。
+// holeBytes 返回「被删掉的行留下的空洞」占了多少字节。
+//
+// 页里删一行只是把槽位长度置 0，字节还留在元组区 —— 这些洞只能靠 compact
+// 收回来。返回 0 表示这一页没有洞，不用整理。
+func (p *page) holeBytes() int {
+	used := 0
+	for _, s := range p.slots {
+		if s.len == 0 {
+			continue
+		}
+		used += int(s.len)
+	}
+	free := p.freeHi - pageHeaderSize - len(p.slots)*slotEntrySize
+	if free < 0 {
+		return 0
+	}
+	return free - used
+}
+
 func (p *page) compact() {
 	tmp := make([]byte, PageSize)
 	dst := PageSize

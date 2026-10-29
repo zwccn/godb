@@ -53,6 +53,12 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 				addIntent(out, s.Table, lock.Exclusive)
 			}
 		}
+	case *sql.Vacuum:
+		// 带表名就锁那张表（整理页的时候不能被同一个表上的写事务插进来）；
+		// 不带表名（VACUUM 全库）由 SchemaMu 读锁 + CommitMu 兜住。
+		if s.Table != "" {
+			addIntent(out, s.Table, lock.Exclusive)
+		}
 	case *sql.TxStmt, *sql.SavepointStmt, *sql.Checkpoint, *sql.Analyze, *sql.Show, *sql.SetStmt, *sql.SessionCleanup:
 		// 事务控制、保存点、CHECKPOINT、ANALYZE、SHOW/SET、DISCARD/RESET/DEALLOCATE 都不需要表锁
 	}

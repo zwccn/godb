@@ -259,16 +259,7 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 	}
 
 	// 5) 写 meta：记下「磁盘已经覆盖到哪个代次」+ 每表行数。
-	tables := make(map[string]metaTable, len(s.Cat.Tables))
-	for _, t := range s.Cat.Tables {
-		key := cleanName(t.Name)
-		rows := s.tableRows[key]
-		if td := s.Data[key]; td != nil && s.loaded[key] {
-			rows = td.Live
-		}
-		tables[key] = metaTable{ID: t.ID, Rows: rows}
-	}
-	if err := s.writeMeta(gen, tables); err != nil {
+	if err := s.writeMeta(gen, s.metaTablesLocked()); err != nil {
 		return err
 	}
 
@@ -298,6 +289,23 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 	}
 	s.noteCheckpointLocked(reason, hrtime.Since(t0), bytes, pages)
 	return nil
+}
+
+// metaTablesLocked 组装 meta.json 里的每表信息（行数用内存里的 Live，
+// 没加载的表用上次落盘时记的行数）。
+func (s *Store) metaTablesLocked() map[string]metaTable {
+	tables := make(map[string]metaTable, len(s.Cat.Tables))
+	s.loadMu.RLock()
+	for _, t := range s.Cat.Tables {
+		key := cleanName(t.Name)
+		rows := s.tableRows[key]
+		if td := s.Data[key]; td != nil && s.loaded[key] {
+			rows = td.Live
+		}
+		tables[key] = metaTable{ID: t.ID, Rows: rows}
+	}
+	s.loadMu.RUnlock()
+	return tables
 }
 
 // cleanupOrphanFiles 删掉已 DROP 的表留下的数据文件。

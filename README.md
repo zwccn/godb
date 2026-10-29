@@ -52,7 +52,7 @@ go build -o godb.exe .
 
 | 类别 | 支持 |
 |---|---|
-| 持久化 | `CHECKPOINT` / `FLUSH`（刷脏页 + 记代次 + 轮转 WAL，返回代次与统计）；`ANALYZE`（识别并成功，暂无统计信息） |
+| 持久化 | `CHECKPOINT` / `FLUSH`（刷脏页 + 记代次 + 轮转 WAL，返回代次与统计）；`VACUUM [表]`（整理页内空洞 + 回收尾部空页，返回整理/回收的页数）；`ANALYZE`（识别并成功，暂无统计信息） |
 | 索引 | `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验；**`ORDER BY` 命中 PK/NOT NULL 索引前缀时可免排序，带 `LIMIT` 还能提前停（Top-N 分页）** |
 | 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
@@ -332,7 +332,7 @@ SELECT * FROM emp    →  employees（表在前），后面才是 E 开头的关
   | 7 | 表结构与索引（`ALTER`、`CREATE INDEX`、约束、`COMMENT ON`） |
   | 8 | 事务与并发（`BEGIN`/`COMMIT`、`SAVEPOINT`、隔离级别、表级锁） |
   | 9 | 常用函数与类型 |
-  | 10 | 诊断与维护（`EXPLAIN [ANALYZE]`、`CHECKPOINT`、系统目录） |
+  | 10 | 诊断与维护（`EXPLAIN [ANALYZE]`、`CHECKPOINT`、`VACUUM`、系统目录） |
   | 11 | 明确不支持（递归 CTE、窗口函数、`FULL`/`NATURAL JOIN`、行级锁、`LATERAL`） |
 
 - **上手示例**：7 个带一句说明的卡片（全部员工 / 部门统计 / 左连接 / 事务演示 /
@@ -1154,9 +1154,27 @@ checkpoint 的顺序是「落盘 → 轮转 WAL」。如果崩在两步之间，
 CHECKPOINT;
 ```
 
-把 WAL 里未落盘的记录 `fsync`，然后写一份全量快照并轮转 WAL。返回代次号、行数、快照字节数等统计。事务块里执行会报错（和 PostgreSQL 一致）。进程正常退出时也会自动做一次。
+把 WAL 里未落盘的记录 `fsync`，然后把待落盘行写进页、刷脏页、记代次、轮转 WAL。返回代次号、行数、写入字节数等统计。事务块里执行会报错（和 PostgreSQL 一致）。进程正常退出时也会自动做一次。
 
-> 顺带说明：这条语句是给"想显式控制落盘时机"用的。正常情况下不需要手动执行——已提交的事务本来就保证持久，`CHECKPOINT` 只是把内存里的全量数据整理写盘、并让 WAL 回到空文件。
+> 顺带说明：这条语句是给"想显式控制落盘时机"用的。正常情况下不需要手动执行——已提交的事务本来就保证持久，`CHECKPOINT` 只是把内存里的改动整理写盘、并让 WAL 回到空文件。
+
+#### 空间回收：`VACUUM [表]`
+
+```sql
+VACUUM employees;   -- 只整理一张表
+VACUUM;             -- 所有表
+```
+
+删一行只把槽位置空，占的字节还留在页里；所以「大批删 + 零散插」之后，一页可能只剩几行却仍占 8 KB。`VACUUM` 做两件事：
+
+1. **页内整理**：把活着的元组挪到页尾，空出来的连续空间还给插入；
+2. **尾部空页回收**：文件末尾整页空的页直接从文件里截掉。
+
+返回 `pages_compacted` / `pages_reclaimed` / `pages` / `bytes`，能直接看到省了多少。实测：200 行（6 页，49 KB）删到 40 行 → `VACUUM` 后 2 页 16 KB。
+
+两件**不做**的事：不动 RID（索引里存的就是槽位号，重排等于把索引全废掉）、不回收文件中间的空页（页号不能重排）。所以它不会「越整理越碎」，但也别指望它把中间的大洞收回来。
+
+和 `CHECKPOINT` 一样，事务块里执行会报错；改的是磁盘上的页，回滚不了。整页镜像（FPI）的规则同样适用：整理前后页要落盘，必须先让镜像进 WAL。
 
 #### 哪些 DDL 会重写全量快照
 
@@ -1220,8 +1238,9 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
   优先一次做成统一的快照隔离（MVCC），不要做成「自动提交一种行为、显式事务另一种行为」。
 - 写路径已经没有 O(表大小) 的操作了：提交只碰写集，索引增量维护。20 万行的表单条 `UPDATE`
   约 1.3 ms，其中大部分是 SQL 解析、表锁和 WAL `fsync`。
-- 空槽只在 `TRUNCATE` / `ALTER TABLE` 时回收，没有后台 compact：频繁「大批删 + 零散插」
-  会让槽位数组长期偏大（行数本身仍然正确）。
+- 空槽只能靠 `VACUUM` / `TRUNCATE` / `ALTER TABLE` 回收，**没有后台自动整理**：
+  频繁「大批删 + 零散插」会让页里留空洞、槽位数组偏大（行数本身仍然正确）。
+  `VACUUM` 只回收文件尾部的空页，中间的空页不动（页号不能重排）。
 - 索引的删除也是延迟合并：空叶占比超过 30% 才整树重建。反复「大批删 + 零散插」之后
   索引里会留着空叶（查询会跳过，只是多一点遍历）。
 - 组提交依赖"同时有多个事务在等落盘"。表级 X 锁让同一张表的写天然串行，所以只有写**不同表**的事务能合并 fsync（实测 1.1–1.7x）。

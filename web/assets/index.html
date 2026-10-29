@@ -122,11 +122,17 @@ try {
       </div>
     </div>
 
+    <!-- 结果区：上面一条 tab（信息 / 结果 N），下面只有一个滚动容器。
+         以前是「整区滚 + 表内又滚」，一旦内容超过高度就是两条滚动条；
+         现在外层不滚，谁的内容长谁自己滚（信息栏滚信息、结果 tab 滚表格）。 -->
     <div id="results" class="results">
-      <div class="welcome">
-        <div class="welcome-title">准备就绪</div>
-        <p>左侧是表结构，点击表名可快速查询。支持多语句（用 <code>;</code> 分隔），结果会逐条显示在这里。</p>
-        <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>tables/*.snp</code> 每表一个数据文件、<code>wal.log</code> 提交日志。落盘节奏与端口在右上角「设置」里改。</p>
+      <div id="resultTabs" class="result-tabs hidden" role="tablist" aria-label="执行结果"></div>
+      <div id="resultPane" class="result-pane">
+        <div class="welcome">
+          <div class="welcome-title">准备就绪</div>
+          <p>左侧是表结构，点击表名可快速查询。支持多语句（用 <code>;</code> 分隔），每条语句的结果在下方 <code>结果 N</code> 里各占一个 tab，执行的细节都收在 <code>信息</code> 里。</p>
+          <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>tables/*.snp</code> 每表一个数据文件、<code>wal.log</code> 提交日志。落盘节奏与端口在右上角「设置」里改。</p>
+        </div>
       </div>
     </div>
   </section>

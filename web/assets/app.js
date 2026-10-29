@@ -26,7 +26,6 @@ const editor = {
     return (cm ? cm.getWrapperElement() : editorEl).getBoundingClientRect();
   },
 };
-const resultsEl = document.getElementById('results');
 const treeEl = document.getElementById('schemaTree');
 const txBar = document.getElementById('txBar');
 const txText = document.getElementById('txText');
@@ -666,19 +665,19 @@ async function run(prefix) {
     skipped = ex.skipped;
     if (!ex.sql) {
       // 一条能解释的都没有：别把请求发出去换个看不懂的报错回来
-      resultsEl.innerHTML = '';
-      resultsEl.appendChild(errorCard({
+      showPaneError({
         title: '无法生成执行计划',
         message: skipped.length
           ? `「执行计划」只能解释查询语句（SELECT / WITH / VALUES）。当前这批是 ${skipped.join('、')}，想直接跑它们请点「执行」。`
           : '编辑器里还没有可解释的语句。',
-      }));
+      });
       return;
     }
     sql = ex.sql;
   }
   busy = true;
   setRunning(true);
+  lastSubmittedSQL = sql;
   const t0 = performance.now();
   try {
     const data = await api('/api/query', { sql });
@@ -700,8 +699,7 @@ async function run(prefix) {
       /^(create|drop)\s+database/i.test(sql);
     if (touchedDB) await loadDBs();
   } catch (e) {
-    resultsEl.innerHTML = '';
-    resultsEl.appendChild(errorCard({ message: String(e.message || e) }));
+    showPaneError({ message: String(e.message || e) });
   } finally {
     busy = false;
     setRunning(false);
@@ -773,35 +771,174 @@ function formatSQL() {
 
 /* ---------------- 渲染结果 ---------------- */
 
-function renderResults(data) {
-  resultsEl.innerHTML = '';
+/* ---------------- 渲染结果 ----------------
+   结构：#results > [tab 栏] + [pane]。
+   pane 里只放「当前 tab」的内容：信息栏是一串文本，结果 tab 是一张表。
+   同一时刻只有一处滚动（.info-body 或 .grid-wrap），不会再出现两条滚动条。 */
+
+let resultTab = 0;          // 0 = 信息；1.. = 第 n 个「有行」的结果
+let lastSubmittedSQL = '';  // 信息栏按语句回显 SQL 用
+const WELCOME_HTML = (() => {
+  const pane = document.getElementById('resultPane');
+  return pane ? pane.innerHTML : '';
+})();
+
+// 清空结果区（切库、清库时用）：回到欢迎页或一句提示
+function clearResults(text) {
+  lastData = null;
+  lastResults = [];
+  resultTab = 0;
+  const tabs = document.getElementById('resultTabs');
+  if (tabs) { tabs.innerHTML = ''; tabs.classList.add('hidden'); }
+  const pane = document.getElementById('resultPane');
+  if (!pane) return;
+  pane.innerHTML = text ? '' : WELCOME_HTML;
+  if (text) pane.appendChild(el('div', 'results-empty', text));
+}
+
+// 错误不进结果 tab：写进信息栏，默认就停在信息栏
+function showPaneError(err) {
+  lastSubmittedSQL = '';
+  renderResults({ results: [], error: err }, false);
+}
+
+// 只有真返回了行的语句才配一个「结果 N」tab；UPDATE / DDL 没有表可看，信息栏里说清楚即可
+function resultTabModels(data) {
+  const list = (data && data.results) || [];
+  const models = [{ kind: 'info' }];
+  list.forEach((r, i) => {
+    if (r.rows && r.rows.length) models.push({ kind: 'res', r: r, idx: i });
+  });
+  return models;
+}
+
+function renderResults(data, keepTab) {
+  if (!data) return;
   lastData = data;
   lastResults = (data.results || []).slice();
   if (data.clockGranNs) clockGranNs = data.clockGranNs;
-  const waitNs = data.tx && data.tx.waitNs ? data.tx.waitNs : 0;
-  if (waitNs > 0) {
-    const note = el('div', 'wait-note', `本次执行等待表锁 ${fmtTook(waitNs)}`);
-    note.title = `等待锁 ${waitNs} ns`;
-    resultsEl.appendChild(note);
-  }
-  const list = data.results || [];
-  list.forEach((r, i) => resultsEl.appendChild(resultCard(r, i)));
-  if (list.length > 1) {
-    resultsEl.appendChild(el('div', 'batch-note',
-      `共 ${list.length} 条语句 · 服务端合计 ${fmtTook(data.elapsedNs)}`));
-  }
-  if (data.roundTripMs !== undefined) {
-    const rt = el('div', 'batch-note', `浏览器往返 ${data.roundTripMs.toFixed(2)} ms（含网络与 JSON 编码，浏览器时钟精度）`);
-    resultsEl.appendChild(rt);
-  }
-  if (data.error) {
-    resultsEl.appendChild(errorCard(data.error));
-  }
-  if (!list.length && !data.error) {
-    resultsEl.appendChild(el('div', 'msg', '没有返回结果'));
-  }
+  const models = resultTabModels(data);
+  // 默认落点：正常拿到结果表就停「结果 1」，没有表（错误 / DDL / 空结果）就停信息栏
+  if (!keepTab) resultTab = models.length > 1 ? 1 : 0;
+  if (resultTab > models.length - 1) resultTab = 0;
+  renderResultTabs(data);
+  renderResultPane(data);
 }
 
+function renderResultTabs(data) {
+  const tabs = document.getElementById('resultTabs');
+  if (!tabs) return;
+  const models = resultTabModels(data);
+  const stmts = splitStatements(lastSubmittedSQL || '');
+  tabs.innerHTML = '';
+
+  const addTab = (label, idx, extra, tip) => {
+    const b = el('button', 'result-tab' + (resultTab === idx ? ' on' : '') + (extra ? ' ' + extra : ''), label);
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', resultTab === idx ? 'true' : 'false');
+    if (tip) b.title = tip;
+    b.addEventListener('click', () => {
+      resultTab = idx;
+      renderResultTabs(data);
+      renderResultPane(data);
+    });
+    tabs.appendChild(b);
+  };
+
+  addTab('信息', 0, data.error ? 'has-err' : '', '往返时间、每条语句的耗时与报错');
+
+  let n = 0;
+  for (let i = 1; i < models.length; i++) {
+    n++;
+    const r = models[i].r;
+    const stmt = (stmts[models[i].idx] || '').trim();
+    addTab('结果 ' + n, i, '',
+      (r.tag || r.command || '') + (stmt ? ' · ' + stmt.split('\n')[0].slice(0, 80) : ''));
+  }
+
+  const sum = [];
+  const cnt = (data.results || []).length;
+  if (cnt > 1) sum.push('共 ' + cnt + ' 条语句');
+  if (data.roundTripMs !== undefined) sum.push('往返 ' + data.roundTripMs.toFixed(2) + ' ms');
+  if (sum.length) tabs.appendChild(el('span', 'result-tabs-meta', sum.join(' · ')));
+
+  tabs.classList.remove('hidden');
+}
+
+function renderResultPane(data) {
+  const pane = document.getElementById('resultPane');
+  if (!pane) return;
+  const models = resultTabModels(data);
+  const cur = models[resultTab] || models[0];
+  pane.innerHTML = '';
+  if (!cur || cur.kind === 'info') pane.appendChild(infoPanel(data));
+  else pane.appendChild(resultCard(cur.r, cur.idx));
+}
+
+// 信息栏：一行总览（往返 / 合计 / 等锁）+ 每条语句的 SQL 与状态
+function infoPanel(data) {
+  const box = el('div', 'info-body');
+  const list = data.results || [];
+  const stmts = splitStatements(lastSubmittedSQL || '');
+
+  const sum = [];
+  if (data.roundTripMs !== undefined) {
+    sum.push('浏览器往返 ' + data.roundTripMs.toFixed(2) + ' ms（含网络与 JSON 编码，浏览器时钟精度）');
+  }
+  if (list.length > 1 && data.elapsedNs !== undefined) sum.push('服务端合计 ' + fmtTook(data.elapsedNs));
+  const waitNs = data.tx && data.tx.waitNs ? data.tx.waitNs : 0;
+  if (waitNs > 0) sum.push('本次执行等待表锁 ' + fmtTook(waitNs));
+  if (sum.length) box.appendChild(el('div', 'info-sum', sum.join(' · ')));
+
+  if (!list.length && !data.error) box.appendChild(el('div', 'results-empty', '没有返回结果'));
+
+  list.forEach((r, i) => {
+    const item = el('div', 'info-item');
+    const head = el('div', 'info-head');
+    head.appendChild(el('span', 'info-no', String(i + 1)));
+    const sql = (stmts[i] || '').trim() || '（未记录 SQL）';
+    const sqlEl = el('span', 'info-sql', sql);
+    sqlEl.title = sql;
+    head.appendChild(sqlEl);
+    item.appendChild(head);
+    item.appendChild(el('div', 'info-status', infoStatus(r)));
+    box.appendChild(item);
+  });
+
+  if (data.error) {
+    // 出错那条也要看得见 SQL：results 里没有它，就从语句列表里补一条
+    const failIdx = (typeof data.error.stmt === 'number' && data.error.stmt >= 0)
+      ? data.error.stmt : list.length;
+    const failSQL = (stmts[failIdx] || '').trim();
+    if (failSQL) {
+      const item = el('div', 'info-item');
+      const head = el('div', 'info-head');
+      head.appendChild(el('span', 'info-no', String(failIdx + 1)));
+      const sqlEl = el('span', 'info-sql', failSQL);
+      sqlEl.title = failSQL;
+      head.appendChild(sqlEl);
+      item.appendChild(head);
+      item.appendChild(el('div', 'info-status err', '失败 · ' + (data.error.title || '执行失败')));
+      box.appendChild(item);
+    }
+    const err = errorCard(data.error);
+    err.classList.add('info-error');
+    box.appendChild(err);
+  }
+  return box;
+}
+
+function infoStatus(r) {
+  const bits = [];
+  if (typeof r.rowCount === 'number' && r.command === 'SELECT') bits.push(r.rowCount + ' 行');
+  if (typeof r.affected === 'number' && r.affected > 0 && r.command !== 'SELECT') bits.push('影响 ' + r.affected + ' 行');
+  if (r.tookNs !== undefined) bits.push('服务端 ' + fmtTook(r.tookNs));
+  if (r.message) bits.push(r.message);
+  return 'OK' + (bits.length ? ' · ' + bits.join(' · ') : '');
+}
+
+// 结果 tab 的内容：头（命令 / 行数 / 导出 / 执行计划）+ 表体 + 分页条
 function resultCard(r, idx) {
   const card = el('div', 'result-card');
   const head = el('div', 'result-head');
@@ -820,16 +957,14 @@ function resultCard(r, idx) {
   head.appendChild(el('span', 'spacer'));
 
   // 导出按钮：只有真的返回了行才有意义
-  if (r.rows && r.rows.length) {
-    const acts = el('div', 'result-actions');
-    acts.appendChild(exportBtn('CSV', () => {
-      downloadText('query-' + stamp() + '.csv', '\ufeff' + csvOf(r), 'text/csv');
-    }));
-    acts.appendChild(exportBtn('JSON', () => {
-      downloadText('query-' + stamp() + '.json', jsonOf(r), 'application/json');
-    }));
-    head.appendChild(acts);
-  }
+  const acts = el('div', 'result-actions');
+  acts.appendChild(exportBtn('CSV', () => {
+    downloadText('query-' + stamp() + '.csv', '\ufeff' + csvOf(r), 'text/csv');
+  }));
+  acts.appendChild(exportBtn('JSON', () => {
+    downloadText('query-' + stamp() + '.json', jsonOf(r), 'application/json');
+  }));
+  head.appendChild(acts);
 
   if (r.plan && r.plan.length && r.command !== 'EXPLAIN') {
     const btn = el('button', 'plan-btn', '执行计划');
@@ -845,15 +980,7 @@ function resultCard(r, idx) {
     card.appendChild(head);
   }
 
-  if (r.message) {
-    card.appendChild(el('div', 'msg', r.message));
-  }
-
-  if (r.rows && r.rows.length) {
-    card.appendChild(gridBlock(r, idx));
-  } else if (r.columns && r.columns.length && !r.message) {
-    card.appendChild(el('div', 'msg', '（0 行）'));
-  }
+  card.appendChild(gridBlock(r, idx));
   return card;
 }
 
@@ -925,7 +1052,7 @@ function gridBlock(r, idx) {
     sizeSel.addEventListener('change', () => {
       st.size = parseInt(sizeSel.value, 10) || 100;
       st.page = 0;
-      renderResults(lastData);
+      renderResults(lastData, true);
     });
     foot.appendChild(sizeSel);
     foot.appendChild(el('span', 'grid-range', `${st.page + 1}/${pages} 页`));
@@ -933,14 +1060,14 @@ function gridBlock(r, idx) {
     const prev = el('button', 'pg-btn', '‹ 上一页');
     prev.disabled = st.page <= 0;
     prev.addEventListener('click', () => {
-      if (st.page > 0) { st.page--; renderResults(lastData); }
+      if (st.page > 0) { st.page--; renderResults(lastData, true); }
     });
     foot.appendChild(prev);
 
     const next = el('button', 'pg-btn', '下一页 ›');
     next.disabled = st.page >= pages - 1;
     next.addEventListener('click', () => {
-      if (st.page < pages - 1) { st.page++; renderResults(lastData); }
+      if (st.page < pages - 1) { st.page++; renderResults(lastData, true); }
     });
     foot.appendChild(next);
   }
@@ -2093,8 +2220,7 @@ async function resetDatabase() {
   try {
     await api('/api/reset', {});
     await loadSchema();
-    resultsEl.innerHTML = '';
-    resultsEl.appendChild(el('div', 'msg', '数据库已清空'));
+    clearResults('数据库已清空');
     updateTx({ active: false });
     closeSettings();
   } catch (e) {
@@ -3453,7 +3579,7 @@ async function switchDB(name) {
   }
   // 换了库：结果区清掉，表结构重新拉。**事务状态交给 loadSchema 同步** ——
   // 会话是按库分开的，目标库里这个会话可能正开着事务，不能想当然置成空闲。
-  resultsEl.innerHTML = '';
+  clearResults();
   await loadDBs();
   await loadSchema();
   dbHint('已切换到 ' + name, 'ok');

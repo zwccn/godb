@@ -872,13 +872,136 @@ body {
 .hidden { display: none !important; }
 
 /* ---------- 结果区 ---------- */
+/* 结果区：外层不滚，只有「当前 tab 的内容」滚 —— 这样永远只有一条滚动条。
+   以前 .results 自己 overflow-y:auto，卡片里的 .grid-wrap 又按 52vh 撑，
+   编辑器一高或字号一大就内外同时溢出，出现两条滚动条。 */
 .results {
   flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 结果 tab 栏：信息 / 结果 1 / 结果 2 …；语句多到放不下就横向滚，不换行 */
+.result-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+.result-tab {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: calc(12px * var(--fs));
+  padding: 7px 12px 6px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+}
+.result-tab:hover { color: var(--text); }
+.result-tab.on { color: var(--text); border-bottom-color: var(--accent); }
+.result-tab.has-err { color: var(--danger-text); }
+.result-tabs-meta {
+  margin-left: auto;
+  padding-left: 12px;
+  padding-right: 4px;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  white-space: nowrap;
+}
+
+.result-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px 12px;
+}
+
+/* 当前 tab 里那张卡吃满剩余高度：头 / 表体 / 分页三段，只有中间那段滚 */
+.result-pane > .result-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+}
+.result-pane > .error-card { flex: 0 0 auto; }
+.results-empty {
+  color: var(--text-3);
+  font-size: calc(12px * var(--fs));
+  padding: 6px 2px;
+}
+
+/* ---------- 信息栏（第一个 tab） ---------- */
+.info-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px 40px;
+}
+.info-sum {
+  padding: 2px 2px 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.7;
+}
+.info-item { padding: 10px 2px; border-bottom: 1px solid var(--border-soft); }
+.info-item:last-child { border-bottom: none; }
+.info-head { display: flex; gap: 10px; align-items: flex-start; }
+.info-no {
+  flex: 0 0 auto;
+  min-width: 16px;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  line-height: 1.75;
+}
+.info-sql {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--fs));
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.info-status.err { color: var(--danger-text); }
+.info-error { margin: 10px 0 2px; }
+.info-status {
+  padding-left: 26px;
+  margin-top: 3px;
+  color: var(--ok-text);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
 }
 
 .welcome { max-width: 720px; }
+/* 窄屏：tab 栏本来就要横向滚，右侧摘要（往返 ms）在信息栏里也有，直接收起来 */
+@media (max-width: 720px) {
+  .result-tabs-meta { display: none; }
+  .result-head .plan-btn { white-space: nowrap; }
+}
+
+/* 欢迎页在结果 pane 里，内容比窗口高时自己滚（pane 本身不滚） */
+.result-pane > .welcome { overflow-y: auto; }
 .welcome-title {
   font-size: calc(14px * var(--fs));
   font-weight: 600;
@@ -904,6 +1027,7 @@ body {
   overflow: hidden;
 }
 .result-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -938,6 +1062,9 @@ body {
 
 .plan {
   display: none;
+  flex: 0 0 auto;
+  max-height: 40%;      /* 计划面板自己滚，别把表格挤没 */
+  overflow: auto;
   margin: 0;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-soft);
@@ -958,7 +1085,13 @@ body {
   font-family: var(--mono);
 }
 
-.grid-wrap { overflow: auto; max-height: 52vh; }
+/* 表体是这张卡里唯一能滚的地方：撑满剩余高度，表头 sticky、分页条钉在下面。
+   不要再给 max-height —— 那是按视口算的，会和结果区的实际高度打架。 */
+.grid-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
 
 table.grid {
   border-collapse: separate;
@@ -2168,6 +2301,7 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
 .exp-btn:hover { color: var(--text); border-color: var(--border-hover); background: var(--bg-3); }
 
 .grid-foot {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 10px;

@@ -168,6 +168,55 @@ class CDP {
     const fmtKey = await cdp.eval(`!!((cm.getOption('extraKeys') || {})['Shift-Ctrl-F'])`);
     check('美化：Ctrl+Shift+F 已绑定', fmtKey === true, String(fmtKey));
 
+    // 0.1c) 结果区：一条 tab 栏（信息 / 结果 N）+ 同一时刻只有一条滚动条。
+    //      以前 .results 自己滚、卡片里的 .grid-wrap 又按 52vh 滚，必然出现两条。
+    const runSqlX = async (sql, wait = 1100) => {
+      await cdp.eval(`cm.setValue(${JSON.stringify(sql)}); document.getElementById('btnRun').click()`);
+      await sleep(wait);
+    };
+    const tabState = () => cdp.eval(`(() => {
+      const tabs = [...document.querySelectorAll('.result-tab')];
+      const res = document.getElementById('results');
+      const inner = [...document.querySelectorAll('#results *')].filter(e => {
+        const cs = getComputedStyle(e);
+        return (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && e.scrollHeight > e.clientHeight + 1;
+      });
+      const pane = document.getElementById('resultPane').firstElementChild || {};
+      return {
+        labels: tabs.map(t => t.textContent.trim()),
+        active: (document.querySelector('.result-tab.on') || {}).textContent || '',
+        outerScrolls: res.scrollHeight > res.clientHeight + 1,
+        innerScrollers: inner.length,
+        pane: pane.className || '',
+        text: (document.getElementById('resultPane').textContent || '').replace(/\\s+/g, ' ').slice(0, 200),
+      };
+    })()`);
+
+    await runSqlX('SELECT * FROM employees');
+    const tSingle = await tabState();
+    check('单条结果：tab 是「信息 / 结果 1」且默认停在结果 1',
+      tSingle.labels.join('|') === '信息|结果 1' && tSingle.active === '结果 1', tSingle.labels.join('|'));
+    check('结果区只有一条滚动条（外层不滚、表体自己滚）',
+      !tSingle.outerScrolls && tSingle.innerScrollers <= 1,
+      `外层滚动=${tSingle.outerScrolls} / 内层滚动容器=${tSingle.innerScrollers}`);
+
+    await runSqlX('SELECT 1 AS a; SELECT 2 AS b');
+    const tMulti = await tabState();
+    check('多语句：有结果集的语句各占一个 tab，不再纵向堆叠',
+      tMulti.labels.join('|') === '信息|结果 1|结果 2', tMulti.labels.join('|'));
+    await cdp.eval(`[...document.querySelectorAll('.result-tab')].find(t => t.textContent.trim() === '信息').click()`);
+    await sleep(300);
+    const tInfo = await tabState();
+    check('「信息」tab = 往返时间 + 逐条语句明细',
+      tInfo.pane.indexOf('info-body') === 0 && /浏览器往返/.test(tInfo.text) && /SELECT 1 AS a/.test(tInfo.text),
+      tInfo.text.slice(0, 90));
+
+    await runSqlX('SELECT * FROM no_such_table');
+    const tErr = await tabState();
+    check('报错时默认落到「信息」，且只有信息这一个 tab',
+      tErr.labels.join('|') === '信息' && tErr.active === '信息' &&
+        /does not exist|不存在/.test(tErr.text), tErr.text.slice(0, 70));
+
     // 0.2)「执行计划」按钮：只解释查询，别把 BEGIN/UPDATE 也套上 EXPLAIN
     //      （以前是 split(';') 全量加前缀，事务演示一按就报 only supports SELECT）
     const planText = () => cdp.eval(`(document.getElementById('results').textContent || '').replace(/\\s+/g, ' ')`);

@@ -16,7 +16,7 @@ func TestTablePagesRoundTrip(t *testing.T) {
 		t.Fatalf("openTablePages: %v", err)
 	}
 	for i := 0; i < 200; i++ {
-		if err := tp.put(i, tupleN(i)); err != nil {
+		if _, err := tp.put(i, tupleN(i)); err != nil {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
@@ -64,13 +64,13 @@ func TestTablePagesOverwrite(t *testing.T) {
 	}
 	defer tp.close()
 
-	if err := tp.put(0, tupleN(1)); err != nil {
+	if _, err := tp.put(0, tupleN(1)); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	// 变长覆盖：短 → 长 → 短，每次都要读得回新内容
 	long := append(tupleN(2), bytes.Repeat([]byte(" "), 600)...)
 	for _, want := range [][]byte{tupleN(1), long, tupleN(3)} {
-		if err := tp.put(0, want); err != nil {
+		if _, err := tp.put(0, want); err != nil {
 			t.Fatalf("put: %v", err)
 		}
 		got, ok := tp.get(0)
@@ -91,18 +91,18 @@ func TestTablePagesDeleteAndReload(t *testing.T) {
 		t.Fatalf("openTablePages: %v", err)
 	}
 	for i := 0; i < 10; i++ {
-		if err := tp.put(i, tupleN(i)); err != nil {
+		if _, err := tp.put(i, tupleN(i)); err != nil {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
-	if err := tp.del(3); err != nil {
+	if _, err := tp.del(3); err != nil {
 		t.Fatalf("del: %v", err)
 	}
 	if _, ok := tp.get(3); ok {
 		t.Fatal("删掉的行还能读到")
 	}
 	// RID 复用：同一个槽位放新行
-	if err := tp.put(3, tupleN(99)); err != nil {
+	if _, err := tp.put(3, tupleN(99)); err != nil {
 		t.Fatalf("put 复用: %v", err)
 	}
 	if _, err := tp.flush(); err != nil {
@@ -141,7 +141,7 @@ func TestTablePagesGrowAcrossPages(t *testing.T) {
 	big := append([]byte(`{"pad":"`), bytes.Repeat([]byte("x"), 700)...)
 	big = append(big, []byte(`"}`)...)
 	for i := 0; i < 60; i++ {
-		if err := tp.put(i, big); err != nil {
+		if _, err := tp.put(i, big); err != nil {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
@@ -164,7 +164,7 @@ func TestTablePagesReset(t *testing.T) {
 	}
 	defer tp.close()
 	for i := 0; i < 20; i++ {
-		if err := tp.put(i, tupleN(i)); err != nil {
+		if _, err := tp.put(i, tupleN(i)); err != nil {
 			t.Fatalf("put: %v", err)
 		}
 	}
@@ -177,10 +177,83 @@ func TestTablePagesReset(t *testing.T) {
 	if _, ok := tp.get(0); ok {
 		t.Fatal("reset 后还能读到旧行")
 	}
-	if err := tp.put(0, tupleN(7)); err != nil {
+	if _, err := tp.put(0, tupleN(7)); err != nil {
 		t.Fatalf("reset 后写新行: %v", err)
 	}
 	if got, ok := tp.get(0); !ok || !bytes.Equal(got, tupleN(7)) {
 		t.Fatalf("reset 后 get(0) = %q", got)
+	}
+}
+
+// 防页撕裂：一页在一次 checkpoint 之后第一次被改时必须带整页镜像，
+// 之后再改就不用了；镜像必须是「改之前」的样子（恢复时先用它还原，再重放）。
+func TestTablePagesFullPageImage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fpi.dat")
+	tp, err := openTablePages(path, 4)
+	if err != nil {
+		t.Fatalf("openTablePages: %v", err)
+	}
+	defer tp.close()
+
+	imgs, err := tp.put(0, tupleN(1))
+	if err != nil {
+		t.Fatalf("put 0: %v", err)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("首次改页应该带 1 份全页镜像，实际 %d", len(imgs))
+	}
+	if imgs[0].page != 0 || len(imgs[0].data) != PageSize {
+		t.Fatalf("镜像不对：page=%d len=%d", imgs[0].page, len(imgs[0].data))
+	}
+	// 新页的镜像是零页（还没写过），恢复时按新页处理
+	zero := true
+	for _, b := range imgs[0].data {
+		if b != 0 {
+			zero = false
+			break
+		}
+	}
+	if !zero {
+		t.Fatal("新页的镜像应该是全零")
+	}
+
+	// 同一页第二次改：不再带镜像
+	imgs, err = tp.put(1, tupleN(2))
+	if err != nil {
+		t.Fatalf("put 1: %v", err)
+	}
+	if len(imgs) != 0 {
+		t.Fatalf("同一 checkpoint 内第二次改页不该再带镜像，实际 %d", len(imgs))
+	}
+
+	// checkpoint 之后标记清零，下次改页重新带镜像 —— 而且镜像里应该有 2 行
+	if _, err := tp.checkpoint(); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	imgs, err = tp.put(2, tupleN(3))
+	if err != nil {
+		t.Fatalf("put 2: %v", err)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("checkpoint 后第一次改页应该带镜像，实际 %d", len(imgs))
+	}
+	p, err := decodePage(imgs[0].data)
+	if err != nil {
+		t.Fatalf("镜像不是合法页：%v", err)
+	}
+	if p.liveCount() != 2 {
+		t.Fatalf("镜像里应该有 2 行（改之前的样子），实际 %d", p.liveCount())
+	}
+
+	// 删行同样要走镜像保护（新的一轮 checkpoint 之后）
+	if _, err := tp.checkpoint(); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	imgs, err = tp.del(1)
+	if err != nil {
+		t.Fatalf("del: %v", err)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("checkpoint 后第一次删行也要带镜像，实际 %d", len(imgs))
 	}
 }

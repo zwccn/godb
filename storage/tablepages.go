@@ -41,6 +41,12 @@ type tablePages struct {
 	// hi 是下一个可用页号。**不能用文件大小推**：脏页还在池里没落盘，
 	// 文件大小会落后于实际用了多少页，推出来就会「重新分配一个还在用的页」。
 	hi uint32
+
+	// fpi 记录「自上次 checkpoint 以来，这一页有没有写过全页镜像」。
+	// 防页撕裂：8KB 落盘不是原子的（可能只写了前 4KB 就断电），CRC 只能**发现**
+	// 坏页、修不回来。所以每页在一次 checkpoint 之后**第一次**被改时，把整页
+	// 镜像塞进 WAL；恢复时先用镜像还原整页，再重放逻辑记录。
+	fpi map[uint32]bool
 }
 
 func openTablePages(path string, poolPages int) (*tablePages, error) {
@@ -54,6 +60,7 @@ func openTablePages(path string, poolPages int) (*tablePages, error) {
 		path:   path,
 		byPage: make(map[uint32][]int),
 		hi:     pf.pageCount(),
+		fpi:    make(map[uint32]bool),
 	}
 	return tp, nil
 }
@@ -62,6 +69,44 @@ func (tp *tablePages) pageCount() uint32 { return tp.pf.pageCount() }
 
 // fetch 取一页并钉住；调用方负责 unpin（页的 latch 自己加）。
 func (tp *tablePages) fetch(page uint32) (*bufFrame, error) { return tp.pool.fetch(page) }
+
+// pageImage 是一页的整页副本，用来写进 WAL 的「首改全页镜像」记录。
+type pageImage struct {
+	page uint32
+	data []byte
+}
+
+// noteFPI 在「即将修改某页」之前调用：如果这是自上次 checkpoint 以来第一次改它，
+// 返回整页镜像（调用方必须把它写进 WAL），否则返回 nil。
+//
+// 只读页、不改页的路径不要调它，否则 WAL 会被无用镜像撑大。
+func (tp *tablePages) noteFPI(page uint32) ([]byte, error) {
+	if tp.fpi[page] {
+		return nil, nil
+	}
+	f, err := tp.fetch(page)
+	if err != nil {
+		return nil, err
+	}
+	img := make([]byte, PageSize)
+	f.latch.RLock()
+	copy(img, f.data)
+	f.latch.RUnlock()
+	tp.pool.unpin(f, false)
+	tp.fpi[page] = true
+	return img, nil
+}
+
+// afterCheckpoint：checkpoint 之后所有页都已经是「磁盘上的样子」，
+// 下次修改要重新带一次全页镜像。
+func (tp *tablePages) afterCheckpoint() { tp.fpi = make(map[uint32]bool) }
+
+// checkpoint = 刷脏页 + 清掉全页镜像标记。返回实际写回的页数。
+func (tp *tablePages) checkpoint() (int, error) {
+	n, err := tp.flush()
+	tp.afterCheckpoint()
+	return n, err
+}
 
 // ensure 保证 RID 的目录槽位存在。
 func (tp *tablePages) ensure(slot int) {
@@ -72,25 +117,33 @@ func (tp *tablePages) ensure(slot int) {
 }
 
 // put 写入一行（RID = slot）。已有位置就覆盖，没有就找地方插。
-func (tp *tablePages) put(slot int, tuple []byte) error {
+func (tp *tablePages) put(slot int, tuple []byte) ([]pageImage, error) {
 	if len(tuple) > MaxTupleSize {
-		return errTupleTooLarge
+		return nil, errTupleTooLarge
 	}
 	tp.ensure(slot)
+	var fpis []pageImage
 
 	// 已经有位置：先删旧元组（长度可能变了），再把新元组插同一页
 	if tp.valid[slot] {
 		at := tp.loc[slot]
+		img, err := tp.noteFPI(at.page)
+		if err != nil {
+			return nil, err
+		}
+		if img != nil {
+			fpis = append(fpis, pageImage{page: at.page, data: img})
+		}
 		f, err := tp.fetch(at.page)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		f.latch.Lock()
 		p, err := decodeOrInitPage(f.data, at.page)
 		if err != nil {
 			f.latch.Unlock()
 			tp.pool.unpin(f, false)
-			return err
+			return nil, err
 		}
 		_ = p.del(int(at.slot))
 		local, err := p.insertOrCompact(tuple, uint32(slot))
@@ -102,7 +155,7 @@ func (tp *tablePages) put(slot int, tuple []byte) error {
 			copy(f.data, p.encode())
 			f.latch.Unlock()
 			tp.pool.unpin(f, true)
-			return nil
+			return fpis, nil
 		}
 		// 这页放不下：删掉旧元组后换一页
 		copy(f.data, p.encode())
@@ -112,34 +165,41 @@ func (tp *tablePages) put(slot int, tuple []byte) error {
 			tp.valid[slot] = false
 			tp.removeFromPageIndex(slot, at)
 		} else {
-			return err
+			return nil, err
 		}
 	}
 
 	// 找一页能塞下的：从后往前找几页，都满了就开新页
 	page, isNew, err := tp.findPage(len(tuple))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if isNew {
 		tp.hi = page + 1
 	}
+	img, err := tp.noteFPI(page)
+	if err != nil {
+		return nil, err
+	}
+	if img != nil {
+		fpis = append(fpis, pageImage{page: page, data: img})
+	}
 	f, err := tp.fetch(page)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	f.latch.Lock()
 	p, err := decodeOrInitPage(f.data, page)
 	if err != nil {
 		f.latch.Unlock()
 		tp.pool.unpin(f, false)
-		return err
+		return nil, err
 	}
 	local, err := p.insertOrCompact(tuple, uint32(slot))
 	if err != nil {
 		f.latch.Unlock()
 		tp.pool.unpin(f, false)
-		return err
+		return nil, err
 	}
 	copy(f.data, p.encode())
 	f.latch.Unlock()
@@ -151,7 +211,7 @@ func (tp *tablePages) put(slot int, tuple []byte) error {
 	if page >= tp.nextPage {
 		tp.nextPage = page
 	}
-	return nil
+	return fpis, nil
 }
 
 // get 读一行（返回副本）。
@@ -175,26 +235,34 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 }
 
 // del 删一行：把元组从页里摘掉，并让 RID 失效（槽位号交给 TableData 复用了）。
-func (tp *tablePages) del(slot int) error {
+func (tp *tablePages) del(slot int) ([]pageImage, error) {
 	if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
-		return nil
+		return nil, nil
 	}
 	at := tp.loc[slot]
+	img, err := tp.noteFPI(at.page)
+	if err != nil {
+		return nil, err
+	}
+	var fpis []pageImage
+	if img != nil {
+		fpis = append(fpis, pageImage{page: at.page, data: img})
+	}
 	f, err := tp.fetch(at.page)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	f.latch.Lock()
 	p, err := decodeOrInitPage(f.data, at.page)
 	if err != nil {
 		f.latch.Unlock()
 		tp.pool.unpin(f, false)
-		return err
+		return nil, err
 	}
 	if err := p.del(int(at.slot)); err != nil && err != errSlotOutOfRange {
 		f.latch.Unlock()
 		tp.pool.unpin(f, false)
-		return err
+		return nil, err
 	}
 	copy(f.data, p.encode())
 	f.latch.Unlock()
@@ -202,7 +270,7 @@ func (tp *tablePages) del(slot int) error {
 
 	tp.valid[slot] = false
 	tp.removeFromPageIndex(slot, at)
-	return nil
+	return fpis, nil
 }
 
 // removeFromPageIndex 把 RID 从「哪一页有哪些行」的索引里摘掉。

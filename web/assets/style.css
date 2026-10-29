@@ -230,15 +230,18 @@ html[data-theme="mint"] {
    底色几乎无彩，只有主色和几个语义色带一点点蓝紫，久看不刺眼。
    主色用 #89b4fa（浅天蓝）做链接/图标；实心按钮仍用更深的 #3a6bcc，保证白字可读。 */
 html[data-theme="steel"] {
-  --bg: #101017;
-  --bg-1: #17171f;
-  --bg-2: #1d1e27;
-  --bg-3: #262735;
-  --border: #2c2d3c;
-  --border-soft: #24252f;
+  /* 比第一版（#101017 起步）整体提亮一档 —— 纯黑灰看久了发闷；现在对齐
+     Catppuccin 的 mantle / base（#181825 / #1e1e2e）。仍保持四级层次：
+     bg < bg-1 < bg-2 < bg-3，越靠上越亮 */
+  --bg: #17171f;
+  --bg-1: #1e1e2e;
+  --bg-2: #262637;
+  --bg-3: #313244;
+  --border: #33344a;
+  --border-soft: #292a39;
   --text: #ced2e2;
-  --text-2: #9ba1b5;
-  --text-3: #6f7488;
+  --text-2: #a2a8bc;
+  --text-3: #808599;
   --accent: #89b4fa;
   --accent-dim: #23304a;
   --ok: #a6e3a1;
@@ -251,35 +254,35 @@ html[data-theme="steel"] {
   --accent-strong-hover: #4a7bdc;
   --accent-border: #4b7ad8;
   --accent-border-hover: #5d8ce8;
-  --accent-soft-bg: #1c2536;
-  --accent-soft-border: #2f4165;
+  --accent-soft-bg: #22304a;
+  --accent-soft-border: #36486d;
   --accent-soft-text: #a9c6f5;
-  --hint-active-bg: #2c3a52;
-  --ok-bg: #16281d;
-  --ok-bg-hover: #1d3527;
-  --ok-border: #2b4d38;
+  --hint-active-bg: #35455f;
+  --ok-bg: #1a2f22;
+  --ok-bg-hover: #21392a;
+  --ok-border: #32553f;
   --ok-text: #9fdfae;
-  --warn-bg: #2a2318;
-  --warn-bg-hover: #3b3120;
-  --warn-border: #5d4a24;
+  --warn-bg: #2f2719;
+  --warn-bg-hover: #40361f;
+  --warn-border: #655120;
   --warn-text: #ecc98d;
-  --danger-bg: #2a1620;
+  --danger-bg: #2f1a23;
   --danger-strong: #6b2534;
-  --danger-border: #4f2029;
+  --danger-border: #57232d;
   --danger-text: #f395a9;
   --danger-text-dim: #c97b8b;
-  --border-hover: #3b3d4f;
-  --row-hover: #1a1b23;
-  --scroll-thumb: #2f3143;
-  --scroll-thumb-hover: #3d4056;
-  --code-bg: #0c0c12;
+  --border-hover: #44465f;
+  --row-hover: #20202d;
+  --scroll-thumb: #383a4f;
+  --scroll-thumb-hover: #4a4c66;
+  --code-bg: #131320;
   --code-text: #a3adc4;
-  --tint-strong: rgba(255, 255, 255, .12);
-  --tint-hover: rgba(137, 180, 250, .07);
-  --tint-sel: rgba(137, 180, 250, .16);
+  --tint-strong: rgba(255, 255, 255, .13);
+  --tint-hover: rgba(137, 180, 250, .08);
+  --tint-sel: rgba(137, 180, 250, .18);
   --tint-danger: rgba(243, 139, 168, .12);
-  --overlay: rgba(6, 6, 12, .66);
-  --shadow-color: rgba(0, 0, 0, .60);
+  --overlay: rgba(6, 6, 12, .60);
+  --shadow-color: rgba(0, 0, 0, .55);
 }
 
 /* ---------- 皮肤切换器（现在在设置页里；圆点本身仍复用这套渐变） ---------- */

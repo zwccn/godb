@@ -870,10 +870,12 @@ class CDP {
         bodyBg: getComputedStyle(document.body).backgroundColor,
       };
     })()`);
-    check('科技灰皮肤：底色冷灰 + 浅天蓝主色，且能真正切换',
-      steel.theme === 'steel' && steel.bg === '#101017' && steel.accent === '#89b4fa' &&
-        steel.bodyBg === 'rgb(16, 16, 23)',
-      `${steel.theme} / bg ${steel.bg} / accent ${steel.accent} / body ${steel.bodyBg}`);
+    // 底色要「冷灰」而不是纯黑：三通道都很低、蓝分量不低于红分量（冷调）
+    const bodyRGB = (steel.bodyBg.match(/\d+/g) || []).map(Number);
+    check('科技灰皮肤：冷调深灰（不是纯黑）+ 浅天蓝主色，且能真正切换',
+      steel.theme === 'steel' && steel.accent === '#89b4fa' && bodyRGB.length === 3 &&
+        bodyRGB.every(v => v >= 15 && v <= 45) && bodyRGB[2] >= bodyRGB[0],
+      `${steel.theme} / accent ${steel.accent} / body ${steel.bodyBg}`);
     await cdp.eval(`applyTheme('sky', false)`);
     check('设置页有字号控件', setUi.fsBtns === 2 && setUi.fsValues === 1 && /%$/.test(setUi.fsText), setUi.fsText);
     check('设置页有载入示例数据 / 清空当前库',

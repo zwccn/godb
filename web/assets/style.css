@@ -2339,6 +2339,98 @@ table.grid td.bool { color: var(--warn-text); }
   word-break: break-all;
 }
 
+/* ---------- 设置：分组 Tab ---------- */
+/* 高度固定：五组内容差得多（外观 300 出头、性能近 700），跟着内容走的话切 Tab 窗口就忽大忽小。
+   打开时 JS（lockSettingsHeight）按最高的一组精确设定；这条兜底保证没跑到 JS 时也是固定的。
+   系数是拿默认字号实测的：固定部分约 172px（标题栏 + Tab 条 + 底栏 + 边框），内容随 --fs 缩放。 */
+.modal-card.set-win { height: min(calc(172px + 430px * var(--fs)), calc(100vh - 80px)); }
+
+/* 五组横排：连接 / 安全 / 性能 / 外观 / 数据。窄屏横向滚动，不换行、不折成两排。 */
+.set-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.set-tabs::-webkit-scrollbar { height: 0; }
+
+.set-tab {
+  appearance: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 9px 12px 8px;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: calc(12.5px * var(--fs));
+  white-space: nowrap;
+  cursor: pointer;
+}
+.set-tab:hover { color: var(--text-2); }
+.set-tab.on { color: var(--text); border-bottom-color: var(--accent); }
+.set-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+
+.set-pane.hidden { display: none; }
+
+/* 组首那句话：解释这一组是什么，不当正文读 */
+.set-lead {
+  margin: 2px 0 12px;
+  color: var(--text-3);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.6;
+}
+
+/* 危险操作从配置项里拎出来：虚线红框 —— 「清空当前库」不该长得像「每多少次提交」 */
+.set-danger {
+  margin: 4px 0 6px;
+  padding: 10px 12px 2px;
+  border: 1px dashed var(--danger-border);
+  border-radius: 7px;
+  background: var(--danger-bg);
+}
+.set-danger .set-sec {
+  margin-top: 0;
+  border-bottom-color: var(--danger-border);
+  color: var(--danger-text);
+}
+.set-danger .set-hint { margin-left: 142px; }
+
+.set-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+}
+.set-badge.ok { color: var(--ok-text); border-color: var(--ok-border); background: var(--ok-bg); }
+
+.pw-wrap { display: flex; align-items: center; gap: 7px; }
+
+.set-linkbtn {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0 1px;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: calc(11.5px * var(--fs));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.set-linkbtn:hover { color: var(--text-2); }
+.set-linkbtn.on { color: var(--danger-text); }
+
+/* 超出 min/max 的输入框：边框变红，和底部那句「N 处输入不合法」对上 */
+.set-row input.bad { border-color: var(--danger-border); background: var(--danger-bg); }
+
+.modal-hint.dirty { color: var(--warn); }
+#settingsModal .modal-foot { justify-content: flex-start; }
+#settingsModal .modal-foot .btn { margin-left: auto; }
+
 .btn:disabled {
   opacity: .45;
   cursor: not-allowed;

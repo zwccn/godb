@@ -407,13 +407,16 @@ try {
 </div>
 
 <div id="settingsModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="设置">
-  <div class="modal-card">
+  <div class="modal-card set-win">
     <div class="modal-head">
       <span>设置</span>
       <button id="btnSettingsClose" class="icon-btn" title="关闭">×</button>
     </div>
+    <!-- 分组 Tab：连接（账号/端口）· 安全（暴露面）· 性能（并发/内存/落盘）· 外观（本地）· 数据（危险操作 + 现状） -->
+    <div class="set-tabs" id="settingsTabs" role="tablist" aria-label="设置分组"></div>
     <div id="settingsBody" class="modal-body"></div>
     <div class="modal-foot">
+      <span id="settingsDirty" class="modal-hint"></span>
       <span id="settingsHint" class="modal-hint"></span>
       <button id="btnSettingsSave" class="btn btn-primary btn-sm">保存并应用</button>
     </div>

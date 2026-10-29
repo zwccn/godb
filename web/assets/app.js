@@ -460,7 +460,10 @@ function resetCard(card) {
     card.style.removeProperty(p);
   }
   card.dataset.framed = '0';
+  delete card.dataset.userSize;
   card.classList.remove('framed', 'dragging', 'resizing');
+  // 设置窗的高度是量出来的（见 lockSettingsHeight）：复位把 inline 高度清掉了，得重新量
+  if (card.classList.contains('set-win')) lockSettingsHeight();
 }
 
 // startDrag 抓标题栏拖动。用 pointer 事件 + setPointerCapture：
@@ -509,6 +512,8 @@ function startResize(card, ev) {
   card.style.height = r.height + 'px';
   card.style.maxWidth = 'none';
   card.style.maxHeight = 'none';
+  // 手动改过尺寸：以后打开设置不再按内容重新量高度（见 lockSettingsHeight）
+  card.dataset.userSize = '1';
   const grip = ev.currentTarget;
   card.classList.add('resizing');
   try { grip.setPointerCapture(ev.pointerId); } catch (e) {}
@@ -2876,7 +2881,13 @@ async function openSettings() {
   }
 }
 
-function closeSettings() {
+function closeSettings(force) {
+  // 有未保存的改动就拦一下：这些输入框在五个分组里，随手点 × 就丢得没痕迹。
+  // 保存成功走的是 closeSettings(true)，不该被自己拦。
+  if (!force) {
+    const n = dirtyIds().length + (setClearPw ? 1 : 0);
+    if (n && !confirm('有 ' + n + ' 处改动还没保存，确定关闭？')) return;
+  }
   settingsModal.classList.add('hidden');
 }
 
@@ -2917,18 +2928,215 @@ function checkInput(id, checked) {
   return i;
 }
 
-function renderSettings() {
-  const d = settingsData;
-  settingsBody.innerHTML = '';
-  const rt = d.runtime || {};
+/* ---- 设置：五个分组 ----
+   分组只解决「找得到」，保存仍然是一次整体提交。切组不重新渲染 DOM，
+   否则在「连接」里改了一半再去看「性能」，回来改动就丢了。 */
+const SET_PANES = [
+  { id: 'conn', name: '连接', render: renderConnPane },
+  { id: 'sec', name: '安全', render: renderSecPane },
+  { id: 'perf', name: '性能', render: renderPerfPane },
+  { id: 'look', name: '外观', render: renderLookPane },
+  { id: 'data', name: '数据', render: renderDataPane },
+];
 
-  if (!rt.canEdit) {
-    settingsBody.appendChild(el('div', 'set-readonly',
-      '当前连接来自 ' + (rt.clientIp || '远程序') + '，只能查看。配置的写操作只接受本机（127.0.0.1）请求。'));
+const settingsTabs = document.getElementById('settingsTabs');
+const settingsDirty = document.getElementById('settingsDirty');
+let setPane = 'conn';
+let setClearPw = false; // 点了「清除」：保存时把已有密码清掉
+
+function buildSettingsTabs() {
+  settingsTabs.innerHTML = '';
+  for (const p of SET_PANES) {
+    const b = el('button', 'set-tab');
+    b.type = 'button';
+    b.dataset.pane = p.id;
+    b.setAttribute('role', 'tab');
+    b.textContent = p.name;
+    b.addEventListener('click', () => setSettingsPane(p.id));
+    settingsTabs.appendChild(b);
   }
+}
 
-  /* ---- 外观（本机偏好，改完立即生效） ---- */
-  settingsBody.appendChild(el('div', 'set-sec', '外观（只影响这台浏览器）'));
+function setSettingsPane(id) {
+  if (!SET_PANES.some(p => p.id === id)) id = 'conn';
+  setPane = id;
+  for (const b of settingsTabs.children) {
+    const on = b.dataset.pane === id;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+  }
+  for (const box of settingsBody.querySelectorAll('.set-pane')) {
+    box.classList.toggle('hidden', box.dataset.pane !== id);
+  }
+  settingsBody.scrollTop = 0;
+  refreshFooter();
+}
+
+// dirtyIds 返回「和打开时不一样」的输入框数量依据。
+// 只比 value/checked，不比 disabled —— PG 端口灰着的时候值仍然要能提交。
+function dirtyIds() {
+  const out = [];
+  for (const n of settingsBody.querySelectorAll('input')) {
+    if (n.dataset.init === undefined) continue;
+    const cur = n.type === 'checkbox' ? String(n.checked) : n.value;
+    if (cur !== n.dataset.init) out.push(n.id || n.name || 'input');
+  }
+  return out;
+}
+
+// invalidInputs 把超出 min/max 的输入框标红并返回，用来挡住「端口填了 70000 再点保存」。
+function invalidInputs() {
+  const bad = [];
+  for (const n of settingsBody.querySelectorAll('input[type="number"]')) {
+    if (n.disabled) {
+      n.classList.remove('bad');
+      continue;
+    }
+    const v = n.value.trim();
+    const num = Number(v);
+    const ok = v !== '' && Number.isFinite(num) &&
+      (n.min === '' || num >= Number(n.min)) &&
+      (n.max === '' || num <= Number(n.max));
+    n.classList.toggle('bad', !ok);
+    if (!ok) bad.push(n);
+  }
+  return bad;
+}
+
+function refreshDirty() {
+  const bad = invalidInputs();
+  const n = dirtyIds().length + (setClearPw ? 1 : 0);
+  if (bad.length) {
+    settingsDirty.textContent = bad.length + ' 处输入不合法';
+    settingsDirty.className = 'modal-hint err';
+  } else if (n) {
+    settingsDirty.textContent = n + ' 处未保存';
+    settingsDirty.className = 'modal-hint dirty';
+  } else {
+    settingsDirty.textContent = '';
+    settingsDirty.className = 'modal-hint';
+  }
+  const btn = document.getElementById('btnSettingsSave');
+  btn.disabled = bad.length > 0 || !settingsData || !settingsData.runtime.canEdit;
+  refreshFooter();
+}
+
+// 「外观」是浏览器本地偏好、不进保存，所以这一页没有改动时底部按钮就是「关闭」；
+// 如果还压着别处的改动，按钮仍然是「保存并应用」，别让人以为没处可存。
+function refreshFooter() {
+  const btn = document.getElementById('btnSettingsSave');
+  const dirty = dirtyIds().length + (setClearPw ? 1 : 0);
+  if (setPane === 'look' && dirty === 0 && settingsData && settingsData.runtime.canEdit) {
+    btn.textContent = '关闭';
+    btn.dataset.mode = 'close';
+  } else {
+    btn.textContent = '保存并应用';
+    btn.dataset.mode = 'save';
+  }
+}
+
+function statLine(k, v) {
+  const s = el('span', '', k + ' ');
+  s.appendChild(el('b', '', v));
+  return s;
+}
+
+/* ---- 连接：账号、端口、监听 ---- */
+function renderConnPane(box, d, rt) {
+  box.appendChild(el('div', 'set-lead',
+    '账号和端口都属于「怎么连进来」，改完立即生效。'));
+
+  box.appendChild(setRow('用户名', textInput('setAuthUser', d.auth.user, 'godb')));
+
+  const pwWrap = el('div', 'pw-wrap');
+  const pw = textInput('setAuthPassword', '', d.auth.hasPassword ? '已设置，留空则不修改' : '设置密码', 'password');
+  pwWrap.appendChild(pw);
+  if (d.auth.hasPassword) {
+    pwWrap.appendChild(el('span', 'set-badge ok', '已设置'));
+    const clearBtn = el('button', 'set-linkbtn', '清除');
+    clearBtn.type = 'button';
+    clearBtn.title = '保存时清掉已有密码';
+    clearBtn.addEventListener('click', () => {
+      setClearPw = !setClearPw;
+      clearBtn.textContent = setClearPw ? '取消清除' : '清除';
+      clearBtn.classList.toggle('on', setClearPw);
+      pw.disabled = setClearPw;
+      pw.value = '';
+      refreshDirty();
+    });
+    pwWrap.appendChild(clearBtn);
+  }
+  box.appendChild(setRow('密码', pwWrap));
+  box.appendChild(el('div', 'set-hint',
+    '密码以 PBKDF2-SHA256 哈希存在配置文件里，接口不会回显；留空表示保持不变。'));
+
+  box.appendChild(el('div', 'set-sec', '端口'));
+  box.appendChild(setRow('控制台端口', numInput('setHTTPPort', d.network.httpPort, 1, 65535),
+    '当前 ' + (rt.httpAddr || '—')));
+  box.appendChild(setRow('PostgreSQL', checkInput('setPGEnabled', d.network.pgEnabled), '启用 PG 协议端口'));
+  const pgPort = numInput('setPGPort', d.network.pgPort, 1, 65535);
+  pgPort.disabled = !d.network.pgEnabled;
+  box.appendChild(setRow('PG 端口', pgPort, '当前 ' + (rt.pgAddr || '未启用')));
+  box.appendChild(el('div', 'set-hint',
+    '改控制台端口后要用新地址重新打开页面；改 PG 端口会断开现有客户端，重连即可。'));
+
+  const pgEnabled = box.querySelector('#setPGEnabled');
+  pgEnabled.addEventListener('change', () => {
+    pgPort.disabled = !pgEnabled.checked;
+    refreshDirty();
+  });
+}
+
+/* ---- 安全：暴露面都放这一组 ---- */
+function renderSecPane(box, d, rt) {
+  box.appendChild(el('div', 'set-lead', '这里的开关决定「谁能连进来」，改完立即生效。'));
+
+  box.appendChild(setRow('必须密码', checkInput('setRequirePw', d.auth.requirePassword),
+    '连接 PG 时必须输入密码'));
+  box.appendChild(setRow('控制台远程', checkInput('setHTTPRemote', d.network.httpRemote),
+    '允许其它计算机访问网页控制台'));
+  box.appendChild(setRow('PG 远程', checkInput('setPGRemote', d.network.pgRemote),
+    '允许其它计算机连接 PG 端口'));
+  box.appendChild(el('div', 'set-hint',
+    '当前监听：控制台 ' + (rt.httpAddr || '—') + '，PG ' + (rt.pgAddr || '未启用') +
+    '。关掉远程时只绑定 127.0.0.1。'));
+
+  box.appendChild(el('div', 'set-warn',
+    '网页控制台本身不登录：能访问控制台的人可以执行任意 SQL。配置的修改只接受本机请求，' +
+    '所以远程只能查看。PG 协议是明文传输（没有 TLS），跨公网请自行套隧道。'));
+}
+
+/* ---- 性能：并发、内存、落盘 ---- */
+function renderPerfPane(box, d, rt) {
+  box.appendChild(el('div', 'set-lead', '三个旋钮都影响吞吐和内存，改完立即生效（缓冲池除外）。'));
+
+  box.appendChild(el('div', 'set-sec', '并发'));
+  const pf = d.performance || {};
+  box.appendChild(setRow('最大并发数', numInput('setPerfMaxConc', pf.maxConcurrent ?? 32, 0, 10000)));
+  box.appendChild(setRow('排队上限', numInput('setPerfMaxQueued', pf.maxQueued ?? 256, 0, 100000)));
+  box.appendChild(el('div', 'set-hint',
+    '同时执行 SQL 的上限（0 = 不限），超出的排队；排队超过上限快速失败（SQLSTATE 53300）。' +
+    '排队超时在「监控」面板的超时开关里设。'));
+
+  box.appendChild(el('div', 'set-sec', '内存'));
+  box.appendChild(setRow('缓冲池页数', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
+  box.appendChild(el('div', 'set-hint',
+    '一页 8KB，全库共享（不是每张表各一份）。池满后久未访问的页会被淘汰。' +
+    '默认 4096 页 = 32MB；改完要重启才生效。'));
+
+  box.appendChild(el('div', 'set-sec', '落盘节奏'));
+  box.appendChild(setRow('每多少次提交', numInput('setCpCommits', d.storage.checkpointCommits, 0, 1000000), '次'));
+  box.appendChild(setRow('每隔多少秒', numInput('setCpSeconds', d.storage.checkpointSeconds, 0, 86400), '秒'));
+  box.appendChild(setRow('WAL 超过', numInput('setCpWALMB', d.storage.checkpointWalMB, 0, 65536), 'MB'));
+  box.appendChild(el('div', 'set-hint',
+    '三条任一满足就落盘（刷脏页 + 轮转 WAL），填 0 关闭该条。提交时的 fsync 始终同步执行。'));
+}
+
+/* ---- 外观：浏览器本地偏好 ---- */
+function renderLookPane(box) {
+  box.appendChild(el('div', 'set-lead',
+    '皮肤和字号改完立刻生效，只存在这台浏览器，不用保存。'));
+
   const curTheme = document.documentElement.getAttribute('data-theme') || 'dark';
   const picks = el('div', 'theme-picks');
   for (const t of THEME_LIST) {
@@ -2940,7 +3148,7 @@ function renderSettings() {
     btn.appendChild(el('span', '', t.name));
     picks.appendChild(btn);
   }
-  settingsBody.appendChild(picks);
+  box.appendChild(picks);
 
   const fsCtl = el('div', 'fs-ctl');
   fsCtl.setAttribute('role', 'group');
@@ -2958,15 +3166,16 @@ function renderSettings() {
   fsCtl.appendChild(fsMinus);
   fsCtl.appendChild(fsVal);
   fsCtl.appendChild(fsPlus);
-  settingsBody.appendChild(setRow('字号', fsCtl));
-  settingsBody.appendChild(el('div', 'set-hint',
-    '皮肤和字号改完立刻生效，只存在本机，不用点下面的「保存并应用」（那只提交服务器配置）。'));
-  // 刚建出来的按钮需要拿到当前档位的 disabled 状态
-  applyFontScale(currentFsPct(), false);
+  box.appendChild(setRow('字号', fsCtl));
+  box.appendChild(el('div', 'set-hint',
+    '这一页没有「保存」这回事：改了就生效，底部按钮会变成「关闭」。'));
+}
 
-  /* ---- 数据 ---- */
-  settingsBody.appendChild(el('div', 'set-sec', '数据'));
-  const dataActs = el('div', 'set-actions');
+/* ---- 数据：危险操作 + 现状 ---- */
+function renderDataPane(box, d, rt) {
+  const danger = el('div', 'set-danger');
+  danger.appendChild(el('div', 'set-sec', '危险操作'));
+  const acts = el('div', 'set-actions');
   const sampleBtn = el('button', 'btn btn-ghost btn-sm', '载入示例数据');
   sampleBtn.type = 'button';
   sampleBtn.title = '清空当前库并重建 departments / employees';
@@ -2975,138 +3184,121 @@ function renderSettings() {
   resetBtn.type = 'button';
   resetBtn.title = '删除当前库里的所有表（不可撤销）';
   resetBtn.addEventListener('click', resetDatabase);
-  dataActs.appendChild(sampleBtn);
-  dataActs.appendChild(resetBtn);
-  settingsBody.appendChild(setRow('维护', dataActs));
-  settingsBody.appendChild(el('div', 'set-hint',
+  acts.appendChild(sampleBtn);
+  acts.appendChild(resetBtn);
+  danger.appendChild(setRow('维护', acts));
+  danger.appendChild(el('div', 'set-hint',
     '两条都要手打库名才能确认（防手滑），且只作用于当前库（' +
     ((document.getElementById('dbBadge') || {}).textContent || '当前库') +
     '）。删掉的东西会先进回收站，停服后可用 -restore-trash 找回。'));
+  box.appendChild(danger);
 
-  /* ---- 落盘 ---- */
-  settingsBody.appendChild(el('div', 'set-sec', '落盘节奏（checkpoint）'));
-  settingsBody.appendChild(setRow('每多少次提交', numInput('setCpCommits', d.storage.checkpointCommits, 0, 1000000), '次'));
-  settingsBody.appendChild(setRow('每隔多少秒', numInput('setCpSeconds', d.storage.checkpointSeconds, 0, 86400), '秒'));
-  settingsBody.appendChild(setRow('WAL 超过', numInput('setCpWALMB', d.storage.checkpointWalMB, 0, 65536), 'MB'));
-  settingsBody.appendChild(el('div', 'set-hint',
-    '三条任一满足就落盘（刷脏页 + 轮转 WAL），填 0 表示关闭该条。提交时的 fsync 始终同步执行，不受这里影响。'));
-
-  /* ---- 内存（行换出） ---- */
-  settingsBody.appendChild(el('div', 'set-sec', '内存（缓冲池）'));
-  settingsBody.appendChild(setRow('全库共享', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
-  settingsBody.appendChild(el('div', 'set-hint',
-    '一页 8KB，所有表的页框加在一起不超过这个数（不是每张表各一份）。池子满后久未访问的页' +
-    '会被淘汰、对应的行从内存里放掉，下次访问再从页文件读回来。' +
-    '默认 4096 页 = 32MB；改完要重启才生效。'));
-
+  box.appendChild(el('div', 'set-sec', '当前状态'));
   const cp = rt.checkpoint || {};
   const stats = el('div', 'set-stats');
-  const stat = (k, v) => {
-    const s = el('span', '', k + ' ');
-    s.appendChild(el('b', '', v));
-    stats.appendChild(s);
-  };
-  stat('累计落盘', (cp.runs || 0) + ' 次');
-  stat('上次落盘', cp.lastAt ? (cp.secondsAgo || 0) + ' 秒前' : '尚未');
-  stat('之后已提交', (cp.commitsSince || 0) + ' 次');
-  stat('上次写入', fmtBytes(cp.bytesWritten || 0));
-  stat('累计写入', fmtBytes(cp.bytesTotal || 0));
-  stat('当前 WAL', fmtBytes(cp.walBytes || 0));
+  stats.appendChild(statLine('累计落盘', (cp.runs || 0) + ' 次'));
+  stats.appendChild(statLine('上次落盘', cp.lastAt ? (cp.secondsAgo || 0) + ' 秒前' : '尚未'));
+  stats.appendChild(statLine('之后已提交', (cp.commitsSince || 0) + ' 次'));
+  stats.appendChild(statLine('上次写入', fmtBytes(cp.bytesWritten || 0)));
+  stats.appendChild(statLine('累计写入', fmtBytes(cp.bytesTotal || 0)));
+  stats.appendChild(statLine('当前 WAL', fmtBytes(cp.walBytes || 0)));
   const dbN = rt.databases || 1;
-  stat('库数', dbN + ' 个');
-  stat('数据文件', fmtBytes(rt.dataBytes || 0));
+  stats.appendChild(statLine('库数', dbN + ' 个'));
+  stats.appendChild(statLine('数据文件', fmtBytes(rt.dataBytes || 0)));
   // 多库时这些是全部库的合计，得写清楚，否则会以为「数据丢了 / 变多了」
-  stat('表 / 行数', (rt.tables || 0) + ' / ' + (rt.rows || 0) + (dbN > 1 ? '（全部库合计）' : ''));
-  settingsBody.appendChild(stats);
+  stats.appendChild(statLine('表 / 行数', (rt.tables || 0) + ' / ' + (rt.rows || 0) + (dbN > 1 ? '（全部库合计）' : '')));
+  box.appendChild(stats);
   if (dbN > 1) {
-    settingsBody.appendChild(el('div', 'set-hint',
+    box.appendChild(el('div', 'set-hint',
       '以上表数、行数、数据文件都是 ' + dbN + ' 个库的合计。各库的明细在「表结构」标题旁的库名里。'));
   }
+}
 
-  if ((d.warnings || []).length) {
-    d.warnings.forEach(w => settingsBody.appendChild(el('div', 'set-warn', w)));
+function renderSettings() {
+  const d = settingsData;
+  const rt = d.runtime || {};
+  settingsBody.innerHTML = '';
+  settingsTabs.innerHTML = '';
+  setClearPw = false;
+
+  if (!rt.canEdit) {
+    settingsBody.appendChild(el('div', 'set-readonly',
+      '当前连接来自 ' + (rt.clientIp || '远程序') + '，只能查看。配置的写操作只接受本机（127.0.0.1）请求。'));
+  }
+  // 告警是「你选的组合有坑」，不属于某一组，放在最上面始终可见
+  for (const w of (d.warnings || [])) settingsBody.appendChild(el('div', 'set-warn', w));
+
+  buildSettingsTabs();
+  for (const p of SET_PANES) {
+    const box = el('div', 'set-pane');
+    box.dataset.pane = p.id;
+    p.render(box, d, rt);
+    settingsBody.appendChild(box);
   }
 
-  /* ---- 网络 ---- */
-  settingsBody.appendChild(el('div', 'set-sec', '网络（改完立即生效）'));
-  settingsBody.appendChild(setRow('控制台端口', numInput('setHTTPPort', d.network.httpPort, 1, 65535)));
-  const httpRemote = checkInput('setHTTPRemote', d.network.httpRemote);
-  const httpRemoteRow = el('div', 'set-row');
-  httpRemoteRow.appendChild(el('label', '', ''));
-  httpRemoteRow.appendChild(httpRemote);
-  httpRemoteRow.appendChild(el('span', 'unit', '允许远程访问控制台'));
-  settingsBody.appendChild(httpRemoteRow);
-  settingsBody.appendChild(el('div', 'set-hint',
-    '当前监听：' + (rt.httpAddr || '—') + '（' + (d.network.httpRemote ? '同网段可访问' : '仅本机') + '）' +
-    '　关闭远程时只绑定 127.0.0.1。'));
+  // 记住初值：底部「N 处未保存」和关窗确认都靠它
+  for (const n of settingsBody.querySelectorAll('input')) {
+    n.dataset.init = n.type === 'checkbox' ? String(n.checked) : n.value;
+    n.addEventListener('input', refreshDirty);
+    n.addEventListener('change', refreshDirty);
+  }
 
-  const pgEnabled = checkInput('setPGEnabled', d.network.pgEnabled);
-  const pgRow = el('div', 'set-row');
-  pgRow.appendChild(el('label', '', ''));
-  pgRow.appendChild(pgEnabled);
-  pgRow.appendChild(el('span', 'unit', '启用 PostgreSQL 协议端口'));
-  settingsBody.appendChild(pgRow);
+  if (!rt.canEdit) {
+    // 远程只能查看：输入框全灰。外观是本地偏好，仍然可以点。
+    for (const n of settingsBody.querySelectorAll('input')) n.disabled = true;
+    for (const n of settingsBody.querySelectorAll('.set-pane:not([data-pane="look"]) button')) n.disabled = true;
+  }
 
-  const pgPort = numInput('setPGPort', d.network.pgPort, 1, 65535);
-  pgPort.disabled = !d.network.pgEnabled;
-  settingsBody.appendChild(setRow('PG 端口', pgPort));
+  if (!SET_PANES.some(p => p.id === setPane)) setPane = 'conn';
+  setSettingsPane(setPane);
+  // 刚建出来的按钮需要拿到当前档位的 disabled 状态
+  applyFontScale(currentFsPct(), false);
+  refreshDirty();
+  lockSettingsHeight();
+}
 
-  const pgRemote = checkInput('setPGRemote', d.network.pgRemote);
-  const pgRemoteRow = el('div', 'set-row');
-  pgRemoteRow.appendChild(el('label', '', ''));
-  pgRemoteRow.appendChild(pgRemote);
-  pgRemoteRow.appendChild(el('span', 'unit', '允许远程连接 PG'));
-  settingsBody.appendChild(pgRemoteRow);
+// lockSettingsHeight 把弹窗高度钉在「最高的那一组」上。
+//
+// 五组内容差得多（外观 300 出头、性能近 700），高度跟着内容走的话，点一下 Tab
+// 窗口就蹿高或缩回去，鼠标下的按钮跟着跑。钉死之后矮组下方留白，切组纹丝不动。
+// 量的时候必须先把卡片高度松开：卡片有固定高度时 body 会被撑开，
+// scrollHeight 只会返回可视高度，五组量出来一样高，等于没量。
+// 用户拽过右下角（userSize）就还给他设的尺寸 —— 但每次打开都重新量，
+// 否则改过字号以后再打开，高度还停在旧的那一档上。
+function lockSettingsHeight() {
+  const card = settingsModal.querySelector('.modal-card');
+  const panes = [...settingsBody.querySelectorAll('.set-pane')];
+  if (!card || !panes.length || card.dataset.userSize === '1') return;
 
-  settingsBody.appendChild(el('div', 'set-hint',
-    '当前监听：' + (rt.pgAddr || '未启用') +
-    '　改端口会断开现有客户端，重连即可。改控制台端口后需要用新端口重新打开页面。'));
+  const shown = Math.max(0, panes.findIndex(p => !p.classList.contains('hidden')));
+  const hadMax = card.style.maxHeight;
+  card.style.height = 'auto';
+  card.style.maxHeight = 'none';
 
-  pgEnabled.addEventListener('change', () => {
-    pgPort.disabled = !pgEnabled.checked;
-  });
+  let max = 0;
+  for (let i = 0; i < panes.length; i++) {
+    panes.forEach((q, j) => q.classList.toggle('hidden', i !== j));
+    max = Math.max(max, settingsBody.scrollHeight);
+  }
+  panes.forEach((q, j) => q.classList.toggle('hidden', j !== shown));
 
-  /* ---- 性能（并发控制） ---- */
-  const pf = d.performance || {};
-  settingsBody.appendChild(el('div', 'set-sec', '性能（并发控制）'));
-  settingsBody.appendChild(setRow('最大并发数', numInput('setPerfMaxConc', pf.maxConcurrent ?? 32, 0, 10000)));
-  settingsBody.appendChild(setRow('排队上限', numInput('setPerfMaxQueued', pf.maxQueued ?? 256, 0, 100000)));
-  settingsBody.appendChild(el('div', 'set-hint',
-    '同时执行 SQL 的上限（0 = 不限）：超出的排队等，不占内存。' +
-    '排队超过上限会快速失败（SQLSTATE 53300），客户端能感知压力。' +
-    '显式事务占槽位到 COMMIT/ROLLBACK，事务多时可适当调大。' +
-    '排队超时在「监控」面板的「超时开关」里设（queueWaitSec，0 = 不限）。'));
-
-  /* ---- 安全 ---- */
-  settingsBody.appendChild(el('div', 'set-sec', '安全（PostgreSQL 协议密码）'));
-  const requirePw = checkInput('setRequirePw', d.auth.requirePassword);
-  const pwRow = el('div', 'set-row');
-  pwRow.appendChild(el('label', '', ''));
-  pwRow.appendChild(requirePw);
-  pwRow.appendChild(el('span', 'unit', '连接 PG 时必须输入密码'));
-  settingsBody.appendChild(pwRow);
-
-  const userInput = textInput('setAuthUser', d.auth.user, 'godb');
-  const pwInput = textInput('setAuthPassword', '', d.auth.hasPassword ? '已设置，留空则不修改' : '设置密码', 'password');
-  settingsBody.appendChild(setRow('用户名', userInput));
-  settingsBody.appendChild(setRow('密码', pwInput));
-  settingsBody.appendChild(el('div', 'set-hint',
-    '密码以 PBKDF2-SHA256 哈希保存在配置文件里，接口不会回显。' +
-    (d.auth.hasPassword ? ' 已有密码；留空表示保持不变。' : '')));
-
-  settingsBody.appendChild(el('div', 'set-warn',
-    '网页控制台本身不登录：能访问控制台的人可以执行任意 SQL。配置的修改只接受本机请求，' +
-    '所以远程只能查看。PG 协议是明文传输（没有 TLS），跨公网请自行套隧道。'));
-
-  const pathEl = el('div', 'set-path', '配置文件：' + (d.path || '—') + '　客户端：' + (rt.clientIp || '—'));
-  settingsBody.appendChild(pathEl);
-
-  const saveBtn = document.getElementById('btnSettingsSave');
-  saveBtn.disabled = !rt.canEdit;
+  const head = card.querySelector('.modal-head');
+  const foot = card.querySelector('.modal-foot');
+  const chrome = (head ? head.offsetHeight : 0)
+    + settingsTabs.offsetHeight
+    + (foot ? foot.offsetHeight : 0)
+    + 2; // 上下边框
+  card.style.maxHeight = hadMax;
+  if (max <= 0) return; // 弹窗还藏着（display:none）时量不出高度，别把卡片压成 0
+  card.style.height = Math.min(Math.ceil(chrome + max), window.innerHeight - 80) + 'px';
 }
 
 async function saveSettings() {
   if (!settingsData || !settingsData.runtime.canEdit) return;
+  if (invalidInputs().length) {
+    setHint('有输入不合法，先改好再保存', 'err');
+    return;
+  }
   const val = id => {
     const n = document.getElementById(id);
     const v = parseInt(n.value, 10);
@@ -3131,7 +3323,7 @@ async function saveSettings() {
       requirePassword: document.getElementById('setRequirePw').checked,
       user: document.getElementById('setAuthUser').value.trim(),
       password: document.getElementById('setAuthPassword').value,
-      clearPassword: false,
+      clearPassword: setClearPw,
     },
     performance: {
       maxConcurrent: val('setPerfMaxConc'),
@@ -3154,7 +3346,8 @@ async function saveSettings() {
     // 存成功就把弹窗收掉：结果交给 toast，用户接着干活，不用再点一次 ×
     // （改监听地址是唯一要「停一下」的情况，toast 多留几秒把它读完）
     // 失败/被拒仍然留在弹窗里 —— 那句错误得贴着出错的输入框看。
-    closeSettings();
+    setClearPw = false;
+    closeSettings(true); // 已落盘，别再弹「有改动没保存」
     setHint('');
     if (moved) {
       toast('已保存，控制台换到了 ' + afterAddr + '，请用新地址打开页面', false, 9000);
@@ -3170,7 +3363,14 @@ async function saveSettings() {
 
 document.getElementById('btnSettings').addEventListener('click', openSettings);
 document.getElementById('btnSettingsClose').addEventListener('click', closeSettings);
-document.getElementById('btnSettingsSave').addEventListener('click', saveSettings);
+document.getElementById('btnSettingsSave').addEventListener('click', () => {
+  // 「外观」组没有可保存的东西，那一页的按钮就是关闭（有别的改动时仍显示「保存并应用」）
+  if (document.getElementById('btnSettingsSave').dataset.mode === 'close') {
+    closeSettings();
+    return;
+  }
+  saveSettings();
+});
 document.addEventListener('keydown', e => {
   // 确认框开着的时候 Esc 只该关它自己，别顺手把底下的设置页也关掉
   // （设置页里的两个按钮都会弹这个确认框，叠在一起）。

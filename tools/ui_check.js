@@ -882,8 +882,116 @@ class CDP {
     check('设置页有字号控件', setUi.fsBtns === 2 && setUi.fsValues === 1 && /%$/.test(setUi.fsText), setUi.fsText);
     check('设置页有载入示例数据 / 清空当前库',
       setUi.hasSample && setUi.hasReset);
-    check('设置页分区顺序：外观 → 数据 → 落盘…',
-      /外观/.test(setUi.secs[0] || '') && setUi.secs[1] === '数据', setUi.secs.slice(0, 3).join(' / '));
+    // 五组 Tab：连接 / 安全 / 性能 / 外观 / 数据。旧版是一条长列滚两屏，找一项得翻半天。
+    const setTabs = await cdp.eval(`(() => {
+      const tabs = [...document.querySelectorAll('.set-tab')];
+      return {
+        names: tabs.map(t => t.textContent.trim()),
+        active: (tabs.find(t => t.classList.contains('on')) || {}).textContent || '',
+        panes: [...document.querySelectorAll('.set-pane')].filter(p => !p.classList.contains('hidden')).map(p => p.dataset.pane),
+      };
+    })()`);
+    check('设置页分成五组：连接/安全/性能/外观/数据',
+      setTabs.names.join('/') === '连接/安全/性能/外观/数据', setTabs.names.join('/'));
+    check('设置页默认停在「连接」，一屏只显示一组',
+      setTabs.active === '连接' && setTabs.panes.join() === 'conn', setTabs.active + ' / ' + setTabs.panes.join());
+
+    // 切组不重新渲染：在「连接」里改了一半再去看「性能」，回来还得在
+    const keep = await cdp.eval(`(() => {
+      document.getElementById('setAuthUser').value = 'keepme';
+      document.getElementById('setAuthUser').dispatchEvent(new Event('input', { bubbles: true }));
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'perf').click();
+      return {
+        user: document.getElementById('setAuthUser').value,
+        dirty: document.getElementById('settingsDirty').textContent.trim(),
+        active: (document.querySelector('.set-tab.on') || {}).textContent || '',
+      };
+    })()`);
+    check('切组后另一组的改动还在，并提示「1 处未保存」',
+      keep.user === 'keepme' && keep.active === '性能' && /1 处未保存/.test(keep.dirty),
+      `${keep.active} / ${keep.dirty}`);
+
+    // 端口填 70000：立刻标红 + 底部禁用保存，不等到提交才报错
+    const badPort = await cdp.eval(`(() => {
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'conn').click();
+      const n = document.getElementById('setHTTPPort');
+      n.value = '70000';
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+      const r = {
+        bad: n.classList.contains('bad'),
+        hint: document.getElementById('settingsDirty').textContent.trim(),
+        disabled: document.getElementById('btnSettingsSave').disabled,
+      };
+      n.value = n.dataset.init;
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+      return r;
+    })()`);
+    check('端口超范围：输入框标红 + 保存被禁用',
+      badPort.bad && /输入不合法/.test(badPort.hint) && badPort.disabled,
+      `${badPort.hint} / 保存禁用 ${badPort.disabled}`);
+
+    // 外观组：本地偏好，不进保存。有别的改动时按钮还是「保存并应用」，别让人以为没处可存；
+    // 一条改动都没有时才是「关闭」。
+    const lookWithDirty = await cdp.eval(`(() => {
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'look').click();
+      const b = document.getElementById('btnSettingsSave');
+      return { btn: b.textContent.trim(), mode: b.dataset.mode, dirty: document.getElementById('settingsDirty').textContent.trim() };
+    })()`);
+    check('外观组：还压着别处改动时，按钮仍是「保存并应用」',
+      lookWithDirty.mode === 'save' && /未保存/.test(lookWithDirty.dirty),
+      `${lookWithDirty.btn} / ${lookWithDirty.dirty}`);
+
+    // 把连接的改动还原，再回外观组：这时才是「关闭」
+    await cdp.eval(`(() => {
+      const n = document.getElementById('setAuthUser');
+      n.value = n.dataset.init;
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    const look = await cdp.eval(`(() => {
+      const pane = document.querySelector('.set-pane[data-pane="look"]');
+      const b = document.getElementById('btnSettingsSave');
+      return {
+        btn: b.textContent.trim(),
+        mode: b.dataset.mode,
+        picks: pane.querySelectorAll('.theme-pick').length,
+        fs: pane.querySelectorAll('.fs-btn').length,
+      };
+    })()`);
+    check('外观组：皮肤/字号都在这一组，无改动时按钮变成「关闭」',
+      look.mode === 'close' && look.btn === '关闭' && look.picks === 5 && look.fs === 2,
+      `${look.btn} / ${look.picks} 皮肤 / ${look.fs} 字号按钮`);
+
+    // 数据组：危险操作独处红框，不和普通配置混排
+    const dataPane = await cdp.eval(`(() => {
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'data').click();
+      const zone = document.querySelector('.set-pane[data-pane="data"] .set-danger');
+      return {
+        hasZone: !!zone,
+        borderStyle: zone ? getComputedStyle(zone).borderStyle : '',
+        stats: document.querySelectorAll('.set-pane[data-pane="data"] .set-stats span').length,
+        btns: zone ? zone.querySelectorAll('button').length : 0,
+      };
+    })()`);
+    check('数据组：清库/示例在虚线危险框里，现状统计也在这组',
+      dataPane.hasZone && dataPane.borderStyle === 'dashed' && dataPane.btns === 2 && dataPane.stats === 9,
+      `危险框 ${dataPane.borderStyle} / ${dataPane.btns} 按钮 / ${dataPane.stats} 项统计`);
+    await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'look').click()`);
+
+    // 固定高度：五组内容差得多（外观一百多、性能五百多），跟着内容走的话切 Tab 窗口忽大忽小，
+    // 指针底下的按钮跟着跑。打开时按最高的一组钉死，矮组下方留白。
+    const setH = await cdp.eval(`(() => {
+      const card = document.querySelector('#settingsModal .modal-card');
+      const h = [];
+      for (const t of document.querySelectorAll('.set-tab')) {
+        t.click();
+        h.push(Math.round(card.getBoundingClientRect().height));
+      }
+      return { h, inline: card.style.height };
+    })()`);
+    check('切五个 Tab 弹窗高度纹丝不动',
+      new Set(setH.h).size === 1 && setH.h[0] > 400 && !!setH.inline,
+      setH.h.join(' / ') + ' · inline ' + setH.inline);
+    await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'look').click()`);
 
     // 点了要立刻生效（不依赖「保存并应用」）
     await cdp.eval(`document.querySelector('.theme-pick[data-theme="taro"]').click()`);
@@ -912,6 +1020,8 @@ class CDP {
     // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
     await cdp.eval(`openSettings()`);
     await sleep(800);
+    // 外观组在无改动时按钮是「关闭」，保存用例必须先切回可保存的组
+    await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'conn').click()`);
     await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
     await sleep(1300);
     const saved = await cdp.eval(`(() => {
@@ -931,15 +1041,19 @@ class CDP {
     await sleep(700);
     const pool0 = await cdp.eval(`(() => { const n = document.getElementById('setPoolPages'); return n ? n.value : null; })()`);
     check('设置页有「缓冲池页数」字段', pool0 !== null && pool0 !== '', String(pool0));
+    await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'perf').click()`);
     await cdp.eval(`document.getElementById('setPoolPages').value = '512'`);
+    await cdp.eval(`document.getElementById('setPoolPages').dispatchEvent(new Event('input', { bubbles: true }))`);
     await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
     await sleep(1200);
     await cdp.eval(`openSettings()`);
     await sleep(700);
     const pool1 = await cdp.eval(`document.getElementById('setPoolPages').value`);
     check('缓冲池页数能存住（512）', pool1 === '512', `保存前 ${pool0} → 重新打开 ${pool1}`);
-    // 还原成默认值，别把测试的副作用留在配置文件里
-    await cdp.eval(`document.getElementById('setPoolPages').value = '1024'`);
+    // 还原成打开时读到的值（默认是 4096 页 = 32MB），别把测试的副作用留在配置文件里
+    await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'perf').click()`);
+    await cdp.eval(`document.getElementById('setPoolPages').value = '${pool0}'`);
+    await cdp.eval(`document.getElementById('setPoolPages').dispatchEvent(new Event('input', { bubbles: true }))`);
     await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
     await sleep(1000);
 

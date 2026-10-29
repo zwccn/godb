@@ -55,7 +55,7 @@ type Storage struct {
 // Network 控制两个监听端口。
 //
 // Remote 为 false 时绑定 127.0.0.1（只有本机能连），为 true 时绑定
-// 0.0.0.0（同网段都能连）。默认都是 false。
+// 0.0.0.0（其它计算机都能连）。默认都是 false。
 type Network struct {
 	HTTPPort   int  `json:"httpPort"`
 	HTTPRemote bool `json:"httpRemote"`

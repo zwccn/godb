@@ -2550,13 +2550,19 @@ async function saveSettings() {
       return;
     }
     settingsData = res;
-    renderSettings();
     const afterAddr = res.runtime.httpAddr;
-    if (beforeAddr && afterAddr && beforeAddr !== afterAddr) {
-      setHint('已保存。控制台换到了 ' + afterAddr + '，请用新地址打开页面。', 'ok');
+    const moved = beforeAddr && afterAddr && beforeAddr !== afterAddr;
+    // 存成功就把弹窗收掉：结果交给 toast，用户接着干活，不用再点一次 ×
+    // （改监听地址是唯一要「停一下」的情况，toast 多留几秒把它读完）
+    // 失败/被拒仍然留在弹窗里 —— 那句错误得贴着出错的输入框看。
+    closeSettings();
+    setHint('');
+    if (moved) {
+      toast('已保存，控制台换到了 ' + afterAddr + '，请用新地址打开页面', false, 9000);
     } else {
-      setHint('已保存并生效。', 'ok');
+      toast('设置已保存并生效');
     }
+    // 端口/库名相关的东西会变，表结构跟着刷新一次
     loadSchema();
   } catch (e) {
     setHint('保存失败：' + e.message, 'err');
@@ -2683,13 +2689,15 @@ function typeSql(r) {
 }
 
 let toastTimer = null;
-function toast(msg, isErr) {
+// holdMs：停留时长（毫秒）。默认错误 7s、普通 2.6s；需要用户读一段地址之类的
+// 信息时由调用方传更长的值。
+function toast(msg, isErr, holdMs) {
   const t = document.getElementById('toast');
   if (!t) return;
   t.textContent = msg;
   t.className = 'toast' + (isErr ? ' err' : '');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.className = 'toast hidden'; }, isErr ? 7000 : 2600);
+  toastTimer = setTimeout(() => { t.className = 'toast hidden'; }, holdMs || (isErr ? 7000 : 2600));
 }
 
 // DDL 不允许在显式事务里执行（引擎的硬性限制），先拦一下给个明确提示。

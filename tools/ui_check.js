@@ -766,6 +766,22 @@ class CDP {
     await sleep(200);
     check('设置：点 × 能关掉', await cdp.eval(`document.getElementById('settingsModal').classList.contains('hidden')`));
 
+    // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
+    await cdp.eval(`openSettings()`);
+    await sleep(800);
+    await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
+    await sleep(1300);
+    const saved = await cdp.eval(`(() => {
+      const t = document.getElementById('toast');
+      return {
+        closed: document.getElementById('settingsModal').classList.contains('hidden'),
+        toast: (t.textContent || ''),
+        shown: !t.classList.contains('hidden'),
+      };
+    })()`);
+    check('设置：「保存并应用」成功后自动关闭 + 提示',
+      saved.closed && saved.shown && /已保存/.test(saved.toast), JSON.stringify(saved));
+
     // 3) 历史面板
     await cdp.eval(`openHistory()`);
     await sleep(300);

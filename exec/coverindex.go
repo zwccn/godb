@@ -128,6 +128,8 @@ func (o *coverScanOp) Next() (types.Row, bool, error) {
 			t.done(false)
 			return nil, false, nil
 		}
+		// 按「读到的索引项」计数，解不出来的也算 —— 那同样是扫过的成本。
+		o.tx.NoteScan()
 		vals, ok := storage.DecodeOrderKey(key, len(o.ixCols))
 		if !ok || len(vals) < len(o.ixCols) {
 			continue

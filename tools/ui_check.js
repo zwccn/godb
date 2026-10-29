@@ -175,6 +175,43 @@ class CDP {
     check('回滚后：药丸隐藏 + 圆点提示回到「空闲」',
       txOff.pillHidden && /空闲/.test(txOff.tip), txOff.tip);
 
+    // 0.4c) 监控面板：慢SQL/慢事务是紧凑表格，点行出详情（含扫描行数）
+    await cdp.eval(`document.getElementById('btnMonitor').click()`);
+    await sleep(1200);
+    const monUi = await cdp.eval(`(() => {
+      const tb = document.querySelector('#monSlowSQL').closest('table');
+      const cell = document.querySelector('#monSlowSQL td.c-sql');
+      const cs = cell ? getComputedStyle(cell) : null;
+      return {
+        isTable: !!tb,
+        rows: document.querySelectorAll('#monSlowSQL tr').length,
+        tableLayout: tb ? getComputedStyle(tb).tableLayout : '',
+        ellipsis: cs ? cs.textOverflow : '',
+        nowrap: cs ? cs.whiteSpace : '',
+      };
+    })()`);
+    check('慢SQL 是紧凑表格 + SQL 列省略号截断',
+      monUi.isTable && monUi.rows > 0 && monUi.tableLayout === 'fixed' &&
+      monUi.ellipsis === 'ellipsis' && monUi.nowrap === 'nowrap',
+      `${monUi.rows} 行 / ${monUi.tableLayout} / ${monUi.ellipsis}`);
+    await cdp.eval(`document.querySelector('#monSlowSQL tr').click()`);
+    await sleep(700);
+    const detUi = await cdp.eval(`(() => {
+      const m = document.getElementById('slowModal');
+      return {
+        open: !m.classList.contains('hidden'),
+        stats: m.querySelectorAll('.sm-stats .sm-stat').length,
+        scan: /扫描行数/.test(m.textContent),
+        sql: (m.querySelector('#smSQL') || {}).textContent || '',
+      };
+    })()`);
+    check('点慢SQL行打开详情（指标卡 + 扫描行数 + SQL 原文）',
+      detUi.open && detUi.stats >= 4 && detUi.scan && detUi.sql.length > 0,
+      `${detUi.stats} 张卡 / ${detUi.sql.slice(0, 30)}`);
+    await cdp.eval(`document.getElementById('btnSlowDone').click()`);
+    await cdp.eval(`document.getElementById('btnMonClose').click()`);
+    await sleep(400);
+
     // 0.5) 编辑器高度：默认够高、能拖、双击回自动
     check('CodeMirror 已接管编辑区（语法高亮 + 补全）',
       await cdp.eval(`!!document.querySelector('.CodeMirror') && !!window.CodeMirror`),

@@ -34,6 +34,9 @@ type Result struct {
 	Message  string          `json:"message,omitempty"`
 	// TookNs 是这条语句的耗时（纳秒，含等待锁，不含 SQL 解析），由 db 层填充。
 	TookNs int64 `json:"tookNs"`
+	// Scanned 是这条语句从表/索引里读出来的行数（含被 WHERE 过滤掉的），
+	// 同样由 db 层从事务计数器取走。慢 SQL 面板靠它回答「扫了多少行」。
+	Scanned int64 `json:"scanned,omitempty"`
 }
 
 // Engine 执行 DDL/DML/DQL。DDL 会直接落盘（本库限制：DDL 不能在显式事务中执行）。
@@ -1269,6 +1272,9 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 		return append(out, fr...)
 	}
 	collect := func(ref storage.Ref, row types.Row) error {
+		// 计扫描量：UPDATE/DELETE 走的是 tx.Scan 回调（不经过扫描算子），
+		// 不在这里记的话监控面板上「扫描」一栏永远是空的。
+		tx.NoteScan()
 		if len(s.From) == 0 {
 			ok, err := matchRow(row)
 			if err != nil || !ok {
@@ -1511,6 +1517,7 @@ func (e *Engine) execDelete(tx *storage.Tx, s *sql.Delete) (*Result, error) {
 		return false, nil
 	}
 	collect := func(ref storage.Ref, row types.Row) error {
+		tx.NoteScan()
 		ok, err := matchUsing(row)
 		if err != nil || !ok {
 			return err

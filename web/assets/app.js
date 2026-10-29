@@ -1535,32 +1535,39 @@ function explainSQL(sqlText) {
 
 /* ---- 5. 慢SQL / 慢事务 ---- */
 
+// 行数文案：百万以内给精确值（带千分位）—— 「2万」会把 19980 和 20001 抹平，
+// 而判断「扫了多少」差一点就差很多。百万以上才换单位。
+function fmtCount(n) {
+  if (n === undefined || n === null) return '—';
+  n = Number(n);
+  if (!isFinite(n)) return '—';
+  if (n < 1e6) return n.toLocaleString('en-US');
+  if (n < 1e8) return (n / 1e4).toFixed(1).replace(/\.0$/, '') + '万';
+  return (n / 1e8).toFixed(1).replace(/\.0$/, '') + '亿';
+}
+
+// 一行一个样本。表格只放「扫一眼够用」的四列，其余全在详情里。
 function renderSlowSQL(m) {
   const box = monEls.slowSql;
   box.innerHTML = '';
   const rows = m.slowSql || [];
   if (!rows.length) {
-    box.appendChild(el('div', 'mon-none', '还没有执行记录。'));
+    box.appendChild(emptyRow(4, '还没有执行记录。'));
     return;
   }
-  for (const r of rows) {
-    const item = el('div', 'mon-item' + (r.running ? ' running' : ''));
-    const top = el('div', 'mi-top');
-    top.appendChild(el('span', 'rw ' + (r.write ? 'rw-w' : 'rw-r'), r.write ? '写' : '读'));
-    top.appendChild(el('span', 'mi-took', fmtNs(r.tookNs)));
-    if (r.running) top.appendChild(el('span', 'mi-running', '还在跑'));
-    top.appendChild(el('span', 'mi-sess mono', sessionShort(r.session)));
-    item.appendChild(top);
-
-    const sql = el('div', 'mi-sql mono', r.sql || '—');
-    sql.title = r.sql || '';
-    item.appendChild(sql);
-
-    if ((r.tables || []).length) {
-      item.appendChild(el('div', 'mi-meta', '表：' + r.tables.join(', ')));
-    }
-    box.appendChild(item);
-  }
+  rows.forEach((r, i) => {
+    const tr = el('tr');
+    if (r.running) tr.classList.add('running');
+    tr.title = '点击查看详情';
+    tr.appendChild(el('td', 'c-rw')).appendChild(
+      el('span', 'rw ' + (r.write ? 'rw-w' : 'rw-r'), r.write ? '写' : '读'));
+    tr.appendChild(el('td', 'c-num', fmtNs(r.tookNs)));
+    tr.appendChild(el('td', 'c-num', r.scanned > 0 ? fmtCount(r.scanned) : '—'));
+    const sql = el('td', 'c-sql', r.sql || '—');
+    tr.appendChild(sql);
+    tr.addEventListener('click', () => openSlowDetail('sql', i));
+    box.appendChild(tr);
+  });
 }
 
 function renderSlowTx(m) {
@@ -1568,38 +1575,185 @@ function renderSlowTx(m) {
   box.innerHTML = '';
   const rows = m.slowTx || [];
   if (!rows.length) {
-    box.appendChild(el('div', 'mon-none', '当前没有进行中的事务。'));
+    box.appendChild(emptyRow(5, '当前没有进行中的事务。'));
     return;
   }
-  for (const r of rows) {
-    const item = el('div', 'mon-item');
-    const top = el('div', 'mi-top');
-    top.appendChild(el('span', 'mi-sess mono', sessionShort(r.session)));
-    top.appendChild(el('span', 'tx-state ' + (r.state === 'running' ? 'st-run' : 'st-idle'),
+  rows.forEach((r, i) => {
+    const tr = el('tr');
+    tr.title = '点击查看详情';
+    tr.appendChild(el('td', 'c-sess mono', sessionShort(r.session)));
+    const st = el('td', 'c-st');
+    st.appendChild(el('span', 'tx-state ' + (r.state === 'running' ? 'st-run' : 'st-idle'),
       r.state === 'running' ? '执行中' : '空闲'));
-    top.appendChild(el('span', 'mi-held', '持锁 ' + fmtMs(r.heldMs)));
-    top.appendChild(el('span', 'mi-idle', '空闲 ' + fmtMs(r.idleMs)));
-    item.appendChild(top);
+    tr.appendChild(st);
+    tr.appendChild(el('td', 'c-num', fmtMs(r.heldMs)));
+    tr.appendChild(el('td', 'c-num', fmtMs(r.idleMs)));
+    tr.appendChild(el('td', 'c-sql mono', r.lastSql || '—'));
+    tr.addEventListener('click', () => openSlowDetail('tx', i));
+    box.appendChild(tr);
+  });
+}
 
-    const meta = el('div', 'mi-meta');
-    // 「事务开始时间」比「已持续多久」更适合对照日志，两个都给。
-    let started = '';
+// 空表占位：跨列一行，不然 tbody 里没 tr 会塌成一条边。
+function emptyRow(cols, text) {
+  const tr = el('tr');
+  const td = el('td', 'mon-none', text);
+  td.colSpan = cols;
+  tr.appendChild(td);
+  return tr;
+}
+
+/* ---- 5.1 详情：点一行看「到底慢在哪」 ---- */
+
+let slowDetail = null; // { kind: 'sql'|'tx', row, at }
+
+function statCard(k, v, cls, wide) {
+  const card = el('div', 'sm-stat' + (wide ? ' wide' : ''));
+  card.appendChild(el('div', 'sm-stat-k', k));
+  card.appendChild(el('div', 'sm-stat-v' + (cls ? ' ' + cls : ''), v));
+  return card;
+}
+
+// 只有查询能 EXPLAIN（godb 的限制）：写语句给了按钮点了也是报错，不如不给。
+function explainableSQL(s) {
+  const t = String(s || '').trim().replace(/^\(+/, '').toUpperCase();
+  return t.startsWith('SELECT') || t.startsWith('WITH') || t.startsWith('VALUES');
+}
+
+function openSlowDetail(kind, idx) {
+  const m = monData;
+  if (!m) return;
+  const rows = kind === 'sql' ? (m.slowSql || []) : (m.slowTx || []);
+  const r = rows[idx];
+  if (!r) return;
+  slowDetail = { kind, row: r, at: m.nowMs };
+
+  const stats = document.getElementById('smStats');
+  const sqlBox = document.getElementById('smSQL');
+  const planWrap = document.getElementById('smPlanWrap');
+  const planBox = document.getElementById('smPlan');
+  const planHint = document.getElementById('smPlanHint');
+  const hint = document.getElementById('smHint');
+  stats.innerHTML = '';
+  sqlBox.textContent = '';
+  planBox.textContent = '';
+  planHint.textContent = '';
+
+  if (kind === 'sql') {
+    document.getElementById('smTitle').textContent = '慢 SQL 详情';
+    // 写语句没有 EXPLAIN（godb 只解释查询），别给一个点了就报错的按钮；
+    // 多语句批次（BEGIN; UPDATE…）同理 —— 开头不是查询就不给。
+    document.getElementById('btnSlowExplain').classList.toggle('hidden',
+      !!r.write || !explainableSQL(r.fullSql || r.sql));
+    const took = r.tookNs / 1e6;
+    const ret = r.rows || 0;
+    const aff = r.affected || 0;
+    const scan = r.scanned || 0;
+    stats.appendChild(statCard('耗时', fmtNs(r.tookNs), took >= 200 ? 'warn' : ''));
+    stats.appendChild(statCard('扫描行数', scan > 0 ? fmtCount(scan) : '—'));
+    stats.appendChild(statCard('返回行数', r.write ? '—' : fmtCount(ret)));
+    stats.appendChild(statCard('写入行数', r.write ? fmtCount(aff) : '—'));
+    if (scan > 0) {
+      const ratio = scan / Math.max(ret, 1);
+      stats.appendChild(statCard('扫描/返回', r.write ? '—' : ratio.toFixed(ratio < 10 ? 1 : 0) + '×',
+        ratio >= 100 ? 'bad' : (ratio >= 10 ? 'warn' : '')));
+    }
+    if (ret > 0 && took > 0) {
+      stats.appendChild(statCard('每行耗时', fmtPerRow(took, ret)));
+    }
+    stats.appendChild(statCard('类型', r.command || (r.write ? '写' : '读')));
+    stats.appendChild(statCard('涉及表', (r.tables || []).join(', ') || '—'));
+    stats.appendChild(statCard('会话', sessionShort(r.session)));
+    stats.appendChild(statCard('发生时间', r.ageMs ? fmtAgo(r.ageMs) : '—'));
+
+    sqlBox.textContent = r.fullSql || r.sql || '—';
+    if ((r.plan || []).length) {
+      planBox.textContent = r.plan.join('\n');
+      planHint.textContent = '（执行时记录）';
+      planWrap.classList.remove('hidden');
+    } else if (r.write) {
+      // godb 的 EXPLAIN 只解释查询，写语句没有计划可看。
+      planBox.textContent = '写语句没有执行计划：看「扫描行数」和「写入行数」就够了 —— ' +
+        '扫描远大于写入说明定位太粗（缺索引），两者接近说明是纯写入开销。';
+      planHint.textContent = '';
+      planWrap.classList.remove('hidden');
+    } else {
+      planWrap.classList.add('hidden');
+    }
+    hint.textContent = scan > ret * 20 && ret > 0
+      ? '扫描行数远多于返回行数：多半没走索引，可以给过滤列建索引。'
+      : (scan > aff * 20 && aff > 0 ? '扫描行数远多于写入行数：WHERE 没走索引，定位成本高。' : '');
+  } else {
+    document.getElementById('smTitle').textContent = '慢事务详情';
+    document.getElementById('btnSlowExplain').classList.remove('hidden');
+    stats.appendChild(statCard('持锁时长', fmtMs(r.heldMs), r.heldMs >= 3000 ? 'warn' : ''));
+    stats.appendChild(statCard('空闲时长', fmtMs(r.idleMs), r.idleMs >= 3000 ? 'warn' : ''));
+    stats.appendChild(statCard('已持续', fmtMs(r.txAgeMs)));
+    stats.appendChild(statCard('语句数', String(r.stmts || 0)));
+    stats.appendChild(statCard('状态', r.state === 'running' ? '执行中' : '空闲'));
+    stats.appendChild(statCard('会话', sessionShort(r.session)));
+    stats.appendChild(statCard('持有的锁', (r.locks || []).join(' ') || '—', '', true));
     if (m.nowMs && r.txAgeMs > 0) {
       const t = new Date(m.nowMs - r.txAgeMs);
-      started = '开始 ' + t.toLocaleTimeString('zh-CN', { hour12: false }) + ' · ';
+      stats.appendChild(statCard('开始时间', t.toLocaleTimeString('zh-CN', { hour12: false })));
     }
-    meta.textContent = `${started}已持续 ${fmtMs(r.txAgeMs)} · ${r.stmts || 0} 条语句` +
-      ((r.locks || []).length ? ' · 锁 ' + r.locks.join(' ') : '');
-    item.appendChild(meta);
-
-    if (r.lastSql) {
-      const sql = el('div', 'mi-sql mono', r.lastSql);
-      sql.title = r.lastSql;
-      item.appendChild(sql);
-    }
-    box.appendChild(item);
+    sqlBox.textContent = r.lastSql || '（没有记录到 SQL）';
+    planWrap.classList.add('hidden');
+    // 事务的最后一条是写语句时别给「看执行计划」（EXPLAIN 只支持查询）
+    document.getElementById('btnSlowExplain').classList.toggle('hidden', !explainableSQL(r.lastSql));
+    hint.textContent = r.state === 'idle' && r.idleMs >= 3000
+      ? '事务空转（SQL 都跑完了但没提交），它一直占着锁 —— 要么提交，要么 Kill。'
+      : '';
   }
+  document.getElementById('smHint').textContent = hint.textContent;
+
+  const modal = document.getElementById('slowModal');
+  modal.classList.remove('hidden');
 }
+
+function closeSlowDetail() {
+  document.getElementById('slowModal').classList.add('hidden');
+}
+
+// 「3 分钟前」这类相对时间：详情里比绝对时间更好读。
+// 每行耗时：小到 0.001ms 时改报微秒 —— 一律 toFixed(2) 会全变成 0.00，
+// 而「每行 0.8µs」和「每行 0.05µs」是可以拿来对比的。
+function fmtPerRow(tookMs, rows) {
+  const per = tookMs / rows;
+  if (per >= 1) return per.toFixed(1) + ' ms';
+  if (per >= 0.01) return per.toFixed(2) + ' ms';
+  if (per >= 0.00001) return (per * 1000).toFixed(1) + ' µs';
+  return '<0.01 µs';
+}
+
+function fmtAgo(ms) {
+  if (ms < 1000) return '刚刚';
+  if (ms < 60000) return Math.round(ms / 1000) + ' 秒前';
+  if (ms < 3600000) return Math.round(ms / 60000) + ' 分钟前';
+  return Math.round(ms / 3600000) + ' 小时前';
+}
+
+function slowDetailSQL() {
+  if (!slowDetail) return '';
+  const r = slowDetail.row;
+  return r.fullSql || r.sql || r.lastSql || '';
+}
+
+document.getElementById('btnSlowDone').addEventListener('click', closeSlowDetail);
+document.getElementById('btnSlowClose').addEventListener('click', closeSlowDetail);
+document.getElementById('btnSlowEditor').addEventListener('click', () => {
+  const sql = slowDetailSQL();
+  if (!sql) return;
+  editor.value = sql;
+  closeSlowDetail();
+  toggleMonitor(false);
+});
+document.getElementById('btnSlowExplain').addEventListener('click', () => {
+  const sql = slowDetailSQL();
+  if (!sql) return;
+  closeSlowDetail();
+  explainSQL(sql);
+});
 
 /* ---- 6. 超时开关 ---- */
 

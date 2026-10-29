@@ -80,6 +80,7 @@ func (o *scanOp) Next() (types.Row, bool, error) {
 		return nil, false, nil
 	}
 	o.scanned++
+	o.tx.NoteScan()
 	t.done(true)
 	return row, true, nil
 }
@@ -199,6 +200,7 @@ func (o *indexScanOp) Next() (types.Row, bool, error) {
 	}
 	r := o.rows[o.i]
 	o.i++
+	o.tx.NoteScan()
 	t.done(true)
 	return r, true, nil
 }
@@ -274,6 +276,7 @@ func (o *indexRangeScanOp) Next() (types.Row, bool, error) {
 		t.done(false)
 		return nil, false, nil
 	}
+	o.tx.NoteScan()
 	t.done(true)
 	return h.Row, true, nil
 }

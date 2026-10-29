@@ -6,7 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"godb/exec"
 	"godb/storage"
 	"godb/txn"
 )
@@ -34,8 +36,16 @@ const (
 	actSampleCap = 512
 	// slowSQLCap 是慢 SQL 记录的容量：保留最近这么多条执行记录，前端按耗时取 Top N。
 	slowSQLCap = 256
-	// sqlPreviewLen 是 SQL 预览的最大字节数。
+	// sqlPreviewLen 是 SQL 预览的最大字节数（表格里那一行）。
 	sqlPreviewLen = 240
+	// sqlFullLen 是详情页保留的 SQL 全文上限。慢样本最多 256 条，
+	// 不限长的话一条 COPY 就能把环形缓冲顶到 MB 级。
+	sqlFullLen = 2000
+	// planKeepNs：慢到这个量级才留计划文本。计划是 ExplainPlan 现成的（SELECT
+	// 本来就在算），留一份只是多几十字节；但快语句没人点详情，没必要占缓冲。
+	planKeepNs = int64(5 * time.Millisecond)
+	// planKeepLines 是详情里保留的计划行数上限（再长也看不过来）。
+	planKeepLines = 24
 )
 
 // actRec 是一条会话的活动记录。字段都由 recorder.mu 保护。
@@ -112,11 +122,18 @@ func (r *ring) Stats() (p50, p95, max int64) {
 }
 
 // execSample 是一条已完成的语句记录，供慢 SQL 列表取 Top N。
+// execSample 是一条已结束语句的样本。
 type execSample struct {
 	session string
-	sql     string
+	sql     string // 单行预览：表格里一行显示完，超长省略
+	full    string // 原文（详情看全文，多行保留；超长截断到 sqlFullLen）
 	tables  []string
 	write   bool
+	command string
+	rows    int   // 返回给客户端的行数（SELECT）
+	affect  int   // 影响行数（INSERT/UPDATE/DELETE）
+	scanned int64 // 从表/索引读出来的行数（含被过滤掉的）
+	plan    []string
 	tookNs  int64
 	at      time.Time
 }
@@ -213,11 +230,26 @@ func (r *recorder) setUser(id, user string) {
 }
 
 // noteExec 记一条完成的语句：进时长样本 + 慢 SQL 环形。
-func (r *recorder) noteExec(id, text string, tables []string, write bool, tookNs int64) {
+func (r *recorder) noteExec(id, text string, tables []string, write bool, res *exec.Result) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.execRing.Add(tookNs)
-	rec := execSample{session: id, sql: previewSQL(text), tables: tables, write: write, tookNs: tookNs, at: time.Now()}
+	r.execRing.Add(res.TookNs)
+	rec := execSample{
+		session: id,
+		sql:     previewSQL(text),
+		full:    clampText(text, sqlFullLen),
+		tables:  tables,
+		write:   write,
+		command: res.Command,
+		rows:    res.RowCount,
+		affect:  res.Affected,
+		scanned: res.Scanned,
+		tookNs:  res.TookNs,
+		at:      time.Now(),
+	}
+	if res.TookNs >= planKeepNs {
+		rec.plan = trimPlan(res.Plan)
+	}
 	r.slow[r.pos] = rec
 	r.pos = (r.pos + 1) % len(r.slow)
 	if r.n < len(r.slow) {
@@ -226,6 +258,33 @@ func (r *recorder) noteExec(id, text string, tables []string, write bool, tookNs
 	if a := r.acts[id]; a != nil {
 		a.lastAt = rec.at
 	}
+}
+
+// clampText 截断到 n 字节，保留换行（详情页展示原文用）。
+func clampText(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	// 别把多字节字符切一半
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n…（已截断）"
+}
+
+// trimPlan 截取计划的前若干行。
+func trimPlan(plan []string) []string {
+	if len(plan) == 0 {
+		return nil
+	}
+	out := plan
+	if len(out) > planKeepLines {
+		out = out[:planKeepLines]
+	}
+	// 复制一份：Result 里的切片可能被后续使用，别共享底层数组。
+	return append([]string(nil), out...)
 }
 
 func (r *recorder) noteQueueWait(ns int64) {
@@ -402,12 +461,18 @@ type LockRow struct {
 // SlowSQLRow 是慢 SQL 列表的一行。
 type SlowSQLRow struct {
 	Session string   `json:"session"`
-	SQL     string   `json:"sql"`
+	SQL     string   `json:"sql"`   // 单行预览（表格里一行显示，超长省略）
+	FullSQL string   `json:"fullSql,omitempty"` // 原文（详情用）
 	Tables  []string `json:"tables,omitempty"`
 	Write   bool     `json:"write"`
-	TookNs  int64    `json:"tookNs"`
-	Running bool     `json:"running"`
-	AgeMs   int64    `json:"ageMs"`
+	Command string   `json:"command,omitempty"`
+	RowCount int     `json:"rows"`
+	Affected int     `json:"affected"`
+	Scanned  int64   `json:"scanned"`
+	Plan     []string `json:"plan,omitempty"`
+	TookNs   int64   `json:"tookNs"`
+	Running  bool    `json:"running"`
+	AgeMs    int64   `json:"ageMs"`
 }
 
 // SlowTxRow 是慢事务列表的一行。
@@ -647,12 +712,18 @@ func (d *DB) Monitor(t TimeoutStatus) Monitor {
 	m.Slow = []SlowSQLRow{}
 	for _, e := range d.act.topSlowSQL(topSlowSQL) {
 		m.Slow = append(m.Slow, SlowSQLRow{
-			Session: e.session,
-			SQL:     e.sql,
-			Tables:  e.tables,
-			Write:   e.write,
-			TookNs:  e.tookNs,
-			AgeMs:   durMs(now.Sub(e.at)),
+			Session:  e.session,
+			SQL:      e.sql,
+			FullSQL:  e.full,
+			Tables:   e.tables,
+			Write:    e.write,
+			Command:  e.command,
+			RowCount: e.rows,
+			Affected: e.affect,
+			Scanned:  e.scanned,
+			Plan:     e.plan,
+			TookNs:   e.tookNs,
+			AgeMs:    durMs(now.Sub(e.at)),
 		})
 	}
 	// 正在跑且已经超过当前第 N 名的语句排在最前面（"还在跑"是这一栏的关键信息）。

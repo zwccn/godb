@@ -436,6 +436,11 @@ type Tx struct {
 	// User 是发起本事务的登录名（current_user 回显；空串表示未知）。
 	User string
 
+	// scanRows 是本事务从表/索引里读出来的行数，给监控面板的「扫描量」用。
+	// 语句结束时 TakeScanRows 取走并清零：一个事务里多条语句各算各的。
+	// 单会话串行执行，不需要原子操作（每行只加一要能内联，别拖慢热路径）。
+	scanRows int64
+
 	// lastSeq / hasLastSeq 记录本事务最后一次 nextval 分配的值（lastval() 用）。
 	lastSeq    int64
 	hasLastSeq bool
@@ -785,6 +790,18 @@ func (tx *Tx) LastSeqValue() (int64, bool) {
 // lastval() 在 PostgreSQL 里是会话级的，跨语句有效，所以每次开事务都要继承。
 func (tx *Tx) SetLastSeq(v int64) {
 	tx.lastSeq, tx.hasLastSeq = v, true
+}
+
+// NoteScan 记一行扫描。扫描算子每吐一行调一次，是热路径 ——
+// 方法体保持极短，编译器才会内联（别在这里加锁或判断分支）。
+func (tx *Tx) NoteScan() { tx.scanRows++ }
+
+// TakeScanRows 取走并清零本事务的扫描计数。
+// 每条语句结束时调一次：显式事务里多条语句各算各的扫描量。
+func (tx *Tx) TakeScanRows() int64 {
+	n := tx.scanRows
+	tx.scanRows = 0
+	return n
 }
 
 // ResetSeq 把自增序列重置为 0（TRUNCATE 用）。

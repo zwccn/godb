@@ -193,21 +193,46 @@ try {
       </section>
     </div>
 
-    <!-- 5. 慢SQL / 慢事务：两个并列 Top N -->
+    <!-- 5. 慢SQL / 慢事务：两个并列 Top N，都是紧凑表格，点行看详情 -->
     <div class="mon-two">
       <section class="mon-card">
         <div class="mon-card-head">
           <span>慢 SQL</span>
-          <span class="mon-sub">Top 10 · 按执行耗时</span>
+          <span class="mon-sub">Top 10 · 按执行耗时 · 点行看详情</span>
         </div>
-        <div class="mon-list" id="monSlowSQL"></div>
+        <div class="mon-tw">
+          <table class="mon-slow">
+            <thead>
+              <tr>
+                <th class="c-rw">类型</th>
+                <th class="c-num">耗时</th>
+                <th class="c-num">扫描</th>
+                <th class="c-sql">SQL</th>
+              </tr>
+            </thead>
+            <tbody id="monSlowSQL"></tbody>
+          </table>
+        </div>
       </section>
       <section class="mon-card">
         <div class="mon-card-head">
           <span>慢事务</span>
-          <span class="mon-sub">Top 10 · 按持锁时长</span>
+          <span class="mon-sub">Top 10 · 按持锁时长 · 点行看详情</span>
         </div>
-        <div class="mon-list" id="monSlowTx"></div>
+        <div class="mon-tw">
+          <table class="mon-slow">
+            <thead>
+              <tr>
+                <th class="c-sess">会话</th>
+                <th class="c-st">状态</th>
+                <th class="c-num">持锁</th>
+                <th class="c-num">空闲</th>
+                <th class="c-sql">最后一条 SQL</th>
+              </tr>
+            </thead>
+            <tbody id="monSlowTx"></tbody>
+          </table>
+        </div>
       </section>
     </div>
 
@@ -259,6 +284,33 @@ try {
       <span id="dbHint" class="modal-hint"></span>
       <div class="foot-actions">
         <button id="btnDBDone" class="btn btn-sm" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 慢 SQL / 慢事务详情：点监控面板里的一行打开 -->
+<div id="slowModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="慢查询详情">
+  <div class="modal-card mid">
+    <div class="modal-head">
+      <span id="smTitle">慢 SQL 详情</span>
+      <button id="btnSlowClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="modal-body sm-body">
+      <div class="sm-stats" id="smStats"></div>
+      <div class="sm-sec">SQL</div>
+      <pre class="sm-sql mono" id="smSQL"></pre>
+      <div id="smPlanWrap">
+        <div class="sm-sec">执行计划<span class="sm-sec-hint" id="smPlanHint"></span></div>
+        <pre class="sm-plan mono" id="smPlan"></pre>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="modal-hint" id="smHint"></span>
+      <div class="foot-actions">
+        <button id="btnSlowEditor" class="btn btn-sm" type="button" title="把这条 SQL 填进编辑器">填进编辑器</button>
+        <button id="btnSlowExplain" class="btn btn-primary btn-sm" type="button" title="在编辑器里跑 EXPLAIN ANALYZE">看执行计划</button>
+        <button id="btnSlowDone" class="btn btn-sm" type="button">关闭</button>
       </div>
     </div>
   </div>

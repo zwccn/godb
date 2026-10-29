@@ -421,7 +421,7 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 		}
 		if res != nil && res.TookNs > 0 {
 			totalTook += res.TookNs
-			d.act.noteExec(sess.ID, text, tables, write, res.TookNs)
+			d.act.noteExec(sess.ID, text, tables, write, res)
 		}
 		if err != nil {
 			return out, err
@@ -571,6 +571,13 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	// 卡死，整个库看起来像挂了。panic 由 Exec 的 recover 兜住并转成错误，
 	// 但锁不能再靠调用顺序保证。
 	res, execErr := d.execLocked(stmt, st)
+	// 扫描量：从事务计数器取走（取走即清零，所以显式事务里多条语句各算各的）。
+	// 放在 End 之前 —— 自动提交会在 End 里把 tx 置空。
+	if res != nil {
+		if tx := stmt.Tx(); tx != nil {
+			res.Scanned = tx.TakeScanRows()
+		}
+	}
 	// lastval() 是会话级的：把本事务最后一次分配的序列值带回会话。
 	if v, ok := stmt.Tx().LastSeqValue(); ok {
 		sess.SetLastSeq(v)

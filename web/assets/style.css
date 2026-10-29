@@ -1343,6 +1343,103 @@ table.grid td.bool { color: var(--warn-text); }
 .mon-locks .c-act { width: 132px; white-space: nowrap; }
 .mon-locks .c-act .btn + .btn { margin-left: 5px; }
 .mon-table { font-family: var(--mono); color: var(--text); }
+
+/* 慢SQL / 慢事务：紧凑表格。
+   table-layout:fixed 是必须的 —— 只有列宽被定死，td 上的 ellipsis 才生效，
+   否则长 SQL 会把整列撑开、把右边的单元格挤没。 */
+.mon-tw { overflow-x: auto; }
+.mon-slow {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: calc(11.5px * var(--fs));
+}
+.mon-slow th {
+  text-align: left;
+  padding: 6px 8px;
+  font-weight: 500;
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+.mon-slow td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mon-slow tr:last-child td { border-bottom: none; }
+.mon-slow tbody tr { cursor: pointer; }
+.mon-slow tbody tr:hover { background: var(--row-hover); }
+.mon-slow .c-rw { width: 46px; }
+.mon-slow .c-num { width: 72px; text-align: right; font-family: var(--mono); }
+.mon-slow .c-sess { width: 86px; }
+.mon-slow .c-st { width: 68px; }
+.mon-slow th.c-num { text-align: right; }
+.mon-slow .c-sql { color: var(--text-2); font-family: var(--mono); }
+.mon-slow tbody tr.running .c-num { color: var(--warn-text); }
+
+/* 详情弹窗：关键指标一排卡片，SQL 与计划各一块 */
+.sm-body { display: flex; flex-direction: column; gap: 10px; }
+.sm-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+}
+.sm-stat {
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 6px 9px;
+  background: var(--bg-2);
+  min-width: 0;
+}
+.sm-stat-k {
+  font-size: calc(10px * var(--fs));
+  color: var(--text-3);
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+.sm-stat-v {
+  font-family: var(--mono);
+  font-size: calc(13px * var(--fs));
+  color: var(--text);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sm-stat-v.warn { color: var(--warn-text); }
+.sm-stat-v.bad { color: var(--danger-text); }
+/* 宽卡片（如「持有的锁」）：占两格并允许换行，别把 "slowdemo S" 截成 "slowdemo…" */
+.sm-stat.wide { grid-column: span 2; }
+.sm-stat.wide .sm-stat-v { white-space: normal; word-break: break-word; }
+.sm-sec {
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
+  letter-spacing: .4px;
+  margin-top: 2px;
+}
+.sm-sec-hint { margin-left: 8px; color: var(--text-3); opacity: .8; }
+.sm-sql, .sm-plan {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 190px;
+  overflow: auto;
+}
+.sm-plan { color: var(--text-2); }
+
 .held { font-family: var(--mono); }
 .held.warn { color: var(--warn-text); }
 .held.bad { color: var(--danger-text); font-weight: 600; }

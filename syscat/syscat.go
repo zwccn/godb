@@ -52,7 +52,7 @@ const DatabaseName = DefaultDatabaseName
 const (
 	ServerVersion    = "10.0"
 	ServerVersionNum = "100000"
-	GodbVersion      = "0.2.0"
+	GodbVersion      = "0.3.0"
 )
 
 // ServerVersionLine 是 version() 的返回值。

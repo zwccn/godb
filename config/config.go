@@ -24,7 +24,9 @@ import (
 // v3：等锁 / 排队的出厂默认从 3 秒改成「不限」（0）。监控面板上四个超时
 // 现在出厂全是「不限」——它们都是「主动回滚或放弃用户请求」的保护，
 // 默认打开等于替用户做决定。
-const Version = 3
+//
+// v4：缓冲池默认从 1024 页（8MB）提到 4096 页（32MB）。
+const Version = 4
 
 // Storage 控制 checkpoint（落盘）的触发策略。
 //
@@ -40,12 +42,13 @@ type Storage struct {
 	CheckpointWALMB int `json:"checkpointWalMB"`
 	// BufferPoolPages 是**全库共享**的缓冲池页数（8KB/页，所有表加在一起）。
 	//
-	// 行能换出之后，它决定单表最多留多少「热页」的行在内存里：
-	// 1024 页 = 8MB/表，表比这大时，很久没访问的页会被淘汰、对应的行
-	// 从内存里放掉，下次访问再从页文件读回来。
+	// 它决定「同时能有多少个热页留在内存里」：池子满了以后，最近没被
+	// 碰过的页会被淘汰、对应的行从内存里放掉，下次访问再从页文件读回来。
+	// 所以它约等于「能从磁盘省掉的页命中预算」，不是某一张表的配额 ——
+	// 一张很大的表可以把整个池子占满。
 	//
-	// 0 表示用默认值（1024）。**改完要重启才生效**（缓冲池在表第一次
-	// 打开时创建），不像落盘节奏那样能热改。
+	// 0 表示用默认值（4096 页 = 32MB）。**改完要重启才生效**（缓冲池在
+	// 表第一次打开时创建），不像落盘节奏那样能热改。
 	BufferPoolPages int `json:"bufferPoolPages"`
 }
 
@@ -133,7 +136,7 @@ func Default() Config {
 			CheckpointCommits: 128,
 			CheckpointSeconds: 60,
 			CheckpointWALMB:   64,
-			BufferPoolPages:   1024,
+			BufferPoolPages:   4096,
 		},
 		Network: Network{
 			HTTPPort:   8080,
@@ -299,6 +302,18 @@ func (c *Config) Normalize() {
 		}
 		if c.Timeouts.QueueWaitSec == 3 {
 			c.Timeouts.QueueWaitSec = 0
+		}
+		c.Version = 3
+	}
+	if c.Version < 4 {
+		// v3 → v4：缓冲池默认从 1024 页（8MB）提到 4096 页（32MB）。
+		//
+		// 和 v3 一样的问题：v3 的 Default() 把 1024 写进了每个配置文件，
+		// 「没动过」和「特意设成 8MB」在文件里看不出区别。恰好等于 1024
+		// 的当没动过迁到新默认，其它值（含 0 = 用默认）原样保留。
+		// 只影响下次启动 —— 缓冲池在表第一次打开时创建，不热改。
+		if c.Storage.BufferPoolPages == 1024 {
+			c.Storage.BufferPoolPages = 4096
 		}
 		c.Version = Version
 	}

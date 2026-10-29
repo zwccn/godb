@@ -84,6 +84,26 @@ func TestMigrateV2Timeouts(t *testing.T) {
 	}
 }
 
+// v3 → v4：缓冲池默认从 1024 页提到 4096 页，做法和 v3 的超时迁移一样
+// —— 恰好等于旧默认的视为没动过，其它值（含 0 = 用默认）原样保留。
+func TestMigrateV3BufferPool(t *testing.T) {
+	c := Config{Version: 3, Storage: Storage{BufferPoolPages: 1024}}
+	c.Normalize()
+	if c.Storage.BufferPoolPages != 4096 {
+		t.Errorf("旧默认 1024 页应迁成 4096，实际 %d", c.Storage.BufferPoolPages)
+	}
+	if c.Version != Version {
+		t.Errorf("版本 = %d，期望 %d", c.Version, Version)
+	}
+
+	// 用户自己调过的值不能被这次迁移抹掉。
+	c = Config{Version: 3, Storage: Storage{BufferPoolPages: 2048}}
+	c.Normalize()
+	if c.Storage.BufferPoolPages != 2048 {
+		t.Errorf("用户显式设置的页数被改写了：%d", c.Storage.BufferPoolPages)
+	}
+}
+
 // 已经是最新版的配置不能再被迁移逻辑改写：用户把超时显式设成 0（不限）
 // 是一个合法选择，重启后必须还是 0。
 func TestLatestConfigKeepsExplicitZero(t *testing.T) {

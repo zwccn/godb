@@ -133,7 +133,7 @@ func Open(dir string, cat *catalog.Catalog, progress func(string)) (*Store, erro
 }
 
 // OpenWith 和 Open 一样，只是能指定「全库共享的缓冲池页数」。
-// poolPages <= 0 表示用默认值（1024 页 = 8MB，**所有表合计**）。
+// poolPages <= 0 表示用默认值（4096 页 = 32MB，**所有表合计**）。
 //
 // 测试靠它把池子压到 2~3 页，逼出「行换出 → 再从页里换回来」这条路径。
 func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages int) (*Store, error) {

@@ -26,8 +26,12 @@ import (
 //   - **顺序预取**（prefetch）：扫表按 RID 递增，页号基本单调，检测到连续就
 //     一次 pread 读 8 页塞进池子，把「一页一次 syscall + 等 I/O」摊平。
 
-// defaultPoolPages 是全局缓冲池的默认页数（1024 × 8KB = 8MB）。
-const defaultPoolPages = 1024
+// defaultPoolPages 是全局缓冲池的默认页数（4096 × 8KB = 32MB）。
+//
+// 32MB 的理由：这是个教学级引擎，数据集通常几十到几百 MB，32MB 能装下
+// 中小表的全部热页，又不至于让「空跑」的实例白占内存。1024 页（8MB）
+// 在几十万行的表上命中率明显偏低 —— 一次全表扫就把池子洗一遍。
+const defaultPoolPages = 4096
 
 // defaultPrefetchDepth 是一次顺序预取读几页（8 页 = 64KB，一次 pread）。
 // 是变量而不是常量：测试/诊断要能把它关掉（0 = 不预取），对照组才好比。
@@ -579,7 +583,11 @@ func (bp *bufPool) prefetch(ids []uint32) int {
 	added := 0
 	for i, id := range need {
 		// 坏页不预取：真读它的时候再报错（这里静默更安全，别把预取变成故障源）
-		if verifyPage(datas[i]) != nil {
+		//
+		// 必须走 bp.verifyPage 而不是包级 verifyPage：索引页池有自己的
+		// 魔数与校验和（indexfile.go 里设的 verifyIdxPage）。目前只有堆页池
+		// 预取，两者等价；但哪天索引也预取，写死包级函数就会用错校验器。
+		if bp.verifyPage(datas[i]) != nil {
 			continue
 		}
 		bp.mu.Lock()

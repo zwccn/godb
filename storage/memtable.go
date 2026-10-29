@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ type TableData struct {
 
 	// pk 是主键索引：保序键 → 槽位。用 B+Tree 而不是哈希表，这样主键也能走
 	// 范围扫描（`id BETWEEN`、`ORDER BY id`、`min/max`），而且键天然有序。
+	// 树本身在页文件里（一个索引一个文件），内存里只有页缓存。
 	pk  *btree
 	Seq int64 // 自增列当前值
 
@@ -36,6 +38,16 @@ type TableData struct {
 
 	// unique 是非主键 UNIQUE 列组的索引：列组签名（"1,3"）→ B+Tree。
 	unique map[string]*btree
+
+	// indexTrees 是「索引身份 → 树」的登记表（"pk" / "ix:名字" / "uq:1,3"），
+	// 上面三个 map 只是按不同维度索引它。同一个索引只开一个文件、一个缓冲池。
+	indexTrees map[string]*btree
+	// idxNeedRebuild 记「打开时发现文件失效（代次落后 / 身份不符 / 校验坏）」的索引，
+	// 行加载完之后统一重建。
+	idxNeedRebuild map[string]bool
+	// budget / indexGen 是挂索引文件时要用的上下文（预算 + 表已落盘的代次）。
+	budget   *memBudget
+	indexGen map[string]int64
 
 	// pages 是页式堆文件。Rows 仍然是内存里的权威副本；提交只记「哪些行变了」，
 	// checkpoint 时再成批写进页 —— 提交路径因此和以前一样快（不用编解码整页），
@@ -78,14 +90,16 @@ type TableData struct {
 }
 
 func newTableData(name string) *TableData {
-	return &TableData{Name: name, pk: newBTree()}
+	// 索引树要挂在索引文件上，而文件要等表第一次落地（拿到稳定 ID）才存在，
+	// 所以这里不建树：所有树方法对 nil 接收者都是「空索引」。
+	return &TableData{Name: name}
 }
 
 // attachPages 给表挂上页文件（幂等）。id <= 0 表示这张表还没拿到稳定 ID。
 //
 // t 是 catalog 里的表定义：从页里换入行时要靠它对齐列与类型。
 // budget 是**全库共享**的页框预算（nil = 不参与预算，固定小池）。
-func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, budget *memBudget) error {
+func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, budget *memBudget, idxGen map[string]int64) error {
 	if t != nil {
 		td.tbl = t
 	}
@@ -108,7 +122,80 @@ func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, budget 
 	tp.guardEvict(td.evictBlocked.Load)
 	td.pages = tp
 	td.dir, td.id = dir, id
+	td.budget, td.indexGen = budget, idxGen
+	// 索引文件跟着表一起打开（身份不对或代次落后就标记「待重建」）
+	if err := td.openIndexFiles(t, idxGen); err != nil {
+		return err
+	}
 	return nil
+}
+
+// openIndexFiles 打开表上所有索引的页文件（幂等）。
+func (td *TableData) openIndexFiles(t *catalog.Table, idxGen map[string]int64) error {
+	if t == nil || td.id <= 0 {
+		return nil
+	}
+	if td.indexTrees == nil {
+		td.indexTrees = map[string]*btree{}
+	}
+	if td.idxNeedRebuild == nil {
+		td.idxNeedRebuild = map[string]bool{}
+	}
+	td.indexGen = idxGen
+	pk := t.PKIdxes()
+	if len(pk) > 0 {
+		td.pk = td.openIndexTree("pk")
+	}
+	names, _ := secondIndexCols(t)
+	if len(names) > 0 {
+		td.second = make(map[string]*btree, len(names))
+		for _, n := range names {
+			td.second[n] = td.openIndexTree("ix:" + n)
+		}
+	}
+	groups := td.uniqueGroups(t)
+	if len(groups) > 0 {
+		td.unique = make(map[string]*btree, len(groups))
+		for _, g := range groups {
+			sig := colsSig(g)
+			td.unique[sig] = td.openIndexTree("uq:" + sig)
+		}
+	}
+	return nil
+}
+
+// openIndexTree 取（或打开）某个索引的树。打不开就当没有这个索引 —— 反正下次
+// checkpoint 会因为它没被写过而保持旧代次，重启时统一重建。
+func (td *TableData) openIndexTree(ident string) *btree {
+	if td.dir == "" || td.id <= 0 {
+		return nil
+	}
+	if tr, ok := td.indexTrees[ident]; ok {
+		return tr
+	}
+	f, err := openIndexFile(td.dir, td.id, ident, td.budget, td.indexGen[ident])
+	if err != nil {
+		return nil
+	}
+	if f.fresh {
+		td.idxNeedRebuild[ident] = true
+	}
+	tr := newBTree(f)
+	td.indexTrees[ident] = tr
+	return tr
+}
+
+// uniqueGroups 返回需要单独建树（不跟主键重合）的 UNIQUE 列组。
+func (td *TableData) uniqueGroups(t *catalog.Table) [][]int {
+	pk := t.PKIdxes()
+	var groups [][]int
+	for _, g := range t.UniqueGroups() {
+		if sameCols(g, pk) {
+			continue // 主键已经走 td.pk 了
+		}
+		groups = append(groups, g)
+	}
+	return groups
 }
 
 // lockPages 拿页的独占权（checkpoint / VACUUM 用）：这期间本表不许换页落盘。
@@ -440,7 +527,7 @@ func (td *TableData) pageDirty() int {
 	if td.pages == nil {
 		return 0
 	}
-	n := len(td.pendingSlots) + td.pages.dirtyPages()
+	n := len(td.pendingSlots) + td.pages.dirtyPages() + td.dirtyIndexPages()
 	if td.fullSync {
 		n++
 	}
@@ -450,12 +537,91 @@ func (td *TableData) pageDirty() int {
 	return n
 }
 
-// closePages 关掉页文件（DROP TABLE / 表被换掉时）。
+// closePages 关掉页文件与索引文件（DROP TABLE / 表被换掉时）。
 func (td *TableData) closePages() {
 	if td.pages != nil {
 		_ = td.pages.close()
 		td.pages = nil
 	}
+	for _, tr := range td.indexTrees {
+		if tr != nil && tr.f != nil {
+			_ = tr.f.close()
+		}
+	}
+	td.indexTrees = nil
+	td.pk, td.second, td.unique = nil, nil, nil
+}
+
+// flushIndexes 把索引的脏页刷盘并把头页的代次推进到 gen（checkpoint 调用）。
+// 返回写回的页数，以及「每个索引现在落到了哪一代」（写进 meta）。
+func (td *TableData) flushIndexes(gen int64) (int, map[string]int64, error) {
+	pages := 0
+	gens := make(map[string]int64, len(td.indexTrees))
+	for ident, tr := range td.indexTrees {
+		if tr == nil || tr.f == nil {
+			continue
+		}
+		n, err := tr.f.flush(gen)
+		pages += n
+		if err != nil {
+			return pages, gens, err
+		}
+		gens[ident] = gen
+	}
+	return pages, gens, nil
+}
+
+// dirtyIndexPages 是索引池里还没落盘的脏页数（checkpoint 用它判断这张表要不要写）。
+func (td *TableData) dirtyIndexPages() int {
+	n := 0
+	for _, tr := range td.indexTrees {
+		if tr != nil && tr.f != nil {
+			n += tr.f.pool.dirtyCount()
+		}
+	}
+	return n
+}
+
+// resetIndexes 清空所有索引（TRUNCATE 用）。
+func (td *TableData) resetIndexes() {
+	for _, tr := range td.indexTrees {
+		if tr != nil {
+			tr.Reset()
+		}
+	}
+	td.idxNeedRebuild = nil
+}
+
+// DropIndexTree 关掉某个索引的树并删掉它的页文件（DROP INDEX 用）。
+func (td *TableData) DropIndexTree(name string) {
+	if td.indexTrees == nil {
+		return
+	}
+	ident := "ix:" + cleanName(name)
+	tr := td.indexTrees[ident]
+	if tr == nil {
+		return
+	}
+	if tr.f != nil {
+		path := tr.f.path
+		_ = tr.f.close()
+		_ = os.Remove(path)
+	}
+	delete(td.indexTrees, ident)
+	if td.second != nil {
+		delete(td.second, cleanName(name))
+	}
+}
+
+// IndexPages 汇总索引页数（监控/EXPLAIN 用）。
+func (td *TableData) IndexPages() int {
+	n := 0
+	for _, tr := range td.indexTrees {
+		if p, _, _ := tr.PageStats(); p > 0 {
+			n += p
+		}
+	}
+	return n
 }
 
 // alloc 分配一个槽位（优先复用空槽）。
@@ -530,25 +696,37 @@ func (td *TableData) CompactRows() {
 // Compact。正常提交走增量维护（IndexInsert / IndexDelete / IndexUpdate）。
 func (td *TableData) RebuildIndex(t *catalog.Table) {
 	td.Recompute()
-	pk := t.PKIdxes()
-	tree := newBTree()
+	if err := td.openIndexFiles(t, td.indexGen); err != nil {
+		return
+	}
+	if td.pk != nil {
+		td.pk.Build(td.collectPairs(t.PKIdxes()))
+	}
+	td.RebuildSecond(t)
+	td.RebuildUniqueKeys(t)
+	td.idxNeedRebuild = nil
+}
+
+// collectPairs 把「行 → 索引键」扫一遍，收集成待建树的 (键, 槽位) 列表。
+// 走 rowAt：被换出的行会从页里换回来（换进来的又可能被淘汰，不能直接读 td.rows）。
+func (td *TableData) collectPairs(cols []int) []idxPair {
+	if len(cols) == 0 {
+		return nil
+	}
+	pairs := make([]idxPair, 0, td.Live)
 	buf := make([]byte, 0, 32)
 	for i := range td.rows {
-		// 走 rowAt：被换出的行会从页里换回来（换进来的又可能被淘汰，
-		// 所以这里不能直接读 td.rows）
 		r, ok := td.rowAt(i)
 		if !ok {
 			continue
 		}
-		buf, ok = AppendOrderKeyInto(buf[:0], r, pk)
+		buf, ok = AppendOrderKeyInto(buf[:0], r, cols)
 		if !ok {
 			continue
 		}
-		tree.Insert(string(buf), i)
+		pairs = append(pairs, idxPair{Key: string(buf), Slot: i})
 	}
-	td.pk = tree
-	td.RebuildSecond(t)
-	td.RebuildUniqueKeys(t)
+	return pairs
 }
 
 // secondIndexCols 解析出每个用户索引的名字与列位置；解析不出列名的索引整条跳过
@@ -585,66 +763,40 @@ func secondIndexCols(t *catalog.Table) ([]string, [][]int) {
 // 键里塞个 NULL 只会让等值查找命中一堆不该命中的行）。
 func (td *TableData) RebuildSecond(t *catalog.Table) {
 	names, colsOf := secondIndexCols(t)
+	// 先确保每个索引都有树（新建的索引这时候才开文件）
+	if err := td.openIndexFiles(t, td.indexGen); err != nil {
+		return
+	}
 	if len(names) == 0 {
 		td.second = nil
 		return
 	}
-	next := make(map[string]*btree, len(names))
-	for _, n := range names {
-		next[n] = newBTree()
-	}
-	buf := make([]byte, 0, 32)
-	for i := 0; i < len(td.rows); i++ {
-		r, ok := td.rowAt(i) // 被换出的行要换回来才能建索引
-		if !ok {
+	for j, name := range names {
+		tree := td.second[name]
+		if tree == nil {
 			continue
 		}
-		for j, name := range names {
-			var ok bool
-			buf, ok = AppendOrderKeyInto(buf[:0], r, colsOf[j])
-			if !ok {
-				continue
-			}
-			next[name].Insert(string(buf), i)
-		}
+		tree.Build(td.collectPairs(colsOf[j]))
 	}
-	td.second = next
 }
 
 // RebuildUniqueKeys 重建非主键 UNIQUE 列的索引。
 func (td *TableData) RebuildUniqueKeys(t *catalog.Table) {
-	pk := t.PKIdxes()
-	var groups [][]int
-	for _, g := range t.UniqueGroups() {
-		if sameCols(g, pk) {
-			continue // 主键已经走 td.pk 了
-		}
-		groups = append(groups, g)
+	groups := td.uniqueGroups(t)
+	if err := td.openIndexFiles(t, td.indexGen); err != nil {
+		return
 	}
 	if len(groups) == 0 {
 		td.unique = nil
 		return
 	}
-	next := make(map[string]*btree, len(groups))
 	for _, g := range groups {
-		next[colsSig(g)] = newBTree()
-	}
-	buf := make([]byte, 0, 32)
-	for i := 0; i < len(td.rows); i++ {
-		r, ok := td.rowAt(i)
-		if !ok {
+		tree := td.unique[colsSig(g)]
+		if tree == nil {
 			continue
 		}
-		for _, g := range groups {
-			var ok bool
-			buf, ok = AppendOrderKeyInto(buf[:0], r, g)
-			if !ok {
-				continue
-			}
-			next[colsSig(g)].Insert(string(buf), i)
-		}
+		tree.Build(td.collectPairs(g))
 	}
-	td.unique = next
 }
 
 // ---------- 索引的增量维护 ----------

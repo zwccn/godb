@@ -34,6 +34,13 @@ type metaInfo struct {
 type metaTable struct {
 	ID   int64 `json:"id"`
 	Rows int   `json:"rows"`
+	// Idx 记「每个索引文件写的是哪一代」（索引身份 → 代次）。
+	//
+	// 索引不写 WAL，所以「索引和堆是不是一致」只能靠这个数字判断：
+	// 索引头页里的 gen 必须等于这里记的值，否则整棵重建。
+	// 存在 meta 里而不是「每次 checkpoint 重写每个索引的头页」，是因为
+	// 空闲库每轮 checkpoint 都会推进全局代次，那样会变成「每轮每索引写一页」。
+	Idx map[string]int64 `json:"idx,omitempty"`
 }
 
 // snapFormat 是当前磁盘格式版本（4 = 页式堆文件 + 二进制元组）。
@@ -126,6 +133,9 @@ func (s *Store) loadSnapshot() error {
 		}
 		s.hasSnap[key] = true
 		s.tableRows[key] = mt.Rows
+		if len(mt.Idx) > 0 {
+			s.idxGen[key] = mt.Idx
+		}
 		// 页文件已经覆盖到这一代：重放从这里往后算
 		s.tableGen[key] = metaGen
 	}
@@ -197,6 +207,7 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 	// 否则刚写进池的脏页可能在镜像落盘前被淘汰刷出去。
 	var (
 		flushed  []string
+		idxGens  = map[string]map[string]int64{}
 		pages    int
 		bytes    int64
 		firstErr error
@@ -229,6 +240,17 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 			}
 		}
 		n, err := td.pageFlush()
+		if err == nil {
+			// 索引页紧随堆页之后刷：顺序不能反（索引头页记的是这一轮的代次，
+			// 堆页没落地就推进索引代次 = 声称「索引和堆一致」，而堆还旧着）。
+			var ip int
+			var gens map[string]int64
+			ip, gens, err = td.flushIndexes(gen)
+			n += ip
+			if gens != nil && len(gens) > 0 {
+				idxGens[key] = gens
+			}
+		}
 		td.unlockPages()
 		if err != nil {
 			firstErr = err
@@ -239,7 +261,14 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 		flushed = append(flushed, key)
 	}
 
-	// 5) 写 meta：记下「磁盘已经覆盖到哪个代次」+ 每表行数。
+	// 4.5) 索引代次记账：从这一轮起，meta 里就记着「每个索引文件是哪一代」。
+	for key, gens := range idxGens {
+		s.loadMu.Lock()
+		s.idxGen[key] = gens
+		s.loadMu.Unlock()
+	}
+
+	// 5) 写 meta：记下「磁盘已经覆盖到哪个代次」+ 每表行数 + 每个索引的代次。
 	if err := s.writeMeta(gen, s.metaTablesLocked()); err != nil {
 		return err
 	}
@@ -283,7 +312,7 @@ func (s *Store) metaTablesLocked() map[string]metaTable {
 		if td := s.Data[key]; td != nil && s.loaded[key] {
 			rows = td.Live
 		}
-		tables[key] = metaTable{ID: t.ID, Rows: rows}
+		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key]}
 	}
 	s.loadMu.RUnlock()
 	return tables
@@ -302,10 +331,12 @@ func (s *Store) cleanupOrphanFiles() {
 	for _, de := range files {
 		var id int64
 		name := de.Name()
-		// t<6位ID>.dat（页文件）/ t<6位ID>.snp（旧版快照，见到就顺手清掉）
+		// t<6位ID>.dat（堆页）/ t<6位ID>.snp（旧版快照）/ i<6位ID>.<hash>.idx（索引页）
 		if _, err := fmt.Sscanf(name, "t%d.dat", &id); err != nil {
 			if _, err := fmt.Sscanf(name, "t%d.snp", &id); err != nil {
-				continue
+				if _, err := fmt.Sscanf(name, "i%d.", &id); err != nil {
+					continue
+				}
 			}
 		}
 		if !live[id] {

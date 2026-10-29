@@ -273,6 +273,13 @@ type bufPool struct {
 	overflow                      int64
 	pinnedBlocked                 int64
 
+	// verify 校验读进来的页（堆页 / 索引页各有各的魔数与校验和）。
+	// nil 表示用堆页的 verifyPage。
+	verify func(raw []byte) error
+	// pack 在脏页落盘之前补充编码（索引页的 CRC 只在落盘前算一次，
+	// 不然每次插入都要重算 8KB 校验和）。
+	pack func(f *bufFrame) error
+
 	// onEvict 在一页被淘汰（或从池里摘掉）时回调，给上层「把行从内存里放掉」用。
 	onEvict func(page uint32)
 }
@@ -349,7 +356,7 @@ func (bp *bufPool) fetchLocked(id uint32, force bool) (*bufFrame, uint32, error)
 		return nil, noPage, err
 	}
 	// 校验一次（魔数 + CRC）：换入路径按槽位直取元组，不会再去 decode 整页
-	if err := verifyPage(data); err != nil {
+	if err := bp.verifyPage(data); err != nil {
 		return nil, noPage, err
 	}
 	f, evicted, err := bp.installLocked(id, data, force)
@@ -397,6 +404,9 @@ func (bp *bufPool) installLocked(id uint32, data []byte, force bool) (*bufFrame,
 	}
 	victim := bp.ring[idx]
 	if victim.dirty {
+		if err := bp.packFrame(victim); err != nil {
+			return nil, noPage, err
+		}
 		if err := bp.pf.writePage(victim.id, victim.data); err != nil {
 			return nil, noPage, err
 		}
@@ -414,6 +424,21 @@ func (bp *bufPool) installLocked(id uint32, data []byte, force bool) (*bufFrame,
 	victim.ref = true
 	bp.frames[id] = victim
 	return victim, evicted, nil
+}
+
+func (bp *bufPool) verifyPage(raw []byte) error {
+	if bp.verify != nil {
+		return bp.verify(raw)
+	}
+	return verifyPage(raw)
+}
+
+// packFrame 在写盘之前让上层补编码（索引页的 CRC）。
+func (bp *bufPool) packFrame(f *bufFrame) error {
+	if bp.pack == nil {
+		return nil
+	}
+	return bp.pack(f)
 }
 
 // findVictimLocked 找一个可以淘汰的框，返回它在 ring 里的下标（没有则 -1）。
@@ -490,6 +515,10 @@ func (bp *bufPool) tryEvictOne() bool {
 	}
 	f := bp.ring[idx]
 	if f.dirty {
+		if err := bp.packFrame(f); err != nil {
+			bp.mu.Unlock()
+			return false
+		}
 		if err := bp.pf.writePage(f.id, f.data); err != nil {
 			bp.mu.Unlock()
 			return false
@@ -638,6 +667,10 @@ func (bp *bufPool) flushAll() (int, error) {
 		dirty, id := f.dirty, f.id
 		bp.mu.Unlock()
 		if dirty {
+			if err := bp.packFrame(f); err != nil {
+				f.latch.RUnlock()
+				return n, err
+			}
 			if err := bp.pf.writePage(id, f.data); err != nil {
 				f.latch.RUnlock()
 				return n, err
@@ -678,6 +711,22 @@ func (bp *bufPool) releaseAll() {
 		// 刷不动就宁可留着内存，也不要是「丢了也没人知道」
 		return
 	}
+	bp.mu.Lock()
+	n := len(bp.ring)
+	bp.frames = make(map[uint32]*bufFrame, 16)
+	bp.ring = nil
+	bp.hand = 0
+	bp.mu.Unlock()
+	if bp.budget != nil {
+		for i := 0; i < n; i++ {
+			bp.budget.release()
+		}
+	}
+}
+
+// releaseDiscard 丢掉所有页框、不写盘（索引文件专用：索引随时可以重建，
+// 关闭时把脏页刷出去反而会让「头页代次」和「页内容」对不上）。
+func (bp *bufPool) releaseDiscard() {
 	bp.mu.Lock()
 	n := len(bp.ring)
 	bp.frames = make(map[uint32]*bufFrame, 16)

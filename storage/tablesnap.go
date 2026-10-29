@@ -231,5 +231,11 @@ func removeTablePages(dir string, id int64) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// 索引文件（每个索引一个：i<6位ID>.<hash>.idx）一起删掉，否则 DROP 之后
+	// 重建成同名表、ID 又刚好复用时，会读到上一张表的索引。
+	matches, _ := filepath.Glob(filepath.Join(dir, "tables", fmt.Sprintf("i%06d.*.idx", id)))
+	for _, m := range matches {
+		_ = os.Remove(m)
+	}
 	return nil
 }

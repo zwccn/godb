@@ -7,39 +7,55 @@ import (
 	"testing"
 )
 
-// checkBTree 校验树的三个不变量：全局有序、叶子链完整、条目数与 Len 一致。
+// newTestTree 建一棵挂在临时索引文件上的树（节点是真实页，走缓冲池）。
+func newTestTree(t *testing.T) *btree {
+	t.Helper()
+	f, err := openIndexFile(t.TempDir(), 1, "pk", nil, 0)
+	if err != nil {
+		t.Fatalf("打开索引文件: %v", err)
+	}
+	t.Cleanup(func() { _ = f.close() })
+	return newBTree(f)
+}
+
+// checkBTree 校验树的不变量：全局有序、条目数与 Len 一致、没有负槽位。
+// 叶子链的完整性靠游标自己走一遍来验证（页式树里没有可遍历的节点指针了）。
 func checkBTree(t *testing.T, tr *btree) []string {
 	t.Helper()
 	var got []string
 	seen := 0
 	prev := ""
-	for n := tr.leftmost(); n != nil; n = n.next {
-		if !n.leaf {
-			t.Fatal("叶子链里出现了内部节点")
+	tr.Walk(func(k string, slot int) {
+		if seen > 0 && k < prev {
+			t.Fatalf("跨叶子键不有序: %q 之后出现 %q", prev, k)
 		}
-		for i, k := range n.keys {
-			if i > 0 && n.keys[i-1] > k {
-				t.Fatalf("叶子内键不有序: %q > %q", n.keys[i-1], k)
-			}
-			if seen > 0 && k < prev {
-				t.Fatalf("跨叶子键不有序: %q 之后出现 %q", prev, k)
-			}
-			prev = k
-			got = append(got, k)
-			seen++
-			if n.slots[i] < 0 {
-				t.Fatal("槽位号不该是负数")
-			}
+		if slot < 0 {
+			t.Fatal("槽位号不该是负数")
 		}
-	}
+		prev = k
+		got = append(got, k)
+		seen++
+	})
 	if seen != tr.Len() {
 		t.Fatalf("扫描到 %d 条，Len() = %d", seen, tr.Len())
+	}
+	// 反向走一遍：条数必须一样（prev 链漏一处就会在这里露出来）
+	rev := 0
+	c := tr.last()
+	for {
+		if _, _, ok := c.prev(); !ok {
+			break
+		}
+		rev++
+	}
+	if rev != seen {
+		t.Fatalf("反序 %d 条，正序 %d 条", rev, seen)
 	}
 	return got
 }
 
 func TestBTreeInsertGet(t *testing.T) {
-	tr := newBTree()
+	tr := newTestTree(t)
 	for i := 0; i < 1000; i++ {
 		tr.Insert(fmt.Sprintf("k%04d", i), i)
 	}
@@ -64,7 +80,7 @@ func TestBTreeInsertGet(t *testing.T) {
 
 // 重复键会被分裂切到相邻叶子里，Get 必须跨叶子取全。
 func TestBTreeDuplicateKeys(t *testing.T) {
-	tr := newBTree()
+	tr := newTestTree(t)
 	for i := 0; i < 5000; i++ {
 		tr.Insert("same", i)
 	}
@@ -93,7 +109,7 @@ func TestBTreeDuplicateKeys(t *testing.T) {
 }
 
 func TestBTreeRange(t *testing.T) {
-	tr := newBTree()
+	tr := newTestTree(t)
 	for i := 0; i < 1000; i++ {
 		tr.Insert(fmt.Sprintf("%04d", i), i)
 	}
@@ -141,7 +157,7 @@ func TestBTreeRange(t *testing.T) {
 // 随机增删对拍：每一步都和 map 的期望集合比对（等值 + 全序 + 不变量）。
 func TestBTreeRandomOps(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
-	tr := newBTree()
+	tr := newTestTree(t)
 	want := map[string][]int{} // key → slots
 	inserted := map[[2]interface{}]bool{}
 
@@ -229,7 +245,7 @@ func checkAgainstWant(t *testing.T, tr *btree, want map[string][]int) {
 func TestBTreeSequentialInsert(t *testing.T) {
 	for _, name := range []string{"asc", "desc"} {
 		t.Run(name, func(t *testing.T) {
-			tr := newBTree()
+			tr := newTestTree(t)
 			const n = 20000
 			for i := 0; i < n; i++ {
 				k := i
@@ -252,7 +268,7 @@ func TestBTreeSequentialInsert(t *testing.T) {
 
 // 全删之后还能继续用（延迟合并下结构性节点会留着）。
 func TestBTreeDeleteAllAndReuse(t *testing.T) {
-	tr := newBTree()
+	tr := newTestTree(t)
 	for i := 0; i < 3000; i++ {
 		tr.Insert(fmt.Sprintf("%05d", i), i)
 	}
@@ -283,7 +299,7 @@ func TestBTreeDeleteAllAndReuse(t *testing.T) {
 // 漏一处就会在某个分裂点之后反序漏行（而且正向完全正常，极难发现）。
 func TestBTreeReverseWalk(t *testing.T) {
 	for _, n := range []int{1, 2, 255, 256, 257, 1000, 3000} {
-		tr := newBTree()
+		tr := newTestTree(t)
 		for i := 0; i < n; i++ {
 			tr.Insert(fmt.Sprintf("k%06d", i), i)
 		}
@@ -309,7 +325,7 @@ func TestBTreeReverseWalk(t *testing.T) {
 
 // 反向定位：revCursorLe 取 <= key 的最后一条（同键多条时不能漏），revCursorLt 不含等于。
 func TestBTreeReverseSeek(t *testing.T) {
-	tr := newBTree()
+	tr := newTestTree(t)
 	// 键 a 有 5 条，b、c 各 1 条
 	for i := 0; i < 5; i++ {
 		tr.Insert("a", i)

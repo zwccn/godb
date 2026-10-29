@@ -1858,8 +1858,12 @@ func (e *Engine) execDropIndex(s *sql.DropIndex) (*Result, error) {
 				if err := e.persistSchema(false); err != nil {
 					return nil, err
 				}
-				// 重建一次，把这张索引在内存里的哈希表一起清掉
+				// 索引页文件当场删掉（等孤儿清理也行，但删索引要立刻见效），
+				// 再重建剩下的索引，把这张索引从树登记表里摘干净
 				if e.Store != nil {
+					if td := e.Store.Table(t.Name); td != nil {
+						td.DropIndexTree(ix.Name)
+					}
 					e.Store.RebuildIndex(t.Name)
 				}
 				return &Result{Command: "DROP INDEX", Tag: "DROP INDEX"}, nil

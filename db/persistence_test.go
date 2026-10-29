@@ -108,8 +108,8 @@ func TestBinaryWALRoundTrip(t *testing.T) {
 	run(t, d, "s", `DELETE FROM b WHERE id = 1`)
 	run(t, d, "s", `INSERT INTO b VALUES (3,'丙',NULL,NULL,NULL)`)
 
-	// 崩溃：不 Close，直接把 WAL 复制一份，模拟进程被杀
-	if err := d.Store.Close(); err != nil { // 只关 WAL 文件，不写快照
+	// 崩溃：只关文件、不落盘，模拟进程被杀（Close 会顺手 checkpoint，走不到重放）
+	if err := d.Store.CloseWithoutFlush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -392,7 +392,6 @@ func TestLazyLoadOnStartup(t *testing.T) {
 	}
 }
 
-
 // ---------- 落盘策略：少写、快写、可观测 ----------
 
 // 只改一两行不值得为它重写整张表（实测 2 万行的表改一行要写 0.97 MB）。
@@ -443,8 +442,8 @@ func TestSkippedCheckpointStillDurable(t *testing.T) {
 		// 只做一次很弱的检查：上面那条 UPDATE 被跳过后，脏表还在
 		_ = got
 	}
-	// 不 Flush，直接关 WAL —— 等价于进程被 kill
-	if err := d.Store.Close(); err != nil {
+	// 不 Flush，直接关文件 —— 等价于进程被 kill
+	if err := d.Store.CloseWithoutFlush(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
@@ -516,8 +515,8 @@ func TestStartupRotatesWAL(t *testing.T) {
 	d := openDir(t, dir)
 	run(t, d, "s", `CREATE TABLE wr (id int4 PRIMARY KEY, v text)`)
 	run(t, d, "s", `INSERT INTO wr VALUES (1,'a'),(2,'b')`)
-	// 不 Flush 直接关 WAL：WAL 里留着未落盘的记录，等价于进程被 kill
-	if err := d.Store.Close(); err != nil {
+	// 不 Flush 直接关文件：WAL 里留着未落盘的记录，等价于进程被 kill
+	if err := d.Store.CloseWithoutFlush(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	walPath := filepath.Join(dir, "wal.log")
@@ -557,9 +556,9 @@ func TestSerialSeqAfterWalReplay(t *testing.T) {
 	run(t, d, s, `INSERT INTO sr (v) VALUES ('a'), ('b')`)
 	run(t, d, s, `CHECKPOINT`)
 	run(t, d, s, `INSERT INTO sr (v) VALUES ('c'), ('d')`)
-	// 只关 WAL 文件、不写快照 —— 模拟进程被杀。用 d.Close() 的话会顺手
-	// checkpoint，WAL 里的行就进了快照，走不到「重放」这条路（第一版就是这么漏测的）
-	if err := d.Store.Close(); err != nil {
+	// 只关文件、不写快照 —— 模拟进程被杀。用 Close() 的话会顺手 checkpoint，
+	// WAL 里的行就进了快照，走不到「重放」这条路（第一版就是这么漏测的）
+	if err := d.Store.CloseWithoutFlush(); err != nil {
 		t.Fatalf("store close: %v", err)
 	}
 
@@ -595,8 +594,8 @@ func TestWALReplayMultiTable(t *testing.T) {
 	run(t, d, s, `UPDATE m2 SET v = 'b1x' WHERE id = 1`)
 	run(t, d, s, `DELETE FROM m3 WHERE id = 2`)
 	// 模拟被杀（不 checkpoint）
-	if err := d.Store.Close(); err != nil {
-		t.Fatalf("Store.Close: %v", err)
+	if err := d.Store.CloseWithoutFlush(); err != nil {
+		t.Fatalf("Store.CloseWithoutFlush: %v", err)
 	}
 	d2, err := Open(dir, Options{})
 	if err != nil {

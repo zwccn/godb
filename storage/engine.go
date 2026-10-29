@@ -85,6 +85,13 @@ type Store struct {
 	// 现在超预算时由「框最多的那张表」先吐一页出来（见 memBudget）。
 	Budget *memBudget
 
+	// idxGen[key][ident] 是「这个索引文件对应哪一代」（写进 meta.json）。
+	// 加载时拿它和索引头页里的 gen 比对：对不上就整棵重建。
+	idxGen map[string]map[string]int64
+
+	// idxRebuilds 是启动以来「索引整棵重建」的次数（正常重启应该是 0）。
+	idxRebuilds atomic.Int64
+
 	// written 是累计写盘字节数（给 CHECKPOINT / 状态页看）
 	written atomic.Int64
 	// totalCommits 是进程启动以来的累计提交数。commits 只统计「当前 checkpoint
@@ -128,6 +135,7 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		dirty:     map[string]bool{},
 		dirtyRows: map[string]int64{},
 		loaded:    map[string]bool{},
+		idxGen:    map[string]map[string]int64{},
 		cpRing:    newLatRing(cpSampleCap),
 		cpReasons: map[string]int64{},
 	}
@@ -180,14 +188,36 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 // 「file is being used by another process」）。
 func (s *Store) Close() error {
 	s.StopAutoCheckpoint()
+	// 关库前做一次完整 checkpoint（刷堆页 + 刷索引页 + 写 meta + 轮转 WAL）。
+	//
+	// 关键不是为了「多写一次数据」，而是让索引的代次跟着 meta 一起往前走：
+	// 只刷页不写 meta，重启时索引的代次对不上 meta，整棵索引就得重建 ——
+	// 「干净关库再打开」本来应该是最省事的场景。
+	s.CommitMu.Lock()
+	_ = s.forceCheckpointLocked(CPReasonFlush)
+	s.CommitMu.Unlock()
+
+	return s.closeFiles(true)
+}
+
+// CloseWithoutFlush 只关文件、**不落盘**，用来模拟「进程被 kill」。
+//
+// 已经提交的事务在 WAL 里（提交时 fsync 过），重开时重放会补回来；
+// 没提交的写集本来就只在内存里，一起丢掉 —— 这正是崩溃该有的样子。
+// 测试用它验证重放路径（用 Close 会顺手 checkpoint，就永远走不到重放）。
+func (s *Store) CloseWithoutFlush() error {
+	s.StopAutoCheckpoint()
+	return s.closeFiles(false)
+}
+
+// closeFiles 关掉所有页文件与 WAL；flushPages 表示要不要把脏页刷出去。
+func (s *Store) closeFiles(flushPages bool) error {
 	s.loadMu.Lock()
 	for _, td := range s.Data {
 		if td == nil {
 			continue
 		}
-		// 尽力刷一遍脏页：即使 meta 的代次没跟上，重放也能补齐（幂等），
-		// 但刷了可以让下次启动少重放一堆记录。
-		if td.pages != nil {
+		if flushPages && td.pages != nil {
 			_, _ = td.pages.checkpoint()
 		}
 		td.closePages()
@@ -256,7 +286,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 	}
 	// 页文件是唯一的数据来源：按 RID 把行放回槽位数组。
 	// 槽位号必须与页里记的一致 —— 索引里存的就是它。
-	if err := td.attachPages(s.Dir, t.ID, t, s.Budget); err != nil {
+	if err := td.attachPages(s.Dir, t.ID, t, s.Budget, s.idxGen[key]); err != nil {
 		s.loadErr = err
 		s.loaded[key] = true
 		return
@@ -269,9 +299,22 @@ func (s *Store) ensureLoadedLocked(key string) {
 	}
 	s.Repaired.Add(int64(repaired))
 	td.rows = rows
-	// 必须重建主键索引：否则重启后第一次写入看不到已有行，
-	// 重复主键会被放过去（索引要等到下一次提交才重建）。
-	td.RebuildIndex(t)
+	td.Recompute()
+	// 索引落盘之后，加载不再必然重建 —— 只有这几种情况才重扫一遍表：
+	//  1. 打开时发现索引文件失效（代次落后 / 身份不符 / 校验坏）；
+	//  2. 行解码时修补过（ALTER TABLE 留下的老行，键可能对不上）；
+	//  3. 主键索引的条目数和行数对不上（最省事的一致性体检）。
+	needRebuild := len(td.idxNeedRebuild) > 0 || repaired > 0
+	if !needRebuild && td.pk != nil && td.pk.Len() != td.Live {
+		needRebuild = true
+	}
+	if needRebuild {
+		// 不重建就会「重启后第一次写入看不到已有行、重复主键被放过去」。
+		if len(td.indexTrees) > 0 {
+			s.idxRebuilds.Add(1)
+		}
+		td.RebuildIndex(t)
+	}
 	// 自增序列也要恢复：页里只存行、不存计数器，所以取现有数据的最大值。
 	// 不恢复的话重启后 SERIAL 从 1 重新发号，会撞上已有主键。
 	if si := t.SerialIdx(); si >= 0 {
@@ -368,6 +411,24 @@ func (s *Store) RenameTable(oldName, newName string) {
 		s.dirty[newKey] = true
 		delete(s.dirty, oldKey)
 	}
+}
+
+// IdxRebuilds 返回启动以来「索引整棵重建」的次数。
+// 正常重启应该只有「第一次建索引」那几次，之后重启一律是 0 —— 这是「索引真的落盘了」的判据。
+func (s *Store) IdxRebuilds() int64 { return s.idxRebuilds.Load() }
+
+// genOf 取某张表已经落盘的代次。
+func (s *Store) genOf(key string) int64 {
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	return s.tableGen[key]
+}
+
+// idxGenOf 取某张表各索引「已经落盘的代次」。
+func (s *Store) idxGenOf(key string) map[string]int64 {
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	return s.idxGen[key]
 }
 
 // RebuildIndex 重建某张表的主键索引。
@@ -1734,7 +1795,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 		// 记下这批改动的行：checkpoint 时成批写进页（这里不写页 ——
 		// 每行编解码整页会让提交慢一个量级，见 notePending 的注释）。
 		if t != nil && (len(c.del) > 0 || len(c.upd) > 0 || len(c.ins) > 0) {
-			if err := td.attachPages(tx.st.Dir, t.ID, t, tx.st.Budget); err != nil {
+			if err := td.attachPages(tx.st.Dir, t.ID, t, tx.st.Budget, tx.st.idxGenOf(cleanName(c.table))); err != nil {
 				return 0, err
 			}
 			slots := make([]int, 0, len(c.del)+len(c.upd)+len(c.ins))
@@ -1792,6 +1853,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 				if err := td.pages.reset(); err != nil {
 					return 0, err
 				}
+				td.resetIndexes()
 			}
 		}
 		if c.seqSet {

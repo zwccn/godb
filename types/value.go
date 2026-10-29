@@ -396,7 +396,9 @@ func (v Value) MarshalJSON() ([]byte, error) {
 	case KText:
 		return json.Marshal(v.S)
 	case KTime:
-		return json.Marshal(map[string]string{"$ts": v.Time().UTC().Format(time.RFC3339Nano)})
+		// 保留原始时区偏移：写成 UTC 再解回来会变成「同一个时刻、不同的墙上时间」，
+		// 显示出来差好几个小时（踩过：03:04:05 变成前一天 19:04:05）。
+		return json.Marshal(map[string]string{"$ts": v.Time().Format(time.RFC3339Nano)})
 	case KDecimal:
 		// 用字符串持久化：float 会丢精度，{"$n":"..."} 保证 round-trip 精确
 		return json.Marshal(map[string]string{"$n": v.S})

@@ -642,3 +642,33 @@ func TestWALReplayIdempotent(t *testing.T) {
 	assertRows(t, run(t, d2, "s", `SELECT id, v FROM idem ORDER BY id`),
 		[]string{"1|a", "2|B改", "3|c", "5|e", "6|f"})
 }
+
+// 页文件是唯一数据来源时，每一列都要能还原。
+//
+// numeric / timestamp 在页里是用 {"$n":"..."} / {"$ts":"..."} 包装存的，
+// 用 interface{} 硬解会变成 map、按列类型再解就整列退化成 NULL —— 这个 bug
+// 在「重启后只走页文件」的路径上才会暴露（走 WAL 重放用的是另一套解码）。
+func TestPageFileKeepsAllColumnTypes(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	run(t, d, "s", `CREATE TABLE kinds (id INTEGER PRIMARY KEY, t TEXT, n NUMERIC(12,2), f DOUBLE PRECISION, b BOOLEAN, ts TIMESTAMP, dt DATE)`)
+	run(t, d, "s", `INSERT INTO kinds VALUES (1,'甲',12345678.90,1.5,true,'2026-01-02 03:04:05','2026-03-04'),(2,NULL,NULL,NULL,NULL,NULL,NULL)`)
+	run(t, d, "s", `CHECKPOINT`)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 把 WAL 也删掉：确保重启后只能从页文件读，没有任何逻辑记录可重放
+	if err := os.Remove(filepath.Join(dir, "wal.log")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	assertRows(t, run(t, d2, "s", `SELECT id, t, n, f, b, ts, dt FROM kinds ORDER BY id`), []string{
+		// numeric 落盘后会按声明精度重新定标，末尾的 0 不保留（与 .snp 时代一致）
+		"1|甲|12345678.9|1.5|true|2026-01-02 03:04:05|2026-03-04",
+		"2|<nil>|<nil>|<nil>|<nil>|<nil>|<nil>",
+	})
+	// 行数、主键索引、自增序列也要一起活过来
+	assertRows(t, run(t, d2, "s", `SELECT count(*) FROM kinds`), []string{"2"})
+}

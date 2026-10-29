@@ -9,6 +9,8 @@ godb
 # 运行时数据（WAL / 快照 / 表结构），首次启动会自动生成
 godb-data/
 godb-data.bak/
+# 换存储格式时留档的旧数据目录（别提交，里面是几 MB 的数据文件）
+godb-data.*/
 # 带时间戳的备份（拉上游前手动做的；lost-* 是事故现场保留目录）
 godb-data.bak-*/
 godb-data.lost-*/

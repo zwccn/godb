@@ -563,10 +563,22 @@ func encodeRowTuple(row types.Row) ([]byte, error) {
 }
 
 func decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
-	var raw []interface{}
+	// 必须先拆成 RawMessage 再逐个 types.Value.UnmarshalJSON：
+	// numeric 存成 {"$n":"50000"}、timestamp 存成 {"$ts":...}，直接解成
+	// interface{} 会变成 map，按列类型硬解就会全部退化成 NULL（踩过）。
+	var raw []json.RawMessage
 	if err := json.Unmarshal(tuple, &raw); err != nil {
 		return nil, 0, fmt.Errorf("行解码失败：%w", err)
 	}
-	row, repaired := decodeRow(t, raw)
-	return row, repaired, nil
+	vals := make([]types.Value, len(raw))
+	repaired := 0
+	for i, r := range raw {
+		if err := vals[i].UnmarshalJSON(r); err != nil {
+			vals[i] = types.Null
+			repaired++
+		}
+	}
+	// 再按当前表结构对齐：列数变了、类型换了（ALTER TABLE）都在这里兜住
+	row, rep := castRow(t, vals)
+	return row, repaired + rep, nil
 }

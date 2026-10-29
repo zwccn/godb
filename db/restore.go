@@ -85,7 +85,7 @@ func RestoreTrash(root, entry string) (RestoreReport, error) {
 			if err != nil {
 				return rep, err
 			}
-			n, err := storage.InstallTableSnap(root, newID, data, gen)
+			n, err := storage.InstallTableSnap(root, newID, data)
 			if err != nil {
 				return rep, fmt.Errorf("恢复表 %q 的数据失败: %w", def.Name, err)
 			}

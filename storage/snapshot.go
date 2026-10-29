@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"godb/hrtime"
-	"godb/types"
 )
 
 const (
@@ -20,36 +19,48 @@ const (
 )
 
 // metaInfo 是 meta.json 的内容。
+//
+// Generation 是「已经落盘的 WAL 代次」：重放只应用比它新的记录。代次是全局的
+// —— 因为 checkpoint 在 CommitMu 里一次做完，不存在「一半表新、一半表旧」的
+// 状态；就算中途出错，重放是幂等的，多放一遍也无害。
 type metaInfo struct {
-	Generation int64 `json:"generation"`
-	Format     int   `json:"format"`
+	Generation int64                `json:"generation"`
+	Format     int                  `json:"format"`
+	Tables     map[string]metaTable `json:"tables,omitempty"`
 }
 
-// snapFormat 是当前磁盘格式版本（2 = 分表快照）。
-const snapFormat = 2
+// metaTable 是每张表的信息。Rows 只为「未加载的表」回答行数查询，
+// 数据本身在 t<ID>.dat 里。
+type metaTable struct {
+	ID   int64 `json:"id"`
+	Rows int   `json:"rows"`
+}
+
+// snapFormat 是当前磁盘格式版本（3 = 页式堆文件）。
+const snapFormat = 3
 
 func (s *Store) metaPath() string { return filepath.Join(s.Dir, metaFile) }
 
 func (s *Store) legacySnapshotPath() string { return filepath.Join(s.Dir, legacySnapshotFile) }
 
-// loadMeta 读 meta.json，返回代次；文件不存在返回 0。
-func (s *Store) loadMeta() (int64, error) {
+// loadMeta 读 meta.json，返回代次与每表信息；文件不存在返回 0。
+func (s *Store) loadMeta() (int64, map[string]metaTable, error) {
 	b, err := os.ReadFile(s.metaPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return 0, nil, nil
 		}
-		return 0, err
+		return 0, nil, err
 	}
 	var m metaInfo
 	if err := json.Unmarshal(b, &m); err != nil {
-		return 0, fmt.Errorf("解析 %s 失败: %w", metaFile, err)
+		return 0, nil, fmt.Errorf("解析 %s 失败: %w", metaFile, err)
 	}
-	return m.Generation, nil
+	return m.Generation, m.Tables, nil
 }
 
-func (s *Store) writeMeta(gen int64) error {
-	b, err := json.Marshal(&metaInfo{Generation: gen, Format: snapFormat})
+func (s *Store) writeMeta(gen int64, tables map[string]metaTable) error {
+	b, err := json.Marshal(&metaInfo{Generation: gen, Format: snapFormat, Tables: tables})
 	if err != nil {
 		return err
 	}
@@ -77,21 +88,14 @@ func writeFileAtomic(path string, b []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// loadSnapshot 读磁盘状态：meta.json + 每张表的文件头。
+// loadSnapshot 读磁盘状态：meta.json + 每张表的页文件。
 //
-// 只读文件头（24 字节/表），不读行数据 —— 行在第一次真正访问时才加载
-// （见 ensureLoaded）。这样表很多、数据很大时冷启动也不用把全部数据读进内存。
+// 只读 meta 里记的行数，**不读页、不读行** —— 行在第一次真正访问时才从
+// 页文件装进内存（见 ensureLoaded）。表很多时冷启动也不用把数据全读一遍。
 func (s *Store) loadSnapshot() error {
-	metaGen, err := s.loadMeta()
+	metaGen, tables, err := s.loadMeta()
 	if err != nil {
 		return err
-	}
-	// 旧的单文件快照：只在 meta.json 不存在时迁移一次
-	if _, statErr := os.Stat(s.metaPath()); os.IsNotExist(statErr) {
-		if err := s.migrateLegacySnapshot(); err != nil {
-			return err
-		}
-		metaGen = s.appliedGen
 	}
 	s.metaGen = metaGen
 	if metaGen > s.appliedGen {
@@ -99,85 +103,45 @@ func (s *Store) loadSnapshot() error {
 	}
 	for _, t := range s.Cat.Tables {
 		key := cleanName(t.Name)
-		hdr, err := readTableSnapHeader(tableFileName(s.Dir, t.ID))
-		if err != nil {
-			return err
+		mt, ok := tables[key]
+		path := tablePagePath(s.Dir, t.ID)
+		if !ok || mt.ID != t.ID {
+			// 不在 meta 里（新建表 / 从没落过盘 / 回收站恢复回来的新 ID）：
+			// 只要页文件在，就当它已经包含当前代次 —— 恢复出来的备份是
+			// DROP 之前的快照，再被 WAL 重放一遍会把删掉的行插回来。
+			if _, err := os.Stat(path); err == nil {
+				s.hasSnap[key] = true
+				s.tableGen[key] = metaGen
+			}
+			continue
 		}
-		if !hdr.Exists {
+		if _, err := os.Stat(path); err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			// meta 说有、文件却不在：数据没法救，记下来让启动日志报出去，
+			// 但不要因此让整个库打不开（其它表还能用）。
+			s.loadErr = fmt.Errorf("表 %s 的数据文件丢失（%s）", t.Name, path)
 			continue
 		}
 		s.hasSnap[key] = true
-		s.tableGen[key] = hdr.Generation
-		s.tableRows[key] = hdr.Rows
+		s.tableRows[key] = mt.Rows
+		// 页文件已经覆盖到这一代：重放从这里往后算
+		s.tableGen[key] = metaGen
 	}
 	return nil
 }
 
-// migrateLegacySnapshot 把旧的单文件 snapshot.json 迁移成分表文件。
-// 只读一次：迁移成功后把旧文件改名成 .bak，之后再也不碰。
-func (s *Store) migrateLegacySnapshot() error {
-	path := s.legacySnapshotPath()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var old struct {
-		Generation int64 `json:"generation"`
-		Tables     map[string]struct {
-			Rows [][]any `json:"rows"`
-		} `json:"tables"`
-	}
-	if err := json.Unmarshal(b, &old); err != nil {
-		return fmt.Errorf("解析旧快照失败: %w", err)
-	}
-	for name, ts := range old.Tables {
-		td := s.Table(name)
-		if td == nil {
-			continue
-		}
-		t, ok := s.Cat.Get(name)
-		if !ok {
-			continue
-		}
-		key := cleanName(name)
-		rows := make([]types.Row, 0, len(ts.Rows))
-		for _, raw := range ts.Rows {
-			vals := make([]types.Value, len(raw))
-			for i, v := range raw {
-				vals[i] = legacyValue(v)
-			}
-			row, rep := castRow(t, vals)
-			s.Repaired.Add(int64(rep))
-			rows = append(rows, row)
-		}
-		td.Rows = rows
-		s.loaded[key] = true
-		s.dirty[key] = true // 让接下来那次 checkpoint 写出分表文件
-	}
-	s.appliedGen = old.Generation
-	s.metaGen = old.Generation
-	if err := os.Rename(path, path+".bak"); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Checkpoint 把内存数据写成快照，然后轮转 WAL。
+// Checkpoint 把脏页刷盘、记代次，然后轮转 WAL。
 func (s *Store) Checkpoint() error {
 	s.CommitMu.Lock()
 	defer s.CommitMu.Unlock()
-	// 手动 CHECKPOINT / 退出时的 Flush 也算一次落盘：更新统计并清零计数，
-	// 否则后台定时器还会因为「计数没清」再补写一次快照。
-	// （这一步现在由 checkpointBodyLocked 内部完成）
 	return s.forceCheckpointLocked(CPReasonManual)
 }
 
 // CheckpointDDL 是 DDL 之后的强制落盘。
 //
-// 触发原因单独记成 ddl：DDL 引起的落盘往往是一次整表重写，正好能解释
+// 触发原因单独记成 ddl：DDL 会引起一次 checkpoint，正好能解释
 // 「为什么刚才那几十毫秒 fsync 变慢了」。
 func (s *Store) CheckpointDDL() error {
 	s.CommitMu.Lock()
@@ -199,149 +163,166 @@ func (s *Store) Flush() error {
 			return err
 		}
 	}
-	// Flush（手动 CHECKPOINT / 进程退出）同样算一次落盘：更新统计并清零
-	// 提交计数，否则后台定时器会因为「计数没清」再补写一次快照。
 	return s.forceCheckpointLocked(CPReasonFlush)
 }
 
-// snapshotJob 是一次「已经拍好的快照」：只持有行切片的引用，不含序列化结果。
-//
-// 行是不可变的（UPDATE 复制整行、提交时重组的是切片头），所以在锁外读这些行
-// 是安全的 —— 这正是能把「序列化 + fsync」挪出 CommitMu 的前提。
-type snapshotJob struct {
-	gen     int64
-	tables  []snapshotTable
-	written int64
+// stagedFPI 是一张表在这一轮 checkpoint 里产生的全页镜像。
+type stagedFPI struct {
+	table string
+	imgs  []pageImage
 }
 
-type snapshotTable struct {
-	id   int64
-	key  string
-	rows []types.Row // 槽位数组的拷贝（提交会原地替换槽位，不能直接引用）
-	live int
-	// dirtyCnt 是拍快照时这张表的累计脏行数，收尾时用来判断期间有没有新改动
-	dirtyCnt int64
-}
-
-// checkpointStartLocked 拍快照。调用方必须持有 CommitMu。
+// checkpointBodyLocked 走完一整轮：刷脏页 → 写 meta → 轮转 WAL。
 //
-// 这里必须**拷一份槽位数组**：提交是原地替换 `td.Rows[slot]`（而不是整片换掉），
-// 所以直接引用 td.Rows 会让写盘过程读到「半新半旧」的行。拷贝只是指针数组，
-// 20 万行约 3 ms，而且只在需要写盘的脏表上做。
-func (s *Store) checkpointStartLocked() *snapshotJob {
-	job := &snapshotJob{gen: s.appliedGen}
+// 为什么整轮都在 CommitMu 里（而不是像以前那样把写盘挪出去）：
+// 代次是全局的，只有在「没有提交能插进来」的前提下，才能保证
+// 「meta 记的代次 = 页文件里实际包含的内容」。否则一个落在写盘期间的提交
+// 会拿到旧代次，WAL 轮转后它的记录既不在页里、也不在日志里 —— 直接丢数据。
+//
+// 现在一次 checkpoint 只写**脏页**（实测几十页到几百页，几毫秒），
+// 不像以前那样整表序列化 + fsync（20 万行 30–70ms），所以咬着锁是划算的。
+func (s *Store) checkpointBodyLocked(reason string) error {
+	t0 := hrtime.Now()
+
+	// 1) 写前日志：页可以晚于日志（重放能补上），日志绝不能晚于页。
+	if s.wal != nil {
+		if err := s.wal.SyncTo(s.wal.Written()); err != nil {
+			return err
+		}
+	}
+
+	gen := s.appliedGen
+	if s.wal != nil {
+		gen = s.wal.Gen()
+	}
+
+	// 2) 把待落盘行写进页（只改池里的页，还没落盘），收集全页镜像。
+	//
+	// 这一步必须和「刷脏页」分开：镜像要先写进 WAL，页才能落盘。反过来
+	// （先刷页、后写镜像）一旦断电把页写了一半，就没有任何东西能修它。
+	var (
+		staged   []stagedFPI
+		flushed  []string
+		pages    int
+		bytes    int64
+		firstErr error
+	)
 	for _, t := range s.Cat.Tables {
 		key := cleanName(t.Name)
 		td := s.Data[key]
 		if td == nil || !s.loaded[key] {
 			continue
 		}
-		if !s.dirty[key] && s.hasSnap[key] {
-			continue // 没改动就跳过
+		if td.pageDirty() == 0 {
+			continue
 		}
-		rows := make([]types.Row, len(td.Rows))
-		copy(rows, td.Rows)
-		job.tables = append(job.tables, snapshotTable{
-			id: t.ID, key: key, rows: rows, live: td.Live, dirtyCnt: s.dirtyRows[key],
-		})
-	}
-	return job
-}
-
-// checkpointWrite 在**不持 CommitMu** 的时候序列化并写盘。
-func (s *Store) checkpointWrite(job *snapshotJob) error {
-	var written int64
-	for _, t := range job.tables {
-		n, err := writeTableSnap(s.Dir, t.id, job.gen, t.rows)
+		fpis, err := td.pageStage()
 		if err != nil {
+			firstErr = err
+			break
+		}
+		if len(fpis) > 0 {
+			staged = append(staged, stagedFPI{table: t.Name, imgs: fpis})
+		}
+		flushed = append(flushed, key)
+	}
+
+	// 3) 全页镜像先写进 WAL：断电把头 4KB 写下去了、后 4KB 没写，
+	//    恢复时靠这份镜像把整页还原，再重放逻辑记录。
+	if firstErr == nil && len(staged) > 0 && s.wal != nil {
+		recs := make([]walRec, 0, len(staged)*4)
+		for _, st := range staged {
+			for _, img := range st.imgs {
+				recs = append(recs, walRec{Gen: gen, Op: opFPI, Table: st.table, Slot: -1, Page: img.page, Img: img.data})
+			}
+		}
+		if _, err := s.wal.Append(recs); err != nil {
 			return err
 		}
-		written += n
+		if err := s.wal.SyncTo(s.wal.Written()); err != nil {
+			return err
+		}
 	}
-	job.written = written
+
+	// 4) 刷脏页（只有到这一步，页才真的写进文件）。
+	if firstErr == nil {
+		for _, key := range flushed {
+			td := s.Data[key]
+			n, err := td.pageFlush()
+			if err != nil {
+				firstErr = err
+				break
+			}
+			pages += n
+			bytes += int64(n) * PageSize
+		}
+	}
+
+	// 5) 写 meta：记下「磁盘已经覆盖到哪个代次」+ 每表行数。
+	tables := make(map[string]metaTable, len(s.Cat.Tables))
+	for _, t := range s.Cat.Tables {
+		key := cleanName(t.Name)
+		rows := s.tableRows[key]
+		if td := s.Data[key]; td != nil && s.loaded[key] {
+			rows = td.Live
+		}
+		tables[key] = metaTable{ID: t.ID, Rows: rows}
+	}
+	if err := s.writeMeta(gen, tables); err != nil {
+		return err
+	}
+
+	// 6) 收尾：清脏标记、记代次、删掉已 DROP 的表留下的数据文件、轮转 WAL。
+	for _, key := range flushed {
+		s.dirty[key] = false
+		s.dirtyRows[key] = 0
+		s.hasSnap[key] = true
+		s.tableGen[key] = gen
+		if td := s.Data[key]; td != nil {
+			s.tableRows[key] = td.Live
+		}
+	}
+	s.cleanupOrphanFiles()
+
+	s.snapshotGen = gen
+	s.commits = 0
+	s.snapBytes = bytes
+	s.written.Add(bytes)
+	if firstErr != nil {
+		return firstErr
+	}
+	if s.wal != nil {
+		if err := s.wal.Rotate(gen + 1); err != nil {
+			return err
+		}
+	}
+	s.noteCheckpointLocked(reason, hrtime.Since(t0), bytes, pages)
 	return nil
 }
 
-// checkpointFinishLocked 写盘成功后更新内存状态、清理孤儿文件、写 meta、轮转 WAL。
-// 调用方必须持有 CommitMu。
-func (s *Store) checkpointFinishLocked(job *snapshotJob) error {
-	// 一张表都不需要重写说明数据早就在磁盘上了。这时只剩一件事值得做：把
-	// WAL 轮转掉（启动时重放完的那批记录就靠这一步清空）。WAL 本来就空的话，
-	// 写 meta 和轮转都是白做功 —— 一次 tmp+fsync+rename 加一次删文件重建。
-	if len(job.tables) == 0 && (s.wal == nil || s.wal.LiveBytes() == 0) {
-		s.commits = 0
-		s.snapBytes = 0 // 这一轮确实一个字节都没写，别把上一轮的数字留着
-		return nil
-	}
-	for _, t := range job.tables {
-		// 写盘期间又改了这张表 → dirty 不能清，改动留在 WAL 里等下一轮。
-		// 少了这个判断，那些改动会被永久标记成「已落盘」而丢掉。
-		if s.dirtyRows[t.key] == t.dirtyCnt {
-			s.dirty[t.key] = false
-			s.dirtyRows[t.key] = 0
-		}
-		s.hasSnap[t.key] = true
-		s.tableGen[t.key] = job.gen
-		s.tableRows[t.key] = t.live
-	}
-
-	// 清理已 DROP 的表留下的数据文件
+// cleanupOrphanFiles 删掉已 DROP 的表留下的数据文件。
+func (s *Store) cleanupOrphanFiles() {
 	live := make(map[int64]bool, len(s.Cat.Tables))
 	for _, t := range s.Cat.Tables {
 		live[t.ID] = true
 	}
-	if files, err := os.ReadDir(filepath.Join(s.Dir, "tables")); err == nil {
-		for _, de := range files {
-			var id int64
-			if _, err := fmt.Sscanf(de.Name(), "t%d.snp", &id); err != nil {
+	files, err := os.ReadDir(filepath.Join(s.Dir, "tables"))
+	if err != nil {
+		return
+	}
+	for _, de := range files {
+		var id int64
+		name := de.Name()
+		// t<6位ID>.dat（页文件）/ t<6位ID>.snp（旧版快照，见到就顺手清掉）
+		if _, err := fmt.Sscanf(name, "t%d.dat", &id); err != nil {
+			if _, err := fmt.Sscanf(name, "t%d.snp", &id); err != nil {
 				continue
 			}
-			if !live[id] {
-				_ = os.Remove(filepath.Join(s.Dir, "tables", de.Name()))
-			}
+		}
+		if !live[id] {
+			_ = os.Remove(filepath.Join(s.Dir, "tables", name))
 		}
 	}
-
-	if err := s.writeMeta(job.gen); err != nil {
-		return err
-	}
-	s.snapshotGen = job.gen
-	s.commits = 0
-	s.snapBytes = job.written
-	s.written.Add(job.written)
-	if s.wal != nil {
-		return s.wal.Rotate(job.gen + 1)
-	}
-	return nil
-}
-
-// checkpointBodyLocked 走完一整轮：拍快照（锁内）→ 写盘（锁外）→ 收尾（锁内）。
-//
-// 这么拆是为了把几十毫秒的「序列化 + fsync」移出 CommitMu：之前整段都在锁里，
-// 一次 checkpoint 会把所有写事务堵在门外（40 万行的表约 50 ms）。拆完之后
-// 锁内只剩「拷一遍切片头 + 更新几个 map」，几毫秒量级。
-//
-// 调用方必须持有 CommitMu，并且仍在 SchemaMu 的锁内 —— 行数据在锁外被读的
-// 前提是期间没有 DDL 能改它们。checkpoint 的所有触发点都满足：提交在语句的
-// 读锁内，DDL 的 checkpoint 在写锁内，后台 ticker 自己先拿读锁。
-func (s *Store) checkpointBodyLocked(reason string) error {
-	t0 := hrtime.Now()
-	job := s.checkpointStartLocked()
-	s.CommitMu.Unlock()
-	err := func() error {
-		s.cpMu.Lock()
-		defer s.cpMu.Unlock()
-		return s.checkpointWrite(job)
-	}()
-	s.CommitMu.Lock()
-	if err != nil {
-		return err
-	}
-	if err := s.checkpointFinishLocked(job); err != nil {
-		return err
-	}
-	s.noteCheckpointLocked(reason, hrtime.Since(t0), job.written, len(job.tables))
-	return nil
 }
 
 // tryCheckpointLocked 用于提交路径与后台定时器：已经有 checkpoint 在写盘时直接

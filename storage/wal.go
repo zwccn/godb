@@ -586,6 +586,38 @@ func (s *Store) replayWAL() error {
 		s.appliedGen = maxGen
 	}
 
+	// 0) 全页镜像先还原。
+	//
+	//    8KB 页写盘不是原子的：断电可能只写了前 4KB，于是页头是新的、
+	//    元组区是旧的。CRC 只能**发现**这种坏页，修不回来 —— 所以每页在
+	//    两次 checkpoint 之间第一次被改时，把改之前的整页写进了 WAL。
+	//    这里先把镜像写回页文件，后面的加载/重放才踩在完整的一页上。
+	//
+	//    镜像记录不挂在任何事务上（Tx=0），所以不看 committed，只看代次。
+	for _, rec := range recs {
+		if rec.Op != opFPI {
+			continue
+		}
+		key := cleanName(rec.Table)
+		if rec.Gen <= s.tableGen[key] {
+			continue
+		}
+		td := s.Data[key]
+		if td == nil {
+			continue
+		}
+		t, ok := s.Cat.Get(rec.Table)
+		if !ok {
+			continue
+		}
+		if err := td.attachPages(s.Dir, t.ID); err != nil {
+			return fmt.Errorf("还原页镜像失败: %w", err)
+		}
+		if err := td.pages.applyImage(rec.Page, rec.Img); err != nil {
+			return fmt.Errorf("还原第 %d 页的镜像失败: %w", rec.Page, err)
+		}
+	}
+
 	// 1) 哪些事务提交了
 	committed := map[int64]bool{}
 	for _, rec := range recs {
@@ -673,6 +705,9 @@ func (s *Store) applyRec(rec walRec) error {
 	if !ok {
 		return nil
 	}
+	if rec.Op == opFPI {
+		return nil // 镜像在 replayWAL 的预演里已经处理过
+	}
 	// 重放的改动只存在于内存里，必须标脏，否则接下来的轮转会把它丢掉
 	s.loadMu.Lock()
 	s.dirty[key] = true
@@ -697,9 +732,12 @@ func (s *Store) applyRec(rec walRec) error {
 				td.Live++
 			}
 			td.Rows[rec.Slot] = row
+			// 内存改了、页还没改：标成待落盘，下次 checkpoint 才写得进去
+			td.notePending([]int{rec.Slot}, []types.Row{row})
 		} else {
 			td.Rows = append(td.Rows, row)
 			td.Live++
+			td.notePending([]int{len(td.Rows) - 1}, []types.Row{row})
 		}
 		bumpSeq(t.SerialIdx(), td, row)
 	case opDel:
@@ -707,6 +745,7 @@ func (s *Store) applyRec(rec walRec) error {
 			if rec.Slot < len(td.Rows) && td.Rows[rec.Slot] != nil {
 				td.Rows[rec.Slot] = nil
 				td.Live--
+				td.notePending([]int{rec.Slot}, []types.Row{nil})
 			}
 			return nil
 		}
@@ -733,6 +772,7 @@ func (s *Store) applyRec(rec walRec) error {
 		if rec.Slot >= 0 {
 			growTo(rec.Slot)
 			td.Rows[rec.Slot] = newRow
+			td.notePending([]int{rec.Slot}, []types.Row{newRow})
 		} else {
 			for i := range td.Rows {
 				if td.Rows[i] == nil {

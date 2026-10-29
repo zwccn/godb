@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -33,10 +34,17 @@ type TableData struct {
 	// unique 是非主键 UNIQUE 列组的索引：列组签名（"1,3"）→ B+Tree。
 	unique map[string]*btree
 
-	// pages 是页式堆文件（第 1 期）。Rows 仍然是内存里的权威副本，
-	// 提交时按行 write-through 到页里，checkpoint 只刷脏页。
+	// pages 是页式堆文件。Rows 仍然是内存里的权威副本；提交只记「哪些行变了」，
+	// checkpoint 时再成批写进页 —— 提交路径因此和以前一样快（不用编解码整页），
+	// 而写盘仍然是「只写脏页」。
 	// nil 表示这张表还没挂上（新建但没写过、或从没落地）。
 	pages *tablePages
+
+	// pendingSlots/pendingRows 是「自上次 checkpoint 以来变化过的行」，
+	// 二者对齐；pendingRows[i] == nil 表示这一行被删了。
+	// checkpoint 时按槽位去重（同一行改多次只留最后一次）再写页。
+	pendingSlots []int
+	pendingRows  []types.Row
 	// dir/id 记下来，是为了「第一次写的时候才开文件」——
 	// 只读表不产生 .dat，少一堆空文件。
 	dir string
@@ -64,27 +72,95 @@ func (td *TableData) attachPages(dir string, id int64) error {
 	return nil
 }
 
-// pagePut 把一行写进页文件（第 1 期只写不读，见 engine 里的说明）。
-func (td *TableData) pagePut(slot int, row types.Row) error {
-	if td.pages == nil || row == nil {
-		return nil
+// notePending 记下这次提交改了哪些行，等 checkpoint 成批写页。
+//
+// 为什么不在这里直接写页：写页要 decode 整页 + encode 整页（含 8KB CRC），
+// 每行一次会让提交慢一个量级（实测 5 万行插入 21s → 279s），而且会把组提交
+// 打散（提交变慢 → 并发提交挤不到同一个 fsync 窗口里）。
+func (td *TableData) notePending(slots []int, rows []types.Row) {
+	if td.pages == nil || len(slots) == 0 {
+		return
 	}
-	tuple, err := encodeRowTuple(row)
-	if err != nil {
-		return err
-	}
-	// TODO(第 1 期·待接)：put 返回的全页镜像要写进 WAL，防页撕裂。
-	_, err = td.pages.put(slot, tuple)
-	return err
+	td.pendingSlots = append(td.pendingSlots, slots...)
+	td.pendingRows = append(td.pendingRows, rows...)
 }
 
-// pageDel 把一行从页文件里摘掉。
-func (td *TableData) pageDel(slot int) error {
-	if td.pages == nil {
-		return nil
+// dropPending 丢掉待落盘行（全表清空时用：行都没了，再写回去就是复活）。
+func (td *TableData) dropPending() {
+	td.pendingSlots = nil
+	td.pendingRows = nil
+}
+
+// drainPending 把待落盘行按槽位合并（最后一次为准），编码成页里存的元组。
+func (td *TableData) drainPending() ([]int, []pendingRow, error) {
+	if len(td.pendingSlots) == 0 {
+		return nil, nil, nil
 	}
-	_, err := td.pages.del(slot)
-	return err
+	final := make(map[int]types.Row, len(td.pendingSlots))
+	for i, slot := range td.pendingSlots {
+		final[slot] = td.pendingRows[i]
+	}
+	dels := make([]int, 0, len(final))
+	puts := make([]pendingRow, 0, len(final))
+	for slot, row := range final {
+		if row == nil {
+			dels = append(dels, slot)
+			continue
+		}
+		tuple, err := encodeRowTuple(row)
+		if err != nil {
+			return nil, nil, err
+		}
+		puts = append(puts, pendingRow{slot: slot, tuple: tuple})
+	}
+	// 排序只为让「同一批改动」产生同样的页布局（可复现、便于对比文件）
+	sort.Ints(dels)
+	sort.Slice(puts, func(i, j int) bool { return puts[i].slot < puts[j].slot })
+	td.pendingSlots = nil
+	td.pendingRows = nil
+	return dels, puts, nil
+}
+
+// pageLoad 从页文件读回全表（槽位号 == RID，不能重排）。
+func (td *TableData) pageLoad(t *catalog.Table) ([]types.Row, int, error) {
+	if td.pages == nil {
+		return nil, 0, nil
+	}
+	return td.pages.loadRows(t)
+}
+
+// pageStage 把待落盘行写进页（只改池里的页，不落盘），返回全页镜像。
+//
+// 这一步和「刷脏页」必须分成两步：镜像要先写进 WAL，页才能落盘
+// （否则断电把页写了一半，镜像还没来得及落盘，这页就废了）。
+func (td *TableData) pageStage() ([]pageImage, error) {
+	if td.pages == nil {
+		return nil, nil
+	}
+	dels, puts, err := td.drainPending()
+	if err != nil {
+		return nil, err
+	}
+	if len(dels) == 0 && len(puts) == 0 {
+		return nil, nil
+	}
+	return td.pages.write(dels, puts)
+}
+
+// pageFlush 刷脏页 + 清 FPI 标记（只在镜像已经写进 WAL 之后调用）。
+func (td *TableData) pageFlush() (int, error) {
+	if td.pages == nil {
+		return 0, nil
+	}
+	return td.pages.checkpoint()
+}
+
+// pageDirty 报告还有多少改动没落盘（待写入的行 + 池里的脏页）。
+func (td *TableData) pageDirty() int {
+	if td.pages == nil {
+		return 0
+	}
+	return len(td.pendingSlots) + td.pages.dirtyPages()
 }
 
 // closePages 关掉页文件（DROP TABLE / 表被换掉时）。

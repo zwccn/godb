@@ -224,9 +224,60 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 		return nil, nil
 	}
 	b := tp.newBatch()
+	if err := b.putRows(rows); err != nil {
+		return nil, err
+	}
+	return b.flush()
+}
+
+// delBatch 批量删行：同样按页批量，一次提交里删 5 万行也只做「页数」次编解码。
+func (tp *tablePages) delBatch(slots []int) ([]pageImage, error) {
+	if len(slots) == 0 {
+		return nil, nil
+	}
+	b := tp.newBatch()
+	b.delSlots(slots)
+	return b.flush()
+}
+
+// write 把「删除 + 写入」放进同一个批次：一次提交里同一页可能既删又写，
+// 合并成一批才不会 decode/encode 两遍。
+func (tp *tablePages) write(dels []int, rows []pendingRow) ([]pageImage, error) {
+	if len(dels) == 0 && len(rows) == 0 {
+		return nil, nil
+	}
+	b := tp.newBatch()
+	b.delSlots(dels)
+	if err := b.putRows(rows); err != nil {
+		return nil, err
+	}
+	return b.flush()
+}
+
+// delSlots 在批次里删行（不落盘，等 flush）。
+func (b *pageBatch) delSlots(slots []int) {
+	tp := b.tp
+	for _, slot := range slots {
+		if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
+			continue
+		}
+		at := tp.loc[slot]
+		p, err := b.get(at.page)
+		if err != nil {
+			continue
+		}
+		_ = p.del(int(at.slot))
+		tp.valid[slot] = false
+		tp.removeFromPageIndex(slot, at)
+	}
+}
+
+// putRows 在批次里写入一批行（不落盘，等 flush）。
+func (b *pageBatch) putRows(rows []pendingRow) error {
+	tp := b.tp
 	for _, row := range rows {
 		if len(row.tuple) > MaxTupleSize {
-			return nil, errTupleTooLarge
+			return errTupleTooLarge
 		}
 		tp.ensure(row.slot)
 
@@ -235,7 +286,7 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 			at := tp.loc[row.slot]
 			p, err := b.get(at.page)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			_ = p.del(int(at.slot))
 			local, err := p.insertOrCompact(row.tuple, uint32(row.slot))
@@ -244,7 +295,7 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 				continue
 			}
 			if err != errPageFull {
-				return nil, err
+				return err
 			}
 			tp.valid[row.slot] = false
 			tp.removeFromPageIndex(row.slot, at)
@@ -263,14 +314,14 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 		}
 		page, isNew, err := tp.findPage(len(row.tuple))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if isNew {
 			tp.hi = page + 1
 		}
 		p, err := b.get(page)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		local, err := p.insertOrCompact(row.tuple, uint32(row.slot))
 		if err != nil {
@@ -279,42 +330,18 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 			tp.hi++
 			p, err = b.get(page)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			local, err = p.insertOrCompact(row.tuple, uint32(row.slot))
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		tp.loc[row.slot] = rowLoc{page: page, slot: uint16(local)}
 		tp.valid[row.slot] = true
 		tp.byPage[page] = append(tp.byPage[page], row.slot)
 	}
-	return b.flush()
-}
-
-// delBatch 批量删行：同样按页批量，一次提交里删 5 万行也只做「页数」次编解码。
-func (tp *tablePages) delBatch(slots []int) ([]pageImage, error) {
-	if len(slots) == 0 {
-		return nil, nil
-	}
-	b := tp.newBatch()
-	for _, slot := range slots {
-		if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
-			continue
-		}
-		at := tp.loc[slot]
-		p, err := b.get(at.page)
-		if err != nil {
-			return nil, err
-		}
-		if err := p.del(int(at.slot)); err != nil && err != errSlotOutOfRange {
-			return nil, err
-		}
-		tp.valid[slot] = false
-		tp.removeFromPageIndex(slot, at)
-	}
-	return b.flush()
+	return nil
 }
 
 // get 读一行（返回副本）。
@@ -375,6 +402,51 @@ func (tp *tablePages) findPage(size int) (uint32, bool, error) {
 		}
 	}
 	return total, true, nil // 新页
+}
+
+// loadRows 读全表，按 RID 放进槽位数组（空洞是 nil）。
+//
+// 这是「重启后内存槽位号 == 页里的 RID」的唯一保证：索引里存的是 RID，
+// 加载时把行搬了位置，索引就全错了。
+func (tp *tablePages) loadRows(t *catalog.Table) ([]types.Row, int, error) {
+	var rows []types.Row
+	repaired := 0
+	err := tp.loadAll(func(slot int, tuple []byte) error {
+		row, rep, err := decodeRowTuple(tuple, t)
+		if err != nil {
+			return err
+		}
+		repaired += rep
+		for len(rows) <= slot {
+			rows = append(rows, nil)
+		}
+		rows[slot] = row
+		return nil
+	})
+	if err != nil {
+		return nil, repaired, err
+	}
+	return rows, repaired, nil
+}
+
+// dirtyPages 返回池里还有多少脏页。
+func (tp *tablePages) dirtyPages() int { return tp.pool.dirtyCount() }
+
+// applyImage 把一页的整页镜像写回页文件（崩溃恢复用：页撕裂时靠它还原）。
+func (tp *tablePages) applyImage(page uint32, img []byte) error {
+	if len(img) != PageSize {
+		return fmt.Errorf("页镜像长度 %d，应为 %d", len(img), PageSize)
+	}
+	// 池里可能还缓存着坏页，先摘掉，免得之后又读到它。
+	// writePage 写超出文件末尾会自动把文件撑长，不需要先 truncate。
+	tp.pool.drop(page)
+	if err := tp.pf.writePage(page, img); err != nil {
+		return err
+	}
+	if page >= tp.hi {
+		tp.hi = page + 1
+	}
+	return nil
 }
 
 // loadAll 读全表：按页顺序回调 (RID, 元组)。同时把 RID 目录重建出来。

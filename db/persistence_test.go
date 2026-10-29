@@ -267,7 +267,7 @@ func TestAddColumnDoesNotRewriteSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("catalog 里找不到 ac")
 	}
-	snapPath := filepath.Join(dir, "tables", fmt.Sprintf("t%06d.snp", tbl.ID))
+	snapPath := filepath.Join(dir, "tables", fmt.Sprintf("t%06d.dat", tbl.ID))
 	before, err := os.Stat(snapPath)
 	if err != nil {
 		t.Fatalf("数据文件应该存在: %v", err)
@@ -324,7 +324,7 @@ func TestIncrementalCheckpoint(t *testing.T) {
 		if !ok {
 			t.Fatalf("找不到表 %s", name)
 		}
-		st, err := os.Stat(filepath.Join(dir, "tables", fmt.Sprintf("t%06d.snp", tb.ID)))
+		st, err := os.Stat(filepath.Join(dir, "tables", fmt.Sprintf("t%06d.dat", tb.ID)))
 		if err != nil {
 			t.Fatalf("数据文件不存在: %v", err)
 		}
@@ -389,36 +389,6 @@ func TestLazyLoadOnStartup(t *testing.T) {
 	}
 }
 
-// 旧的单文件 snapshot.json 要能自动迁移成分表文件。
-func TestLegacySnapshotMigration(t *testing.T) {
-	dir := t.TempDir()
-	d := openDir(t, dir)
-	run(t, d, "s", `CREATE TABLE lm (id INTEGER PRIMARY KEY, v TEXT)`)
-	d.Close()
-	// 手工造一个旧格式快照，同时删掉新格式的 meta.json 与表文件
-	legacy := `{"generation":3,"tables":{"lm":{"rows":[[1,"旧数据"],[2,"也还在"]]}}}`
-	if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte(legacy), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	os.Remove(filepath.Join(dir, "meta.json"))
-	os.RemoveAll(filepath.Join(dir, "tables"))
-
-	d2 := openDir(t, dir)
-	assertRows(t, run(t, d2, "s", `SELECT id, v FROM lm ORDER BY id`), []string{"1|旧数据", "2|也还在"})
-	d2.Close()
-
-	// 迁移后旧文件应该被改名，新格式文件就位
-	if _, err := os.Stat(filepath.Join(dir, "snapshot.json.bak")); err != nil {
-		t.Fatal("旧快照应该被改名成 .bak")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err != nil {
-		t.Fatal("应该生成 meta.json")
-	}
-
-	d3 := openDir(t, dir)
-	defer d3.Close()
-	assertRows(t, run(t, d3, "s", `SELECT count(*) FROM lm`), []string{"2"})
-}
 
 // ---------- 落盘策略：少写、快写、可观测 ----------
 

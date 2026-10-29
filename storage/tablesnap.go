@@ -113,25 +113,54 @@ func writeTableSnap(dir string, id int64, gen int64, rows []types.Row) (int64, e
 // 回收站恢复要按 ID 直接操作文件，所以这里把命名规则暴露出去。
 func TableSnapPath(dir string, id int64) string { return tableFileName(dir, id) }
 
-// InstallTableSnap 把一份表数据写进 <data>/tables/，并把代次对齐到 gen。
+// InstallTableSnap 把一份 .snp 备份（回收站里的那份）装成页文件。
 //
-// 回收站里的备份文件代次写的是 0（不参与当时的重放判断），直接拷回来会被
-// WAL 整段重放 —— 重放判据是 rec.Gen > 表代次，0 等于「什么记录都没包含」。
-// 所以恢复写入时必须盖成当前代次，表示「这份数据已包含该代次之前的一切」。
-func InstallTableSnap(dir string, id int64, data []byte, gen int64) (int64, error) {
+// 备份文件仍是 .snp 格式（一份紧凑的行流，适合当交换格式），装回来时
+// 展开成页：RID 就是行号。恢复出来的表 ID 是新的，页文件也按新 ID 命名。
+//
+// 代次不需要在这里盖：恢复的表不在 meta.json 里，loadSnapshot 会把
+// 「有页文件但不在 meta 里」的表当作「已包含当前代次」，从而不被 WAL 重放
+// 倒灌（备份是 DROP 之前的快照，重放它之后的记录会把删掉的行又插回来）。
+func InstallTableSnap(dir string, id int64, data []byte) (int64, error) {
 	if len(data) < tableSnapHeader || string(data[:8]) != tableSnapMagic {
 		return 0, fmt.Errorf("不是表数据文件（缺少 %s 文件头）", tableSnapMagic)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "tables"), 0o755); err != nil {
+	payload := data[tableSnapHeader:]
+	if crc32.Checksum(payload, crcTable) != binary.LittleEndian.Uint32(data[20:]) {
+		return 0, fmt.Errorf("备份文件校验和不匹配，可能已损坏")
+	}
+	var rows []types.Row
+	for p := 0; p < len(payload); {
+		row, next, err := readRowValues(payload, p)
+		if err != nil {
+			return 0, fmt.Errorf("解析备份数据失败: %w", err)
+		}
+		rows = append(rows, row)
+		p = next
+	}
+
+	tp, err := openTablePages(tablePagePath(dir, id), defaultTablePoolPages)
+	if err != nil {
 		return 0, err
 	}
-	buf := make([]byte, len(data))
-	copy(buf, data)
-	binary.LittleEndian.PutUint64(buf[8:], uint64(gen))
-	if err := writeFileAtomic(tableFileName(dir, id), buf); err != nil {
+	defer tp.close()
+
+	puts := make([]pendingRow, 0, len(rows))
+	for i, r := range rows {
+		tuple, err := encodeRowTuple(r)
+		if err != nil {
+			return 0, err
+		}
+		puts = append(puts, pendingRow{slot: i, tuple: tuple})
+	}
+	if _, err := tp.putBatch(puts); err != nil {
 		return 0, err
 	}
-	return int64(len(buf)), nil
+	n, err := tp.checkpoint()
+	if err != nil {
+		return 0, err
+	}
+	return int64(n) * PageSize, nil
 }
 
 // MetaGeneration 读 meta.json 里的当前代次（文件不存在返回 0）。

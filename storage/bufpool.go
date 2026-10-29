@@ -215,6 +215,19 @@ func (bp *bufPool) unpin(f *bufFrame, dirty bool) {
 	bp.mu.Unlock()
 }
 
+// dirtyCount 返回池里还有多少脏页（checkpoint 用它决定要不要真去刷）。
+func (bp *bufPool) dirtyCount() int {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	n := 0
+	for _, f := range bp.frames {
+		if f.dirty {
+			n++
+		}
+	}
+	return n
+}
+
 // flushAll 把所有脏页写回并 fsync。checkpoint 就是「刷脏页 + 记 LSN」，
 // 不再是整表重写。
 func (bp *bufPool) flushAll() (int, error) {

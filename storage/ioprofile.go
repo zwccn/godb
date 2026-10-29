@@ -169,7 +169,7 @@ func (s *Store) TableSizes() []TableSize {
 	for _, t := range s.Cat.Tables {
 		key := cleanName(t.Name)
 		ts := TableSize{Name: t.Name}
-		if st, err := os.Stat(tableFileName(s.Dir, t.ID)); err == nil {
+		if st, err := os.Stat(tablePagePath(s.Dir, t.ID)); err == nil {
 			ts.Bytes = st.Size()
 		}
 		if td := s.Data[key]; td != nil && s.loaded[key] {

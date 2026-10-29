@@ -160,9 +160,25 @@ func Open(dir string, cat *catalog.Catalog, progress func(string)) (*Store, erro
 	return s, nil
 }
 
-// Close 停掉后台落盘定时器并关闭 WAL（写快照由 Checkpoint 负责）。
+// Close 停掉后台落盘定时器，刷掉脏页，再关页文件与 WAL。
+//
+// 页文件必须显式关：Windows 上没关的文件会让目录删不掉（测试里表现为
+// 「file is being used by another process」）。
 func (s *Store) Close() error {
 	s.StopAutoCheckpoint()
+	s.loadMu.Lock()
+	for _, td := range s.Data {
+		if td == nil {
+			continue
+		}
+		// 尽力刷一遍脏页：即使 meta 的代次没跟上，重放也能补齐（幂等），
+		// 但刷了可以让下次启动少重放一堆记录。
+		if td.pages != nil {
+			_, _ = td.pages.checkpoint()
+		}
+		td.closePages()
+	}
+	s.loadMu.Unlock()
 	if s.wal != nil {
 		return s.wal.Close()
 	}
@@ -224,22 +240,25 @@ func (s *Store) ensureLoadedLocked(key string) {
 		s.loaded[key] = true
 		return
 	}
-	rows, gen, repaired, err := readTableSnap(s.Dir, t.ID, t)
+	// 页文件是唯一的数据来源：按 RID 把行放回槽位数组。
+	// 槽位号必须与页里记的一致 —— 索引里存的就是它。
+	if err := td.attachPages(s.Dir, t.ID); err != nil {
+		s.loadErr = err
+		s.loaded[key] = true
+		return
+	}
+	rows, repaired, err := td.pageLoad(t)
 	if err != nil {
-		// 文件坏了：当作空表，但保留错误信息给启动日志
+		// 页坏了：当作空表，但保留错误信息给启动日志
 		s.loadErr = err
 		rows = nil
 	}
-	if gen > s.tableGen[key] {
-		s.tableGen[key] = gen
-	}
 	s.Repaired.Add(int64(repaired))
 	td.Rows = rows
-	s.tableRows[key] = len(rows)
 	// 必须重建主键索引：否则重启后第一次写入看不到已有行，
 	// 重复主键会被放过去（索引要等到下一次提交才重建）。
 	td.RebuildIndex(t)
-	// 自增序列也要恢复：快照里只存行，不存计数器，所以取现有数据的最大值。
+	// 自增序列也要恢复：页里只存行、不存计数器，所以取现有数据的最大值。
 	// 不恢复的话重启后 SERIAL 从 1 重新发号，会撞上已有主键。
 	if si := t.SerialIdx(); si >= 0 {
 		var max int64
@@ -252,6 +271,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 			td.Seq = max
 		}
 	}
+	s.tableRows[key] = td.Live
 	s.loaded[key] = true
 }
 
@@ -283,6 +303,14 @@ func (s *Store) DropTable(name string) {
 	key := cleanName(name)
 	s.loadMu.Lock()
 	defer s.loadMu.Unlock()
+	if td := s.Data[key]; td != nil {
+		// 页文件当场删掉：等 checkpoint 的孤儿清理也行，但删表要立刻见效
+		// （不然用户重建成同名表时，可能读到上一张表残留的页）。
+		td.closePages()
+		if td.id > 0 {
+			_ = removeTablePages(s.Dir, td.id)
+		}
+	}
 	delete(s.Data, key)
 	delete(s.loaded, key)
 	delete(s.tableGen, key)
@@ -1685,6 +1713,28 @@ func (tx *Tx) commitLocked() (int64, error) {
 		if !ok {
 			t = nil
 		}
+		// 记下这批改动的行：checkpoint 时成批写进页（这里不写页 ——
+		// 每行编解码整页会让提交慢一个量级，见 notePending 的注释）。
+		if t != nil && (len(c.del) > 0 || len(c.upd) > 0 || len(c.ins) > 0) {
+			if err := td.attachPages(tx.st.Dir, t.ID); err != nil {
+				return 0, err
+			}
+			slots := make([]int, 0, len(c.del)+len(c.upd)+len(c.ins))
+			rows := make([]types.Row, 0, len(c.del)+len(c.upd)+len(c.ins))
+			// 删除用 nil 行表示（页那里按「删掉这一槽的行」处理）
+			for _, slot := range c.del {
+				slots = append(slots, slot)
+				rows = append(rows, nil)
+			}
+			slots = append(slots, c.upd...)
+			rows = append(rows, c.updRows...)
+			for i, slot := range c.insSlots {
+				slots = append(slots, slot)
+				rows = append(rows, c.ins[i])
+			}
+			td.notePending(slots, rows)
+		}
+
 		// 增量应用：只碰写集里那几行，索引也只动那几个键。
 		// 换行（原地替换）不改变槽位，所以索引里的槽位号一直有效 ——
 		// 这是「提交成本与表大小无关」的另一半。
@@ -1715,6 +1765,13 @@ func (tx *Tx) commitLocked() (int64, error) {
 		if td.Live == 0 && len(td.Rows) > 0 {
 			td.Rows = nil
 			td.free = nil
+			// 全表清空：页文件也缩回去，否则空表还占着几个 GB
+			if td.pages != nil {
+				td.dropPending()
+				if err := td.pages.reset(); err != nil {
+					return 0, err
+				}
+			}
 		}
 		if c.seqSet {
 			switch {

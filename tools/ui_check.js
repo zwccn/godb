@@ -257,6 +257,33 @@ class CDP {
       detUi.open && detUi.stats >= 4 && detUi.scan && detUi.sql.length > 0,
       `${detUi.stats} 张卡 / ${detUi.sql.slice(0, 30)}`);
     await cdp.eval(`document.getElementById('btnSlowDone').click()`);
+
+    // 字号调到最大再看面板：.mon-card 是 overflow:hidden，按 flex 规范它的自动
+    // 最小尺寸会退化成 0 —— 纵向空间不够时 flex 不滚动而是把卡片压成 0 高，
+    // 内容被裁掉且滚不出来（表现就是「下面显示不全、页面不能滚」）。
+    await cdp.eval(`applyFontScale(165, true)`);
+    await sleep(500);
+    const monFit = await cdp.eval(`(() => {
+      const b = document.querySelector('.mon-body');
+      const cards = [...document.querySelectorAll('#monPanel .mon-card')];
+      b.scrollTop = 999999;
+      const last = cards[cards.length - 1].getBoundingClientRect();
+      return {
+        n: cards.length,
+        crushed: cards.filter(c => c.getBoundingClientRect().height < 20).length,
+        scrollTop: Math.round(b.scrollTop),
+        max: Math.round(b.scrollHeight - b.clientHeight),
+        lastBottom: Math.round(last.bottom),
+        panelBottom: Math.round(document.getElementById('monPanel').getBoundingClientRect().bottom),
+      };
+    })()`);
+    check('165% 字号：监控面板能滚到底、卡片不被压扁',
+      monFit.crushed === 0 && monFit.scrollTop >= monFit.max - 2 &&
+        monFit.lastBottom <= monFit.panelBottom + 1,
+      `卡片 ${monFit.n} 张（压扁 ${monFit.crushed}）· 滚到 ${monFit.scrollTop}/${monFit.max}`);
+    await cdp.eval(`applyFontScale(120, true)`);
+    await sleep(300);
+
     await cdp.eval(`document.getElementById('btnMonClose').click()`);
     await sleep(400);
 

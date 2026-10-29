@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -596,34 +595,31 @@ func (tp *tablePages) close() error { return tp.pf.close() }
 
 // ---- 行编解码 ----
 //
-// 页里存的是 JSON 行，直接复用 codec.go 的 encodeRow/decodeRow：
-//   - 编码：types.Value 自带 MarshalJSON，一行就是一个 JSON 数组
-//   - 解码：decodeRow 会把「列数变了 / 单格解不出来」的旧行修成 NULL 并计数，
-//     这套容错（ALTER TABLE 崩在中间）在页里同样需要，别另写一份
+// 页里的元组用二进制（binwal.go 的 appendRow / readRowValues）：u32 列数 +
+// 每个值 1 字节类型标签 + 定长/带长度前缀的载荷。和 WAL 记录、回收站备份
+// 用的是同一套编码，加新类型只改一个地方。
 //
-// 代价是比二进制编码大 40% 左右。第 1 期先按这个来，等存储层稳定了再换二进制。
+// 比 JSON 省 40% 左右（早先为图省事用 JSON，一行一个数组；numeric 要写成
+// {"$n":"..."}、timestamp 要写成 {"$ts":...}，光是包装就占掉不少）。
+//
+// 兼容性照旧交给 castRow：页里存的是「写这一行时的列数和类型」，读的时候
+// 按当前表结构补齐/截断（ALTER TABLE 崩在中间留下的旧行也能读）。
 
 func encodeRowTuple(row types.Row) ([]byte, error) {
-	return json.Marshal(encodeRow(row))
+	buf := make([]byte, 0, 8*len(row)+8)
+	buf = appendRow(buf, row)
+	if len(buf) > MaxTupleSize {
+		return nil, errTupleTooLarge
+	}
+	return buf, nil
 }
 
 func decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
-	// 必须先拆成 RawMessage 再逐个 types.Value.UnmarshalJSON：
-	// numeric 存成 {"$n":"50000"}、timestamp 存成 {"$ts":...}，直接解成
-	// interface{} 会变成 map，按列类型硬解就会全部退化成 NULL（踩过）。
-	var raw []json.RawMessage
-	if err := json.Unmarshal(tuple, &raw); err != nil {
+	vals, _, err := readRowValues(tuple, 0)
+	if err != nil {
 		return nil, 0, fmt.Errorf("行解码失败：%w", err)
 	}
-	vals := make([]types.Value, len(raw))
-	repaired := 0
-	for i, r := range raw {
-		if err := vals[i].UnmarshalJSON(r); err != nil {
-			vals[i] = types.Null
-			repaired++
-		}
-	}
-	// 再按当前表结构对齐：列数变了、类型换了（ALTER TABLE）都在这里兜住
+	// 按当前表结构对齐：列数变了、类型换了（ALTER TABLE）都在这里兜住
 	row, rep := castRow(t, vals)
-	return row, repaired + rep, nil
+	return row, rep, nil
 }

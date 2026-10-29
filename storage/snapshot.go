@@ -36,8 +36,8 @@ type metaTable struct {
 	Rows int   `json:"rows"`
 }
 
-// snapFormat 是当前磁盘格式版本（3 = 页式堆文件）。
-const snapFormat = 3
+// snapFormat 是当前磁盘格式版本（4 = 页式堆文件 + 二进制元组）。
+const snapFormat = 4
 
 func (s *Store) metaPath() string { return filepath.Join(s.Dir, metaFile) }
 

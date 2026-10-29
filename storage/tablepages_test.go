@@ -2,9 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"godb/types"
 )
 
 func tupleN(i int) []byte { return []byte(fmt.Sprintf(`{"id":%d}`, i)) }
@@ -347,4 +351,46 @@ func TestTablePagesDelBatch(t *testing.T) {
 		t.Fatal("页号游标被清零了")
 	}
 	t.Logf("删 %d 行解码 %d 次 / %d 页", n, got, pages)
+}
+
+// 页里的元组用二进制编码：比 JSON 小三分之一，一页能多塞 40% 的行。
+// 这条守住「别哪天为了图省事又换回 JSON」——换回去会让所有表都胖一圈。
+func TestTupleBinaryIsCompact(t *testing.T) {
+	row := types.Row{
+		types.Int(12345),
+		types.Text("张伟"),
+		types.Decimal("42000.00"),
+		types.Time(time.Date(2019, 3, 11, 0, 0, 0, 0, time.Local)),
+		types.Bool(true),
+	}
+	bin, err := encodeRowTuple(row)
+	if err != nil {
+		t.Fatalf("encodeRowTuple: %v", err)
+	}
+	js, err := json.Marshal(encodeRow(row))
+	if err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(bin)*4 > len(js)*3 {
+		t.Fatalf("二进制 %d 字节，JSON %d 字节 —— 应该至少小 25%%", len(bin), len(js))
+	}
+
+	// 一页能塞多少行：二进制应该明显多
+	fill := func(tuple []byte) int {
+		p := newPage(0)
+		n := 0
+		for {
+			if _, err := p.insertOrCompact(tuple, uint32(n)); err != nil {
+				return n
+			}
+			n++
+		}
+	}
+	nb, nj := fill(bin), fill(js)
+	if nb*5 < nj*6 { // 至少多 20%
+		t.Fatalf("一页能放：二进制 %d 行 / JSON %d 行，应该至少多 20%%", nb, nj)
+	}
+	t.Logf("元组 %d 字节（JSON %d，省 %.0f%%）；一页 %d 行（JSON %d，+%.0f%%）",
+		len(bin), len(js), 100*(1-float64(len(bin))/float64(len(js))),
+		nb, nj, 100*float64(nb-nj)/float64(nj))
 }

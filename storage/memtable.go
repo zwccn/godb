@@ -65,9 +65,6 @@ type TableData struct {
 	// （这期间不许淘汰，否则脏页可能在镜像落盘前就被刷出去）。
 	pageMu sync.RWMutex
 
-	evictCalls   int
-	evictSkipped int
-
 	// dir/id 记下来，是为了「第一次写的时候才开文件」——
 	// 只读表不产生 .dat，少一堆空文件。
 	dir string
@@ -113,9 +110,7 @@ func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, poolPag
 // 两种情况必须保留：表里还有没落盘的改动（pending / fullSync）——
 // 那些行只存在于内存里（或只在 pending 里），页文件上的还是旧版本。
 func (td *TableData) evictPage(page uint32) {
-	td.evictCalls++
 	if len(td.pendingSlots) > 0 || td.fullSync || td.pages == nil {
-		td.evictSkipped++
 		return
 	}
 	for _, slot := range td.pages.byPage[page] {

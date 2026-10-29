@@ -61,15 +61,6 @@
   --tint-danger: rgba(240, 97, 109, .12);
   --overlay: rgba(3, 6, 10, .62);
   --shadow-color: rgba(0, 0, 0, .55);
-
-  /* 主操作按钮（编辑器「执行」）：渐变两端 + 顶部高光 + 外发光。
-     单独一组变量，浅色皮肤要各自调 —— 深色上的发光在浅底上会糊成一团。 */
-  --run-top: #2f8ce4;
-  --run-bottom: #1b6ab6;
-  --run-border: #1a5f9f;
-  --run-shine: rgba(255, 255, 255, .26);
-  --run-glow: rgba(76, 158, 240, .40);
-  --run-kbd-bg: rgba(255, 255, 255, .16);
 }
 
 /* ---------- 皮肤 ---------- */
@@ -127,12 +118,6 @@ html[data-theme="sky"] {
   --tint-danger: rgba(207, 65, 82, .12);
   --overlay: rgba(30, 50, 80, .35);
   --shadow-color: rgba(30, 60, 100, .18);
-  --run-top: #4a97e2;
-  --run-bottom: #2b7fd0;
-  --run-border: #2371bf;
-  --run-shine: rgba(255, 255, 255, .55);
-  --run-glow: rgba(43, 127, 208, .28);
-  --run-kbd-bg: rgba(255, 255, 255, .26);
 }
 
 html[data-theme="taro"] {
@@ -186,12 +171,6 @@ html[data-theme="taro"] {
   --tint-danger: rgba(207, 65, 82, .12);
   --overlay: rgba(45, 30, 70, .35);
   --shadow-color: rgba(60, 40, 100, .18);
-  --run-top: #8f74e0;
-  --run-bottom: #7a5bd6;
-  --run-border: #6b4ecb;
-  --run-shine: rgba(255, 255, 255, .55);
-  --run-glow: rgba(122, 91, 214, .28);
-  --run-kbd-bg: rgba(255, 255, 255, .26);
 }
 
 html[data-theme="mint"] {
@@ -245,12 +224,6 @@ html[data-theme="mint"] {
   --tint-danger: rgba(207, 65, 82, .12);
   --overlay: rgba(20, 50, 45, .35);
   --shadow-color: rgba(20, 60, 50, .18);
-  --run-top: #33b083;
-  --run-bottom: #1f9c72;
-  --run-border: #1a8b66;
-  --run-shine: rgba(255, 255, 255, .55);
-  --run-glow: rgba(31, 156, 114, .28);
-  --run-kbd-bg: rgba(255, 255, 255, .26);
 }
 
 /* ---------- 皮肤切换器（现在在设置页里；圆点本身仍复用这套渐变） ---------- */
@@ -460,74 +433,30 @@ body {
 }
 
 /* ---------- 主操作按钮：编辑器「执行」 ---------- */
-/* 这是整个界面里唯一一个「按下去会发生事情」的按钮，做重一点：
-   渐变 + 顶部高光 + 落地阴影，hover 抬 1px，按下沉回去。
-   颜色全部走 --run-* 变量，四套皮肤各有一套（浅底上的外发光要更淡）。 */
+/* 只比普通按钮多两件事：执行中换转圈、快捷键提示带一点留白。
+   底色/边框/圆角全部复用 .btn-primary + .btn-sm —— 一个界面里只有一种蓝按钮，
+   再加渐变和落地阴影就变成「页面上最响的东西」，抢了 SQL 本身的注意力。 */
 .btn-run {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 10px 5px 9px;
-  border-radius: 7px;
-  font-weight: 600;
-  letter-spacing: .2px;
-  color: var(--on-accent);
-  background: linear-gradient(180deg, var(--run-top), var(--run-bottom));
-  border: 1px solid var(--run-border);
-  box-shadow:
-    inset 0 1px 0 var(--run-shine),
-    0 1px 2px var(--shadow-color),
-    0 5px 14px -8px var(--run-glow);
-  transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+  gap: 5px;
 }
-.btn-run:hover:not(:disabled) {
-  filter: brightness(1.07);
-  transform: translateY(-1px);
-  box-shadow:
-    inset 0 1px 0 var(--run-shine),
-    0 2px 5px var(--shadow-color),
-    0 9px 20px -8px var(--run-glow);
-}
-.btn-run:active:not(:disabled) {
-  transform: translateY(0);
-  filter: brightness(.96);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, .28);
-}
-.btn-run:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.btn-run:disabled {
-  cursor: progress;
-  /* 执行中不要把按钮调成一坨灰：保留色相、整体压暗一点点，配合转圈才看得懂 */
-  opacity: .88;
-  filter: saturate(.8) brightness(1.02);
-  transform: none;
-}
-.btn-run .run-ico { display: inline-flex; align-items: center; }
 .btn-run .run-spin { display: none; }
-.btn-run.is-running .run-ico { display: none; }
 .btn-run.is-running .run-spin {
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  border: 1.6px solid currentColor;
+  border: 1.5px solid currentColor;
   border-top-color: transparent;
   animation: run-spin .7s linear infinite;
 }
 @keyframes run-spin { to { transform: rotate(360deg); } }
-.btn-run .run-keys { display: inline-flex; align-items: center; gap: 2px; margin-left: 3px; }
-.btn-run kbd {
-  margin-left: 0;
-  padding: 0 4px;
-  font-size: calc(9.5px * var(--fs));
-  line-height: 1.55;
-  border-radius: 4px;
-  background: var(--run-kbd-bg);
-  color: inherit;
-  opacity: .82;
-}
+.btn-run:disabled { opacity: .62; cursor: progress; }
+.btn-run .run-keys { display: inline-flex; align-items: center; }
+.btn-run .run-keys .plus { opacity: .55; margin: 0 1px; }
+.btn-run kbd { margin-left: 3px; }
+.btn-run .run-keys kbd:first-child { margin-left: 4px; }
 
 .icon-btn {
   background: transparent;

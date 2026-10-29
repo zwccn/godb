@@ -102,21 +102,23 @@ class CDP {
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
-    // 0.1) 执行按钮是「主操作」的样子：图标 + 快捷键提示 + 渐变（普通按钮长得都一样，
-    //      这一颗要一眼能认出来）。单独断言是因为它曾经被 setRunning 用 innerHTML 冲掉过。
+    // 0.1) 执行按钮：只保留「主色 + 快捷键提示 + 执行中转圈」，不加渐变/阴影
+    //      （曾经做过渐变+发光版本，太抢眼被退回；这条断言防止又长回去）
     const runBtn = await cdp.eval(`(() => {
       const b = document.getElementById('btnRun');
       const cs = getComputedStyle(b);
+      const peer = getComputedStyle(document.getElementById('btnSettingsSave'));
       return {
-        icon: !!b.querySelector('.run-ico svg'),
         keys: (b.querySelector('.run-keys') || {}).textContent || '',
         grad: cs.backgroundImage.indexOf('gradient') >= 0,
+        shadow: cs.boxShadow,
         radius: cs.borderRadius,
+        sameAsPeer: cs.backgroundColor === peer.backgroundColor && cs.borderRadius === peer.borderRadius,
       };
     })()`);
-    check('执行按钮：图标 + 快捷键 + 渐变主按钮',
-      runBtn.icon && /Ctrl/.test(runBtn.keys) && runBtn.grad,
-      `${runBtn.keys} / 圆角 ${runBtn.radius}`);
+    check('执行按钮：与其它主按钮同款扁平样式 + 快捷键提示',
+      !runBtn.grad && runBtn.shadow === 'none' && runBtn.sameAsPeer && /Ctrl/.test(runBtn.keys),
+      `${runBtn.keys} / 圆角 ${runBtn.radius} / 阴影 ${runBtn.shadow}`);
 
     // 执行中恢复：按钮内容不能被整体重写（否则图标/快捷键丢失）
     await cdp.eval(`setRunning(true)`);
@@ -224,6 +226,11 @@ class CDP {
       txOff.pillHidden && /空闲/.test(txOff.tip), txOff.tip);
 
     // 0.4c) 监控面板：慢SQL/慢事务是紧凑表格，点行出详情（含扫描行数）
+    // 先跑一条语句：面板读的是「当前库」的环形缓冲，刚切过库 / 刚清过表时它是空的，
+    // 表格里只有一行「还没有执行记录」，下面的断言就会随机变红。
+    await cdp.eval(`cm.setValue("SELECT 1 AS ping")`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(700);
     await cdp.eval(`document.getElementById('btnMonitor').click()`);
     await sleep(1200);
     const monUi = await cdp.eval(`(() => {

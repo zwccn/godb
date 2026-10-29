@@ -307,3 +307,44 @@ func TestTablePagesBatchDecodesPerPage(t *testing.T) {
 		}
 	}
 }
+
+// 删除同样要按页批量：删 2000 行只解码「页数」次，而不是 2000 次。
+func TestTablePagesDelBatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "del.dat")
+	tp, err := openTablePages(path, 64)
+	if err != nil {
+		t.Fatalf("openTablePages: %v", err)
+	}
+	defer tp.close()
+
+	const n = 2000
+	rows := make([]pendingRow, n)
+	slots := make([]int, n)
+	for i := 0; i < n; i++ {
+		rows[i] = pendingRow{slot: i, tuple: tupleN(i)}
+		slots[i] = i
+	}
+	if _, err := tp.putBatch(rows); err != nil {
+		t.Fatalf("putBatch: %v", err)
+	}
+	pages := int64(tp.hi)
+
+	before := tp.decodes
+	if _, err := tp.delBatch(slots); err != nil {
+		t.Fatalf("delBatch: %v", err)
+	}
+	got := tp.decodes - before
+	if got > pages+2 {
+		t.Fatalf("删 %d 行解码了 %d 次，应该约等于页数 %d", n, got, pages)
+	}
+	for _, i := range []int{0, n / 2, n - 1} {
+		if _, ok := tp.get(i); ok {
+			t.Fatalf("第 %d 行应该已经删掉", i)
+		}
+	}
+	// 页还在（只是空了），要等 VACUUM 才回收
+	if tp.hi == 0 {
+		t.Fatal("页号游标被清零了")
+	}
+	t.Logf("删 %d 行解码 %d 次 / %d 页", n, got, pages)
+}

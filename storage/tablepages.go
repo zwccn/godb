@@ -86,6 +86,81 @@ type pageImage struct {
 	data []byte
 }
 
+// pageBatch 是「一次提交里的页级批处理」：本轮碰到的页只解码一次，
+// 最后每页只编码一次。putBatch / delBatch 共用它，避免两套逻辑各走各的。
+type pageBatch struct {
+	tp    *tablePages
+	cache map[uint32]*page
+	order []uint32
+	fpis  []pageImage
+	done  map[uint32]bool
+}
+
+func (tp *tablePages) newBatch() *pageBatch {
+	return &pageBatch{
+		tp:    tp,
+		cache: make(map[uint32]*page, 8),
+		done:  make(map[uint32]bool, 8),
+	}
+}
+
+// get 取一页的解码结果；第一次碰到这页时顺手取全页镜像（防撕裂用）。
+func (b *pageBatch) get(id uint32) (*page, error) {
+	if p, ok := b.cache[id]; ok {
+		return p, nil
+	}
+	img, err := b.tp.noteFPI(id)
+	if err != nil {
+		return nil, err
+	}
+	if img != nil && !b.done[id] {
+		b.fpis = append(b.fpis, pageImage{page: id, data: img})
+		b.done[id] = true
+	}
+	f, err := b.tp.fetch(id)
+	if err != nil {
+		return nil, err
+	}
+	p, err := decodeOrInitPage(f.data, id)
+	b.tp.pool.unpin(f, false)
+	if err != nil {
+		return nil, err
+	}
+	b.tp.decodes++
+	b.cache[id] = p
+	b.order = append(b.order, id)
+	return p, nil
+}
+
+// last 返回本轮最后碰到的页号（批量插入时优先往这页续着塞）。
+func (b *pageBatch) last() (uint32, bool) {
+	if len(b.order) == 0 {
+		return 0, false
+	}
+	return b.order[len(b.order)-1], true
+}
+
+// flush 每页编码一次并写回页框，返回要写进 WAL 的全页镜像。
+func (b *pageBatch) flush() ([]pageImage, error) {
+	for _, id := range b.order {
+		buf := b.cache[id].encode()
+		f, err := b.tp.fetch(id)
+		if err != nil {
+			return b.fpis, err
+		}
+		f.latch.Lock()
+		copy(f.data, buf)
+		f.latch.Unlock()
+		b.tp.pool.unpin(f, true)
+	}
+	if len(b.order) > 0 {
+		if last := b.order[len(b.order)-1]; last >= b.tp.nextPage {
+			b.tp.nextPage = last
+		}
+	}
+	return b.fpis, nil
+}
+
 // noteFPI 在「即将修改某页」之前调用：如果这是自上次 checkpoint 以来第一次改它，
 // 返回整页镜像（调用方必须把它写进 WAL），否则返回 nil。
 //
@@ -148,39 +223,7 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	cache := make(map[uint32]*page, 8) // 本轮解码过的页
-	var order []uint32                 // 按首次出现的顺序写回，输出稳定
-	var fpis []pageImage
-	fpiDone := make(map[uint32]bool, 8)
-
-	// getPage：拿一页的解码结果；第一次碰到这页时顺手取全页镜像
-	getPage := func(id uint32) (*page, error) {
-		if p, ok := cache[id]; ok {
-			return p, nil
-		}
-		img, err := tp.noteFPI(id)
-		if err != nil {
-			return nil, err
-		}
-		if img != nil && !fpiDone[id] {
-			fpis = append(fpis, pageImage{page: id, data: img})
-			fpiDone[id] = true
-		}
-		f, err := tp.fetch(id)
-		if err != nil {
-			return nil, err
-		}
-		p, err := decodeOrInitPage(f.data, id)
-		tp.pool.unpin(f, false)
-		if err != nil {
-			return nil, err
-		}
-		tp.decodes++
-		cache[id] = p
-		order = append(order, id)
-		return p, nil
-	}
-
+	b := tp.newBatch()
 	for _, row := range rows {
 		if len(row.tuple) > MaxTupleSize {
 			return nil, errTupleTooLarge
@@ -190,7 +233,7 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 		// 已经有位置：先删旧的（长度可能变了），再插新的
 		if tp.valid[row.slot] {
 			at := tp.loc[row.slot]
-			p, err := getPage(at.page)
+			p, err := b.get(at.page)
 			if err != nil {
 				return nil, err
 			}
@@ -207,10 +250,9 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 			tp.removeFromPageIndex(row.slot, at)
 		}
 
-		// 找个能放下的页：先试「上一轮用的页」，再让 findPage 找一个，最后开新页
-		if len(order) > 0 {
-			cur := order[len(order)-1]
-			if p, err := getPage(cur); err == nil {
+		// 找地方插：先续着上一页塞，再让 findPage 找，最后开新页兜底
+		if cur, ok := b.last(); ok {
+			if p, err := b.get(cur); err == nil {
 				if local, err := p.insertOrCompact(row.tuple, uint32(row.slot)); err == nil {
 					tp.loc[row.slot] = rowLoc{page: cur, slot: uint16(local)}
 					tp.valid[row.slot] = true
@@ -226,7 +268,7 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 		if isNew {
 			tp.hi = page + 1
 		}
-		p, err := getPage(page)
+		p, err := b.get(page)
 		if err != nil {
 			return nil, err
 		}
@@ -235,7 +277,7 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 			// 兜底：开一个全新的页，一定放得下
 			page = tp.hi
 			tp.hi++
-			p, err = getPage(page)
+			p, err = b.get(page)
 			if err != nil {
 				return nil, err
 			}
@@ -248,26 +290,31 @@ func (tp *tablePages) putBatch(rows []pendingRow) ([]pageImage, error) {
 		tp.valid[row.slot] = true
 		tp.byPage[page] = append(tp.byPage[page], row.slot)
 	}
+	return b.flush()
+}
 
-	// 每页只编码一次，再一次性写回页框
-	for _, id := range order {
-		p := cache[id]
-		buf := p.encode()
-		f, err := tp.fetch(id)
+// delBatch 批量删行：同样按页批量，一次提交里删 5 万行也只做「页数」次编解码。
+func (tp *tablePages) delBatch(slots []int) ([]pageImage, error) {
+	if len(slots) == 0 {
+		return nil, nil
+	}
+	b := tp.newBatch()
+	for _, slot := range slots {
+		if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
+			continue
+		}
+		at := tp.loc[slot]
+		p, err := b.get(at.page)
 		if err != nil {
-			return fpis, err
+			return nil, err
 		}
-		f.latch.Lock()
-		copy(f.data, buf)
-		f.latch.Unlock()
-		tp.pool.unpin(f, true)
-	}
-	if len(order) > 0 {
-		if last := order[len(order)-1]; last >= tp.nextPage {
-			tp.nextPage = last
+		if err := p.del(int(at.slot)); err != nil && err != errSlotOutOfRange {
+			return nil, err
 		}
+		tp.valid[slot] = false
+		tp.removeFromPageIndex(slot, at)
 	}
-	return fpis, nil
+	return b.flush()
 }
 
 // get 读一行（返回副本）。
@@ -290,43 +337,9 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 	return p.get(int(at.slot))
 }
 
-// del 删一行：把元组从页里摘掉，并让 RID 失效（槽位号交给 TableData 复用了）。
+// del 删一行（单行便捷入口，内部走批量路径）。
 func (tp *tablePages) del(slot int) ([]pageImage, error) {
-	if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
-		return nil, nil
-	}
-	at := tp.loc[slot]
-	img, err := tp.noteFPI(at.page)
-	if err != nil {
-		return nil, err
-	}
-	var fpis []pageImage
-	if img != nil {
-		fpis = append(fpis, pageImage{page: at.page, data: img})
-	}
-	f, err := tp.fetch(at.page)
-	if err != nil {
-		return nil, err
-	}
-	f.latch.Lock()
-	p, err := decodeOrInitPage(f.data, at.page)
-	if err != nil {
-		f.latch.Unlock()
-		tp.pool.unpin(f, false)
-		return nil, err
-	}
-	if err := p.del(int(at.slot)); err != nil && err != errSlotOutOfRange {
-		f.latch.Unlock()
-		tp.pool.unpin(f, false)
-		return nil, err
-	}
-	copy(f.data, p.encode())
-	f.latch.Unlock()
-	tp.pool.unpin(f, true)
-
-	tp.valid[slot] = false
-	tp.removeFromPageIndex(slot, at)
-	return fpis, nil
+	return tp.delBatch([]int{slot})
 }
 
 // removeFromPageIndex 把 RID 从「哪一页有哪些行」的索引里摘掉。

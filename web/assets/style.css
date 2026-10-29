@@ -1733,6 +1733,71 @@ table.grid td.bool { color: var(--warn-text); }
 .mon-slow .c-sql { color: var(--text-2); font-family: var(--mono); }
 .mon-slow tbody tr.running .c-num { color: var(--warn-text); }
 
+/* 诊断区的「按累计 / 按单次」切换。两个榜单后端都算好了（slowSql/slowSqlMax），
+   点一下只是换一份数据重画 —— 不发请求，也不用等下一轮 2 秒轮询。
+   累计 = 谁最费这台机器（高频小语句冒头），单次 = 谁偶发卡了一下（慢查询冒头），
+   这是两个不同的问题，所以两个都要。锁明细没有这个维度，切过去时整组隐藏。 */
+#monDiagSub { margin-left: auto; }
+.mon-sort { display: inline-flex; }
+.mon-sort button {
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: calc(11px * var(--fs));
+  cursor: pointer;
+}
+.mon-sort button:first-child { border-radius: 5px 0 0 5px; }
+.mon-sort button:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+.mon-sort button:hover { color: var(--text); }
+.mon-sort button.on { background: var(--bg-2); color: var(--text); font-weight: 600; }
+
+/* ---- 5.3 详情里的执行明细（这个结构最慢的 100 次）----
+   表头 sticky：滚动时列名跟着走，不然翻到第 60 行就忘了哪列是扫描。 */
+.sm-det-tw {
+  max-height: calc(240px * var(--fs));
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+.sm-det {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: calc(11.5px * var(--fs));
+}
+.sm-det th {
+  position: sticky;
+  top: 0;
+  text-align: left;
+  padding: 5px 8px;
+  font-weight: 500;
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-3);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-soft);
+}
+.sm-det td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sm-det tr:last-child td { border-bottom: none; }
+.sm-det .c-num { width: 88px; text-align: right; font-family: var(--mono); }
+.sm-det .c-sess { width: 92px; }
+.sm-det th.c-num { text-align: right; }
+.sm-det-pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
+}
+
 /* 详情弹窗：关键指标一排卡片，SQL 与计划各一块 */
 .sm-body { display: flex; flex-direction: column; gap: 10px; }
 .sm-stats {

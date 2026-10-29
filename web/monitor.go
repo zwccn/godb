@@ -11,8 +11,9 @@ import (
 
 // 本文件是监控面板的 HTTP 接口。
 //
-// 只有三个动作，对应文档里「每个数字对应一个动作」的原则：
+// 四个动作，对应文档里「每个数字对应一个动作」的原则：
 //   - GET  /api/monitor          看：水位、三层状态、锁明细、慢SQL/慢事务
+//   - POST /api/monitor/detail   取一个结构的执行明细（点开某一行时）
 //   - POST /api/monitor/kill     按会话 Kill（回滚事务、放弃等锁/排队）
 //   - POST /api/monitor/timeouts 改四个超时开关（写 config.json）
 
@@ -52,6 +53,41 @@ func (s *Server) handleMonitorKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "session": id})
+}
+
+// handleMonitorDetail 取一个结构的执行明细。
+//
+// 列表接口只给统计，明细单独按需取：一个结构最多 100 条明细，
+// 100 个结构全给就是 400KB，而用户一次只看得到 10 行。
+func (s *Server) handleMonitorDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Kind string `json:"kind"` // sql / tx
+		Key  string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无法解析请求体"})
+		return
+	}
+	d := s.currentDB(r)
+	if req.Kind == "tx" {
+		det, ok := d.TxDetail(req.Key)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "这个事务结构已经不在统计里了（可能已被淘汰或库已重启）"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"kind": "tx", "details": det})
+		return
+	}
+	det, plan, ok := d.StmtDetail(req.Key)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "这个语句结构已经不在统计里了（可能已被淘汰或库已重启）"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"kind": "sql", "details": det, "plan": plan})
 }
 
 // handleMonitorTimeouts 改四个超时开关并持久化。

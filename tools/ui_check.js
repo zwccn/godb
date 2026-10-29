@@ -321,13 +321,15 @@ class CDP {
       return {
         open: !m.classList.contains('hidden'),
         stats: m.querySelectorAll('.sm-stats .sm-stat').length,
-        scan: /扫描行数/.test(m.textContent),
+        // 新详情：一行是「语句结构」，卡片给次数/累计/平均/最大，下面挂明细表
+        stats_ok: /执行次数/.test(m.textContent) && /累计耗时/.test(m.textContent),
+        detail: /最慢的/.test(m.textContent) && !!m.querySelector('#smDetHead th'),
         sql: (m.querySelector('#smSQL') || {}).textContent || '',
       };
     })()`);
-    check('点慢SQL行打开详情（指标卡 + 扫描行数 + SQL 原文）',
-      detUi.open && detUi.stats >= 4 && detUi.scan && detUi.sql.length > 0,
-      `${detUi.stats} 张卡 / ${detUi.sql.slice(0, 30)}`);
+    check('点慢SQL行打开详情（统计卡 + 结构 SQL + 明细表）',
+      detUi.open && detUi.stats >= 4 && detUi.stats_ok && detUi.detail && detUi.sql.length > 0,
+      `${detUi.stats} 张卡 / 明细 ${detUi.detail} / ${detUi.sql.slice(0, 24)}`);
     await cdp.eval(`document.getElementById('btnSlowDone').click()`);
 
     // 字号调到最大再看面板：.mon-card 是 overflow:hidden，按 flex 规范它的自动
@@ -1048,8 +1050,10 @@ class CDP {
       const pager = document.getElementById('monSqlPager');
       const body = document.getElementById('monSlowSQL');
       const setRows = n => {
-        monData = { slowSql: Array.from({ length: n }, (_, i) => ({
-          tookNs: 1e6, scanned: 10, write: false, sql: 'SELECT ' + i })) };
+        // 新结构：一行是一个「语句结构」的统计，不再是单次执行
+        monData = { stmtLive: n, txLive: 0, slowSql: Array.from({ length: n }, (_, i) => ({
+          n: 3, totalNs: 3e6, avgNs: 1e6, maxNs: 1.5e6, minNs: 8e5,
+          firstMs: 1, lastMs: 2, tables: ['t'], write: false, sql: 'SELECT ' + i })) };
         renderSlowSQL(monData);
         return Math.round(panel.getBoundingClientRect().height);
       };
@@ -1069,6 +1073,35 @@ class CDP {
     check('一页只放 10 行', pg.pageRows === 10, `${pg.pageRows} 行`);
     check('翻页从第 11 条起', pg.page2Rows === 5 && pg.page2First.includes('SELECT 10'),
       `${pg.page2Rows} 行，首行 "${pg.page2First}"`);
+
+    // 两个排序口径来自两份榜单（累计 / 单次最慢），切换只是换一份数据重画。
+    // 一份榜单里放两个明显不同的结构，切过去必须换成另一个。
+    const srt = await cdp.eval(`(() => {
+      const row = (sql, n, total, max) => ({
+        n, totalNs: total, avgNs: total / n, maxNs: max, minNs: total / n,
+        firstMs: 1, lastMs: 2, tables: ['t'], write: false, sql });
+      monData = {
+        stmtLive: 2, txLive: 0,
+        slowSql: [row('SELECT hot', 100, 1e8, 1e6), row('SELECT cold', 1, 5e7, 5e7)],
+        slowSqlMax: [row('SELECT cold', 1, 5e7, 5e7), row('SELECT hot', 100, 1e8, 1e6)],
+      };
+      monSortBy = 'total'; renderSlowSQL(monData);
+      const totalFirst = document.querySelector('#monSlowSQL tr .c-sql').textContent;
+      monSortBy = 'max'; renderSlowSQL(monData);
+      const maxFirst = document.querySelector('#monSlowSQL tr .c-sql').textContent;
+      // 锁 Tab 没有这个维度，切换器要藏起来
+      setMonTab('lock', true);
+      const hiddenOnLock = document.getElementById('monSort').classList.contains('hidden');
+      setMonTab('sql', true);
+      const shownOnSQL = !document.getElementById('monSort').classList.contains('hidden');
+      monSortBy = 'total';
+      return { totalFirst, maxFirst, hiddenOnLock, shownOnSQL };
+    })()`);
+    check('排序切换：累计榜与单次榜各取各的',
+      srt.totalFirst === 'SELECT hot' && srt.maxFirst === 'SELECT cold',
+      `累计首行 ${srt.totalFirst} / 单次首行 ${srt.maxFirst}`);
+    check('锁明细 Tab 藏起排序切换', srt.hiddenOnLock && srt.shownOnSQL,
+      `lock ${srt.hiddenOnLock} / sql ${srt.shownOnSQL}`);
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

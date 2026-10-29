@@ -562,9 +562,11 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 		default:
 			res, err = d.execOne(sess, st, pre)
 		}
-		if res != nil && res.TookNs > 0 {
+		// TookNs 可能是 0（比本机时钟步进 0.2ms 还快）：照样要记，
+		// 否则「执行次数」会把高频短语句漏掉一大半。见 stmtPool.add。
+		if res != nil {
 			totalTook += res.TookNs
-			d.act.noteExec(sess.ID, text, tables, write, res)
+			d.act.noteExec(sess.ID, text, len(stmts) == 1, tables, write, res)
 		}
 		if err != nil {
 			return out, err

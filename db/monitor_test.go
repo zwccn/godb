@@ -71,15 +71,24 @@ func TestMonitorLockDetail(t *testing.T) {
 	if !strings.Contains(l.LastSQL, "SELECT") {
 		t.Errorf("最后一条 SQL = %q，期望包含 SELECT", l.LastSQL)
 	}
-	// 慢事务列表：同一个事务应该出现在里面，并且带锁名
-	if len(m.SlowTx) == 0 {
-		t.Fatal("慢事务列表为空")
-	}
-	if !strings.Contains(strings.Join(m.SlowTx[0].Locks, ","), "lt") {
-		t.Errorf("慢事务的锁列表 = %v，期望含 lt", m.SlowTx[0].Locks)
+	// 慢事务统计只记「已经结束的事务」：这时还没提交，不该有条目
+	if len(m.SlowTx) != 0 {
+		t.Errorf("事务还没结束就进了统计：%+v", m.SlowTx)
 	}
 
 	run(t, d, "m2", "ROLLBACK")
+
+	// 事务结束后按「表集合 + 读写」归档一条，表集合里要有 lt
+	m = d.Monitor(d.Timeouts())
+	if len(m.SlowTx) == 0 {
+		t.Fatalf("事务结束后应该归档一条统计（SlowTx=%+v, StmtLive=%d, TxLive=%d）", m.SlowTx, m.StmtLive, m.TxLive)
+	}
+	if !strings.Contains(strings.Join(m.SlowTx[0].Tables, ","), "lt") {
+		t.Errorf("事务结构 = %v，期望含 lt", m.SlowTx[0].Tables)
+	}
+	if m.SlowTx[0].N != 1 {
+		t.Errorf("事务次数 = %d，期望 1", m.SlowTx[0].N)
+	}
 }
 
 // Kill 一个空闲事务：立刻回滚、锁立刻释放。

@@ -1223,6 +1223,7 @@ const monEls = {
   sqlOk: document.getElementById('monSqlOk'),
   txOk: document.getElementById('monTxOk'),
   diagSub: document.getElementById('monDiagSub'),
+  sort: document.getElementById('monSort'),
   tabs: document.getElementById('monTabs'),
   tabN: {
     lock: document.getElementById('monTabLockN'),
@@ -1264,6 +1265,45 @@ let monTabAuto = true;
 // 顺序 = 页面上的顺序。锁明细放最后：它是「出事才看」的，平时先看慢SQL/慢事务。
 const MON_TABS = ['sql', 'tx', 'lock'];
 
+// 慢SQL/慢事务的排序口径。两个榜单后端都算好了（slowSql / slowSqlMax），
+// 切换时不发请求、不等下一轮轮询。
+//   total = 累计耗时：谁最费这台机器（高频小语句会冒头）
+//   max   = 单次最慢：谁偶发卡了一下（偶发慢查询会冒头）
+// 两种都要，因为它们是两个不同的问题：前者要优化，后者要排查。
+let monSortBy = 'total';
+
+function monStmtRows(m) {
+  return monSortBy === 'max' ? (m.slowSqlMax || []) : (m.slowSql || []);
+}
+function monTxRows(m) {
+  return monSortBy === 'max' ? (m.slowTxMax || []) : (m.slowTx || []);
+}
+
+// 锁明细没有「累计/单次」之分，切到锁 Tab 时把切换器藏起来。
+function syncSortToggle() {
+  if (!monEls.sort) return;
+  monEls.sort.classList.toggle('hidden', monTab === 'lock');
+  for (const b of monEls.sort.querySelectorAll('button')) {
+    b.classList.toggle('on', b.dataset.sort === monSortBy);
+  }
+}
+
+if (monEls.sort) {
+  monEls.sort.addEventListener('click', e => {
+    const b = e.target.closest('button[data-sort]');
+    if (!b) return;
+    monSortBy = b.dataset.sort;
+    syncSortToggle();
+    if (monData) {
+      monPage.sql = 0;
+      monPage.tx = 0;
+      renderSlowSQL(monData);
+      renderSlowTx(monData);
+      updateDiagSub();
+    }
+  });
+}
+
 function toggleMonitor(force) {
   monOpen = force === undefined ? !monOpen : force;
   monPanel.classList.toggle('hidden', !monOpen);
@@ -1285,6 +1325,7 @@ function setMonTab(name, manual) {
   for (const p of monPanel.querySelectorAll('.mon-panel')) {
     p.classList.toggle('hidden', p.dataset.panel !== name);
   }
+  syncSortToggle();
   updateDiagSub();
 }
 
@@ -1292,21 +1333,25 @@ function monCounts() {
   const m = monData || {};
   return {
     lock: (m.locks || []).length,
-    sql: (m.slowSql || []).length,
-    tx: (m.slowTx || []).length,
+    // 慢SQL/慢事务给的是「后端跟踪了多少个结构」（stmtLive/txLive），
+    // 不是这次返回的行数 —— 榜单只给前 100 条，用行数会写成「跟踪 100 个」。
+    sql: m.stmtLive || 0,
+    tx: m.txLive || 0,
   };
 }
 
 // Tab 右侧的说明文字 + 锁明细上的条数。
-// 只有锁明细带数字：「3 把锁」是个量，看得出规模；慢SQL/慢事务是 Top N 列表，
-// 数字只是「记录了几条」，挂在 Tab 上容易被读成「有 N 个问题」，先不显示。
+// 只有锁明细带数字：「3 把锁」是个量，看得出规模；慢SQL/慢事务是「跟踪了多少
+// 个结构」，不是「有几个问题」，数字挂在 Tab 上容易被误读，只写在右侧说明里。
 function updateDiagSub() {
   const n = monCounts();
   const waiting = (monData && monData.locks || []).some(r => (r.waiters || []).length);
+  const by = monSortBy === 'max' ? '单次最慢' : '累计耗时';
+  const byTx = monSortBy === 'max' ? '单次最长' : '累计时长';
   const sub = {
     lock: n.lock ? `${n.lock} 把锁 · 按持有时长降序 · 点行展开事务详情` : '当前没有表锁',
-    sql: n.sql ? `共 ${n.sql} 条 · 按执行耗时 · 点行看详情` : '还没有执行记录',
-    tx: n.tx ? `共 ${n.tx} 条 · 按持锁时长 · 点行看详情` : '当前没有进行中的事务',
+    sql: n.sql ? `跟踪 ${n.sql} 个结构 · 按${by} · 点行看明细` : '还没有执行记录',
+    tx: n.tx ? `跟踪 ${n.tx} 个结构 · 按${byTx} · 点行看明细` : '还没有结束的事务',
   };
   for (const k of MON_TABS) {
     const b = monEls.tabN[k];
@@ -2046,7 +2091,7 @@ function renderSlowSQL(m) {
   const box = monEls.slowSql;
   const panel = document.getElementById('monTabSql');
   box.innerHTML = '';
-  const rows = m.slowSql || [];
+  const rows = monStmtRows(m);
 
   const pg = monPageRows('sql', rows);
   renderPager('sql', pg.pages, pg.total);
@@ -2058,19 +2103,17 @@ function renderSlowSQL(m) {
   }
   setPanelEmpty(panel, monEls.sqlOk, false);
   updateDiagSub();
-  pg.slice.forEach((r, i) => {
+  pg.slice.forEach(r => {
     const tr = el('tr');
     if (r.running) tr.classList.add('running');
-    tr.title = '点击查看详情';
-    tr.appendChild(el('td', 'c-rw')).appendChild(
-      el('span', 'rw ' + (r.write ? 'rw-w' : 'rw-r'), r.write ? '写' : '读'));
-    tr.appendChild(el('td', 'c-num', fmtNs(r.tookNs)));
-    tr.appendChild(el('td', 'c-num', r.scanned > 0 ? fmtCount(r.scanned) : '—'));
-    const sql = el('td', 'c-sql', r.sql || '—');
-    tr.appendChild(sql);
-    // 详情按「完整列表」的下标定位：openSlowDetail 拿的是 monData.slowSql[idx]，
-    // 用页内下标会把第 2 页的第 1 行打开成第 1 页的第 1 行。
-    tr.addEventListener('click', () => openSlowDetail('sql', pg.start + i));
+    tr.title = r.running ? '正在执行，还没结束' : '点击查看这组语句的执行明细';
+    tr.appendChild(el('td', 'c-num', r.running ? '执行中' : fmtCount(r.n)));
+    tr.appendChild(el('td', 'c-num', fmtNs(r.totalNs)));
+    tr.appendChild(el('td', 'c-num', r.running ? '—' : fmtNs(r.avgNs)));
+    tr.appendChild(el('td', 'c-num', fmtNs(r.maxNs)));
+    tr.appendChild(el('td', 'c-sql', r.sql || '—'));
+    // 正在执行的那条不属于任何结构，点开也没有明细可看
+    if (!r.running) tr.addEventListener('click', () => openSlowDetail('sql', r));
     box.appendChild(tr);
   });
 }
@@ -2079,30 +2122,28 @@ function renderSlowTx(m) {
   const box = monEls.slowTx;
   const panel = document.getElementById('monTabTx');
   box.innerHTML = '';
-  const rows = m.slowTx || [];
+  const rows = monTxRows(m);
 
   const pg = monPageRows('tx', rows);
   renderPager('tx', pg.pages, pg.total);
 
   if (!rows.length) {
-    setPanelEmpty(panel, monEls.txOk, true, '当前没有进行中的事务（BEGIN 之后会出现在这里）');
+    setPanelEmpty(panel, monEls.txOk, true, '还没有结束的事务（BEGIN … COMMIT 之后记一条）');
     updateDiagSub();
     return;
   }
   setPanelEmpty(panel, monEls.txOk, false);
   updateDiagSub();
-  pg.slice.forEach((r, i) => {
+  pg.slice.forEach(r => {
     const tr = el('tr');
-    tr.title = '点击查看详情';
-    tr.appendChild(el('td', 'c-sess mono', sessionShort(r.session)));
-    const st = el('td', 'c-st');
-    st.appendChild(el('span', 'tx-state ' + (r.state === 'running' ? 'st-run' : 'st-idle'),
-      r.state === 'running' ? '执行中' : '空闲'));
-    tr.appendChild(st);
-    tr.appendChild(el('td', 'c-num', fmtMs(r.heldMs)));
-    tr.appendChild(el('td', 'c-num', fmtMs(r.idleMs)));
-    tr.appendChild(el('td', 'c-sql mono', r.lastSql || '—'));
-    tr.addEventListener('click', () => openSlowDetail('tx', pg.start + i));
+    tr.title = '点击查看这类事务的明细';
+    tr.appendChild(el('td', 'c-num', fmtCount(r.n)));
+    tr.appendChild(el('td', 'c-num', fmtMs(r.totalMs)));
+    tr.appendChild(el('td', 'c-num', fmtMs(r.avgMs)));
+    tr.appendChild(el('td', 'c-num', fmtMs(r.maxMs)));
+    const label = (r.write ? '写 · ' : '读 · ') + ((r.tables || []).join(', ') || '(无表)');
+    tr.appendChild(el('td', 'c-sql', label));
+    tr.addEventListener('click', () => openSlowDetail('tx', r));
     box.appendChild(tr);
   });
 }
@@ -2124,99 +2165,183 @@ function explainableSQL(s) {
   return t.startsWith('SELECT') || t.startsWith('WITH') || t.startsWith('VALUES');
 }
 
-function openSlowDetail(kind, idx) {
-  const m = monData;
-  if (!m) return;
-  const rows = kind === 'sql' ? (m.slowSql || []) : (m.slowTx || []);
-  const r = rows[idx];
+function openSlowDetail(kind, r) {
   if (!r) return;
-  slowDetail = { kind, row: r, at: m.nowMs };
+  const m = monData;
+  slowDetail = { kind, row: r, at: m && m.nowMs ? m.nowMs : Date.now() };
 
   const stats = document.getElementById('smStats');
   const sqlBox = document.getElementById('smSQL');
+  const sqlHint = document.getElementById('smSQLHint');
+  const sampleWrap = document.getElementById('smSampleWrap');
+  const sampleBox = document.getElementById('smSample');
   const planWrap = document.getElementById('smPlanWrap');
   const planBox = document.getElementById('smPlan');
   const planHint = document.getElementById('smPlanHint');
   const hint = document.getElementById('smHint');
   stats.innerHTML = '';
   sqlBox.textContent = '';
+  sampleBox.textContent = '';
   planBox.textContent = '';
   planHint.textContent = '';
+  hint.textContent = '';
+  document.getElementById('smDetHead').innerHTML = '';
+  document.getElementById('smDetBody').innerHTML = '';
+  document.getElementById('smDetPager').innerHTML = '';
+  document.getElementById('smDetailHint').textContent = '';
+
+  // 「多久以前」按快照时刻算，不用 Date.now()：前后端时钟可能差几秒，
+  // 混用会出现「3 秒前发生的，显示成 2 秒前」。
+  const agoMs = v => (slowDetail.at && v ? Math.max(0, slowDetail.at - v) : 0);
 
   if (kind === 'sql') {
     document.getElementById('smTitle').textContent = '慢 SQL 详情';
-    // 写语句没有 EXPLAIN（godb 只解释查询），别给一个点了就报错的按钮；
-    // 多语句批次（BEGIN; UPDATE…）同理 —— 开头不是查询就不给。
-    document.getElementById('btnSlowExplain').classList.toggle('hidden',
-      !!r.write || !explainableSQL(r.fullSql || r.sql));
-    const took = r.tookNs / 1e6;
-    const ret = r.rows || 0;
-    const aff = r.affected || 0;
-    const scan = r.scanned || 0;
-    stats.appendChild(statCard('耗时', fmtNs(r.tookNs), took >= 200 ? 'warn' : ''));
-    stats.appendChild(statCard('扫描行数', scan > 0 ? fmtCount(scan) : '—'));
-    stats.appendChild(statCard('返回行数', r.write ? '—' : fmtCount(ret)));
-    stats.appendChild(statCard('写入行数', r.write ? fmtCount(aff) : '—'));
-    if (scan > 0) {
-      const ratio = scan / Math.max(ret, 1);
-      stats.appendChild(statCard('扫描/返回', r.write ? '—' : ratio.toFixed(ratio < 10 ? 1 : 0) + '×',
-        ratio >= 100 ? 'bad' : (ratio >= 10 ? 'warn' : '')));
-    }
-    if (ret > 0 && took > 0) {
-      stats.appendChild(statCard('每行耗时', fmtPerRow(took, ret)));
-    }
-    stats.appendChild(statCard('类型', r.command || (r.write ? '写' : '读')));
-    stats.appendChild(statCard('涉及表', (r.tables || []).join(', ') || '—'));
-    stats.appendChild(statCard('会话', sessionShort(r.session)));
-    stats.appendChild(statCard('发生时间', r.ageMs ? fmtAgo(r.ageMs) : '—'));
+    sqlHint.textContent = ' 参数已换成 ?，同结构的执行合并成这一行';
+    sqlBox.textContent = r.sql || '—';
+    const sample = r.sample || '';
+    sampleWrap.classList.toggle('hidden', !sample || sample === r.sql);
+    sampleBox.textContent = sample;
 
-    sqlBox.textContent = r.fullSql || r.sql || '—';
-    if ((r.plan || []).length) {
-      planBox.textContent = r.plan.join('\n');
-      planHint.textContent = '（执行时记录）';
-      planWrap.classList.remove('hidden');
-    } else if (r.write) {
-      // godb 的 EXPLAIN 只解释查询，写语句没有计划可看。
-      planBox.textContent = '写语句没有执行计划：看「扫描行数」和「写入行数」就够了 —— ' +
-        '扫描远大于写入说明定位太粗（缺索引），两者接近说明是纯写入开销。';
-      planHint.textContent = '';
-      planWrap.classList.remove('hidden');
-    } else {
-      planWrap.classList.add('hidden');
+    stats.appendChild(statCard('执行次数', r.running ? '执行中' : fmtCount(r.n)));
+    stats.appendChild(statCard('累计耗时', fmtNs(r.totalNs)));
+    stats.appendChild(statCard('平均', r.running ? '—' : fmtNs(r.avgNs)));
+    stats.appendChild(statCard('最慢一次', fmtNs(r.maxNs), r.maxNs / 1e6 >= 200 ? 'warn' : ''));
+    if (!r.running) {
+      stats.appendChild(statCard('最快一次', fmtNs(r.minNs)));
+      stats.appendChild(statCard('首次执行', fmtAgo(agoMs(r.firstMs))));
+      stats.appendChild(statCard('最近执行', fmtAgo(agoMs(r.lastMs))));
     }
-    hint.textContent = scan > ret * 20 && ret > 0
-      ? '扫描行数远多于返回行数：多半没走索引，可以给过滤列建索引。'
-      : (scan > aff * 20 && aff > 0 ? '扫描行数远多于写入行数：WHERE 没走索引，定位成本高。' : '');
+    stats.appendChild(statCard('涉及表', (r.tables || []).join(', ') || '—'));
+    stats.appendChild(statCard('读写', r.write ? '写' : '读'));
+
+    // EXPLAIN 得用原文：归一化后的 ? 直接拿去跑是语法错误
+    const canExplain = !r.write && !r.running && explainableSQL(sample || r.sql);
+    document.getElementById('btnSlowExplain').classList.toggle('hidden', !canExplain);
+    hint.textContent = r.running
+      ? '这条还在执行，明细要等它结束之后才有。'
+      : '同一个结构只占一行统计，执行明细在下面 —— 看「时刻」能分辨是偶发还是持续。';
   } else {
     document.getElementById('smTitle').textContent = '慢事务详情';
-    document.getElementById('btnSlowExplain').classList.remove('hidden');
-    stats.appendChild(statCard('持锁时长', fmtMs(r.heldMs), r.heldMs >= 3000 ? 'warn' : ''));
-    stats.appendChild(statCard('空闲时长', fmtMs(r.idleMs), r.idleMs >= 3000 ? 'warn' : ''));
-    stats.appendChild(statCard('已持续', fmtMs(r.txAgeMs)));
-    stats.appendChild(statCard('语句数', String(r.stmts || 0)));
-    stats.appendChild(statCard('状态', r.state === 'running' ? '执行中' : '空闲'));
-    stats.appendChild(statCard('会话', sessionShort(r.session)));
-    stats.appendChild(statCard('持有的锁', (r.locks || []).join(' ') || '—', '', true));
-    if (m.nowMs && r.txAgeMs > 0) {
-      const t = new Date(m.nowMs - r.txAgeMs);
-      stats.appendChild(statCard('开始时间', t.toLocaleTimeString('zh-CN', { hour12: false })));
-    }
-    sqlBox.textContent = r.lastSql || '（没有记录到 SQL）';
-    planWrap.classList.add('hidden');
-    // 事务的最后一条是写语句时别给「看执行计划」（EXPLAIN 只支持查询）
-    document.getElementById('btnSlowExplain').classList.toggle('hidden', !explainableSQL(r.lastSql));
-    hint.textContent = r.state === 'idle' && r.idleMs >= 3000
-      ? '事务空转（SQL 都跑完了但没提交），它一直占着锁 —— 要么提交，要么 Kill。'
-      : '';
-  }
-  document.getElementById('smHint').textContent = hint.textContent;
+    document.getElementById('btnSlowExplain').classList.add('hidden');
+    sqlHint.textContent = ' 事务按「涉及的表集合 + 读写」分组';
+    sqlBox.textContent = (r.write ? '写事务' : '只读事务') + ' · ' +
+      ((r.tables || []).join(', ') || '(没有碰表)');
+    sampleWrap.classList.add('hidden');
 
-  const modal = document.getElementById('slowModal');
-  modal.classList.remove('hidden');
+    stats.appendChild(statCard('提交次数', fmtCount(r.n)));
+    stats.appendChild(statCard('累计时长', fmtMs(r.totalMs)));
+    stats.appendChild(statCard('平均', fmtMs(r.avgMs)));
+    stats.appendChild(statCard('最长一次', fmtMs(r.maxMs), r.maxMs >= 3000 ? 'warn' : ''));
+    stats.appendChild(statCard('最短一次', fmtMs(r.minMs)));
+    stats.appendChild(statCard('首次出现', fmtAgo(agoMs(r.firstMs))));
+    stats.appendChild(statCard('最近一次', fmtAgo(agoMs(r.lastMs))));
+    hint.textContent = '时长是从 BEGIN 到 COMMIT/ROLLBACK 的总时间，含等锁和空闲 —— ' +
+      '「挂起不提交」也会记在这里。';
+  }
+
+  document.getElementById('slowModal').classList.remove('hidden');
+  loadSlowDetail(kind, kind === 'sql' ? r.sql : r.key);
+}
+
+/* ---- 5.2 明细：点开之后才去拿 ---- */
+const SM_PAGE = 10;
+let smDetail = null; // { kind, key, rows, page }
+
+async function loadSlowDetail(kind, key) {
+  const hint = document.getElementById('smDetailHint');
+  smDetail = { kind, key, rows: [], page: 0 };
+  hint.textContent = ' 加载中…';
+
+  let data = null;
+  try {
+    const res = await fetch('/api/monitor/detail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, key }),
+    });
+    data = await res.json();
+    if (!res.ok) {
+      hint.textContent = ' ' + ((data && data.error) || '拿不到明细');
+      return;
+    }
+  } catch (e) {
+    hint.textContent = ' 拿不到明细（连接断开）';
+    return;
+  }
+  // 拉的过程中用户可能已经点了别的一行
+  if (!smDetail || smDetail.key !== key) return;
+
+  smDetail.rows = data.details || [];
+  // 计划只留最近一次慢于 5ms 的那份，比列表里每次执行都存计划省得多
+  if (data.plan && data.plan.length) {
+    document.getElementById('smPlan').textContent = data.plan.join('\n');
+    document.getElementById('smPlanHint').textContent = '（最近一次慢于 5ms 的执行的计划）';
+    document.getElementById('smPlanWrap').classList.remove('hidden');
+  }
+  document.getElementById('smDetCap').textContent = String(smDetail.rows.length);
+  hint.textContent = smDetail.rows.length ? ' 按耗时降序' : ' 还没有明细';
+  renderSmDetail();
+}
+
+function renderSmDetail() {
+  if (!smDetail) return;
+  const head = document.getElementById('smDetHead');
+  const body = document.getElementById('smDetBody');
+  const pager = document.getElementById('smDetPager');
+  head.innerHTML = '';
+  body.innerHTML = '';
+  pager.innerHTML = '';
+
+  const isSQL = smDetail.kind === 'sql';
+  const cols = isSQL
+    ? [['c-num', '耗时'], ['c-num', '扫描'], ['c-num', '返回'], ['c-sess', '会话'], ['c-num', '时刻']]
+    : [['c-num', '时长'], ['c-num', '语句数'], ['c-sess', '会话'], ['c-num', '时刻']];
+  for (const pair of cols) head.appendChild(el('th', pair[0], pair[1]));
+
+  const rows = smDetail.rows;
+  const pages = Math.max(1, Math.ceil(rows.length / SM_PAGE));
+  if (smDetail.page > pages - 1) smDetail.page = pages - 1;
+  if (smDetail.page < 0) smDetail.page = 0;
+  const start = smDetail.page * SM_PAGE;
+  const at = slowDetail ? slowDetail.at : Date.now();
+
+  rows.slice(start, start + SM_PAGE).forEach(d => {
+    const tr = el('tr');
+    if (isSQL) {
+      tr.appendChild(el('td', 'c-num', fmtNs(d.tookNs)));
+      tr.appendChild(el('td', 'c-num', d.scanned > 0 ? fmtCount(d.scanned) : '—'));
+      const out = d.rows > 0 ? d.rows : (d.affected > 0 ? -d.affected : 0);
+      tr.appendChild(el('td', 'c-num', out === 0 ? '—' : fmtCount(Math.abs(out))));
+    } else {
+      tr.appendChild(el('td', 'c-num', fmtMs(d.durMs)));
+      tr.appendChild(el('td', 'c-num', fmtCount(d.stmts || 0)));
+    }
+    tr.appendChild(el('td', 'c-sess mono', sessionShort(d.session)));
+    tr.appendChild(el('td', 'c-num', d.atMs ? fmtAgo(Math.max(0, at - d.atMs)) : '—'));
+    body.appendChild(tr);
+  });
+
+  if (rows.length > SM_PAGE) {
+    pager.appendChild(el('span', 'pg-info',
+      `第 ${smDetail.page + 1}/${pages} 页 · 共 ${rows.length} 次`));
+    const mk = (label, disabled, delta) => {
+      const b = el('button', 'pg-btn', label);
+      b.type = 'button';
+      b.disabled = disabled;
+      b.addEventListener('click', () => {
+        smDetail.page += delta;
+        renderSmDetail();
+      });
+      pager.appendChild(b);
+    };
+    mk('‹ 上一页', smDetail.page <= 0, -1);
+    mk('下一页 ›', smDetail.page >= pages - 1, +1);
+  }
 }
 
 function closeSlowDetail() {
   document.getElementById('slowModal').classList.add('hidden');
+  smDetail = null;
 }
 
 // 「3 分钟前」这类相对时间：详情里比绝对时间更好读。
@@ -2240,7 +2365,7 @@ function fmtAgo(ms) {
 function slowDetailSQL() {
   if (!slowDetail) return '';
   const r = slowDetail.row;
-  return r.fullSql || r.sql || r.lastSql || '';
+  return r.sample || r.sql || '';
 }
 
 document.getElementById('btnSlowDone').addEventListener('click', closeSlowDetail);

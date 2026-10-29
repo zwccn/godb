@@ -225,6 +225,10 @@ try {
             锁明细<b class="mon-tab-n" id="monTabLockN"></b>
           </button>
         </div>
+        <div class="mon-sort" id="monSort" role="group" aria-label="排序方式">
+          <button type="button" data-sort="total" class="on">按累计</button>
+          <button type="button" data-sort="max">按单次</button>
+        </div>
         <span class="mon-sub" id="monDiagSub"></span>
       </div>
 
@@ -251,16 +255,17 @@ try {
         <div class="mon-pager hidden" id="monLockPager"></div>
       </div>
 
-      <!-- 4b. 慢 SQL -->
+      <!-- 4b. 慢 SQL：按「语句结构」聚合（参数换成 ? 后相同的算一条） -->
       <div class="mon-panel hidden" data-panel="sql" id="monTabSql" role="tabpanel">
         <div class="mon-tw">
           <table class="mon-slow">
             <thead>
               <tr>
-                <th class="c-rw">类型</th>
-                <th class="c-num">耗时</th>
-                <th class="c-num">扫描</th>
-                <th class="c-sql">SQL</th>
+                <th class="c-num">次数</th>
+                <th class="c-num">累计</th>
+                <th class="c-num">平均</th>
+                <th class="c-num">最大</th>
+                <th class="c-sql">SQL（参数显示为 ?，同结构算一条）</th>
               </tr>
             </thead>
             <tbody id="monSlowSQL"></tbody>
@@ -270,23 +275,23 @@ try {
         <div class="mon-pager hidden" id="monSqlPager"></div>
       </div>
 
-      <!-- 4c. 慢事务 -->
+      <!-- 4c. 慢事务：按「表集合 + 读写」聚合，只记已经结束的事务 -->
       <div class="mon-panel hidden" data-panel="tx" id="monTabTx" role="tabpanel">
         <div class="mon-tw">
           <table class="mon-slow">
             <thead>
               <tr>
-                <th class="c-sess">会话</th>
-                <th class="c-st">状态</th>
-                <th class="c-num">持锁</th>
-                <th class="c-num">空闲</th>
-                <th class="c-sql">最后一条 SQL</th>
+                <th class="c-num">次数</th>
+                <th class="c-num">累计</th>
+                <th class="c-num">平均</th>
+                <th class="c-num">最长</th>
+                <th class="c-sql">表集合（读 / 写）</th>
               </tr>
             </thead>
             <tbody id="monSlowTx"></tbody>
           </table>
         </div>
-        <div class="mon-ok hidden" id="monTxOk">当前没有进行中的事务</div>
+        <div class="mon-ok hidden" id="monTxOk">还没有结束的事务（BEGIN … COMMIT 之后记一条）</div>
         <div class="mon-pager hidden" id="monTxPager"></div>
       </div>
     </section>
@@ -340,8 +345,24 @@ try {
     </div>
     <div class="modal-body sm-body">
       <div class="sm-stats" id="smStats"></div>
-      <div class="sm-sec">SQL</div>
+      <div class="sm-sec">语句结构<span class="sm-sec-hint" id="smSQLHint"></span></div>
       <pre class="sm-sql mono" id="smSQL"></pre>
+      <div id="smSampleWrap">
+        <div class="sm-sec">原文样本</div>
+        <pre class="sm-sql mono" id="smSample"></pre>
+      </div>
+      <!-- 明细：这个结构最慢的 100 次执行。原文不在明细里重复存（1000 个结构
+           × 100 条 × 2KB 就是 200MB），只留上面那一份样本。 -->
+      <div id="smDetailWrap">
+        <div class="sm-sec">最慢的 <span id="smDetCap">100</span> 次<span class="sm-sec-hint" id="smDetailHint"></span></div>
+        <div class="sm-det-tw">
+          <table class="sm-det">
+            <thead><tr id="smDetHead"></tr></thead>
+            <tbody id="smDetBody"></tbody>
+          </table>
+        </div>
+        <div class="sm-det-pager" id="smDetPager"></div>
+      </div>
       <div id="smPlanWrap">
         <div class="sm-sec">执行计划<span class="sm-sec-hint" id="smPlanHint"></span></div>
         <pre class="sm-plan mono" id="smPlan"></pre>

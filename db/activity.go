@@ -34,12 +34,10 @@ const (
 const (
 	// actSampleCap 是每类时长样本的容量（执行 / 等锁 / 排队各一份）。
 	actSampleCap = 512
-	// slowSQLCap 是慢 SQL 记录的容量：保留最近这么多条执行记录，前端按耗时取 Top N。
-	slowSQLCap = 256
 	// sqlPreviewLen 是 SQL 预览的最大字节数（表格里那一行）。
 	sqlPreviewLen = 240
-	// sqlFullLen 是详情页保留的 SQL 全文上限。慢样本最多 256 条，
-	// 不限长的话一条 COPY 就能把环形缓冲顶到 MB 级。
+	// sqlFullLen 是结构上保留的 SQL 原文样本上限。样本每个结构只留一份
+	// （明细里不存原文），1000 个结构最坏也就 2MB。
 	sqlFullLen = 2000
 	// planKeepNs：慢到这个量级才留计划文本。计划是 ExplainPlan 现成的（SELECT
 	// 本来就在算），留一份只是多几十字节；但快语句没人点详情，没必要占缓冲。
@@ -62,6 +60,29 @@ type actRec struct {
 	inTx    bool
 	txStart time.Time
 	txStmts int
+	// txTables 是本次事务涉及过的表（去重累积）。事务结构按表集合分组，
+	// 一个事务会跨多次 Exec，所以要在这里攒着，结束时一次交给 txPool。
+	txTables []string
+	txWrite  bool
+}
+
+// addTxTables 把一条语句的表并进当前事务的表集合。
+func (a *actRec) addTxTables(tables []string, write bool) {
+	if write {
+		a.txWrite = true
+	}
+	for _, t := range tables {
+		dup := false
+		for _, x := range a.txTables {
+			if x == t {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			a.txTables = append(a.txTables, t)
+		}
+	}
 }
 
 // Activity 是对外（JSON）的活动快照。
@@ -121,23 +142,6 @@ func (r *ring) Stats() (p50, p95, max int64) {
 	return pick(0.50), pick(0.95), cp[len(cp)-1]
 }
 
-// execSample 是一条已完成的语句记录，供慢 SQL 列表取 Top N。
-// execSample 是一条已结束语句的样本。
-type execSample struct {
-	session string
-	sql     string // 单行预览：表格里一行显示完，超长省略
-	full    string // 原文（详情看全文，多行保留；超长截断到 sqlFullLen）
-	tables  []string
-	write   bool
-	command string
-	rows    int   // 返回给客户端的行数（SELECT）
-	affect  int   // 影响行数（INSERT/UPDATE/DELETE）
-	scanned int64 // 从表/索引读出来的行数（含被过滤掉的）
-	plan    []string
-	tookNs  int64
-	at      time.Time
-}
-
 // recorder 是监控数据的收集器。
 type recorder struct {
 	mu   sync.RWMutex
@@ -147,9 +151,10 @@ type recorder struct {
 	waitRing  *ring
 	queueRing *ring
 
-	slow []execSample // 环形
-	pos  int
-	n    int
+	// 按结构聚合的执行/事务统计。各自有独立的锁：归一化是 O(n) 的扫描，
+	// 放在 mu 里会拖慢面板每 2 秒一次的快照和所有并发执行的收尾。
+	stmt *stmtPool
+	txp  *txPool
 
 	kills         int64
 	slowSQLAborts int64
@@ -163,7 +168,8 @@ func newRecorder() *recorder {
 		execRing:  newRing(actSampleCap),
 		waitRing:  newRing(actSampleCap),
 		queueRing: newRing(actSampleCap),
-		slow:      make([]execSample, slowSQLCap),
+		stmt:      newStmtPool(),
+		txp:       newTxPool(),
 	}
 }
 
@@ -196,6 +202,10 @@ func (r *recorder) set(id, state string, tables []string, write bool) {
 }
 
 // setSQL 记录会话当前（或最后一条）SQL。
+//
+// 事务涉及的表集合在这里累积，而不是在 noteExec 里：耗时算出来是 0
+// 的极快语句不会进 noteExec（那边有 `TookNs > 0` 的门槛），但它照样
+// 碰了表，事务的结构键不能因为语句跑得快就少一张表。
 func (r *recorder) setSQL(id, text string, tables []string, write bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -204,19 +214,41 @@ func (r *recorder) setSQL(id, text string, tables []string, write bool) {
 	if tables != nil {
 		a.tables = tables
 		a.write = write
+		if a.inTx {
+			a.addTxTables(tables, write)
+		}
 	}
 }
 
 // setTx 同步事务元信息（由 db 层在语句结束时刷一次，避免每次状态切换都去问 Session）。
+//
+// 从「在事务里」变成「不在事务里」的那一刻要归档一次：这是唯一能拿到
+// 事务总时长（含等锁和空闲）的地方，事务一旦结束，Session 那边就清空了。
 func (r *recorder) setTx(id string, inTx bool, start time.Time, stmts int, lastAt time.Time) {
+	var done *txDone
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	a := r.rec(id)
+	if a.inTx && !inTx && !a.txStart.IsZero() {
+		done = &txDone{
+			tables:  append([]string(nil), a.txTables...),
+			write:   a.txWrite,
+			dur:     time.Since(a.txStart),
+			stmts:   a.txStmts,
+			session: id,
+		}
+		a.txTables = a.txTables[:0]
+		a.txWrite = false
+	}
 	a.inTx = inTx
 	a.txStart = start
 	a.txStmts = stmts
 	if !lastAt.IsZero() {
 		a.lastAt = lastAt
+	}
+	r.mu.Unlock()
+
+	if done != nil {
+		r.txp.add(*done)
 	}
 }
 
@@ -229,34 +261,25 @@ func (r *recorder) setUser(id, user string) {
 	r.rec(id).user = user
 }
 
-// noteExec 记一条完成的语句：进时长样本 + 慢 SQL 环形。
-func (r *recorder) noteExec(id, text string, tables []string, write bool, res *exec.Result) {
+// noteExec 记一条完成的语句：进时长样本 + 按结构聚合。
+//
+// 两条链路分开走：时长样本和活动状态留在 recorder.mu 里（轻活）；
+// 归一化 + 聚合走 stmtPool 自己的锁 —— 归一化是 O(n) 扫描，混进 mu
+// 会拖慢面板每 2 秒的快照，也会拖慢所有并发执行的收尾。
+func (r *recorder) noteExec(id, text string, single bool, tables []string, write bool, res *exec.Result) {
+	now := time.Now()
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.execRing.Add(res.TookNs)
-	rec := execSample{
-		session: id,
-		sql:     previewSQL(text),
-		full:    clampText(text, sqlFullLen),
-		tables:  tables,
-		write:   write,
-		command: res.Command,
-		rows:    res.RowCount,
-		affect:  res.Affected,
-		scanned: res.Scanned,
-		tookNs:  res.TookNs,
-		at:      time.Now(),
-	}
-	if res.TookNs >= planKeepNs {
-		rec.plan = trimPlan(res.Plan)
-	}
-	r.slow[r.pos] = rec
-	r.pos = (r.pos + 1) % len(r.slow)
-	if r.n < len(r.slow) {
-		r.n++
-	}
 	if a := r.acts[id]; a != nil {
-		a.lastAt = rec.at
+		a.lastAt = now
+	}
+	r.mu.Unlock()
+
+	// 多语句批次不参与按结构聚合：耗时是单条语句的，原文却是整批共用的，
+	// 硬凑会把一批不相干的语句塞进同一个结构里。单条提交占绝大多数场景。
+	if single {
+		r.stmt.add(text, tables, write, id, res, now)
 	}
 }
 
@@ -353,37 +376,6 @@ func (r *recorder) stats() (exec, wait, queue [3]int64) {
 	return
 }
 
-// topSlowSQL 返回耗时最高的 n 条已结束语句。
-func (r *recorder) topSlowSQL(n int) []execSample {
-	r.mu.RLock()
-	list := make([]execSample, 0, r.n)
-	for i := 0; i < r.n; i++ {
-		idx := (r.pos - 1 - i + len(r.slow)*2) % len(r.slow)
-		e := r.slow[idx]
-		if e.tookNs > 0 {
-			list = append(list, e)
-		}
-	}
-	r.mu.RUnlock()
-	sort.Slice(list, func(i, j int) bool { return list[i].tookNs > list[j].tookNs })
-	// 同一条 SQL（多语句批次里每次都会记一遍整批文本）只留最慢的那条，
-	// 否则一个 CREATE TABLE a; CREATE TABLE b; ... 会把 Top 10 霸满。
-	seen := map[string]bool{}
-	out := make([]execSample, 0, n)
-	for _, e := range list {
-		key := e.session + "\x00" + e.sql
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, e)
-		if len(out) >= n {
-			break
-		}
-	}
-	return out
-}
-
 func previewSQL(s string) string {
 	s = strings.TrimSpace(s)
 	// 多行 SQL 压成一行，表格里只看得见首行，压平才有信息量。
@@ -458,36 +450,6 @@ type LockRow struct {
 	Waiters []LockWaiter `json:"waiters,omitempty"`
 }
 
-// SlowSQLRow 是慢 SQL 列表的一行。
-type SlowSQLRow struct {
-	Session string   `json:"session"`
-	SQL     string   `json:"sql"`   // 单行预览（表格里一行显示，超长省略）
-	FullSQL string   `json:"fullSql,omitempty"` // 原文（详情用）
-	Tables  []string `json:"tables,omitempty"`
-	Write   bool     `json:"write"`
-	Command string   `json:"command,omitempty"`
-	RowCount int     `json:"rows"`
-	Affected int     `json:"affected"`
-	Scanned  int64   `json:"scanned"`
-	Plan     []string `json:"plan,omitempty"`
-	TookNs   int64   `json:"tookNs"`
-	Running  bool    `json:"running"`
-	AgeMs    int64   `json:"ageMs"`
-}
-
-// SlowTxRow 是慢事务列表的一行。
-type SlowTxRow struct {
-	Session  string   `json:"session"`
-	TxAgeMs  int64    `json:"txAgeMs"`
-	IdleMs   int64    `json:"idleMs"`
-	HeldMs   int64    `json:"heldMs"`
-	Stmts    int      `json:"stmts"`
-	Locks    []string `json:"locks,omitempty"`
-	LastSQL  string   `json:"lastSql,omitempty"`
-	State    string   `json:"state"`
-	HoldLock bool     `json:"holdLock"`
-}
-
 // IOProfile 是「存储与 IO」卡片的数据。
 //
 // 这里报的是「我这个进程的落盘等多久」，不是系统的磁盘 %util ——
@@ -503,13 +465,19 @@ type IOProfile struct {
 
 // Monitor 是监控面板的完整快照。
 type Monitor struct {
-	NowMs    int64         `json:"nowMs"`
-	Water    Water         `json:"water"`
-	Layers   Layers        `json:"layers"`
-	Locks    []LockRow     `json:"locks"`
-	Slow     []SlowSQLRow  `json:"slowSql"`
-	SlowTx   []SlowTxRow   `json:"slowTx"`
-	Act      []Activity    `json:"activities"`
+	NowMs  int64      `json:"nowMs"`
+	Water  Water      `json:"water"`
+	Layers Layers     `json:"layers"`
+	Locks  []LockRow  `json:"locks"`
+	Slow   []StmtStat `json:"slowSql"`    // 按累计耗时排（谁最费这台机器）
+	SlowMax []StmtStat `json:"slowSqlMax"` // 按单次最慢排（谁偶发卡了一下）
+	SlowTx []TxStat   `json:"slowTx"`     // 事务按表集合聚合，同样两个口径
+	TxMax  []TxStat   `json:"slowTxMax"`
+	// StmtLive / TxLive 是当前跟踪的结构数：用来回答「1000 个槽位满了没有」。
+	StmtLive    int64 `json:"stmtLive"`
+	StmtEvicted int64 `json:"stmtEvicted"`
+	TxLive      int64 `json:"txLive"`
+	Act         []Activity `json:"activities"`
 	Time     TimeoutStatus `json:"timeouts"`
 	Counters Counters      `json:"counters"`
 	Proc     ProcStats     `json:"proc"`
@@ -570,6 +538,19 @@ func (d *DB) SetTimeouts(t TimeoutStatus) {
 	}
 }
 
+// StmtDetail 取一个语句结构的执行明细与最近一次慢计划（详情弹窗用）。
+//
+// 明细不放进 Monitor 快照：100 个结构 × 100 条 × 40 字节就是 400KB，
+// 面板每 2 秒轮询一次，为看不见的明细付这个带宽不值。
+func (d *DB) StmtDetail(key string) ([]StmtSample, []string, bool) {
+	return d.act.stmt.detail(key)
+}
+
+// TxDetail 取一个事务结构的明细。
+func (d *DB) TxDetail(key string) ([]TxSample, bool) {
+	return d.act.txp.detail(key)
+}
+
 // KillSession 取消一个会话当前的活：排队中立刻退出、等锁中放弃并回滚、
 // 空闲事务立刻回滚、执行中的语句等它跑完后自动回滚（保守版中断）。
 func (d *DB) KillSession(id string) error {
@@ -606,10 +587,22 @@ func (r *recorder) counters() Counters {
 	return Counters{Kills: r.kills, SlowSQL: r.slowSQLAborts, SlowTx: r.slowTxAborts, QueueRejct: r.queueRejected}
 }
 
-const (
-	topSlowSQL = 10
-	topSlowTx  = 10
-)
+// slowTopN 是每个榜单返回的行数。前端 10 行一页，100 条够翻 10 页；
+// 再多就是给「翻了十页还没找到」准备的，反而难看。
+const slowTopN = 100
+
+// prependStmt 把一条「正在执行」的记录塞到榜单最前面，并把长度截回 n。
+//
+// 它不属于任何结构（还没跑完），所以只是一个临时行，不参与统计。
+func prependStmt(list []StmtStat, row StmtStat, n int) []StmtStat {
+	out := make([]StmtStat, 0, len(list)+1)
+	out = append(out, row)
+	out = append(out, list...)
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
 
 // Monitor 汇总当前监控快照。topN 固定 10 条，够看不够刷屏。
 //
@@ -713,88 +706,36 @@ func (d *DB) Monitor(t TimeoutStatus) Monitor {
 	})
 
 	// ---- 慢 SQL ----
-	m.Slow = []SlowSQLRow{}
-	for _, e := range d.act.topSlowSQL(topSlowSQL) {
-		m.Slow = append(m.Slow, SlowSQLRow{
-			Session:  e.session,
-			SQL:      e.sql,
-			FullSQL:  e.full,
-			Tables:   e.tables,
-			Write:    e.write,
-			Command:  e.command,
-			RowCount: e.rows,
-			Affected: e.affect,
-			Scanned:  e.scanned,
-			Plan:     e.plan,
-			TookNs:   e.tookNs,
-			AgeMs:    durMs(now.Sub(e.at)),
-		})
-	}
-	// 正在跑且已经超过当前第 N 名的语句排在最前面（"还在跑"是这一栏的关键信息）。
-	if len(m.Slow) > 0 {
-		cut := m.Slow[len(m.Slow)-1].TookNs
-		if m.Layers.Running.Longest != nil && m.Layers.Running.Longest.StateMs*int64(time.Millisecond) > cut {
-			lg := m.Layers.Running.Longest
-			m.Slow = append([]SlowSQLRow{{
-				Session: lg.Session,
-				SQL:     lg.SQL,
-				Tables:  lg.Tables,
-				Write:   lg.Write,
-				TookNs:  lg.StateMs * int64(time.Millisecond),
-				Running: true,
-			}}, m.Slow...)
-			if len(m.Slow) > topSlowSQL {
-				m.Slow = m.Slow[:topSlowSQL]
+	// ---- 慢 SQL：按语句结构聚合 ----
+	// 两个口径各取一份：Tab 上有「按累计 / 按单次」切换，一次给全，
+	// 切换时不用重新请求（每 2 秒才轮询一次，等一轮才有数据反而别扭）。
+	m.Slow = d.act.stmt.snapshot(slowTopN, true)
+	m.SlowMax = d.act.stmt.snapshot(slowTopN, false)
+	m.StmtLive, m.StmtEvicted = d.act.stmt.count()
+
+	// 正在跑、且已经跑够久的语句塞到最前面：它还没结束，进不了任何结构，
+	// 但「此刻正在卡着」恰恰是这一栏最该先回答的问题。
+	if lg := m.Layers.Running.Longest; lg != nil {
+		if runNs := lg.StateMs * int64(time.Millisecond); runNs >= planKeepNs {
+			row := StmtStat{
+				SQL:      lg.SQL,
+				Sample:   lg.SQL,
+				Tables:   lg.Tables,
+				Write:    lg.Write,
+				MaxNs:    runNs,
+				TotalNs:  runNs,
+				LastSess: lg.Session,
+				Running:  true,
 			}
+			m.Slow = prependStmt(m.Slow, row, slowTopN)
+			m.SlowMax = prependStmt(m.SlowMax, row, slowTopN)
 		}
-	} else if m.Layers.Running.Longest != nil {
-		lg := m.Layers.Running.Longest
-		m.Slow = append(m.Slow, SlowSQLRow{
-			Session: lg.Session,
-			SQL:     lg.SQL,
-			Tables:  lg.Tables,
-			Write:   lg.Write,
-			TookNs:  lg.StateMs * int64(time.Millisecond),
-			Running: true,
-		})
 	}
 
-	// ---- 慢事务 ----
-	m.SlowTx = []SlowTxRow{}
-	for _, a := range acts {
-		if !a.InTx {
-			continue
-		}
-		row := SlowTxRow{
-			Session: a.Session,
-			TxAgeMs: a.TxAgeMs,
-			IdleMs:  a.TxIdleMs,
-			Stmts:   a.TxStmts,
-			LastSQL: a.SQL,
-			State:   a.State,
-		}
-		// 持锁时长 = 该会话持有的最久那把锁的时长（事务开始时一次性拿锁，
-		// 所以它约等于事务已持锁时长，且不受之后增量加锁影响）。
-		for _, l := range m.Locks {
-			if l.Session == a.Session {
-				if l.HeldMs > row.HeldMs {
-					row.HeldMs = l.HeldMs
-				}
-				row.Locks = append(row.Locks, l.Table+":"+l.Mode)
-				row.HoldLock = true
-			}
-		}
-		m.SlowTx = append(m.SlowTx, row)
-	}
-	sort.Slice(m.SlowTx, func(i, j int) bool {
-		if m.SlowTx[i].HeldMs != m.SlowTx[j].HeldMs {
-			return m.SlowTx[i].HeldMs > m.SlowTx[j].HeldMs
-		}
-		return m.SlowTx[i].IdleMs > m.SlowTx[j].IdleMs
-	})
-	if len(m.SlowTx) > topSlowTx {
-		m.SlowTx = m.SlowTx[:topSlowTx]
-	}
+	// ---- 慢事务：按「表集合 + 读写」聚合 ----
+	m.SlowTx = d.act.txp.snapshot(slowTopN, true)
+	m.TxMax = d.act.txp.snapshot(slowTopN, false)
+	m.TxLive = d.act.txp.count()
 
 	// ---- 进程与存储资源（第一档：全标准库）----
 	if d.proc != nil {

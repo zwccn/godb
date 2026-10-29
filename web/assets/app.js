@@ -1551,12 +1551,29 @@ function renderIO(m) {
     '快照是整表重写，占磁盘带宽；fsync 突然变慢常常正好撞上它在写',
     (cp.lastNs || 0) >= 200e6 ? 'warn' : ''));
 
+  // 缓冲池：页存储之后「内存够不够」全看这一行。
+  // 命中率 = 页就在池里，不用读盘；超预算 > 0 说明预算已经不够用了。
+  const pool = io.pool || {};
+  const poolLook = (pool.hits || 0) + (pool.misses || 0);
+  const hitRate = poolLook > 0 ? (pool.hits / poolLook) * 100 : 0;
+  const poolSub = poolLook > 0
+    ? `脏页 ${pool.dirty || 0} · 淘汰 ${pool.evicts || 0} · 预取 ${pool.prefetched || 0}` +
+      (pool.overflow ? ` · 超预算 ${pool.overflow}` : '')
+    : '还没有页被读过';
+  box.appendChild(row('缓冲池',
+    poolLook > 0
+      ? `${hitRate.toFixed(1)}% · ${pool.resident || 0}/${pool.budget || 0} 页`
+      : '—',
+    poolSub,
+    '命中率高 = 页都在内存里，不用读盘。命中率低说明预算太小或访问太随机；出现「超预算」就该把缓冲池页数调大',
+    poolLook > 0 && hitRate < 80 ? 'warn' : ''));
+
   const tables = io.tables || [];
   const top = tables.slice(0, 3).map(t => `${t.name} ${fmtBytes(t.bytes)}`).join(' · ');
   box.appendChild(row('数据',
     `${tables.length} 表 / ${fmtBytes(io.totalBytes)}`,
     top || '还没有表',
-    '各表数据文件（tables/*.snp）的大小'));
+    '各表页文件（tables/tXXXXXX.dat）的大小'));
 }
 
 /* ---- 4. 锁明细 ---- */

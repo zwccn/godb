@@ -54,6 +54,16 @@ type Store struct {
 	loadMu        sync.RWMutex
 	// loadErr 记录读取表文件时的错误（不为 nil 时启动日志会提示）。
 	loadErr error
+	// broken 记录「表定义在、数据却读不出来」的表（数据文件丢失 / 页损坏）。
+	//
+	// 这种表**绝不能当空表**用：看着是 0 行，一写入再落盘，新的空页就把原来
+	// 那份文件盖掉了 —— 数据从此没有任何东西能证明它存在过。所以查询和写入
+	// 一律直接报错，只有 DDL（DROP / TRUNCATE / 改结构）放行，好让人收拾残局。
+	broken map[string]error
+	// missing 是「meta 说有行、数据文件却不在」的表（key → 本该有的行数）。
+	// 只在启动期填一次，WAL 重放跑完由 checkMissingAfterReplay 结算：
+	// 重放补回来了就是正常崩溃恢复，补不回来才是真丢了。
+	missing map[string]int
 
 	// appliedGen 是"已经应用到内存的最高 WAL 代次"，snapshotGen 是磁盘快照
 	// 覆盖到的代次。重放时只应用代次更大的记录，避免和快照重复。
@@ -73,6 +83,9 @@ type Store struct {
 	cpStop     chan struct{}
 	cpOnce     sync.Once
 	cpWG       sync.WaitGroup
+
+	// avLast 是上一次自动整理检查的时间（Unix 秒），只做节流用（见 autovacuum.go）。
+	avLast atomic.Int64
 
 	// cpMu 只串行化「写快照文件」这一段（在 CommitMu 之外拿）。
 	// cpBusy 保证同一时刻只有一个 checkpoint 在拍快照 + 写盘：
@@ -140,6 +153,7 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		dirty:         map[string]bool{},
 		dirtyRows:     map[string]int64{},
 		loaded:        map[string]bool{},
+		broken:        map[string]error{},
 		idxGen:        map[string]map[string]int64{},
 		cpRing:        newLatRing(cpSampleCap),
 		cpReasons:     map[string]int64{},
@@ -162,6 +176,9 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 	if err := s.replayWAL(); err != nil {
 		return nil, err
 	}
+	// 重放完了才判断「哪些表是真的丢了」：崩溃时改动只在 WAL 里、文件还没写，
+	// 这种情况重放会把行补回来，不能算损坏。
+	s.checkMissingAfterReplay()
 	if progress != nil {
 		progress("重建索引")
 	}
@@ -264,6 +281,45 @@ func (s *Store) LoadError() error {
 	return s.loadErr
 }
 
+// BrokenTables 返回「表定义在、数据读不出来」的表和原因（副本）。
+// 启动日志用它把话说明白：这些表不是空的，是打不开。
+func (s *Store) BrokenTables() map[string]error {
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	if len(s.broken) == 0 {
+		return nil
+	}
+	out := make(map[string]error, len(s.broken))
+	for k, v := range s.broken {
+		out[k] = v
+	}
+	return out
+}
+
+// TableBroken 报告某张表是不是「坏掉了」（正常返回 nil）。
+func (s *Store) TableBroken(name string) error {
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	return s.broken[cleanName(name)]
+}
+
+// noteBroken 记下「这张表打不开」，同时留一份到 loadErr 给启动日志。
+// 调用方必须持 loadMu 写锁。
+func (s *Store) noteBrokenLocked(key string, err error) {
+	if s.broken == nil {
+		s.broken = map[string]error{}
+	}
+	s.broken[key] = err
+	s.loadErr = err
+}
+
+// markBroken 是 noteBrokenLocked 的加锁版：启动期读元数据那条路径本身不持锁。
+func (s *Store) markBroken(key string, err error) {
+	s.loadMu.Lock()
+	s.noteBrokenLocked(key, err)
+	s.loadMu.Unlock()
+}
+
 // isLoaded 判断某张表的行是否已经在内存里。
 func (s *Store) isLoaded(name string) bool {
 	key := cleanName(name)
@@ -295,14 +351,14 @@ func (s *Store) ensureLoadedLocked(key string) {
 	// 页文件是唯一的数据来源：按 RID 把行放回槽位数组。
 	// 槽位号必须与页里记的一致 —— 索引里存的就是它。
 	if err := td.attachPages(s.Dir, t.ID, t, s.Budget, s.idxGen[key]); err != nil {
-		s.loadErr = err
+		s.noteBrokenLocked(key, fmt.Errorf("表 %s 的数据文件打不开: %w", t.Name, err))
 		s.loaded[key] = true
 		return
 	}
 	rows, repaired, err := td.pageLoad(t)
 	if err != nil {
-		// 页坏了：当作空表，但保留错误信息给启动日志
-		s.loadErr = err
+		// 页坏了：标成「打不开」，别当空表 —— 当空表就会被写回去盖掉原数据。
+		s.noteBrokenLocked(key, fmt.Errorf("表 %s 的数据读不出来: %w", t.Name, err))
 		rows = nil
 	}
 	s.Repaired.Add(int64(repaired))

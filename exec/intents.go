@@ -54,8 +54,9 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 			}
 		}
 	case *sql.Vacuum:
-		// 带表名就锁那张表（整理页的时候不能被同一个表上的写事务插进来）；
-		// 不带表名（VACUUM 全库）由 SchemaMu 读锁 + CommitMu 兜住。
+		// VACUUM 不走事务层（它改的是磁盘文件，回滚不了；加锁与落盘都在
+		// db.execVacuum 里自己管）。这条只用来给监控面板显示「碰了哪张表」。
+		// 不带表名的全库 VACUUM 会在 db.Exec 里拆成逐表执行。
 		if s.Table != "" {
 			addIntent(out, s.Table, lock.Exclusive)
 		}

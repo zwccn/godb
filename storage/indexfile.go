@@ -459,7 +459,7 @@ func (f *indexFile) initEmpty() error {
 		return err
 	}
 	f.hi = root + 1
-	f.pf.pages = f.hi
+	f.pf.pages.Store(f.hi)
 	f.root, f.height, f.count = root, 1, 0
 	f.nodes, f.emptyLeaves = 1, 0
 	// 「还没被 checkpoint 写过」的标记：meta 里没有这个索引的记录时，

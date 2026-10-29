@@ -224,7 +224,16 @@ func main() {
 	if n := info.Repaired; n > 0 {
 		log.Printf("注意：启动时修复了 %d 个单元格（表结构与磁盘数据不一致）", n)
 	}
-	if err := d.Store.LoadError(); err != nil {
+	if broken := d.Store.BrokenTables(); len(broken) > 0 {
+		// 这些表不是「空的」，是「打不开」。查它们会直接报错，直到 DROP 掉重来。
+		// 启动日志必须说清楚，否则用户看到的就是「我的表怎么没数据了」。
+		log.Printf("⚠ 有 %d 张表的数据读不出来（表定义还在，数据文件丢了或坏了）：", len(broken))
+		for name, err := range broken {
+			log.Printf("   · %s —— %v", name, err)
+		}
+		log.Printf("   这些表暂时不能查也不能写（会直接报错，避免把空数据写回去）。")
+		log.Printf("   先停服务备份整个数据目录，再决定是 DROP 重建还是从备份恢复。")
+	} else if err := d.Store.LoadError(); err != nil {
 		log.Printf("注意：读取表文件时出错: %v", err)
 	}
 

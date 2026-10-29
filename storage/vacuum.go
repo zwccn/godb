@@ -108,6 +108,11 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 		}
 		// 5) 回收尾部空页
 		rec, err := td.pages.reclaim()
+		// 洞已经收干净（compact 把所有活元组挪紧了），计数清零。
+		// 中途出错就不清：下次还能凭这个数再试一次。
+		if err == nil {
+			td.pages.holes.Store(0)
+		}
 		td.unlockPages()
 		if err != nil {
 			return out, err

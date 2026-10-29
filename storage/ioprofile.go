@@ -106,6 +106,63 @@ type TableSize struct {
 	Rows  int    `json:"rows"`
 }
 
+// PoolProfile 是缓冲池的汇总（全库所有表加在一起）。
+//
+// 为什么值得单独报：页存储之后，「内存够不够」这件事全看这几个数 ——
+// 命中率低说明预算太小（或者访问太随机），Evicts 涨得快说明表比池子大得多，
+// Overflow > 0 说明已经出现过「预算满了还得硬塞」的窘境。以前这些只能靠猜。
+type PoolProfile struct {
+	Budget   int   `json:"budget"`   // 全库预算页数
+	Resident int   `json:"resident"` // 当前驻留的页框数
+	Dirty    int   `json:"dirty"`    // 其中还没落盘的
+	Tables   int   `json:"tables"`   // 打开了几个页文件
+	Hits     int64 `json:"hits"`
+	Misses   int64 `json:"misses"`
+	Evicts   int64 `json:"evicts"`
+	Flushes  int64 `json:"flushes"`
+	Prefetch int64 `json:"prefetched"`
+	Overflow int64 `json:"overflow"` // 预算满时硬塞进来的格数（越多越该调大预算）
+	Blocked  int64 `json:"blocked"`  // 想换页但一页都换不出去（全被钉住）的次数
+}
+
+// PoolStats 汇总全库缓冲池的状态。面板每秒调一次，所以只做累加、不排序。
+func (s *Store) PoolStats() PoolProfile {
+	p := PoolProfile{}
+	if s.Budget != nil {
+		p.Budget = s.Budget.totalPages()
+		p.Resident = s.Budget.usedPages()
+	}
+	s.loadMu.RLock()
+	tables := make([]*TableData, 0, len(s.Data))
+	for _, td := range s.Data {
+		tables = append(tables, td)
+	}
+	s.loadMu.RUnlock()
+
+	for _, td := range tables {
+		if td == nil {
+			continue
+		}
+		// td.pages 会被 DDL / VACUUM FULL 整体换掉，读它要跟着 pageMu 走
+		td.pageMu.RLock()
+		tp := td.pages
+		if tp != nil {
+			st := tp.pool.stats()
+			p.Tables++
+			p.Hits += st.Hits
+			p.Misses += st.Misses
+			p.Evicts += st.Evicts
+			p.Flushes += st.Flushes
+			p.Prefetch += st.Prefetched
+			p.Overflow += st.Overflow
+			p.Blocked += st.Blocked
+			p.Dirty += tp.pool.dirtyCount()
+		}
+		td.pageMu.RUnlock()
+	}
+	return p
+}
+
 // checkpoint 的触发原因。空串表示「还没落过盘」。
 const (
 	CPReasonCommits = "commits" // 攒够了提交次数

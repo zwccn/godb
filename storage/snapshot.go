@@ -100,6 +100,36 @@ func writeFileAtomic(path string, b []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// checkMissingAfterReplay 结算「数据文件不在」的表。
+//
+// 重放跑完一行都没有，那就是真丢了（文件被人删了 / 磁盘坏了），而不是
+// 「改动还在 WAL 里没落盘」—— 后者重放会把行补回来。真丢的表标成打不开，
+// 免得后面一条 INSERT 就把空页写回去，把「这里原来有数据」的最后痕迹也抹掉。
+func (s *Store) checkMissingAfterReplay() {
+	if len(s.missing) == 0 {
+		return
+	}
+	s.loadMu.Lock()
+	missing := s.missing
+	s.missing = nil
+	s.loadMu.Unlock()
+
+	for key, want := range missing {
+		if want <= 0 {
+			continue // 本来就是空表，没有数据文件很正常
+		}
+		name := key
+		if td := s.Data[key]; td != nil {
+			if td.Live > 0 {
+				continue // 重放把它填回来了，是正常崩溃恢复
+			}
+			name = td.Name
+		}
+		s.markBroken(key, fmt.Errorf(
+			"表 %s 的数据文件丢失，WAL 里也没有可重放的记录（本该有 %d 行）", name, want))
+	}
+}
+
 // loadSnapshot 读磁盘状态：meta.json + 每张表的页文件。
 //
 // 只读 meta 里记的行数，**不读页、不读行** —— 行在第一次真正访问时才从
@@ -131,9 +161,13 @@ func (s *Store) loadSnapshot() error {
 			if !os.IsNotExist(err) {
 				return err
 			}
-			// meta 说有、文件却不在：数据没法救，记下来让启动日志报出去，
-			// 但不要因此让整个库打不开（其它表还能用）。
-			s.loadErr = fmt.Errorf("表 %s 的数据文件丢失（%s）", t.Name, path)
+			// meta 说有、文件却不在。**先别急着判损坏** —— 正常崩溃也会长这样：
+			// 改动全在 WAL 里还没落盘，重启后靠重放就能补回来。记下「本该有几行」，
+			// 等重放跑完再看补没补上（见 checkMissingAfterReplay）。
+			if s.missing == nil {
+				s.missing = map[string]int{}
+			}
+			s.missing[key] = mt.Rows
 			continue
 		}
 		s.hasSnap[key] = true

@@ -71,6 +71,13 @@ type tablePages struct {
 	// decodes 统计「解码了多少次页」。这是写路径的核心成本指标：
 	// 按行写 → 行数 次；按页批量写 → 页数 次。测试用它守住回归。
 	decodes int64
+
+	// holes 是「删掉的行在页里留下来的洞」的累计字节数（随删随加，整理后清零）。
+	//
+	// 删一行只是把槽位置空，字节还留在页里 —— 这一页看着还有空间，实际全是
+	// 用不上的碎片。后台靠这个数判断「该不该顺手整理一次」，所以它必须 O(1)
+	// 可维护，不能靠遍历页去算。写路径（持表 X 锁）和后台定时器都会读，用 atomic。
+	holes atomic.Int64
 }
 
 // openTablePages 打开一张表的页文件。budget 为 nil 表示不参与全局预算
@@ -340,6 +347,14 @@ func (tp *tablePages) write(dels []int, rows []pendingRow) ([]pageImage, error) 
 	return b.flush()
 }
 
+// delTuple 删掉一个槽位，并把「又多了多少洞」记到表上。
+// 后台自动整理只认这个数，所以两处删除（显式删行、更新前删旧元组）都要走这里。
+func (b *pageBatch) delTuple(p *page, slot int) {
+	before := p.liveBytes()
+	_ = p.del(slot)
+	b.tp.holes.Add(int64(before - p.liveBytes()))
+}
+
 // delSlots 在批次里删行（不落盘，等 flush）。
 func (b *pageBatch) delSlots(slots []int) {
 	tp := b.tp
@@ -352,7 +367,7 @@ func (b *pageBatch) delSlots(slots []int) {
 		if err != nil {
 			continue
 		}
-		_ = p.del(int(at.slot))
+		b.delTuple(p, int(at.slot))
 		tp.valid[slot] = false
 		tp.removeFromPageIndex(slot, at)
 	}
@@ -374,7 +389,7 @@ func (b *pageBatch) putRows(rows []pendingRow) error {
 			if err != nil {
 				return err
 			}
-			_ = p.del(int(at.slot))
+			b.delTuple(p, int(at.slot))
 			local, err := p.insertOrCompact(row.tuple, uint32(row.slot))
 			if err == nil {
 				tp.loc[row.slot] = rowLoc{page: at.page, slot: uint16(local)}
@@ -680,6 +695,25 @@ func (tp *tablePages) shrink() int {
 
 // dirtyPages 返回池里还有多少脏页。
 func (tp *tablePages) dirtyPages() int { return tp.pool.dirtyCount() }
+
+// deadBytes 是页内空洞的累计字节（整理一次就归零）。
+func (tp *tablePages) deadBytes() int64 { return tp.holes.Load() }
+
+// vacuumThreshold 是「值得整理一次」的判据：洞超过文件大小的 1/4。
+//
+// 为什么按比例而不是按绝对值：8KB 的文件和 8GB 的文件，「四分之一都是垃圾」
+// 是同一种浪费；绝对值阈值对小库永远触发、对大库永远不触发。
+const vacuumThreshold = 4 // 1/4
+
+// needsVacuum 报告这张表是不是该整理一次了。
+// 小表（不到 8 页 = 64KB）不折腾：一条 DELETE 就能让它达标，纯属自找麻烦。
+func (tp *tablePages) needsVacuum() bool {
+	pages := tp.pf.pageCount()
+	if pages < 8 {
+		return false
+	}
+	return tp.holes.Load()*vacuumThreshold > int64(pages)*PageSize
+}
 
 // applyImage 把一页的整页镜像写回页文件（崩溃恢复用：页撕裂时靠它还原）。
 func (tp *tablePages) applyImage(page uint32, img []byte) error {

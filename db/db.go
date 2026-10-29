@@ -86,6 +86,41 @@ func (d *DB) execVacuum(sess *txn.Session, v *sql.Vacuum) (*exec.Result, error) 
 	return res, nil
 }
 
+// execVacuumAll 处理不带表名的 VACUUM：拆成「一次一张表」依次跑。
+//
+// 为什么不交给 Store 一次扫完：它整段都在 CommitMu 里，一张大表整理三秒，
+// 这三秒全库的写都得排队。拆开之后每张表各自进出一次 CommitMu，中间别的表
+// 照常读写 —— 把一次长停顿换成 N 次短停顿，代价是结果要在这里拼起来。
+func (d *DB) execVacuumAll(sess *txn.Session, v *sql.Vacuum, pre map[string]lock.Mode) (*exec.Result, error) {
+	var merged *exec.Result
+	for _, t := range d.Store.Cat.Tables {
+		res, err := d.execOne(sess, &sql.Vacuum{Full: v.Full, Table: t.Name}, pre)
+		if err != nil {
+			return merged, err
+		}
+		merged = mergeVacuumResult(merged, res)
+	}
+	if merged == nil {
+		return &exec.Result{Command: "VACUUM", Tag: "VACUUM", Message: "没有可整理的表"}, nil
+	}
+	return merged, nil
+}
+
+// mergeVacuumResult 把逐表的结果拼成一条 VACUUM 的返回（列结构一样，行追加）。
+func mergeVacuumResult(dst, src *exec.Result) *exec.Result {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		return src
+	}
+	dst.Rows = append(dst.Rows, src.Rows...)
+	dst.RowCount = len(dst.Rows)
+	dst.TookNs += src.TookNs
+	dst.Message = ""
+	return dst
+}
+
 // execVacuumFull 处理 VACUUM FULL：整份重写表数据。
 func (d *DB) execVacuumFull(v *sql.Vacuum) (*exec.Result, error) {
 	start := hrtime.Now()
@@ -514,6 +549,13 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 			res, err = d.createDatabase(sess, s)
 		case *sql.DropDatabase:
 			res, err = d.dropDatabase(sess, s)
+		case *sql.Vacuum:
+			// 不带表名的 VACUUM 拆成「一次一张表」：见 execVacuumAll 的注释。
+			if s.Table == "" {
+				res, err = d.execVacuumAll(sess, s, pre)
+				break
+			}
+			res, err = d.execOne(sess, st, pre)
 		default:
 			res, err = d.execOne(sess, st, pre)
 		}
@@ -648,6 +690,16 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	intents, err := exec.TableIntents(st)
 	if err != nil {
 		return nil, err
+	}
+	// 数据文件丢了 / 页坏了的表：先在这儿挡住，别让它以「0 行」的样子往下走。
+	// 一旦写入再落盘，新的空页就把原来那份文件盖掉了 —— 那才是真没救。
+	// 检查放在加载之前：加载会把这类表当作空表装进内存，越早拦越干净。
+	if !brokenAllowed(st) {
+		for name := range intents {
+			if e := d.Store.TableBroken(name); e != nil {
+				return nil, fmt.Errorf("%w（DROP / TRUNCATE 之后可以重新建表）", e)
+			}
+		}
 	}
 	// 按需加载：把这条语句要碰的表先读进内存。
 	// 必须放在拿 SchemaMu 之前 —— 加载是磁盘 IO，不能持着锁做。
@@ -789,6 +841,18 @@ func isDDL(st sql.Statement) bool {
 		return true
 	}
 	return false
+}
+
+// brokenAllowed 判断一条语句能不能碰「数据读不出来」的表。
+//
+// 只有收拾残局的语句放行：DROP 掉它、清空它、改它的结构。其余一律报错 ——
+// 因为把一张读不出来的表当成空表来查/写，是最危险的一种「看起来正常」。
+func brokenAllowed(st sql.Statement) bool {
+	if isDDL(st) {
+		return true
+	}
+	_, trunc := st.(*sql.Truncate)
+	return trunc
 }
 
 // execAnalyze 扫一遍用户表，收集行数与列基数（distinct 上限 1024 个值）。

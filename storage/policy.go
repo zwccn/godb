@@ -183,6 +183,8 @@ func (s *Store) StartAutoCheckpoint() {
 					return
 				case <-t.C:
 					s.tickCheckpoint()
+					// 顺手看一眼哪张表删出来的洞该收了（自己按 60 秒节流）
+					s.tickAutoVacuum()
 				}
 			}
 		}()

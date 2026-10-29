@@ -124,9 +124,11 @@ func (b *memBudget) reclaimOne(exclude *bufPool) bool {
 
 // pageFile 是一张表的页文件：第 n 页在 n*PageSize 处。
 type pageFile struct {
-	path  string
-	f     *os.File
-	pages uint32
+	path string
+	f    *os.File
+	// pages 是文件当前有多少页。写路径、checkpoint、后台自动整理会同时读它，
+	// 所以用 atomic：裸 uint32 在 32 位平台上读写可能被撕成两半。
+	pages atomic.Uint32
 }
 
 func openPageFile(path string) (*pageFile, error) {
@@ -144,15 +146,17 @@ func openPageFile(path string) (*pageFile, error) {
 		f.Close()
 		return nil, fmt.Errorf("storage: %s 长度 %d 不是 %d 的整数倍，文件已损坏", path, size, PageSize)
 	}
-	return &pageFile{path: path, f: f, pages: uint32(size / PageSize)}, nil
+	pf := &pageFile{path: path, f: f}
+	pf.pages.Store(uint32(size / PageSize))
+	return pf, nil
 }
 
-func (pf *pageFile) pageCount() uint32 { return pf.pages }
+func (pf *pageFile) pageCount() uint32 { return pf.pages.Load() }
 
 // readPage 读第 id 页。id >= 页数时返回全零页（新页的第一种状态）。
 func (pf *pageFile) readPage(id uint32) ([]byte, error) {
 	buf := make([]byte, PageSize)
-	if id >= pf.pages {
+	if id >= pf.pages.Load() {
 		return buf, nil
 	}
 	if _, err := pf.f.ReadAt(buf, int64(id)*PageSize); err != nil {
@@ -182,8 +186,8 @@ func (pf *pageFile) readPages(ids []uint32) ([][]byte, error) {
 	first := ids[0]
 	n := len(ids)
 	avail := 0
-	if first < pf.pages {
-		avail = int(pf.pages - first)
+	if total := pf.pages.Load(); first < total {
+		avail = int(total - first)
 		if avail > n {
 			avail = n
 		}
@@ -209,8 +213,12 @@ func (pf *pageFile) writePage(id uint32, data []byte) error {
 	if _, err := pf.f.WriteAt(data, int64(id)*PageSize); err != nil {
 		return err
 	}
-	if id >= pf.pages {
-		pf.pages = id + 1
+	// 文件长大了就把页数推上去。并发写不同页时会同时走到这里，用 CAS 取最大。
+	for {
+		cur := pf.pages.Load()
+		if id < cur || pf.pages.CompareAndSwap(cur, id+1) {
+			break
+		}
 	}
 	return nil
 }
@@ -219,13 +227,13 @@ func (pf *pageFile) sync() error { return pf.f.Sync() }
 
 // truncate 把文件截到 n 页（VACUUM 回收尾巴上的空页用）。
 func (pf *pageFile) truncate(n uint32) error {
-	if n >= pf.pages {
+	if n >= pf.pages.Load() {
 		return nil
 	}
 	if err := pf.f.Truncate(int64(n) * PageSize); err != nil {
 		return err
 	}
-	pf.pages = n
+	pf.pages.Store(n)
 	return nil
 }
 

@@ -495,6 +495,7 @@ type SlowTxRow struct {
 type IOProfile struct {
 	Fsync      storage.FsyncProfile      `json:"fsync"`
 	Checkpoint storage.CheckpointProfile `json:"checkpoint"`
+	Pool       storage.PoolProfile        `json:"pool"`
 	Tables     []storage.TableSize       `json:"tables"`
 	TotalBytes int64                     `json:"totalBytes"`
 	Rates      IORates                   `json:"rates"`
@@ -801,6 +802,7 @@ func (d *DB) Monitor(t TimeoutStatus) Monitor {
 	if d.Store != nil {
 		m.IO.Fsync = d.Store.FsyncProfile()
 		m.IO.Checkpoint = d.Store.CheckpointProfile()
+		m.IO.Pool = d.Store.PoolStats()
 		m.IO.Tables = d.Store.TableSizes()
 		var sum int64
 		for _, t := range m.IO.Tables {

@@ -226,6 +226,62 @@ html[data-theme="mint"] {
   --shadow-color: rgba(20, 60, 50, .18);
 }
 
+/* 科技灰：冷调深灰（蓝灰），参照 VS Code / Catppuccin Mocha 那一类配色 ——
+   底色几乎无彩，只有主色和几个语义色带一点点蓝紫，久看不刺眼。
+   主色用 #89b4fa（浅天蓝）做链接/图标；实心按钮仍用更深的 #3a6bcc，保证白字可读。 */
+html[data-theme="steel"] {
+  --bg: #101017;
+  --bg-1: #17171f;
+  --bg-2: #1d1e27;
+  --bg-3: #262735;
+  --border: #2c2d3c;
+  --border-soft: #24252f;
+  --text: #ced2e2;
+  --text-2: #9ba1b5;
+  --text-3: #6f7488;
+  --accent: #89b4fa;
+  --accent-dim: #23304a;
+  --ok: #a6e3a1;
+  --warn: #f0cf94;
+  --danger: #f38ba8;
+
+  --on-accent: #fff;
+  --on-accent-dim: #d7e3f8;
+  --accent-strong: #3a6bcc;
+  --accent-strong-hover: #4a7bdc;
+  --accent-border: #4b7ad8;
+  --accent-border-hover: #5d8ce8;
+  --accent-soft-bg: #1c2536;
+  --accent-soft-border: #2f4165;
+  --accent-soft-text: #a9c6f5;
+  --hint-active-bg: #2c3a52;
+  --ok-bg: #16281d;
+  --ok-bg-hover: #1d3527;
+  --ok-border: #2b4d38;
+  --ok-text: #9fdfae;
+  --warn-bg: #2a2318;
+  --warn-bg-hover: #3b3120;
+  --warn-border: #5d4a24;
+  --warn-text: #ecc98d;
+  --danger-bg: #2a1620;
+  --danger-strong: #6b2534;
+  --danger-border: #4f2029;
+  --danger-text: #f395a9;
+  --danger-text-dim: #c97b8b;
+  --border-hover: #3b3d4f;
+  --row-hover: #1a1b23;
+  --scroll-thumb: #2f3143;
+  --scroll-thumb-hover: #3d4056;
+  --code-bg: #0c0c12;
+  --code-text: #a3adc4;
+  --tint-strong: rgba(255, 255, 255, .12);
+  --tint-hover: rgba(137, 180, 250, .07);
+  --tint-sel: rgba(137, 180, 250, .16);
+  --tint-danger: rgba(243, 139, 168, .12);
+  --overlay: rgba(6, 6, 12, .66);
+  --shadow-color: rgba(0, 0, 0, .60);
+}
+
 /* ---------- 皮肤切换器（现在在设置页里；圆点本身仍复用这套渐变） ---------- */
 .theme-dot {
   width: 16px;
@@ -311,6 +367,7 @@ html[data-theme="mint"] {
 .theme-dot-sky { background: linear-gradient(135deg, #d3e4f7 45%, #2b7fd0 45%); }
 .theme-dot-taro { background: linear-gradient(135deg, #ded0f5 45%, #7a5bd6 45%); }
 .theme-dot-mint { background: linear-gradient(135deg, #cfeade 45%, #1f9c72 45%); }
+.theme-dot-steel { background: linear-gradient(135deg, #262735 45%, #89b4fa 45%); }
 
 * { box-sizing: border-box; }
 

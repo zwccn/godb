@@ -37,6 +37,7 @@ const THEME_KEY = 'godb.theme';
 // 顺序即设置页里的展示顺序；深色是默认值
 const THEME_LIST = [
   { id: 'dark', name: '深色' },
+  { id: 'steel', name: '科技灰' },
   { id: 'sky', name: '淡蓝' },
   { id: 'taro', name: '芋紫' },
   { id: 'mint', name: '薄荷绿' },

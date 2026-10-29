@@ -545,19 +545,19 @@ class CDP {
       hintLook ? `命中「${hintLook.hit}」，字重 ${hintLook.weight}` : '');
     check('候选弹层没被长签名撑破', !!(hintLook && hintLook.fits));
 
-    // 换皮肤不能把选中色弄丢（四套都要有 --hint-active-bg，否则退回透明 = 又看不见了）
+    // 换皮肤不能把选中色弄丢（五套都要有 --hint-active-bg，否则退回透明 = 又看不见了）
     const themeVars = await cdp.eval(`(() => {
       const out = {};
       const html = document.documentElement;
       const keep = html.getAttribute('data-theme');
-      for (const t of ['dark', 'sky', 'taro', 'mint']) {
+      for (const t of ['dark', 'steel', 'sky', 'taro', 'mint']) {
         html.setAttribute('data-theme', t);
         out[t] = getComputedStyle(html).getPropertyValue('--hint-active-bg').trim();
       }
       html.setAttribute('data-theme', keep || 'sky');
       return out;
     })()`);
-    check('四套皮肤都定义了候选选中色',
+    check('五套皮肤都定义了候选选中色',
       Object.keys(themeVars).every(k => themeVars[k]), JSON.stringify(themeVars));
     await cdp.eval(`cm.setValue('')`);
 
@@ -855,9 +855,26 @@ class CDP {
       brand.text === 'GoDB' && brand.dbColor === brand.accent &&
         brand.shadow === 'none' && brand.bgImage === 'none' && /^GoDB/.test(brand.title),
       `${brand.text} · DB 色 ${brand.dbColor} · title ${brand.title}`);
-    check('设置页有 4 个带名字的皮肤卡片',
-      setUi.picks === 4 && setUi.pickNames.join('/') === '深色/淡蓝/芋紫/薄荷绿',
+    check('设置页有 5 个带名字的皮肤卡片',
+      setUi.picks === 5 && setUi.pickNames.join('/') === '深色/科技灰/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);
+
+    // 科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）
+    const steel = await cdp.eval(`(() => {
+      applyTheme('steel', false);
+      const cs = getComputedStyle(document.documentElement);
+      const get = n => cs.getPropertyValue(n).trim();
+      return {
+        theme: document.documentElement.getAttribute('data-theme'),
+        bg: get('--bg'), accent: get('--accent'), text: get('--text'),
+        bodyBg: getComputedStyle(document.body).backgroundColor,
+      };
+    })()`);
+    check('科技灰皮肤：底色冷灰 + 浅天蓝主色，且能真正切换',
+      steel.theme === 'steel' && steel.bg === '#101017' && steel.accent === '#89b4fa' &&
+        steel.bodyBg === 'rgb(16, 16, 23)',
+      `${steel.theme} / bg ${steel.bg} / accent ${steel.accent} / body ${steel.bodyBg}`);
+    await cdp.eval(`applyTheme('sky', false)`);
     check('设置页有字号控件', setUi.fsBtns === 2 && setUi.fsValues === 1 && /%$/.test(setUi.fsText), setUi.fsText);
     check('设置页有载入示例数据 / 清空当前库',
       setUi.hasSample && setUi.hasReset);

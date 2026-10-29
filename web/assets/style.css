@@ -358,11 +358,18 @@ body {
 }
 
 .brand-text { display: flex; align-items: baseline; gap: 10px; }
-.brand-text h1 {
+/* 字标 GoDB：Go 用正文色、DB 用主色 —— 只用一种已有的颜色做区分，
+   不叠渐变/阴影。字距收紧一点（-0.1px），小字号下更像「一个字标」而不是两个词。 */
+.wordmark {
   margin: 0;
   font-size: calc(15px * var(--fs));
   font-weight: 600;
-  letter-spacing: 0.2px;
+  letter-spacing: -0.1px;
+  color: var(--text);
+}
+.wordmark span {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .top-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }

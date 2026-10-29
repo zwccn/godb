@@ -783,6 +783,29 @@ class CDP {
       setUi.idlePillHidden ? '药丸已隐藏' : '药丸仍显示');
     check('监控圆点够大且有 hover 文字', setUi.dotSize >= 10 && setUi.dotTip.length > 0,
       setUi.dotSize + 'px / ' + setUi.dotTip);
+
+    // 字标：GoDB，「DB」用主色 —— 顶栏里唯一一处有颜色的文字，不许再叠渐变/阴影
+    const brand = await cdp.eval(`(() => {
+      const w = document.querySelector('.wordmark');
+      const span = w && w.querySelector('span');
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--accent)';
+      document.body.appendChild(probe);
+      const accent = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        text: w ? w.textContent.trim() : '',
+        dbColor: span ? getComputedStyle(span).color : '',
+        accent: accent,
+        shadow: w ? getComputedStyle(w).textShadow : '',
+        bgImage: w ? getComputedStyle(w).backgroundImage : '',
+        title: document.title,
+      };
+    })()`);
+    check('品牌字标 GoDB：DB 用主色、无渐变/文字阴影',
+      brand.text === 'GoDB' && brand.dbColor === brand.accent &&
+        brand.shadow === 'none' && brand.bgImage === 'none' && /^GoDB/.test(brand.title),
+      `${brand.text} · DB 色 ${brand.dbColor} · title ${brand.title}`);
     check('设置页有 4 个带名字的皮肤卡片',
       setUi.picks === 4 && setUi.pickNames.join('/') === '深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);

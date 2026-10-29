@@ -433,15 +433,16 @@ body {
 }
 
 /* ---------- 主操作按钮：编辑器「执行」 ---------- */
-/* 只比普通按钮多两件事：执行中换转圈、快捷键提示带一点留白。
-   底色/边框/圆角全部复用 .btn-primary + .btn-sm —— 一个界面里只有一种蓝按钮，
-   再加渐变和落地阴影就变成「页面上最响的东西」，抢了 SQL 本身的注意力。 */
+/* 复用 .btn-primary + .btn-sm 的色与形，只多一个 9px 的播放三角 + 执行中的转圈。
+   三角用 currentColor（就是按钮的 --on-accent），不另配颜色 —— 多一种色就会跑调。 */
 .btn-run {
   display: inline-flex;
   align-items: center;
   gap: 5px;
 }
+.btn-run .run-ico { display: inline-flex; align-items: center; }
 .btn-run .run-spin { display: none; }
+.btn-run.is-running .run-ico { display: none; }
 .btn-run.is-running .run-spin {
   display: inline-block;
   width: 9px;
@@ -453,10 +454,6 @@ body {
 }
 @keyframes run-spin { to { transform: rotate(360deg); } }
 .btn-run:disabled { opacity: .62; cursor: progress; }
-.btn-run .run-keys { display: inline-flex; align-items: center; }
-.btn-run .run-keys .plus { opacity: .55; margin: 0 1px; }
-.btn-run kbd { margin-left: 3px; }
-.btn-run .run-keys kbd:first-child { margin-left: 4px; }
 
 .icon-btn {
   background: transparent;
@@ -1095,8 +1092,6 @@ table.grid td.bool { color: var(--warn-text); }
   .editor-label { display: none; }
   #btnExplain, #btnClear { display: none; }
   .editor-lead { gap: 8px; }
-  /* 窄屏去掉按钮里的快捷键提示（手机上本来也没有键盘） */
-  .btn-run .run-keys { display: none; }
 }
 
 

@@ -102,37 +102,49 @@ class CDP {
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
-    // 0.1) 执行按钮：只保留「主色 + 快捷键提示 + 执行中转圈」，不加渐变/阴影
-    //      （曾经做过渐变+发光版本，太抢眼被退回；这条断言防止又长回去）
+    // 0.1) 执行按钮：扁平主色 + 一个 9px 播放三角（跟文字同色）+ 执行中转圈。
+    //      做过渐变+发光+快捷键药丸的版本，都被判「太抢眼」退回；这几条防止又长回去。
     const runBtn = await cdp.eval(`(() => {
       const b = document.getElementById('btnRun');
       const cs = getComputedStyle(b);
       const peer = getComputedStyle(document.getElementById('btnSettingsSave'));
+      const ico = b.querySelector('.run-ico svg');
+      const icoCs = ico ? getComputedStyle(ico) : null;
       return {
-        keys: (b.querySelector('.run-keys') || {}).textContent || '',
+        icon: !!ico,
+        icoW: ico ? Math.round(ico.getBoundingClientRect().width) : 0,
+        icoColor: ico ? icoCs.color : '',
+        textColor: cs.color,
+        kbds: b.querySelectorAll('kbd').length,
         grad: cs.backgroundImage.indexOf('gradient') >= 0,
         shadow: cs.boxShadow,
         radius: cs.borderRadius,
         sameAsPeer: cs.backgroundColor === peer.backgroundColor && cs.borderRadius === peer.borderRadius,
       };
     })()`);
-    check('执行按钮：与其它主按钮同款扁平样式 + 快捷键提示',
-      !runBtn.grad && runBtn.shadow === 'none' && runBtn.sameAsPeer && /Ctrl/.test(runBtn.keys),
-      `${runBtn.keys} / 圆角 ${runBtn.radius} / 阴影 ${runBtn.shadow}`);
+    check('执行按钮：扁平主色 + 播放图标 + 不再挂快捷键药丸',
+      runBtn.icon && runBtn.icoW >= 8 && runBtn.icoW <= 12 &&
+        runBtn.icoColor === runBtn.textColor && runBtn.kbds === 0 &&
+        !runBtn.grad && runBtn.shadow === 'none' && runBtn.sameAsPeer,
+      `图标 ${runBtn.icoW}px / kbd ${runBtn.kbds} 个 / 圆角 ${runBtn.radius} / 阴影 ${runBtn.shadow}`);
 
-    // 执行中恢复：按钮内容不能被整体重写（否则图标/快捷键丢失）
+    // 执行中：图标让位给转圈，结束后再换回来（按钮结构不能被整体重写）
     await cdp.eval(`setRunning(true)`);
     const running = await cdp.eval(`(() => {
       const b = document.getElementById('btnRun');
+      const ico = b.querySelector('.run-ico svg');
       return { label: document.getElementById('btnRunText').textContent,
-               spin: !!b.querySelector('.run-spin'),
+               spin: !!b.querySelector('.run-spin') &&
+                     b.querySelector('.run-spin').getBoundingClientRect().width > 0,
+               icoW: ico ? Math.round(ico.getBoundingClientRect().width) : 0,
                disabled: b.disabled };
     })()`);
     await cdp.eval(`setRunning(false)`);
     const back = await cdp.eval(`document.getElementById('btnRunText').textContent`);
-    check('执行中：文字变「执行中…」且按钮结构不被冲掉',
-      running.label === '执行中…' && running.spin && running.disabled && back === '执行',
-      `${running.label} → ${back}`);
+    check('执行中：文字变「执行中…」、图标换成转圈',
+      running.label === '执行中…' && running.spin && running.icoW === 0 &&
+        running.disabled && back === '执行',
+      `${running.label} / 图标宽 ${running.icoW} → ${back}`);
 
     // 0.1b) 美化 SQL：子句换行 + 关键字大写，字符串里的内容一个字都不能动
     await cdp.eval(`cm.setValue("select id,name from t where a='it''s' and b=1 order by id")`);

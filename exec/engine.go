@@ -1795,6 +1795,19 @@ func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
 			return nil, err
 		}
 	}
+	// 已经有数据的表要先确认「现有行装得进索引页」：文本列可以存 1MB，
+	// 但索引键必须放得进一个 8KB 页（B+Tree 的一页至少要有两个键）。
+	if e.Store != nil && len(s.Cols) > 0 {
+		colIdx := make([]int, 0, len(s.Cols))
+		for _, name := range s.Cols {
+			if i, ok := t.ColumnIdx(name); ok {
+				colIdx = append(colIdx, i)
+			}
+		}
+		if err := e.Store.Table(t.Name).CheckIndexKeyLen(t, colIdx, s.Name); err != nil {
+			return nil, err
+		}
+	}
 	t.Indexes = append(t.Indexes, &catalog.Index{Name: s.Name, Columns: cols, Unique: s.Unique})
 	if err := e.persistSchema(false); err != nil {
 		return nil, err

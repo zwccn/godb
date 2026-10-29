@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -217,5 +216,7 @@ func TestFreeMapDropsReclaimedPages(t *testing.T) {
 			t.Fatalf("第 %d 行读不回来（可能写到了越界页）", r.slot)
 		}
 	}
-	fmt.Sprint(tp.pageCount())
+	if tp.pageCount() == 0 {
+		t.Fatal("页文件不该是 0 页")
+	}
 }

@@ -228,11 +228,12 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 			if tm.sys {
 				ns = NamespaceCatalog
 			}
+			dataPages, idxPages := src.pagesOf(tm.t.Name)
 			out = append(out, mk(def, map[string]types.Value{
 				"oid": iv(int(tm.oid)), "relname": sv(tm.t.Name), "relnamespace": iv(int(ns)),
 				"reltype": iv(0), "reloftype": iv(0), "relowner": iv(OwnerOID),
 				"relam": iv(2), "relfilenode": iv(int(tm.oid)), "reltablespace": iv(0),
-				"relpages": iv(1), "reltuples": types.Float(float64(src.rowsOf(tm.t.Name))),
+				"relpages": iv(dataPages), "reltuples": types.Float(float64(src.rowsOf(tm.t.Name))),
 				"relallvisible": iv(0), "reltoastrelid": iv(0),
 				"relhasindex": bv(len(tm.idx) > 0), "relisshared": bv(false),
 				"relhasoids":     bv(false),
@@ -248,7 +249,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 				out = append(out, mk(def, map[string]types.Value{
 					"oid": iv(int(ix.oid)), "relname": sv(ix.name), "relnamespace": iv(int(ns)),
 					"relowner": iv(OwnerOID), "relam": iv(403), "relfilenode": iv(int(ix.oid)),
-					"relpages": iv(1), "reltuples": types.Float(0), "relhasindex": bv(false),
+					"relpages": iv(idxPages), "reltuples": types.Float(0), "relhasindex": bv(false),
 					"relhasoids": bv(false), "relisshared": bv(false),
 					"relpersistence": sv("p"), "relkind": sv("i"), "relnatts": iv(1),
 					"relispopulated": bv(true), "relreplident": sv("n"),
@@ -618,7 +619,7 @@ func Rows(def *catalog.Table, src Source) []types.Row {
 					"relid": iv(int(tm.oid)), "indexrelid": iv(int(ix.oid)),
 					"schemaname": sv("public"), "relname": sv(tm.t.Name),
 					"indexrelname": sv(ix.name),
-					"idx_scan": i64(st.IdxScans), "idx_tup_read": i64(0), "idx_tup_fetch": i64(0),
+					"idx_scan":     i64(st.IdxScans), "idx_tup_read": i64(0), "idx_tup_fetch": i64(0),
 				}))
 			}
 		}

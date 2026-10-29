@@ -13,6 +13,17 @@ import (
 
 func tupleN(i int) []byte { return []byte(fmt.Sprintf(`{"id":%d}`, i)) }
 
+// newTestPages 开一个临时页文件（大字段文件跟着它一起建）。
+func newTestPages(t *testing.T) *tablePages {
+	t.Helper()
+	tp, err := openTablePages(filepath.Join(t.TempDir(), "t1.dat"), nil, 8)
+	if err != nil {
+		t.Fatalf("openTablePages: %v", err)
+	}
+	t.Cleanup(func() { _ = tp.close() })
+	return tp
+}
+
 func TestTablePagesRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t1.dat")
 	tp, err := openTablePages(path, nil, 8)
@@ -368,7 +379,8 @@ func TestTupleBinaryIsCompact(t *testing.T) {
 		types.Time(time.Date(2019, 3, 11, 0, 0, 0, 0, time.Local)),
 		types.Bool(true),
 	}
-	bin, err := encodeRowTuple(row)
+	tp := newTestPages(t)
+	bin, err := tp.encodeRowTuple(row)
 	if err != nil {
 		t.Fatalf("encodeRowTuple: %v", err)
 	}

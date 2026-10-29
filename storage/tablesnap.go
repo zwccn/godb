@@ -147,13 +147,18 @@ func InstallTableSnap(dir string, id int64, data []byte) (int64, error) {
 
 	puts := make([]pendingRow, 0, len(rows))
 	for i, r := range rows {
-		tuple, err := encodeRowTuple(r)
+		tuple, err := tp.encodeRowTuple(r)
 		if err != nil {
 			return 0, err
 		}
 		puts = append(puts, pendingRow{slot: i, tuple: tuple})
 	}
 	if _, err := tp.putBatch(puts); err != nil {
+		return 0, err
+	}
+	// 编码行时超长文本已经追加进大字段文件了，写页之前必须先落盘
+	// （和 checkpoint 里的规则一样：页里存的是偏移）。
+	if err := tp.lobSync(); err != nil {
 		return 0, err
 	}
 	n, err := tp.checkpoint()
@@ -229,6 +234,10 @@ func removeTableSnap(dir string, id int64) error {
 func removeTablePages(dir string, id int64) error {
 	err := os.Remove(tablePagePath(dir, id))
 	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// 大字段文件（t<6位ID>.lob）一起删：它是表数据的一部分，留下就是垃圾。
+	if err := os.Remove(lobPathOf(tablePagePath(dir, id))); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	// 索引文件（每个索引一个：i<6位ID>.<hash>.idx）一起删掉，否则 DROP 之后

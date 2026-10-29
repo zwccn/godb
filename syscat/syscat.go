@@ -779,6 +779,9 @@ func IsSystem(schema, name string) bool {
 type Source struct {
 	Cat   *catalog.Catalog
 	Count func(table string) int
+	// Pages 返回 (数据页数, 索引页数)：pg_class.relpages 用它。
+	// 取的是「上次落盘时」的数字（存在 meta.json 里），所以不用加载表。
+	Pages func(table string) (int, int)
 
 	// Current 是当前连接的库名，All 是可连接的库名（已排序、含 Current）。
 	// 两者都为空时按单库模式处理：只报 DefaultDatabaseName。
@@ -821,6 +824,21 @@ func (s Source) tables() []*catalog.Table {
 		return nil
 	}
 	return s.Cat.Tables
+}
+
+// pagesOf 返回某张表的数据页数 / 索引页数（拿不到就当 1 页，和以前一样）。
+func (s Source) pagesOf(t string) (int, int) {
+	if s.Pages == nil {
+		return 1, 1
+	}
+	d, i := s.Pages(t)
+	if d <= 0 {
+		d = 1
+	}
+	if i <= 0 {
+		i = 1
+	}
+	return d, i
 }
 
 func (s Source) rowsOf(t string) int64 {

@@ -39,15 +39,22 @@ type Options struct {
 	BufferPoolPages int
 }
 
-// execVacuum 处理 VACUUM [table]。
+// execVacuum 处理 VACUUM [FULL] [table]。
 //
-// 整理页内空洞 + 回收尾部空页，**不动 RID**（索引里存的就是槽位号）。
-// 和 PostgreSQL 一样不能在事务块里跑：它改的是磁盘上的页，回滚不了。
+// 两种档位：
+//   - `VACUUM`：页内整理 + 摘文件尾部的空页，**不动 RID**（索引里存的就是槽位号）。
+//   - `VACUUM FULL`：整份重写表数据（新堆页 + 新大字段文件，原子换上去）。
+//     大字段是追加写的，UPDATE 留下的旧正文只能靠它回收。
+//
+// 和 PostgreSQL 一样不能在事务块里跑：它改的是磁盘上的文件，回滚不了。
 func (d *DB) execVacuum(sess *txn.Session, v *sql.Vacuum) (*exec.Result, error) {
 	if sess.InTx() {
 		return nil, fmt.Errorf("VACUUM cannot run inside a transaction block")
 	}
 	start := hrtime.Now()
+	if v.Full {
+		return d.execVacuumFull(v)
+	}
 	reps, err := d.Store.Vacuum(v.Table)
 	if err != nil {
 		return nil, err
@@ -61,17 +68,66 @@ func (d *DB) execVacuum(sess *txn.Session, v *sql.Vacuum) (*exec.Result, error) 
 			{Name: "pages_reclaimed", Type: "bigint"},
 			{Name: "pages", Type: "bigint"},
 			{Name: "bytes", Type: "bigint"},
+			{Name: "lob_bytes", Type: "bigint"},
+			{Name: "lob_live", Type: "bigint"},
 		},
 		TookNs: hrtime.Since(start),
 	}
 	for _, r := range reps {
 		res.Rows = append(res.Rows, []interface{}{
 			r.Table, int64(r.Compacted), int64(r.Reclaimed), int64(r.Pages), r.Bytes,
+			r.LobBytes, r.LobLive,
 		})
 	}
 	res.RowCount = len(res.Rows)
 	if len(res.Rows) == 0 {
 		res.Message = "没有需要整理的表（都没落过盘）"
+	}
+	return res, nil
+}
+
+// execVacuumFull 处理 VACUUM FULL：整份重写表数据。
+func (d *DB) execVacuumFull(v *sql.Vacuum) (*exec.Result, error) {
+	start := hrtime.Now()
+	var targets []*catalog.Table
+	if v.Table == "" {
+		targets = append(targets, d.Store.Cat.Tables...)
+	} else {
+		t, ok := d.Store.Cat.Get(v.Table)
+		if !ok {
+			return nil, fmt.Errorf("relation %q does not exist", v.Table)
+		}
+		targets = append(targets, t)
+	}
+	res := &exec.Result{
+		Command: "VACUUM",
+		Tag:     "VACUUM",
+		Columns: []exec.Column{
+			{Name: "table", Type: "text"},
+			{Name: "rows", Type: "bigint"},
+			{Name: "pages_before", Type: "bigint"},
+			{Name: "pages_after", Type: "bigint"},
+			{Name: "bytes_before", Type: "bigint"},
+			{Name: "bytes_after", Type: "bigint"},
+			{Name: "lob_before", Type: "bigint"},
+			{Name: "lob_after", Type: "bigint"},
+		},
+		TookNs: hrtime.Since(start),
+	}
+	for _, t := range targets {
+		rep, err := d.Store.FullVacuum(t)
+		if err != nil {
+			return nil, err
+		}
+		res.Rows = append(res.Rows, []interface{}{
+			rep.Table, int64(rep.Rows),
+			int64(rep.PagesBefore), int64(rep.PagesAfter),
+			rep.BytesBefore, rep.BytesAfter, rep.LobBefore, rep.LobAfter,
+		})
+	}
+	res.RowCount = len(res.Rows)
+	if len(res.Rows) == 0 {
+		res.Message = "没有可重写的表"
 	}
 	return res, nil
 }

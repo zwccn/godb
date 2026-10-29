@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"sort"
 )
 
@@ -59,6 +60,13 @@ func (t *btree) PageStats() (pages, height int, entries int64) {
 // Insert 插入一个 (key, slot)。允许重复键（非唯一索引）。
 func (t *btree) Insert(key string, slot int) {
 	if !t.valid() {
+		return
+	}
+	// 键长超过半页：insertAt 永远失败 → 分裂 → 再失败 → 无限分裂（实测会挂死）。
+	// 这里直接拦掉并记错，不让它把索引写坏。真正该拦住它的是提交路径上的
+	// CheckIndexKeys（那里能给用户一句人话）；这一层只是最后一道闸。
+	if len(key) > idxMaxKeyLen {
+		t.f.setErr(fmt.Errorf("storage: 索引键长 %d 字节，超过一页能容纳的上限 %d", len(key), idxMaxKeyLen))
 		return
 	}
 	up, right, err := t.insert(t.f.root, []byte(key), uint32(slot))
@@ -784,6 +792,14 @@ func (t *btree) Build(pairs []idxPair) error {
 		return nil
 	}
 	for _, pr := range pairs {
+		if len(pr.Key) > idxMaxKeyLen {
+			// 构建到一半才发现超长：这棵索引已经不可信了，标记成「下次重建」，
+			// 并把错误交给调用方（日志里要能看到）。
+			t.f.fresh = true
+			err := fmt.Errorf("storage: 索引键长 %d 字节，超过一页能容纳的上限 %d", len(pr.Key), idxMaxKeyLen)
+			t.f.setErr(err)
+			return err
+		}
 		kb := []byte(pr.Key)
 		for {
 			if cur == nil {

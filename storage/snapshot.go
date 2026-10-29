@@ -34,6 +34,11 @@ type metaInfo struct {
 type metaTable struct {
 	ID   int64 `json:"id"`
 	Rows int   `json:"rows"`
+	// Pages / IdxPages 是「上次落盘时这张表占了多少个 8KB 页」。
+	// pg_class.relpages 要它：客户端（Navicat 的表大小、监控面板）都看这个数，
+	// 而从 meta 读不用把表整个加载进来。
+	Pages    int `json:"pages,omitempty"`
+	IdxPages int `json:"idx_pages,omitempty"`
 	// Idx 记「每个索引文件写的是哪一代」（索引身份 → 代次）。
 	//
 	// 索引不写 WAL，所以「索引和堆是不是一致」只能靠这个数字判断：
@@ -133,6 +138,12 @@ func (s *Store) loadSnapshot() error {
 		}
 		s.hasSnap[key] = true
 		s.tableRows[key] = mt.Rows
+		if mt.Pages > 0 {
+			s.tablePages[key] = mt.Pages
+		}
+		if mt.IdxPages > 0 {
+			s.tableIdxPages[key] = mt.IdxPages
+		}
 		if len(mt.Idx) > 0 {
 			s.idxGen[key] = mt.Idx
 		}
@@ -281,6 +292,10 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 		s.tableGen[key] = gen
 		if td := s.Data[key]; td != nil {
 			s.tableRows[key] = td.Live
+			if td.pages != nil {
+				s.tablePages[key] = int(td.pages.pageCount())
+			}
+			s.tableIdxPages[key] = td.IndexPages()
 		}
 	}
 	s.cleanupOrphanFiles()
@@ -312,7 +327,8 @@ func (s *Store) metaTablesLocked() map[string]metaTable {
 		if td := s.Data[key]; td != nil && s.loaded[key] {
 			rows = td.Live
 		}
-		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key]}
+		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key],
+			Pages: s.tablePages[key], IdxPages: s.tableIdxPages[key]}
 	}
 	s.loadMu.RUnlock()
 	return tables
@@ -331,11 +347,14 @@ func (s *Store) cleanupOrphanFiles() {
 	for _, de := range files {
 		var id int64
 		name := de.Name()
-		// t<6位ID>.dat（堆页）/ t<6位ID>.snp（旧版快照）/ i<6位ID>.<hash>.idx（索引页）
+		// t<6位ID>.dat（堆页）/ t<6位ID>.lob（大字段）/ t<6位ID>.snp（旧版快照）
+		// / i<6位ID>.<hash>.idx（索引页）
 		if _, err := fmt.Sscanf(name, "t%d.dat", &id); err != nil {
-			if _, err := fmt.Sscanf(name, "t%d.snp", &id); err != nil {
-				if _, err := fmt.Sscanf(name, "i%d.", &id); err != nil {
-					continue
+			if _, err := fmt.Sscanf(name, "t%d.lob", &id); err != nil {
+				if _, err := fmt.Sscanf(name, "t%d.snp", &id); err != nil {
+					if _, err := fmt.Sscanf(name, "i%d.", &id); err != nil {
+						continue
+					}
 				}
 			}
 		}

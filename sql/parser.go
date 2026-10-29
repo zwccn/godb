@@ -194,6 +194,14 @@ func (p *parser) parseStatement() (Statement, error) {
 		for p.peek().Kind == Word {
 			w := strings.ToUpper(p.peek().Text)
 			if w == "FULL" || w == "FREEZE" || w == "VERBOSE" || w == "ANALYZE" {
+				// FULL 要记住（它决定是「页内整理」还是「整份重写」）；
+				// ANALYZE 只记住、不起作用；FREEZE/VERBOSE 直接忽略。
+				switch w {
+				case "FULL":
+					v.Full = true
+				case "ANALYZE":
+					v.Analyze = true
+				}
 				p.pos++
 				continue
 			}

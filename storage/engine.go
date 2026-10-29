@@ -42,14 +42,16 @@ type Store struct {
 	txSeq atomic.Int64
 
 	// 分表快照的状态。key 一律是 cleanName(表名)。
-	tableGen  map[string]int64 // 该表的数据文件已包含到哪个 WAL 代次
-	tableRows map[string]int   // 该表文件里的行数（未加载时用它回答行数查询）
-	hasSnap   map[string]bool  // 是否已经有数据文件
-	dirty     map[string]bool  // 上一次 checkpoint 之后有没有改动
-	loaded    map[string]bool  // 行是否已经在内存里
-	metaGen   int64
-	snapBytes int64
-	loadMu    sync.RWMutex
+	tableGen      map[string]int64 // 该表的数据文件已包含到哪个 WAL 代次
+	tableRows     map[string]int   // 该表文件里的行数（未加载时用它回答行数查询）
+	tablePages    map[string]int   // 该表数据文件占了多少页（pg_class.relpages）
+	tableIdxPages map[string]int   // 该表所有索引加起来占了多少页
+	hasSnap       map[string]bool  // 是否已经有数据文件
+	dirty         map[string]bool  // 上一次 checkpoint 之后有没有改动
+	loaded        map[string]bool  // 行是否已经在内存里
+	metaGen       int64
+	snapBytes     int64
+	loadMu        sync.RWMutex
 	// loadErr 记录读取表文件时的错误（不为 nil 时启动日志会提示）。
 	loadErr error
 
@@ -126,19 +128,21 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		return nil, err
 	}
 	s := &Store{
-		Dir:       dir,
-		Cat:       cat,
-		Budget:    newMemBudget(poolPages),
-		Data:      map[string]*TableData{},
-		tableGen:  map[string]int64{},
-		tableRows: map[string]int{},
-		hasSnap:   map[string]bool{},
-		dirty:     map[string]bool{},
-		dirtyRows: map[string]int64{},
-		loaded:    map[string]bool{},
-		idxGen:    map[string]map[string]int64{},
-		cpRing:    newLatRing(cpSampleCap),
-		cpReasons: map[string]int64{},
+		Dir:           dir,
+		Cat:           cat,
+		Budget:        newMemBudget(poolPages),
+		Data:          map[string]*TableData{},
+		tableGen:      map[string]int64{},
+		tableRows:     map[string]int{},
+		tablePages:    map[string]int{},
+		tableIdxPages: map[string]int{},
+		hasSnap:       map[string]bool{},
+		dirty:         map[string]bool{},
+		dirtyRows:     map[string]int64{},
+		loaded:        map[string]bool{},
+		idxGen:        map[string]map[string]int64{},
+		cpRing:        newLatRing(cpSampleCap),
+		cpReasons:     map[string]int64{},
 	}
 	for _, t := range cat.Tables {
 		s.Data[cleanName(t.Name)] = newTableData(t.Name)
@@ -146,6 +150,9 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 	if progress != nil {
 		progress("载入表快照")
 	}
+	// 先把「重写到一半」的表收尾（.new 文件 + 标记），再读元数据：
+	// 否则会读到只换了一个文件的不一致状态。
+	finishPendingSwaps(dir)
 	if err := s.loadSnapshot(); err != nil {
 		return nil, err
 	}
@@ -380,6 +387,8 @@ func (s *Store) DropTable(name string) {
 	delete(s.loaded, key)
 	delete(s.tableGen, key)
 	delete(s.tableRows, key)
+	delete(s.tablePages, key)
+	delete(s.tableIdxPages, key)
 	delete(s.hasSnap, key)
 	delete(s.dirty, key)
 }
@@ -489,6 +498,20 @@ func (s *Store) RowCount(name string) int {
 		return 0
 	}
 	return s.tableRows[key]
+}
+
+// PageCount 返回「上次落盘时」这张表的数据页数和索引页数（pg_class.relpages 用）。
+// 和 RowCount 一样：没加载的表也能回答，不需要把表拉进内存。
+func (s *Store) PageCount(name string) (data, idx int) {
+	key := cleanName(name)
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	if s.loaded[key] {
+		if td := s.Data[key]; td != nil && td.pages != nil {
+			return int(td.pages.pageCount()), td.IndexPages()
+		}
+	}
+	return s.tablePages[key], s.tableIdxPages[key]
 }
 
 // Begin 开启一个事务。事务 ID 原子自增，可并发调用。
@@ -1702,12 +1725,24 @@ func (tx *Tx) commitLocked() (int64, error) {
 	// 语句（纯 SELECT nextval()）不会进 tx.ov，需要在循环外补一条 change，
 	// 否则计数器既不更新也不落盘 —— 表现为 nextval 每次都返回同一个值。
 	covered := make(map[string]bool, len(names))
+	// 提交失败（索引键超长 / WAL 写不进去）要把已经发出去的槽位还回去，
+	// 否则这些槽位既不在 free 里、也没有行，永久漏掉。
+	releaseSlots := func() {
+		for _, c := range changes {
+			if td := tx.st.Table(c.table); td != nil {
+				for i := len(c.insSlots) - 1; i >= 0; i-- {
+					td.release(c.insSlots[i])
+				}
+			}
+		}
+	}
 	for _, name := range names {
 		o := tx.ov[name]
 		td := tx.st.Table(name)
 		if td == nil {
 			return 0, fmt.Errorf("relation %q does not exist", name)
 		}
+		t, _ := tx.st.Cat.Get(td.Name)
 		c := &change{table: name}
 		covered[name] = true
 		// 只遍历写集，不再扫全表：这是「提交成本与表大小无关」的关键。
@@ -1738,6 +1773,10 @@ func (tx *Tx) commitLocked() (int64, error) {
 					continue
 				}
 				nr := o.upd[slot]
+				if err := td.CheckIndexKeys(t, nr); err != nil {
+					releaseSlots()
+					return 0, err
+				}
 				recs = append(recs, walRec{Tx: tx.ID, Op: opUpd, Table: td.Name, Slot: slot, Old: old, New: nr})
 				c.upd = append(c.upd, slot)
 				c.updRows = append(c.updRows, nr)
@@ -1749,6 +1788,10 @@ func (tx *Tx) commitLocked() (int64, error) {
 			}
 			if nr, ok := o.insUpd[i]; ok {
 				row = nr
+			}
+			if err := td.CheckIndexKeys(t, row); err != nil {
+				releaseSlots()
+				return 0, err
 			}
 			// 槽位在这里就定下来（而不是留到应用阶段）：WAL 记录要带 RID，
 			// 重放才能「往同一个槽位赋值」，从而幂等 —— 页刷盘与 meta 代次
@@ -1786,13 +1829,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 		if err != nil {
 			// 槽位已经分配出去了，WAL 写不进去就得还回去，
 			// 否则这些槽位既不在 free 里、也没有行，永久漏掉。
-			for _, c := range changes {
-				if td := tx.st.Table(c.table); td != nil {
-					for i := len(c.insSlots) - 1; i >= 0; i-- {
-						td.release(c.insSlots[i])
-					}
-				}
-			}
+			releaseSlots()
 			return 0, err
 		}
 		seq = s
@@ -1859,7 +1896,12 @@ func (tx *Tx) commitLocked() (int64, error) {
 		}
 		// 整表清空（TRUNCATE / 全表 DELETE）后把槽位数组一起放掉：
 		// 否则空数组会一直占着 len(Rows) 那么大的指针空间，扫描也白跑一遍。
-		if td.Live == 0 && len(td.rows) > 0 {
+		//
+		// 判据用「这次真删了东西」（c.dirty）+「现在一行不剩」，不能再用
+		// len(td.rows) > 0 —— `release` 在「删的正好是数组末尾那一槽」时会把
+		// td.rows 直接截短，只删单行表的时候数组已经是 len 0，整表清空的分支
+		// 反而永远进不去（页文件和大字段都留了下来）。
+		if td.Live == 0 && c.dirty > 0 {
 			td.rows = nil
 			td.free = nil
 			td.gone = nil

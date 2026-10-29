@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -109,9 +110,9 @@ func (td *TableData) attachPages(dir string, id int64, t *catalog.Table, budget 
 	if td.pages != nil {
 		return nil
 	}
-	if td.dir == dir && td.id == id {
-		return nil
-	}
+	// 注意这里**不能**再按「dir/id 没变」提前返回：closePages 之后
+	// td.pages 是 nil 而 dir/id 还在，那种情况恰恰需要重新打开文件
+	// （VACUUM FULL 换完文件就是这样挂回来的）。
 	tp, err := openTablePages(tablePagePath(dir, id), budget, defaultPoolPages)
 	if err != nil {
 		return err
@@ -255,7 +256,7 @@ func (td *TableData) rowAt(slot int) (types.Row, bool) {
 	if !ok {
 		return nil, false
 	}
-	row, _, err := decodeRowTuple(tuple, td.tbl)
+	row, _, err := td.pages.decodeRowTuple(tuple, td.tbl)
 	if err != nil {
 		return nil, false
 	}
@@ -281,7 +282,7 @@ func (td *TableData) materializePage(page uint32) {
 		if slot < len(td.gone) && td.gone[slot] {
 			return nil
 		}
-		row, _, err := decodeRowTuple(tuple, td.tbl)
+		row, _, err := td.pages.decodeRowTuple(tuple, td.tbl)
 		if err != nil {
 			return nil
 		}
@@ -420,7 +421,7 @@ func (td *TableData) drainPending() ([]int, []pendingRow, error) {
 			dels = append(dels, slot)
 			continue
 		}
-		tuple, err := encodeRowTuple(row)
+		tuple, err := td.pages.encodeRowTuple(row)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -463,6 +464,15 @@ func (td *TableData) pageStage() ([]pageImage, error) {
 	if len(dels) == 0 && len(puts) == 0 {
 		td.clearPending()
 		return nil, nil
+	}
+	// drainPending 里编码行的时候，超长文本已经追加进大字段文件了。
+	// 必须在**写堆页之前**把它 fsync 下去：页里存的是偏移，大字段还没落盘
+	// 就写页 = 断电之后指针指向一段空洞（页和日志都没法救）。
+	//
+	// 反过来「先落大字段、后写页」是安全的：大字段多出来的只是没人引用的
+	// 孤儿数据，下次 VACUUM 会清掉。
+	if err := td.pages.lobSync(); err != nil {
+		return nil, err
 	}
 	fpis, err := td.pages.write(dels, puts)
 	if err != nil {
@@ -797,6 +807,91 @@ func (td *TableData) RebuildUniqueKeys(t *catalog.Table) {
 		}
 		tree.Build(td.collectPairs(g))
 	}
+}
+
+// CheckIndexKeys 校验一行的索引键「放得进索引页」。
+//
+// 索引键 = OrderKey(索引列)，一个键最多占 8KB 页的一半（少了就没法分裂）。
+// 以前行本身最大 4KB，这个上限几乎撞不到；大字段进来之后文本可以是 1MB，
+// 而索引键仍要整段塞进页里 —— 撞上了必须**当场拒绝**。
+//
+// 不拒绝会怎样：insertAt 失败 → 分裂 → 还是失败 → 条目悄悄丢掉，
+// 索引就和表不一致了（不报错，只是某些查询查不到行）。宁可不给插。
+//
+// 判据看的是 **catalog 里的索引定义**，不是运行时的树：提交路径上
+// `attachPages`（它才会把索引文件打开、填 td.second）排在写集收集之后，
+// 这时 td.second 还是空的 —— 按运行时结构判会漏掉刚 CREATE INDEX 的表。
+func (td *TableData) CheckIndexKeys(t *catalog.Table, row types.Row) error {
+	if t == nil || row == nil {
+		return nil
+	}
+	// 快路径：行里没有「大值」就不可能超键长（OrderKey 最坏也才翻一倍）
+	long := false
+	for _, v := range row {
+		if valueSize(v) > idxMaxKeyLen/4 {
+			long = true
+			break
+		}
+	}
+	if !long {
+		return nil
+	}
+	check := func(cols []int, name string) error {
+		if len(cols) == 0 {
+			return nil
+		}
+		k, ok := OrderKeyOfRow(row, cols)
+		if !ok || len(k) <= idxMaxKeyLen {
+			return nil
+		}
+		return fmt.Errorf("index row size %d exceeds maximum %d for index %q", len(k), idxMaxKeyLen, name)
+	}
+	if err := check(t.PKIdxes(), "primary key"); err != nil {
+		return err
+	}
+	names, colsOf := secondIndexCols(t)
+	for j, n := range names {
+		if err := check(colsOf[j], n); err != nil {
+			return err
+		}
+	}
+	if pk := t.PKIdxes(); len(pk) > 0 {
+		for _, g := range t.UniqueGroups() {
+			if sameCols(g, pk) {
+				continue // 主键那一组上面已经看过
+			}
+			if err := check(g, "unique"); err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, g := range t.UniqueGroups() {
+			if err := check(g, "unique"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// CheckIndexKeyLen 检查表里**已有的行**能不能塞进某组列的索引键。
+// CREATE INDEX 之前用它把「数据本来就不合法」的情况挡在门外。
+func (td *TableData) CheckIndexKeyLen(t *catalog.Table, cols []int, name string) error {
+	if td == nil || t == nil || len(cols) == 0 {
+		return nil
+	}
+	for i := 0; i < td.SlotCount(); i++ {
+		r, ok := td.rowAt(i)
+		if !ok {
+			continue
+		}
+		k, ok := OrderKeyOfRow(r, cols)
+		if !ok || len(k) <= idxMaxKeyLen {
+			continue
+		}
+		return fmt.Errorf("index row size %d exceeds maximum %d for index %q", len(k), idxMaxKeyLen, name)
+	}
+	return nil
 }
 
 // ---------- 索引的增量维护 ----------

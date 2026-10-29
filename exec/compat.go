@@ -95,6 +95,7 @@ func (p *Planner) virtualTable(schema, name, qual string) (Operator, Schema, boo
 	if p.Tx != nil {
 		if st := p.Tx.Store(); st != nil {
 			src.Count = func(t string) int { return st.RowCount(t) }
+			src.Pages = func(t string) (int, int) { return st.PageCount(t) }
 		}
 	}
 	if qual == "" {

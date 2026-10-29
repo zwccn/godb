@@ -556,12 +556,13 @@ SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">诊断与维护</div>
           <div class="help-lv-desc">看计划、看落盘、看系统目录；<code>EXPLAIN ANALYZE</code> 会真的执行并给出每步行数与耗时。</div>
-          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>VACUUM [表]</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span><span>监控 <code>pg_stat_database</code> / <code>pg_stat_user_tables</code> / <code>pg_stat_user_indexes</code> / <code>pg_stats</code></span></div>
+          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>VACUUM [表]</code></span><span><code>VACUUM FULL [表]</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span><span>监控 <code>pg_stat_database</code> / <code>pg_stat_user_tables</code> / <code>pg_stat_user_indexes</code> / <code>pg_stats</code></span></div>
           <pre class="help-code">EXPLAIN ANALYZE SELECT * FROM employees WHERE dept_id = 1;
 SHOW server_version;
 ANALYZE;
 CHECKPOINT;
-VACUUM employees;   -- 整理页内空洞、回收尾部空页
+VACUUM employees;        -- 整理页内空洞、回收尾部空页（不动大字段）
+VACUUM FULL employees;   -- 整份重写：连大字段里 UPDATE 留下的旧正文一起收掉
 SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
         </div>
       </div>

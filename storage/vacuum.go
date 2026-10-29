@@ -20,6 +20,10 @@ type VacuumReport struct {
 	Bytes int64
 	// IndexesRebuilt 是顺手重建的索引个数（空叶占比过阈值时才会做）。
 	IndexesRebuilt int
+	// LobBytes 是大字段文件的字节数，LobLive 是其中**还被行引用**的部分。
+	// 两者差得越多，越该跑 VACUUM FULL（追加写留下的旧正文只能靠重写回收）。
+	LobBytes int64
+	LobLive  int64
 }
 
 // Vacuum 整理表数据：页内空洞回收 + 尾部空页回收。
@@ -116,6 +120,13 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 			log.Printf("表 %s：索引空叶过多，已顺手重建（%d 个）", t.Name, rep.IndexesRebuilt)
 		}
 		rep.Reclaimed = int(rec)
+		// 大字段：追加写会留下大量没人引用的旧正文，这里只统计（不动文件）——
+		// 回收要走 VACUUM FULL（整份重写，见 rewrite.go）。
+		if lp := td.pages.lobPath(); lp != "" {
+			if rep.LobBytes = statSize(lp); rep.LobBytes > 0 {
+				rep.LobLive, _ = td.pages.lobUsage()
+			}
+		}
 
 		// 6) 整理后的统计（文件大小要重新 stat，写盘之后才准）
 		rep.Pages = int(td.pages.pf.pageCount())

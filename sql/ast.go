@@ -62,10 +62,10 @@ type FKDef struct {
 
 // CreateIndex 对应 CREATE [UNIQUE] INDEX name ON table (cols)。
 type CreateIndex struct {
-	Name       string
-	Table      string
-	Cols       []string
-	Unique     bool
+	Name        string
+	Table       string
+	Cols        []string
+	Unique      bool
 	IfNotExists bool
 }
 
@@ -128,7 +128,13 @@ type Checkpoint struct{}
 
 // Vacuum 对应 VACUUM [table]：整理页内空洞、回收尾部空页。
 // Table 为空表示「所有已加载的表」。
-type Vacuum struct{ Table string }
+type Vacuum struct {
+	Table string
+	// Full 表示 VACUUM FULL：整份重写表数据（大字段文件也只留活数据）。
+	Full bool
+	// Analyze 是 VACUUM ANALYZE 里的那一半，认识但没有统计信息可收集。
+	Analyze bool
+}
 
 // Analyze 对应 ANALYZE [table, ...]：godb 没有统计信息，识别后直接成功。
 type Analyze struct{}

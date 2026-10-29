@@ -49,6 +49,10 @@ type tablePages struct {
 	// 中间页被删出来的空洞永远用不上（表文件只涨不缩）。
 	fm *freeMap
 
+	// lob 是大字段文件（一张表一个，纯追加写）。超过 lobThreshold 的文本
+	// 存在这里，行里只留一个 12 字节的指针 —— 大字段不进页、不进缓冲池。
+	lob *lobFile
+
 	// fpi 记录「自上次 checkpoint 以来，这一页有没有写过全页镜像」。
 	// 防页撕裂：8KB 落盘不是原子的（可能只写了前 4KB 就断电），CRC 只能**发现**
 	// 坏页、修不回来。所以每页在一次 checkpoint 之后**第一次**被改时，把整页
@@ -72,6 +76,12 @@ type tablePages struct {
 // openTablePages 打开一张表的页文件。budget 为 nil 表示不参与全局预算
 // （离线工具：备份导入时用一个固定大小的临时池）。
 func openTablePages(path string, budget *memBudget, poolPages int) (*tablePages, error) {
+	return openTablePagesAt(path, lobPathOf(path), budget, poolPages)
+}
+
+// openTablePagesAt 用指定的页文件路径 + 大字段路径打开（VACUUM FULL 重写时，
+// 新大字段文件叫 tXXXXXX.lob.new，不是从页文件名推出来的那个）。
+func openTablePagesAt(path, lobPath string, budget *memBudget, poolPages int) (*tablePages, error) {
 	// 全新库第一次写表时 tables/ 目录还不存在，先建出来
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -88,6 +98,7 @@ func openTablePages(path string, budget *memBudget, poolPages int) (*tablePages,
 		hi:     pf.pageCount(),
 		fm:     newFreeMap(),
 		fpi:    make(map[uint32]bool),
+		lob:    newLobFile(lobPath),
 	}
 	tp.raLast.Store(noPage)
 	// 池淘汰一页 → 通知上层（TableData 把这一页上的行从内存里放掉）
@@ -536,6 +547,99 @@ func (tp *tablePages) findPage(size int) (uint32, bool, error) {
 	return tp.hi, true, nil // 新页
 }
 
+// readLobRef 读一个「指向大字段的指针」，返回真正的文本值。
+func (tp *tablePages) readLobRef(tuple []byte, off int) (types.Value, int, error) {
+	if off+lobRefSize > len(tuple) {
+		return types.Null, off, fmt.Errorf("大字段指针越界")
+	}
+	o := int64(binary.LittleEndian.Uint64(tuple[off+1:]))
+	n := int(binary.LittleEndian.Uint32(tuple[off+9:]))
+	data, err := tp.lob.read(o, n)
+	if err != nil {
+		return types.Null, off, err
+	}
+	return types.Text(string(data)), off + lobRefSize, nil
+}
+
+// lobSync 把大字段刷盘。checkpoint 必须在「写堆页」之前调它：
+// 页里存的是偏移，大字段没落盘就写页 = 崩了之后指针指向空洞。
+func (tp *tablePages) lobSync() error { return tp.lob.sync() }
+
+// lobBytes 返回大字段文件的大小（监控用）。
+func (tp *tablePages) lobBytes() int64 { return tp.lob.size() }
+
+// lobPath 返回大字段文件的路径。
+func (tp *tablePages) lobPath() string { return tp.lob.path }
+
+// skipValue 按 tag 跳过值，不构造 types.Value（扫全表找大字段指针时用，
+// 避免为每个文本值分配一次字符串）。
+func skipValue(b []byte, off int) (int, error) {
+	if off >= len(b) {
+		return off, fmt.Errorf("值编码越界")
+	}
+	switch b[off] {
+	case tagNull:
+		return off + 1, nil
+	case tagInt, tagFloat:
+		return off + 9, nil
+	case tagBool:
+		return off + 2, nil
+	case tagText, tagDecimal:
+		if off+5 > len(b) {
+			return off, fmt.Errorf("值长度越界")
+		}
+		n := int(binary.LittleEndian.Uint32(b[off+1:]))
+		return off + 5 + n, nil
+	case tagTime:
+		return off + 13, nil
+	case tagLOB:
+		return off + lobRefSize, nil
+	}
+	return off, fmt.Errorf("未知的值 tag %d", b[off])
+}
+
+// lobUsage 扫一遍所有页，统计「还活着的大字段字节数」和引用个数。
+// VACUUM 用它算出「文件里有多少是垃圾」。
+func (tp *tablePages) lobUsage() (live int64, refs int) {
+	n := tp.pf.pageCount()
+	for page := uint32(0); page < n; page++ {
+		f, err := tp.fetch(page)
+		if err != nil {
+			continue
+		}
+		f.latch.RLock()
+		p, err := decodeOrInitPage(f.data, page)
+		if err == nil {
+			for i := range p.slots {
+				if p.slots[i].len == 0 {
+					continue
+				}
+				off := int(p.slots[i].off)
+				tuple := p.buf[off : off+int(p.slots[i].len)]
+				if len(tuple) < 4 {
+					continue
+				}
+				cols := int(binary.LittleEndian.Uint32(tuple))
+				pos := 4
+				for c := 0; c < cols; c++ {
+					if pos < len(tuple) && tuple[pos] == tagLOB {
+						live += int64(binary.LittleEndian.Uint32(tuple[pos+9:]))
+						refs++
+					}
+					next, err := skipValue(tuple, pos)
+					if err != nil || next <= pos || next > len(tuple) {
+						break
+					}
+					pos = next
+				}
+			}
+		}
+		f.latch.RUnlock()
+		tp.pool.unpin(f, false)
+	}
+	return live, refs
+}
+
 // loadRows 读全表，按 RID 放进槽位数组（空洞是 nil）。
 //
 // 这是「重启后内存槽位号 == 页里的 RID」的唯一保证：索引里存的是 RID，
@@ -544,7 +648,7 @@ func (tp *tablePages) loadRows(t *catalog.Table) ([]types.Row, int, error) {
 	var rows []types.Row
 	repaired := 0
 	err := tp.loadAll(func(slot int, tuple []byte) error {
-		row, rep, err := decodeRowTuple(tuple, t)
+		row, rep, err := tp.decodeRowTuple(tuple, t)
 		if err != nil {
 			return err
 		}
@@ -659,7 +763,8 @@ func (tp *tablePages) reset() error {
 	tp.nextPage = 0
 	tp.hi = 0
 	tp.raLast.Store(noPage)
-	return nil
+	// 表被清空，大字段也一起清掉（否则 TRUNCATE 之后文件还占着几百 MB）
+	return tp.lob.truncate()
 }
 
 // vacuumPages 逐页整理空洞（把删掉的行占的字节收回来），返回整理过的页数
@@ -755,7 +860,12 @@ func (tp *tablePages) reclaim() (uint32, error) {
 // close 关表：先刷脏页、把页框退回预算，再关文件。
 func (tp *tablePages) close() error {
 	tp.pool.closePool()
-	return tp.pf.close()
+	err := tp.pf.close()
+	// 大字段文件也要关（脏数据先刷）—— Windows 上留着句柄，临时目录都删不掉
+	if lerr := tp.lob.close(); err == nil {
+		err = lerr
+	}
+	return err
 }
 
 // ---- 行编解码 ----
@@ -770,9 +880,93 @@ func (tp *tablePages) close() error {
 // 兼容性照旧交给 castRow：页里存的是「写这一行时的列数和类型」，读的时候
 // 按当前表结构补齐/截断（ALTER TABLE 崩在中间留下的旧行也能读）。
 
-func encodeRowTuple(row types.Row) ([]byte, error) {
-	buf := make([]byte, 0, 8*len(row)+8)
-	buf = appendRow(buf, row)
+// valueSize 是一个值内联进行里要占多少字节（tag + 负载）。
+func valueSize(v types.Value) int {
+	switch v.K {
+	case types.KNull:
+		return 1
+	case types.KInt, types.KFloat:
+		return 9
+	case types.KBool:
+		return 2
+	case types.KTime:
+		return 13
+	case types.KText, types.KDecimal:
+		return 5 + len(v.S)
+	}
+	return 1
+}
+
+// encodeRowTuple 把一行编码成元组：**超过 lobThreshold 的文本搬去大字段文件**，
+// 行里只留一个指针。
+//
+// 为什么不是「一行超过 4KB 才外置」：页是 8KB，一行占 4KB 的话一页只放得下两行，
+// 页内整理的自由度就没了。所以阈值取 2KB —— 常见的「长文本」一开始就不进页，
+// 页里永远是紧凑的小行（顺带把缓存污染也挡住了：一个 1MB 的字段不会挤掉
+// 几十个页框）。
+//
+// 兜底：外置完所有文本还是超过 MaxTupleSize（比如 300 列、或者一个 4KB 的
+// 数值），才报错。这种情况确实没法存 —— 那已经不是「大字段」，是行设计问题。
+func (tp *tablePages) encodeRowTuple(row types.Row) ([]byte, error) {
+	total := 4
+	need := false
+	sizes := make([]int, len(row))
+	for i, v := range row {
+		s := valueSize(v)
+		sizes[i] = s
+		total += s
+		if v.K == types.KText && len(v.S) > lobThreshold {
+			need = true
+		}
+	}
+	// 快路径：整行都小，直接内联（不分配 sizes 之外的任何东西）
+	if !need && total <= MaxTupleSize {
+		return appendRow(make([]byte, 0, total), row), nil
+	}
+
+	out := make([]bool, len(row))
+	for i, v := range row {
+		if v.K == types.KText && len(v.S) > lobThreshold {
+			out[i] = true
+			total += lobRefSize - sizes[i]
+		}
+	}
+	// 还剩不下来就按长度降序继续外置（长的先走，搬得少、效果大）
+	if total > MaxTupleSize {
+		cand := make([]int, 0, len(row))
+		for i, v := range row {
+			if v.K == types.KText && len(v.S) > 0 && !out[i] {
+				cand = append(cand, i)
+			}
+		}
+		sort.Slice(cand, func(a, b int) bool { return len(row[cand[a]].S) > len(row[cand[b]].S) })
+		for _, i := range cand {
+			if total <= MaxTupleSize {
+				break
+			}
+			out[i] = true
+			total += lobRefSize - sizes[i]
+		}
+	}
+	if total > MaxTupleSize {
+		return nil, fmt.Errorf("%w（外置文本之后仍有 %d 字节，行里还有别的大列？）", errTupleTooLarge, total)
+	}
+
+	buf := make([]byte, 0, total)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(row)))
+	for i, v := range row {
+		if !out[i] {
+			buf = appendValue(buf, v)
+			continue
+		}
+		off, err := tp.lob.append([]byte(v.S))
+		if err != nil {
+			return nil, err
+		}
+		buf = append(buf, tagLOB)
+		buf = binary.LittleEndian.AppendUint64(buf, uint64(off))
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(v.S)))
+	}
 	if len(buf) > MaxTupleSize {
 		return nil, errTupleTooLarge
 	}
@@ -784,7 +978,7 @@ func encodeRowTuple(row types.Row) ([]byte, error) {
 // 直接解进目标 types.Row，不像以前那样先攒一个 []types.Value 再拷一遍：
 // 换出之后每一行都要走这条路，20 万行扫描光这个中间切片就是 20 万次分配
 // （profile 里 mallocgc + GC 占掉四分之一时间）。
-func decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
+func (tp *tablePages) decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
 	if len(tuple) < 4 {
 		return nil, 0, fmt.Errorf("行解码失败：行头越界")
 	}
@@ -801,7 +995,16 @@ func decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
 	}
 	off := 4
 	for i := 0; i < n; i++ {
-		v, next, err := readValue(tuple, off)
+		var (
+			v    types.Value
+			next int
+			err  error
+		)
+		if off < len(tuple) && tuple[off] == tagLOB {
+			v, next, err = tp.readLobRef(tuple, off)
+		} else {
+			v, next, err = readValue(tuple, off)
+		}
 		if err != nil {
 			return nil, 0, fmt.Errorf("行解码失败：%w", err)
 		}

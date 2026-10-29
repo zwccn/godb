@@ -844,6 +844,7 @@ func (t *btree) Build(pairs []idxPair) error {
 	}
 
 	// 内部层：自底向上
+	leafCount := uint32(len(level))
 	height := 1
 	for len(level) > 1 {
 		var up []nodeRef
@@ -874,6 +875,8 @@ func (t *btree) Build(pairs []idxPair) error {
 	t.f.root = level[0].page
 	t.f.height = uint16(height)
 	t.f.count = int64(len(pairs))
+	// 重建判断只看叶子页：内部页数量级小得多，混进来只会让阈值失真
+	t.f.nodes, t.f.emptyLeaves = leafCount, 0
 	t.f.headerDirty = true
 	return nil
 }

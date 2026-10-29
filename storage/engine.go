@@ -450,8 +450,12 @@ func (s *Store) RebuildIndex(name string) {
 	}
 }
 
-// rebuildAll 为已加载的表重建主键索引（未加载的表等它被读进来时再说，
-// 那时 ensureLoaded 之后不需要索引也能正确扫描，索引在首次写入前会重建）。
+// rebuildAll 为「重放 WAL 时被加载过」的表重建索引。
+//
+// 为什么要重建：重放只把行写回去（`applyRec`），不维护索引 —— 索引里那两条
+// 增量路径（IndexInsert/Delete）在重放下不幂等（同一条记录可能被放两遍，
+// 会插出重复条目）。所以重放过的表统一重建，干净启动（没有重放）时这个函数
+// 什么都不做：此时没有任何表被加载，索引文件按代次校验直接可用。
 func (s *Store) rebuildAll() {
 	for _, t := range s.Cat.Tables {
 		key := cleanName(t.Name)
@@ -463,6 +467,10 @@ func (s *Store) rebuildAll() {
 			td = newTableData(t.Name)
 			s.Data[key] = td
 			s.loaded[key] = true
+		}
+		if len(td.indexTrees) > 0 {
+			s.idxRebuilds.Add(1)
+			log.Printf("表 %s：重放了 WAL，索引按重放后的行重建（%d 个）", t.Name, len(td.indexTrees))
 		}
 		td.RebuildIndex(t)
 	}

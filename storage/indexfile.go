@@ -395,6 +395,8 @@ func (f *indexFile) verifyIntegrity() error {
 	}
 
 	total := int64(0)
+	leaves := uint32(0)
+	empty := uint32(0)
 	prevPage := idxNoPage
 	var prevKey []byte
 	for page != idxNoPage {
@@ -426,9 +428,17 @@ func (f *indexFile) verifyIntegrity() error {
 			return broke
 		}
 		total += int64(cnt)
+		leaves++
+		if cnt == 0 {
+			empty++
+		}
 		prevPage = page
 		page = nx
 	}
+	// 顺手把「页数 / 空叶数」的增量计数对齐到磁盘现状：不重置的话，重启之后
+	// nodes 从 0 开始，`NeedRebuild` 那条 `nodes <= 4` 的短路会让 VACUUM
+	// 永远不认为索引需要重建。
+	f.nodes, f.emptyLeaves = leaves, empty
 	if total != f.count {
 		return fmt.Errorf("storage: 索引条目数 %d，头页记的是 %d", total, f.count)
 	}

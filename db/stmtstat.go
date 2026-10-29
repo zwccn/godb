@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"godb/exec"
+	"godb/hrtime"
 )
 
 // 本文件按「语句结构」聚合执行统计，替代原来「存 256 条原始样本、取最慢 10 条」
@@ -230,20 +231,39 @@ type stmtPool struct {
 	slow    map[string]struct{} // 单次最慢名单（同时是淘汰豁免名单）
 	slowCut int64               // 名单满员时的门槛（第 100 名的 maxNs）
 	evicted int64
+	zeroNs  int64 // 读数为 0 的语句在累计里按这个值计
 }
 
 func newStmtPool() *stmtPool {
 	return &stmtPool{
-		m:    make(map[string]*stmtStat, stmtStatCap),
-		slow: make(map[string]struct{}, stmtKeepSlow),
+		m:      make(map[string]*stmtStat, stmtStatCap),
+		slow:   make(map[string]struct{}, stmtKeepSlow),
+		zeroNs: zeroFloor(),
 	}
+}
+
+// zeroFloor 是「计时读数为 0」的语句计入累计耗时的估计值：半个时钟步进。
+//
+// 读数为 0 只说明真实耗时落在 [0, 步进) 这个区间里，取中点是没有偏置的猜法。
+// 不这么做的话，一条每秒跑几千次、单次只有几十微秒的语句累计会一直显示 0 ——
+// 它明明吃掉了半个核，榜单却当它不存在。代价是这类极短语句的平均耗时偏高
+// （0.1ms 是估计值，不是测量值），面板上它们本来就显示成「<0.2 ms」。
+func zeroFloor() int64 {
+	g := int64(hrtime.Granularity())
+	if g <= 0 {
+		return 1
+	}
+	if half := g / 2; half > 0 {
+		return half
+	}
+	return 1
 }
 
 // add 记一次执行。
 //
 // took 可能是 0：hrtime 在本机只有 0.2ms 步进，跑得比它还快的语句测出来就是 0。
 // 这种语句照样要计次 —— 「执行总次数」是这一页的第二个核心数字，漏记会让
-// 高频短语句看起来只跑了几次。累计耗时按 0 累加（略小于真实值），
+// 高频短语句看起来只跑了几次。累计耗时按「半个时钟步进」估算计入（见 zeroFloor），
 // 最慢/最快只用非零样本，明细也不收 0（「最慢的 100 次」里塞一堆 0 没意义）。
 func (p *stmtPool) add(text string, tables []string, write bool, id string, res *exec.Result, now time.Time) {
 	took := res.TookNs
@@ -279,7 +299,11 @@ func (p *stmtPool) add(text string, tables []string, write bool, id string, res 
 	}
 
 	st.n++
-	st.totalNs += took
+	if took > 0 {
+		st.totalNs += took
+	} else {
+		st.totalNs += p.zeroNs // 测不出来的，按半个时钟步进估
+	}
 	if took > st.maxNs {
 		st.maxNs = took
 		p.touchSlowLocked(st)

@@ -184,6 +184,11 @@ func TestStmtPoolCountsZeroTook(t *testing.T) {
 	if got.MaxNs != 1000 || got.MinNs != 1000 {
 		t.Errorf("Max/Min = %d/%d，want 1000/1000（0 不该被当成最快）", got.MaxNs, got.MinNs)
 	}
+	// 累计里 0 耗时的那 10 次要按半个时钟步进估算计入，否则一条每秒几千次的
+	// 短语句累计一直是 0，等于在榜单上隐身。
+	if want := 10*p.zeroNs + 1000; got.TotalNs != want {
+		t.Errorf("TotalNs = %d，want %d（10 × 半个步进 + 1000）", got.TotalNs, want)
+	}
 	det, _, _ := p.detail(normKey("SELECT 1"))
 	if len(det) != 1 {
 		t.Errorf("明细里不该收 0 耗时的样本，实际 %d 条", len(det))

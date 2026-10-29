@@ -3,6 +3,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -312,6 +313,13 @@ func (s *Store) ensureLoadedLocked(key string) {
 		// 不重建就会「重启后第一次写入看不到已有行、重复主键被放过去」。
 		if len(td.indexTrees) > 0 {
 			s.idxRebuilds.Add(1)
+			why := "索引文件失效（代次/身份/校验不符）"
+			if repaired > 0 {
+				why = "行被修补过，键可能对不上"
+			} else if len(td.idxNeedRebuild) == 0 && td.pk != nil {
+				why = "索引条目数与行数不一致"
+			}
+			log.Printf("表 %s：%s，正在重建索引（%d 个）", t.Name, why, len(td.indexTrees))
 		}
 		td.RebuildIndex(t)
 	}

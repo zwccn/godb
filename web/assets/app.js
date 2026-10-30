@@ -997,6 +997,77 @@ function resultCard(r, idx) {
 
 // gridBlock 渲染结果表格 + 分页条。分页状态按「第几个结果」记在 pageState 里，
 // 翻页时整体重渲染（结果集已经在内存里，不重新查库）。
+// 结果表里长文本只显示预览。
+//
+// 大字段（LOB）现在能存 1MB，而单元格原来是 `white-space: pre-wrap` 全文展开：
+// 实测 1200 字就能把一行撑到 411px，1MB 的值会把页面卡死（整段文本进 DOM + 反复排版）。
+// 所以单元格里只放前 CELL_PREVIEW_CHARS 个字符（CSS 再夹三行），点开才看全文；
+// 查看器自己也有渲染上限，但「复制全文」始终是完整内容。
+const CELL_PREVIEW_CHARS = 160;
+const CELL_VIEW_CHARS = 200000;
+
+function cellIsLong(s) {
+  if (s.length > CELL_PREVIEW_CHARS) return true;
+  // 短字符串里换行太多也会把行撑高（≤160 字符，数一遍很便宜）
+  let nl = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) === 10 && ++nl > 2) return true;
+  }
+  return false;
+}
+
+function openCellViewer(colName, text) {
+  const modal = document.getElementById('cellModal');
+  document.getElementById('cellTitle').textContent = colName ? colName + ' · 全文' : '单元格内容';
+  const pre = document.getElementById('cellText');
+  const cut = text.length > CELL_VIEW_CHARS;
+  pre.textContent = cut ? text.slice(0, CELL_VIEW_CHARS) : text;
+  pre.scrollTop = 0;
+  const note = document.getElementById('cellNote');
+  note.classList.toggle('hidden', !cut);
+  note.textContent = cut
+    ? `内容太长，这里只渲染前 ${CELL_VIEW_CHARS.toLocaleString()} 字符（共 ${text.length.toLocaleString()} 字符）；要完整内容点「复制全文」。`
+    : '';
+  const lines = text.split('\n').length;
+  document.getElementById('cellMeta').textContent =
+    `${text.length.toLocaleString()} 字符 · ${lines.toLocaleString()} 行`;
+  document.getElementById('cellCopy').onclick = () => {
+    copyText(text).then(ok => {
+      const btn = document.getElementById('cellCopy');
+      btn.textContent = ok ? '已复制' : '复制失败';
+      setTimeout(() => { btn.textContent = '复制全文'; }, 1200);
+    });
+  };
+  modal.classList.remove('hidden');
+}
+
+function closeCellViewer() {
+  document.getElementById('cellModal').classList.add('hidden');
+  // 正文可能有 20 万字符，关掉就放掉，别留着占内存
+  document.getElementById('cellText').textContent = '';
+}
+
+// copyText 优先走剪贴板 API；非 https / 无权限时退回 textarea + execCommand。
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext !== false) {
+    return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+
+function legacyCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+
 function gridBlock(r, idx) {
   const box = document.createDocumentFragment();
   const total = r.rows.length;
@@ -1024,10 +1095,12 @@ function gridBlock(r, idx) {
   table.appendChild(thead);
 
   const tbody = el('tbody');
+  const cols = r.columns || [];
   for (let i = from; i < to; i++) {
     const row = r.rows[i];
     const tr2 = el('tr');
-    for (const v of row) {
+    for (let j = 0; j < row.length; j++) {
+      const v = row[j];
       let td;
       if (v === null || v === undefined) {
         td = el('td', 'null', 'NULL');
@@ -1036,7 +1109,16 @@ function gridBlock(r, idx) {
       } else if (typeof v === 'boolean') {
         td = el('td', 'bool', v ? 'true' : 'false');
       } else {
-        td = el('td', '', String(v));
+        const s = String(v);
+        if (cellIsLong(s)) {
+          // 长文本：只放预览（多一行 div 是为了 CSS 夹行，td 上没法可靠夹高度）
+          td = el('td', 'long');
+          td.appendChild(el('div', 'cell-clip', s.slice(0, CELL_PREVIEW_CHARS)));
+          td.title = `点击看全文（${s.length.toLocaleString()} 字符）`;
+          td.addEventListener('click', () => openCellViewer(cols[j] && cols[j].name, s));
+        } else {
+          td = el('td', '', s);
+        }
       }
       tr2.appendChild(td);
     }
@@ -4326,6 +4408,12 @@ document.getElementById('dbNewName').addEventListener('keydown', e => {
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !document.getElementById('dbModal').classList.contains('hidden')) closeDBModal();
+});
+
+document.getElementById('cellClose').addEventListener('click', closeCellViewer);
+document.getElementById('cellDone').addEventListener('click', closeCellViewer);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !document.getElementById('cellModal').classList.contains('hidden')) closeCellViewer();
 });
 
 loadDBs().then(() => {

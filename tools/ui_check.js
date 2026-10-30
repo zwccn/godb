@@ -1217,6 +1217,29 @@ class CDP {
     check('锁明细 Tab 藏起排序切换', srt.hiddenOnLock && srt.shownOnSQL,
       `lock ${srt.hiddenOnLock} / sql ${srt.shownOnSQL}`);
 
+    // 长文本单元格：大字段能存 1MB，原来 pre-wrap 全文展开会把一行撑到几百像素
+    // （实测 1200 字 = 411px），现在只显示三行预览、点开看全文。
+    const cell = await cdp.eval(`(() => {
+      const big = '长文本'.repeat(400);
+      renderResults({ results: [{ command: 'SELECT', tag: 'SELECT 1', rowCount: 1,
+        columns: [{ name: 'body', type: 'text' }], rows: [[big]], tookNs: 1000 }] }, 0);
+      const tr = document.querySelector('#resultPane table.grid tbody tr');
+      const h = tr ? tr.getBoundingClientRect().height : -1;
+      const td = document.querySelector('#resultPane table.grid td.long');
+      const clicked = !!td;
+      if (td) td.click();
+      const opened = !document.getElementById('cellModal').classList.contains('hidden');
+      const meta = document.getElementById('cellMeta').textContent;
+      const shown = document.getElementById('cellText').textContent.length;
+      document.getElementById('cellClose').click();
+      const closed = document.getElementById('cellModal').classList.contains('hidden');
+      return { h, clicked, opened, meta, shown, closed, want: big.length };
+    })()`);
+    check('长文本单元格夹成几行预览', cell.clicked && cell.h > 0 && cell.h < 120,
+      `行高 ${Math.round(cell.h)}px`);
+    check('点开单元格能看全文并关闭', cell.opened && cell.closed && cell.shown === cell.want,
+      `${cell.meta}，渲染 ${cell.shown} 字符`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

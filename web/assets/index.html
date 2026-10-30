@@ -133,7 +133,7 @@ try {
         <div class="welcome">
           <div class="welcome-title">准备就绪</div>
           <p>左侧是表结构，点击表名可快速查询。支持多语句（用 <code>;</code> 分隔），每条语句的结果在下方 <code>结果 N</code> 里各占一个 tab，执行的细节都收在 <code>信息</code> 里。</p>
-          <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>tables/*.snp</code> 每表一个数据文件、<code>wal.log</code> 提交日志。落盘节奏与端口在右上角「设置」里改。</p>
+          <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>meta.json</code> 落盘进度、<code>tables/t&lt;ID&gt;.dat</code> 表数据页（同目录的 <code>.lob</code> 是大字段、<code>.idx</code> 是索引）、<code>wal.log</code> 提交日志。落盘节奏与端口在右上角「设置」里改。</p>
         </div>
       </div>
     </div>
@@ -403,6 +403,28 @@ try {
       <div class="foot-actions">
         <button id="cfCancel" class="btn btn-sm" type="button">取消</button>
         <button id="cfOk" class="btn btn-sm btn-danger" type="button" disabled>确认</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 单元格全文：结果表里的长文本只显示预览（大字段能存 1MB，pre-wrap 全文展开
+     会把一行撑到几千像素、页面直接卡住），点单元格在这里看全文。 -->
+<div id="cellModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="单元格内容">
+  <div class="modal-card mid">
+    <div class="modal-head">
+      <span id="cellTitle">单元格内容</span>
+      <button id="cellClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="modal-body cell-body">
+      <pre id="cellText" class="cell-full"></pre>
+      <div id="cellNote" class="cell-note hidden"></div>
+    </div>
+    <div class="modal-foot">
+      <span id="cellMeta" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="cellCopy" class="btn btn-sm" type="button">复制全文</button>
+        <button id="cellDone" class="btn btn-sm btn-primary" type="button">关闭</button>
       </div>
     </div>
   </div>

@@ -7,7 +7,7 @@
   --border-soft: #1b222b;
   --text: #e6edf3;
   --text-2: #9aa7b4;
-  --text-3: #6b7785;
+  --text-3: #7b8795;
   --accent: #4c9ef0;
   --accent-dim: #1f3a56;
   --ok: #3fb950;
@@ -76,7 +76,7 @@ html[data-theme="sky"] {
   --border-soft: #d3e3f3;
   --text: #17293c;
   --text-2: #47617b;
-  --text-3: #7b90a6;
+  --text-3: #526b84;
   --accent: #2b7fd0;
   --accent-dim: #c3ddf6;
   --ok: #1f8a4c;
@@ -129,7 +129,7 @@ html[data-theme="taro"] {
   --border-soft: #e0d3f2;
   --text: #2b2140;
   --text-2: #5c4f78;
-  --text-3: #8d81a6;
+  --text-3: #695c84;
   --accent: #7a5bd6;
   --accent-dim: #dccff6;
   --ok: #2f8a5f;
@@ -182,7 +182,7 @@ html[data-theme="mint"] {
   --border-soft: #cfe8dc;
   --text: #14312a;
   --text-2: #3d6156;
-  --text-3: #6f9184;
+  --text-3: #4e7165;
   --accent: #1f9c72;
   --accent-dim: #c4ebdc;
   --ok: #1f8a5c;
@@ -241,7 +241,7 @@ html[data-theme="steel"] {
   --border-soft: #292a39;
   --text: #ced2e2;
   --text-2: #a2a8bc;
-  --text-3: #808599;
+  --text-3: #8a8fa3;
   --accent: #89b4fa;
   --accent-dim: #23304a;
   --ok: #a6e3a1;
@@ -1174,7 +1174,9 @@ table.grid th {
 }
 table.grid th .cname { color: var(--text); }
 table.grid th .ctype {
-  color: var(--text-3);
+  /* 10px 的小字压在 bg-3 上：用 --text-3 时只有 3.4:1（浅色皮肤更低到 2.5），
+     低于 AA 对正文的 4.5，所以这里用 --text-2（各皮肤 ≥ 5:1）。 */
+  color: var(--text-2);
   font-size: calc(10px * var(--fs));
   margin-left: 6px;
   font-weight: 400;
@@ -1191,6 +1193,49 @@ table.grid tr:hover td { background: var(--row-hover); }
 table.grid td.num { text-align: right; color: var(--ok-text); }
 table.grid td.null { color: var(--text-3); font-style: italic; }
 table.grid td.bool { color: var(--warn-text); }
+
+/* 长文本单元格：只显示三行预览，点开看全文。
+   大字段能存 1MB，pre-wrap 全文展开会把一行撑到几千像素（实测 1200 字 = 411px），
+   表格直接没法用；这里夹住行数，宽度也限住，免得一列把整张表推向横向滚动。 */
+table.grid td.long { padding: 0; cursor: zoom-in; vertical-align: top; }
+table.grid td.long .cell-clip {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 48ch;
+  padding: 4px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+table.grid td.long:hover { background: var(--row-hover); }
+table.grid td.long:hover .cell-clip { color: var(--accent); }
+
+/* 单元格全文查看器 */
+.cell-body { display: flex; flex-direction: column; gap: 8px; }
+.cell-full {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 52vh;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: calc(12px * var(--fs));
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  user-select: text;
+}
+.cell-note {
+  color: var(--text-3);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.5;
+}
 
 .more-rows {
   padding: 6px 12px;

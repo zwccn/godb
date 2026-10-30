@@ -76,9 +76,21 @@ try {
       <span class="sidebar-title">表结构<button id="dbBadge" class="db-badge" type="button"
         title="当前数据库（点击管理）">godb</button></span>
       <span class="sidebar-head-actions">
+        <button id="btnTableSearch" class="icon-btn" type="button" title="搜索表名" aria-label="搜索表名">
+          <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true" focusable="false">
+            <circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M9.2 9.2 L12.6 12.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+        </button>
         <button id="btnNewTable" class="icon-btn" title="新建表">+</button>
         <button id="btnRefresh" class="icon-btn" title="刷新">⟳</button>
       </span>
+    </div>
+    <!-- 表多的时候按名字过滤：表一多（几十张）纯靠滚很难找 -->
+    <div class="sidebar-search" id="sbSearchWrap">
+      <input id="sbSearch" type="text" placeholder="搜索表名…" spellcheck="false"
+             autocomplete="off" autocapitalize="off" autocorrect="off" inputmode="latin" aria-label="搜索表名">
+      <button id="sbSearchClear" class="icon-btn" type="button" title="清空">×</button>
     </div>
     <div id="schemaTree" class="tree">
       <div class="empty-hint">暂无表，试试「设置 → 载入示例数据」</div>
@@ -107,6 +119,14 @@ try {
           <button id="btnHistory" class="btn btn-ghost btn-sm" title="最近执行过的 SQL">历史</button>
           <button id="btnExplain" class="btn btn-ghost btn-sm" title="加 EXPLAIN 前缀执行">执行计划</button>
           <button id="btnClear" class="btn btn-ghost btn-sm">清空</button>
+          <!-- 窄屏放不下这四个按钮时，低频的两个收进这里（以前是直接 display:none，
+               手机上就彻底没了「执行计划」和「清空」） -->
+          <button id="btnMore" class="btn btn-ghost btn-sm more-btn" type="button"
+                  title="更多" aria-haspopup="true" aria-expanded="false">⋯</button>
+          <div id="moreMenu" class="more-menu hidden" role="menu">
+            <button type="button" role="menuitem" data-act="explain">执行计划</button>
+            <button type="button" role="menuitem" data-act="clear">清空编辑器</button>
+          </div>
         </div>
       </div>
       <textarea id="editor" spellcheck="false" inputmode="latin" autocapitalize="off"
@@ -444,7 +464,12 @@ try {
     <div class="modal-foot">
       <span id="settingsDirty" class="modal-hint"></span>
       <span id="settingsHint" class="modal-hint"></span>
-      <button id="btnSettingsSave" class="btn btn-primary btn-sm">保存并应用</button>
+      <div class="foot-actions">
+        <!-- 取消 = 直接关掉、丢掉未保存的改动；和右上角的 × 同一个动作，
+             只是放在手指最后落点的位置（右下角） -->
+        <button id="btnSettingsCancel" class="btn btn-sm">取消</button>
+        <button id="btnSettingsSave" class="btn btn-primary btn-sm">保存并应用</button>
+      </div>
     </div>
   </div>
 </div>

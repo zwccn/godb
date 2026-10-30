@@ -950,10 +950,22 @@ function infoStatus(r) {
 }
 
 // 结果 tab 的内容：头（命令 / 行数 / 导出 / 执行计划）+ 表体 + 分页条
+// cmdLabel 把 PG 的命令标签压成「动词」。
+//
+// 标签原文带行数（SELECT 5 / INSERT 0 5 / UPDATE 3），右边 meta 又写着
+// 「5 行」或「影响 3 行」—— 两处并排就成了「SELECT 5  5 行」，第一眼容易
+// 读成「SELECT 5」是一条语句。所以徽标只留动词，行数交给 meta。
+// 带空格的命令（CREATE TABLE / ALTER TABLE…）原样保留。
+function cmdLabel(r) {
+  const raw = r.tag || r.command || 'OK';
+  const m = /^([A-Z]+)(\s+\d+)+$/.exec(raw);
+  return m ? m[1] : raw;
+}
+
 function resultCard(r, idx) {
   const card = el('div', 'result-card');
   const head = el('div', 'result-head');
-  head.appendChild(el('span', 'result-tag', r.tag || r.command || 'OK'));
+  head.appendChild(el('span', 'result-tag', cmdLabel(r)));
   const metaBits = [];
   if (typeof r.rowCount === 'number' && r.command === 'SELECT') metaBits.push(r.rowCount + ' 行');
   if (typeof r.affected === 'number' && r.affected > 0 && r.command !== 'SELECT') metaBits.push('影响 ' + r.affected + ' 行');
@@ -1068,12 +1080,72 @@ function legacyCopy(text) {
   return ok;
 }
 
+// sortOrder 返回「第 i 行实际该显示 rows 里的哪一行」的下标表；不排序时返回 null。
+//
+// 排序在浏览器里对已拿到的行做（服务端已经按 LIMIT 返回），所以它是「看这份结果」
+// 的视图操作，不会重新执行 SQL。相等值保持原顺序（下标兜底），不会来回跳。
+function sortOrder(rows, st) {
+  if (st.sortCol < 0) return null;
+  const ci = st.sortCol;
+  const dir = st.sortDir;
+  const idx = Array.from({ length: rows.length }, (_, i) => i);
+  idx.sort((a, b) => {
+    const r = cmpCell(rows[a][ci], rows[b][ci]);
+    return r !== 0 ? r * dir : a - b;
+  });
+  return idx;
+}
+
+// cmpCell 比较两个单元格的值。
+// NULL 永远排最后（不管正序倒序）—— 「空值挡在最前面」比空值散在中间更难扫。
+function cmpCell(a, b) {
+  const an = a === null || a === undefined;
+  const bn = b === null || b === undefined;
+  if (an || bn) return an && bn ? 0 : an ? 1 : -1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  if (typeof a === 'boolean' && typeof b === 'boolean') return (a ? 1 : 0) - (b ? 1 : 0);
+  // numeric: true 让 "v2" 排在 "v10" 前面（编号列几乎是这种形态）
+  return String(a).localeCompare(String(b), 'zh-Hans-CN', { numeric: true });
+}
+
+// colGrip 是表头右边缘那条拖拽手柄：拖动改列宽，双击恢复自适应。
+function colGrip(th, ci, st) {
+  const g = el('span', 'col-grip');
+  g.addEventListener('pointerdown', ev => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startX = ev.clientX;
+    const startW = th.getBoundingClientRect().width;
+    try { g.setPointerCapture(ev.pointerId); } catch (e) {}
+    const move = e => {
+      th.style.minWidth = Math.max(48, Math.round(startW + (e.clientX - startX))) + 'px';
+    };
+    const up = () => {
+      st.widths = st.widths || {};
+      st.widths[ci] = Math.max(48, Math.round(th.getBoundingClientRect().width));
+      g.removeEventListener('pointermove', move);
+      g.removeEventListener('pointerup', up);
+      g.removeEventListener('pointercancel', up);
+    };
+    g.addEventListener('pointermove', move);
+    g.addEventListener('pointerup', up);
+    g.addEventListener('pointercancel', up);
+  });
+  g.addEventListener('dblclick', ev => {
+    ev.stopPropagation();
+    th.style.minWidth = '';
+    if (st.widths) delete st.widths[ci];
+  });
+  return g;
+}
+
 function gridBlock(r, idx) {
   const box = document.createDocumentFragment();
   const total = r.rows.length;
   let st = pageState.get(idx);
   if (!st) {
-    st = { page: 0, size: 100 };
+    // sortCol < 0 = 按服务端返回的顺序；widths 是拖过列宽之后的固定值
+    st = { page: 0, size: 100, sortCol: -1, sortDir: 1, widths: {} };
     pageState.set(idx, st);
   }
   const pages = Math.max(1, Math.ceil(total / st.size));
@@ -1081,23 +1153,45 @@ function gridBlock(r, idx) {
   const from = st.page * st.size;
   const to = Math.min(from + st.size, total);
 
+  const cols = r.columns || [];
+  // 结果换了（重新执行、切库）之后列数可能变少，旧的下标就失效了
+  if (st.sortCol >= cols.length) st.sortCol = -1;
+  const order = sortOrder(r.rows, st);
+
   const wrap = el('div', 'grid-wrap');
   const table = el('table', 'grid');
   const thead = el('thead');
   const tr = el('tr');
-  for (const c of r.columns || []) {
+  for (let ci = 0; ci < cols.length; ci++) {
+    const c = cols[ci];
     const th = el('th');
     th.appendChild(el('span', 'cname', c.name));
     if (c.type) th.appendChild(el('span', 'ctype', c.type));
+    if (st.sortCol === ci) {
+      th.appendChild(el('span', 'sort-ind', st.sortDir > 0 ? '▲' : '▼'));
+    }
+    th.title = '点一下按这一列排序；拖右边缘调列宽（双击恢复）';
+    if (st.widths && st.widths[ci]) th.style.minWidth = st.widths[ci] + 'px';
+    th.addEventListener('click', ev => {
+      if (ev.target.closest('.col-grip')) return; // 拖列宽不是点排序
+      if (st.sortCol === ci) {
+        st.sortDir = -st.sortDir;
+      } else {
+        st.sortCol = ci;
+        st.sortDir = 1;
+      }
+      st.page = 0;
+      renderResults(lastData, true);
+    });
+    th.appendChild(colGrip(th, ci, st));
     tr.appendChild(th);
   }
   thead.appendChild(tr);
   table.appendChild(thead);
 
   const tbody = el('tbody');
-  const cols = r.columns || [];
   for (let i = from; i < to; i++) {
-    const row = r.rows[i];
+    const row = r.rows[order ? order[i] : i];
     const tr2 = el('tr');
     for (let j = 0; j < row.length; j++) {
       const v = row[j];
@@ -1252,13 +1346,26 @@ async function loadSchema() {
   }
 }
 
+// schemaQuery 是侧栏的过滤词（小写）。表一多的时候纯靠滚找表太慢，
+// 这里按表名做子串匹配，匹配不到给一句明确的空态，而不是「暂无表」那种误导。
+let schemaQuery = '';
+// 最近一次拿到的完整表列表：过滤只改显示，不清数据源（刷新时还要用它重画）
+let lastSchemaTables = [];
+
 function renderSchema(tables) {
   treeEl.innerHTML = '';
+  lastSchemaTables = tables;
   if (!tables.length) {
     treeEl.appendChild(el('div', 'empty-hint', '暂无表，试试「载入示例数据」'));
     return;
   }
-  for (const t of tables) {
+  const q = schemaQuery.trim().toLowerCase();
+  const shown = q ? tables.filter(t => t.name.toLowerCase().includes(q)) : tables;
+  if (!shown.length) {
+    treeEl.appendChild(el('div', 'empty-hint', `没有匹配「${schemaQuery.trim()}」的表`));
+    return;
+  }
+  for (const t of shown) {
     const node = el('div', 'table-node' + (expandedTables.has(t.name) ? ' open' : ''));
     const row = el('div', 'table-row');
     row.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 个字段（点 ▶ 展开字段，右键有表操作）`;
@@ -2623,7 +2730,78 @@ document.getElementById('btnClear').addEventListener('click', () => {
   editor.focus();
 });
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
+
+// 窄屏「更多」菜单：执行计划 / 清空 在 ≤720px 被藏起来，这里给一条出路。
+(function initMoreMenu() {
+  const btn = document.getElementById('btnMore');
+  const menu = document.getElementById('moreMenu');
+  const setOpen = on => {
+    menu.classList.toggle('hidden', !on);
+    btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+  };
+  btn.addEventListener('click', ev => {
+    ev.stopPropagation();
+    setOpen(menu.classList.contains('hidden'));
+  });
+  menu.addEventListener('click', ev => {
+    const act = ev.target.closest('button')?.dataset.act;
+    if (!act) return;
+    setOpen(false);
+    document.getElementById(act === 'explain' ? 'btnExplain' : 'btnClear').click();
+  });
+  document.addEventListener('click', ev => {
+    if (!menu.classList.contains('hidden') && !ev.target.closest('#moreMenu, #btnMore')) setOpen(false);
+  });
+  document.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape' && !menu.classList.contains('hidden')) setOpen(false);
+  });
+  // 转回宽屏时菜单要收起来，否则按钮回来了、菜单还飘着
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 720) setOpen(false);
+  });
+})();
 document.getElementById('btnFormat').addEventListener('click', formatSQL);
+// 搜索表名：图标按钮展开输入框，边打边过滤；Esc 收起并清空。
+document.getElementById('btnTableSearch').addEventListener('click', () => {
+  const sidebar = document.querySelector('.sidebar');
+  const wrap = document.getElementById('sbSearchWrap');
+  const on = !sidebar.classList.contains('searching');
+  sidebar.classList.toggle('searching', on);
+  wrap.classList.toggle('hidden', !on);
+  if (on) {
+    document.getElementById('sbSearch').focus();
+    document.getElementById('sbSearch').select();
+  } else {
+    setSchemaQuery('');
+  }
+});
+
+function setSchemaQuery(q) {
+  schemaQuery = q;
+  document.getElementById('sbSearch').value = q;
+  const sb = document.querySelector('.sidebar');
+  if (!q) {
+    sb.classList.remove('searching');
+    document.getElementById('sbSearchWrap').classList.add('hidden');
+  }
+  renderSchema(lastSchemaTables);
+}
+
+document.getElementById('sbSearch').addEventListener('input', ev => {
+  schemaQuery = ev.target.value;
+  renderSchema(lastSchemaTables);
+});
+document.getElementById('sbSearch').addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') {
+    ev.stopPropagation();
+    setSchemaQuery('');
+  }
+});
+document.getElementById('sbSearchClear').addEventListener('click', () => {
+  setSchemaQuery('');
+  document.getElementById('sbSearch').focus();
+});
+
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
 document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
@@ -3450,6 +3628,7 @@ async function saveSettings() {
 
 document.getElementById('btnSettings').addEventListener('click', openSettings);
 document.getElementById('btnSettingsClose').addEventListener('click', closeSettings);
+document.getElementById('btnSettingsCancel').addEventListener('click', () => closeSettings());
 document.getElementById('btnSettingsSave').addEventListener('click', () => {
   // 「外观」组没有可保存的东西，那一页的按钮就是关闭（有别的改动时仍显示「保存并应用」）
   if (document.getElementById('btnSettingsSave').dataset.mode === 'close') {

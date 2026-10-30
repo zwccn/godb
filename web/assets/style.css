@@ -658,7 +658,37 @@ body {
   color: var(--text-3);
   white-space: nowrap;
 }
-.editor-actions { display: flex; gap: 7px; }
+.editor-actions { display: flex; gap: 7px; position: relative; }
+
+/* 窄屏的「更多」：宽屏不出现（四个按钮都摆得下） */
+.more-btn { display: none; }
+.more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  box-shadow: 0 10px 28px var(--shadow-color);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.more-menu button {
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: calc(12.5px * var(--fs));
+  cursor: pointer;
+}
+.more-menu button:hover { background: var(--row-hover); }
 
 #editor {
   display: block;
@@ -1058,6 +1088,16 @@ body {
 @media (max-width: 720px) {
   .result-tabs-meta { display: none; }
   .result-head .plan-btn { white-space: nowrap; }
+  /* 结果卡头部在 390px 下：徽标 + 「8 行 · 5.15 ms」+ CSV/JSON/执行计划 排不下，
+     原来会被挤成「8 行 ·」换行再「5.15 ms」。改成允许换行、摘要不折行、
+     按钮整体落到第二行右对齐。 */
+  .result-head { flex-wrap: wrap; row-gap: 5px; }
+  /* spacer 撑满整行 = 强制造一个换行点：第一行只剩「徽标 + 摘要」，
+     第二行是 CSV / JSON / 执行计划 三个按钮整体靠右，不会出现某个按钮
+     单独掉到第三行左边。 */
+  body .result-head .spacer { flex: 0 0 100%; height: 0; }
+  .result-meta { white-space: nowrap; }
+  .result-actions { margin-left: auto; }
 }
 
 /* 欢迎页在结果 pane 里，内容比窗口高时自己滚（pane 本身不滚） */
@@ -1173,7 +1213,40 @@ table.grid th {
   padding: 5px 12px;
   white-space: nowrap;
   font-weight: 500;
+  /* 表头可点（排序），拖右边缘改列宽 */
+  cursor: pointer;
+  user-select: none;
 }
+table.grid th:hover { background: var(--bg-2); }
+/* 当前排序列的箭头：▲ 正序 / ▼ 倒序 */
+table.grid th .sort-ind {
+  margin-left: 6px;
+  font-size: calc(9px * var(--fs));
+  color: var(--accent);
+  vertical-align: 1px;
+}
+/* 列宽拖拽手柄：贴在表头右边缘的一条窄热点 */
+table.grid th .col-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+table.grid th .col-grip::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  right: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background .12s ease;
+}
+table.grid th:hover .col-grip::after { background: var(--border); }
+table.grid th .col-grip:hover::after { background: var(--accent); }
 table.grid th .cname { color: var(--text); }
 table.grid th .ctype {
   /* 10px 的小字压在 bg-3 上：用 --text-3 时只有 3.4:1（浅色皮肤更低到 2.5），
@@ -1338,7 +1411,9 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   /* 编辑器工具栏同理：标题和低频按钮让位给「执行」 */
   .editor-bar { padding: 7px 10px; }
   .editor-label { display: none; }
+  /* 低频按钮收进「更多」，而不是直接删掉 —— 手机上也还能用执行计划和清空 */
   #btnExplain, #btnClear { display: none; }
+  .more-btn { display: inline-flex; align-items: center; }
   .editor-lead { gap: 8px; }
 }
 
@@ -2508,6 +2583,32 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 
 /* ---------- 侧栏表头动作 ---------- */
 .sidebar-head-actions { display: flex; align-items: center; gap: 2px; }
+
+/* 表名搜索：默认收起，点放大镜才展开一行输入框。
+   侧栏本来就窄，常驻一行输入框会把表名挤得更少；表多到需要搜的时候再叫出来。 */
+.sidebar-search {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sidebar.searching .sidebar-search { display: flex; }
+.sidebar-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: calc(12px * var(--fs));
+}
+.sidebar-search input::placeholder { color: var(--text-3); }
+.sidebar-search input:focus { outline: none; border-color: var(--accent); }
+.sidebar-search .icon-btn { width: 22px; height: 22px; }
 
 /* ---------- 右键菜单 ---------- */
 .ctx-menu {

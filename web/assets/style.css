@@ -1148,7 +1148,9 @@ body {
 /* 表体是这张卡里唯一能滚的地方：撑满剩余高度，表头 sticky、分页条钉在下面。
    不要再给 max-height —— 那是按视口算的，会和结果区的实际高度打架。 */
 .grid-wrap {
-  flex: 1 1 auto;
+  /* 按内容高度、不硬撑满：只有几行数据时，页脚（第 1-5 行 / 共 5 行）要紧跟表格，
+     否则会被顶到窗格最底下、离表 300px。表比窗格高时靠 flex-shrink 收缩并滚动。 */
+  flex: 0 1 auto;
   min-height: 0;
   overflow: auto;
 }
@@ -1568,7 +1570,8 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   border-left: 3px solid var(--border);
   border-radius: 8px;
   background: var(--bg-1);
-  padding: 9px 12px;
+  /* 这三张卡只是「归因用的一行摘要」，高度要让给下面的诊断表 */
+  padding: 7px 11px;
   min-width: 0;
 }
 .lv-run { border-left-color: var(--accent); }
@@ -1576,7 +1579,7 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 .lv-queue { border-left-color: var(--danger); }
 .lv-head { display: flex; align-items: baseline; gap: 8px; }
 .lv-name { font-size: calc(12px * var(--fs)); color: var(--text-2); letter-spacing: .5px; }
-.lv-count { font-family: var(--mono); font-size: calc(20px * var(--fs)); line-height: 1.1; }
+.lv-count { font-family: var(--mono); font-size: calc(18px * var(--fs)); line-height: 1.15; }
 .lv-stat {
   display: flex;
   gap: 10px;
@@ -1589,8 +1592,8 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: 4px;
+  padding-top: 4px;
   border-top: 1px dashed var(--border-soft);
   font-family: var(--mono);
   font-size: calc(11.5px * var(--fs));
@@ -1709,6 +1712,9 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 
 /* ---- 3. 锁明细表 ---- */
 .mon-lockwrap { overflow-x: auto; }
+/* 慢 SQL / 慢事务表也要能横向滚：窄屏下 5 列硬挤会把「SQL」列压成省略号，
+   而这一列正是要看的东西。锁明细本来就有 wrap，这三块保持一致。 */
+.mon-panel { overflow-x: auto; }
 .mon-locks { width: 100%; border-collapse: collapse; font-size: calc(12px * var(--fs)); }
 .mon-locks th {
   text-align: left;
@@ -2009,31 +2015,36 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 .spark-k.conn { background: var(--warn); }
 
 .io-row {
-  display: flex;
+  /* 两行结构：左边一行标签（横跨两行），右边「值」在上、「说明」在下。
+     以前四样东西挤一行，说明文字一长就被 ellipsis 吃掉，等于没写。 */
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 1px;
   align-items: baseline;
-  gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border-soft);
 }
 .io-row:last-child { border-bottom: none; }
 .io-k {
-  flex: 0 0 auto;
-  width: 44px;
+  grid-row: 1 / span 2;
   font-size: calc(11px * var(--fs));
   color: var(--text-3);
+  white-space: nowrap;
 }
 .io-v {
-  flex: 0 0 auto;
+  grid-column: 2;
   font-family: var(--mono);
   font-size: calc(12.5px * var(--fs));
   color: var(--text);
 }
 .io-sub {
+  grid-column: 2;
   font-size: calc(11px * var(--fs));
+  line-height: 1.45;
   color: var(--text-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 说明可以换行，不再截断（截断等于把「原因」这类信息藏了） */
+  white-space: normal;
 }
 .io-row.bad .io-v { color: var(--danger-text); }
 .io-row.warn .io-v { color: var(--warn-text); }
@@ -2115,6 +2126,20 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 @media (max-width: 1000px) {
   .mon-layers, .mon-two, .mon-timeouts { grid-template-columns: 1fr; }
   .proc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+  /* 诊断卡头部：Tab（慢SQL/慢事务/锁明细）+ 排序（按累计/按单次）在 390px 下
+     会被压成「慢/SQL」这种两行竖排。改成可换行 + 各自不压缩，放不下就整行换。 */
+  .mon-card-head { flex-wrap: wrap; row-gap: 6px; }
+  .mon-tabs { flex: 0 0 auto; max-width: 100%; overflow-x: auto; }
+  .mon-tab { flex: 0 0 auto; white-space: nowrap; }
+  .mon-sort, .mon-sort button { flex: 0 0 auto; white-space: nowrap; }
+  /* 「跟踪 18 个结构 · 按累计耗时 · 点行看明细」这种说明让位给按钮 */
+  #monDiagSub { display: none; }
+  /* 图例一行放不下时换行，而不是被卡片右边裁掉（「纵轴 412.9 K|」） */
+  .spark-tip .spark-row { white-space: normal; }
+  /* 慢SQL 表在窄屏保持一个下限宽度、靠横向滚动看全：
+     硬挤成 100% 会把「SQL」列压到只剩「SELE...」，而这一列正是要看的。 */
+  .mon-slow { min-width: 520px; }
   .mon-locks .c-sql { max-width: 200px; }
 }
 

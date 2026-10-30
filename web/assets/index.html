@@ -179,38 +179,7 @@ try {
     <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
     <div class="mon-layers" id="monLayers"></div>
 
-    <!-- 3. 吞吐走势：QPS / TPS / 连接数。
-         水位是瞬时快照，这里是走势 —— 「刚才那阵子忙成什么样、什么时候掉下去的」
-         只有曲线答得出来。和进程资源用同一个秒级节拍，横轴天然对齐。 -->
-    <section class="mon-card">
-      <div class="mon-card-head">
-        <span>吞吐与连接</span>
-        <span class="mon-sub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
-      </div>
-      <div class="mon-rate" id="monRate"></div>
-    </section>
-
-    <!-- 4. 资源：进程自身 + 存储 IO。
-         全部由标准库采集（runtime/metrics + getrusage/GetProcessTimes），
-         不依赖任何系统命令行工具，三平台行为一致。 -->
-    <div class="mon-two">
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>进程资源</span>
-          <span class="mon-sub">每秒采样 · 最近 5 分钟</span>
-        </div>
-        <div class="mon-proc" id="monProc"></div>
-      </section>
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>存储与 IO</span>
-          <span class="mon-sub">fsync = 提交实际等待</span>
-        </div>
-        <div class="mon-io" id="monIO"></div>
-      </section>
-    </div>
-
-    <!-- 5. 诊断：慢 SQL / 慢事务 / 锁明细 三合一，Tab 切换。
+    <!-- 3. 诊断：慢 SQL / 慢事务 / 锁明细 三合一，Tab 切换。
          三块都是「有问题才有内容」的表格，平铺时没数据的三块会白占两屏。
          锁明细 8 列必须独占整行宽，所以不做左右并排。
          Tab 上带条数，空的不藏起来 —— 看不到的东西等于没监控。 -->
@@ -297,6 +266,39 @@ try {
         <div class="mon-pager hidden" id="monTxPager"></div>
       </div>
     </section>
+
+
+    <!-- 4. 吞吐走势：QPS / TPS / 连接数。
+         水位是瞬时快照，这里是走势 —— 「刚才那阵子忙成什么样、什么时候掉下去的」
+         只有曲线答得出来。和进程资源用同一个秒级节拍，横轴天然对齐。 -->
+    <section class="mon-card">
+      <div class="mon-card-head">
+        <span>吞吐与连接</span>
+        <span class="mon-sub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
+      </div>
+      <div class="mon-rate" id="monRate"></div>
+    </section>
+
+    <!-- 5. 资源：进程自身 + 存储 IO。
+         全部由标准库采集（runtime/metrics + getrusage/GetProcessTimes），
+         不依赖任何系统命令行工具，三平台行为一致。 -->
+    <div class="mon-two">
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>进程资源</span>
+          <span class="mon-sub">每秒采样 · 最近 5 分钟</span>
+        </div>
+        <div class="mon-proc" id="monProc"></div>
+      </section>
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>存储与 IO</span>
+          <span class="mon-sub">fsync = 提交实际等待</span>
+        </div>
+        <div class="mon-io" id="monIO"></div>
+      </section>
+    </div>
+
   </div>
 </section>
 

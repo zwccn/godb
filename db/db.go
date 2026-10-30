@@ -452,9 +452,17 @@ func (d *DB) Session(id string) *txn.Session {
 		// 注入观测钩子：txn 层只负责报告「等锁 / 执行 / 空闲」，
 		// 剩下的（SQL 文本、耗时样本）由 db 层自己记。
 		s.SetObserve(func(state string, tables []string) {
-			// 事务结束要顺带把「还在事务里」的标记清掉，否则 Kill/回滚之后
-			// 这条会话会一直挂在慢事务列表里（inTx 没人再改它）。
-			if state == txn.ObsTxEnd {
+			switch state {
+			case txn.ObsTxBegin:
+				// 事务一开始就把 inTx / 开始时刻记下来。一个请求里连写多条语句时，
+				// 批次中间没有别的地方会同步这两个值 —— 少了这一步，COMMIT 触发
+				// ObsTxEnd 时 db 层还以为「不在事务里」，整批事务都进不了统计。
+				now := time.Now()
+				d.act.setTx(s.ID, true, now, 0, now)
+				return
+			case txn.ObsTxEnd:
+				// 事务结束要顺带把「还在事务里」的标记清掉，否则 Kill/回滚之后
+				// 这条会话会一直挂在慢事务列表里（inTx 没人再改它）。
 				d.act.setTx(s.ID, false, time.Time{}, 0, time.Now())
 				d.act.set(s.ID, ActIdle, nil, false)
 				return

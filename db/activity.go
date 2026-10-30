@@ -239,6 +239,12 @@ func (r *recorder) setTx(id string, inTx bool, start time.Time, stmts int, lastA
 		a.txTables = a.txTables[:0]
 		a.txWrite = false
 	}
+	// 事务刚开始（ObsTxBegin 到达）时把「当前语句的表名」补进事务集合：
+	// 顺序是 setSQL（写 a.tables）→ startTx → ObsTxBegin，那时 a.inTx 还是 false，
+	// setSQL 里的 addTxTables 分支没走到，这里补上，否则面板上是「r:(无表)」。
+	if inTx && !a.inTx && len(a.tables) > 0 {
+		a.addTxTables(a.tables, a.write)
+	}
 	a.inTx = inTx
 	a.txStart = start
 	a.txStmts = stmts

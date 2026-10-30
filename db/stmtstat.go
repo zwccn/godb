@@ -562,7 +562,12 @@ type txDone struct {
 }
 
 func (p *txPool) add(d txDone) {
-	if d.dur <= 0 {
+	// 只有「负数」才是真异常（时钟被回拨）。dur == 0 是**正常**的：极短的事务
+	// 测出来就是 0 —— 事务开始时刻是从 Session 的 UnixNano 还原的
+	// （`time.Unix(0, ns)`，没有 monotonic 时钟），Windows 上墙钟精度只有
+	// 0.5–16ms，几百微秒的事务常常算出 0。下面那行 `ms <= 0 { ms = 1 }`
+	// 本来就是为这种情况准备的，这里却先把 0 丢了，两边自相矛盾。
+	if d.dur < 0 {
 		return
 	}
 	key := txKey(d.tables, d.write)

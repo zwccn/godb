@@ -110,6 +110,15 @@ const (
 	ObsWaiting = "waiting" // 正在等表锁
 	ObsRunning = "running" // 正在执行语句
 	ObsIdle    = "idle"    // 空闲（等客户端发下一条）
+	// ObsTxBegin 是「事务真正开始」（显式 BEGIN 和单语句的隐式事务都算）。
+	//
+	// 为什么非要一个开始事件：db 层的事务元信息（inTx / txStart）原来只在
+	// **语句批次结束时**同步一次。一个请求里写多条语句（Web 控制台选中多行、
+	// PG 的 simple query 多语句）时，批次内 BEGIN→DML→COMMIT 一路跑完，
+	// 中间没有任何同步点，等到 COMMIT 触发 ObsTxEnd 时 db 层还认为
+	// 「这个会话不在事务里」，于是整批事务都进不了统计。
+	ObsTxBegin = "txbegin"
+
 	// ObsTxEnd 是「事务结束」（提交 / 回滚 / 强制回滚都算）。
 	// 单独一个事件而不是靠 ObsIdle 推断：事务里空闲是常态，
 	// 用 idle 判断「还有没有事务」会把所有正常的长事务画成已结束。
@@ -290,9 +299,13 @@ func (s *Session) SetLockTimeout(d time.Duration) {
 }
 
 // markTxStart 记事务开始时刻并把语句计数归零。
+//
+// 顺手发一个 ObsTxBegin：db 层要靠它把「这个会话进事务了」记下来，
+// 否则多语句批次里的事务结束时没人知道它曾经开始过（见 ObsTxBegin 的注释）。
 func (s *Session) markTxStart() {
 	s.txStartUnix.Store(time.Now().UnixNano())
 	s.txStmts.Store(0)
+	s.notify(ObsTxBegin, nil)
 }
 
 // Canceled 时 lock 包需要的回调（避免每次取闭包分配）。

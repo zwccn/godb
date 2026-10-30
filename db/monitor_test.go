@@ -52,6 +52,9 @@ func TestMonitorLockDetail(t *testing.T) {
 	run(t, d, "m2", "CREATE TABLE lt (id int primary key)")
 	run(t, d, "m2", "INSERT INTO lt VALUES (1)")
 	run(t, d, "m2", "BEGIN")
+	// 基线要在「事务已经开始、还没跑语句」时取：建表和插入那两条自动提交语句
+	// 本身就是两个（隐式）事务，结束后各自会归档一条，不能拿它们当干扰项。
+	before := sumTxN(d.Monitor(d.Timeouts()).SlowTx)
 	run(t, d, "m2", "SELECT * FROM lt")
 
 	m := d.Monitor(d.Timeouts())
@@ -71,24 +74,43 @@ func TestMonitorLockDetail(t *testing.T) {
 	if !strings.Contains(l.LastSQL, "SELECT") {
 		t.Errorf("最后一条 SQL = %q，期望包含 SELECT", l.LastSQL)
 	}
-	// 慢事务统计只记「已经结束的事务」：这时还没提交，不该有条目
-	if len(m.SlowTx) != 0 {
-		t.Errorf("事务还没结束就进了统计：%+v", m.SlowTx)
+	// 慢事务统计只记「已经结束的事务」：这时还没提交，条数不该动
+	if got := sumTxN(m.SlowTx); got != before {
+		t.Errorf("事务还没结束就进了统计：%d 条（之前 %d）%+v", got, before, m.SlowTx)
 	}
 
 	run(t, d, "m2", "ROLLBACK")
 
 	// 事务结束后按「表集合 + 读写」归档一条，表集合里要有 lt
 	m = d.Monitor(d.Timeouts())
-	if len(m.SlowTx) == 0 {
-		t.Fatalf("事务结束后应该归档一条统计（SlowTx=%+v, StmtLive=%d, TxLive=%d）", m.SlowTx, m.StmtLive, m.TxLive)
+	if got := sumTxN(m.SlowTx); got != before+1 {
+		t.Fatalf("结束的事务应该归档一条（现在 %d 条，之前 %d）：%+v", got, before, m.SlowTx)
 	}
-	if !strings.Contains(strings.Join(m.SlowTx[0].Tables, ","), "lt") {
-		t.Errorf("事务结构 = %v，期望含 lt", m.SlowTx[0].Tables)
+	var mine *TxStat
+	for i := range m.SlowTx {
+		if strings.Contains(strings.Join(m.SlowTx[i].Tables, ","), "lt") {
+			mine = &m.SlowTx[i]
+			break
+		}
 	}
-	if m.SlowTx[0].N != 1 {
-		t.Errorf("事务次数 = %d，期望 1", m.SlowTx[0].N)
+	if mine == nil {
+		t.Fatalf("归档的结构里没有 lt：%+v", m.SlowTx)
 	}
+	if !strings.Contains(strings.Join(mine.Tables, ","), "lt") {
+		t.Errorf("事务结构 = %v，期望含 lt", mine.Tables)
+	}
+	if mine.N < 1 {
+		t.Errorf("事务次数 = %d，期望至少 1", mine.N)
+	}
+}
+
+// sumTxN 汇总所有事务结构的执行次数（列表是按结构聚合的，可能不止一条）。
+func sumTxN(list []TxStat) int64 {
+	var n int64
+	for _, x := range list {
+		n += x.N
+	}
+	return n
 }
 
 // Kill 一个空闲事务：立刻回滚、锁立刻释放。

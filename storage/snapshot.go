@@ -44,6 +44,13 @@ type metaTable struct {
 	// 页密度 = 1 - Free/(Pages×8KB)。它必须进 meta，因为未加载的表算不出空闲图；
 	// 而监控每秒轮询一次，不能为了一个百分比把整张表的页都读一遍。
 	Free int64 `json:"free_bytes,omitempty"`
+	// Vac / VacFull 是「上次整理 / 上次整份重写」的时刻（Unix 毫秒）。
+	//
+	// 页密度只回答「现在有多少页是白占的」，回答不了「该不该现在整理」——
+	// 配上这两个时间才有动作含义：密度低 + 很久没整理 = 该 VACUUM 了。
+	// 普通 VACUUM 只收页内的洞（页数不变），VACUUM FULL 才重写文件，所以分开记。
+	Vac     int64 `json:"last_vacuum_ms,omitempty"`
+	VacFull int64 `json:"last_vacuum_full_ms,omitempty"`
 	// Seq 是自增列当前值（SERIAL / GENERATED AS IDENTITY）。
 	//
 	// 以前重启是扫一遍行取最大值来恢复，但「打开表不解码行」之后那条路走不通了
@@ -195,6 +202,9 @@ func (s *Store) loadSnapshot() error {
 		}
 		if mt.Free > 0 {
 			s.tableFree[key] = mt.Free
+		}
+		if mt.Vac > 0 || mt.VacFull > 0 {
+			s.tableVac[key] = vacuumTimes{At: mt.Vac, Full: mt.VacFull}
 		}
 		if len(mt.Idx) > 0 {
 			s.idxGen[key] = mt.Idx
@@ -390,8 +400,10 @@ func (s *Store) metaTablesLocked() map[string]metaTable {
 		if td := s.Data[key]; td != nil && s.loaded[key] && td.pages != nil {
 			free = td.pages.freeBytes()
 		}
+		vac := s.tableVac[key]
 		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key], Free: free,
-			Pages: s.tablePages[key], IdxPages: s.tableIdxPages[key], Seq: seq}
+			Pages: s.tablePages[key], IdxPages: s.tableIdxPages[key], Seq: seq,
+			Vac: vac.At, VacFull: vac.Full}
 	}
 	s.loadMu.RUnlock()
 	return tables

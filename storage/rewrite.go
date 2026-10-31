@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"godb/catalog"
 )
@@ -279,6 +280,9 @@ func (s *Store) FullVacuum(t *catalog.Table) (RewriteReport, error) {
 			s.tableFree[key] = td.pages.freeBytes()
 		}
 		s.tableIdxPages[key] = td.IndexPages()
+		// 整份重写：两个时间都刷新（它既是整理，也是重写）
+		now := time.Now().UnixMilli()
+		s.tableVac[key] = vacuumTimes{At: now, Full: now}
 	}
 	s.loadMu.Unlock()
 	if err := s.writeMeta(gen, s.metaTablesLocked()); err != nil {

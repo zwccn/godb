@@ -117,6 +117,10 @@ type TableSize struct {
 	// FillKnown 为 false 表示「空闲字节还没记录过」（表一直没被加载/落盘过），
 	// 这时 Fill 没有意义，前端应该显示「—」而不是 100%。
 	FillKnown bool `json:"fillKnown"`
+	// VacuumAt / RewriteAt 是「上次整理 / 上次整份重写」的时刻（Unix 毫秒，0 = 从没）。
+	// 密度只说「现在有多空」，配上时间才是「该不该现在整理」。
+	VacuumAt  int64 `json:"vacuumAt"`
+	RewriteAt int64 `json:"rewriteAt"`
 }
 
 // PoolProfile 是缓冲池的汇总（全库所有表加在一起）。
@@ -309,6 +313,9 @@ func (s *Store) TableSizes() []TableSize {
 		// 落盘更新，一直干净的表会永远报旧值（VACUUM FULL 换过文件尤其明显）。
 		if !loadedNow && ts.Bytes > 0 {
 			ts.Pages = int(ts.Bytes / PageSize)
+		}
+		if v, ok := s.tableVac[key]; ok {
+			ts.VacuumAt, ts.RewriteAt = v.At, v.Full
 		}
 		// 空闲字节从哪来：加载过的表实时算，没加载的只能信 meta 里上次记的值。
 		// meta 里没有（=0）说明这张表还没被这一版落过盘，密度算不出来 —— 不能当成

@@ -48,6 +48,8 @@ type Store struct {
 	tableSeq      map[string]int64 // 该表自增列的当前值（从 meta 读，不必扫行）
 	tableIdxPages map[string]int   // 该表所有索引加起来占了多少页
 	tableFree     map[string]int64 // 该表页文件里还能用的字节（meta 里读，未加载时用）
+	tableVac      map[string]vacuumTimes // 上次整理 / 上次整份重写的时刻
+
 	hasSnap       map[string]bool  // 是否已经有数据文件
 	dirty         map[string]bool  // 上一次 checkpoint 之后有没有改动
 	loaded        map[string]bool  // 行是否已经在内存里
@@ -153,6 +155,7 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		tableSeq:      map[string]int64{},
 		tableIdxPages: map[string]int{},
 		tableFree:     map[string]int64{},
+		tableVac:      map[string]vacuumTimes{},
 		hasSnap:       map[string]bool{},
 		dirty:         map[string]bool{},
 		dirtyRows:     map[string]int64{},
@@ -464,6 +467,7 @@ func (s *Store) DropTable(name string) {
 	delete(s.tablePages, key)
 	delete(s.tableIdxPages, key)
 	delete(s.tableFree, key)
+	delete(s.tableVac, key)
 	delete(s.hasSnap, key)
 	delete(s.dirty, key)
 }
@@ -501,6 +505,10 @@ func (s *Store) RenameTable(oldName, newName string) {
 	if v, ok := s.tableFree[oldKey]; ok {
 		s.tableFree[newKey] = v
 		delete(s.tableFree, oldKey)
+	}
+	if v, ok := s.tableVac[oldKey]; ok {
+		s.tableVac[newKey] = v
+		delete(s.tableVac, oldKey)
 	}
 	move(s.hasSnap)
 	if s.dirty[oldKey] {

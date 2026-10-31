@@ -389,17 +389,32 @@ class CDP {
     await sleep(1400);
     const spUi = await cdp.eval(`(() => {
       const rows = document.querySelectorAll('#spaceBody tr');
+      const heads = [...document.querySelectorAll('#spaceTable thead th, .space-table thead th')]
+        .map(e => e.textContent.trim());
+      const cells = rows.length ? [...rows[0].children].map(e => e.textContent.trim()) : [];
+      // 每一行的末列都要是相对时间：只看第一行会漏（第一行常常是「从未」）
+      const vacAll = [...rows].map(tr => tr.lastElementChild.textContent.trim());
       return {
         segs: document.querySelectorAll('#spaceBar .space-seg').length,
         legend: document.querySelectorAll('#spaceLegend .space-item').length,
         rows: rows.length,
+        heads, cells, vacAll,
         diagHidden: document.querySelector('.mon-page[data-page="diag"]').classList.contains('hidden'),
-        sub: (document.getElementById('monDiagSub') || {}).textContent || '',
       };
     })()`);
     check('存储页：空间四块占比 + 四段图例 + 明细行（诊断页已隐藏）',
       spUi.segs === 4 && spUi.legend === 4 && spUi.rows > 0 && spUi.diagHidden,
       `${spUi.segs} 段 / 图例 ${spUi.legend} / ${spUi.rows} 行 / 诊断页隐藏 ${spUi.diagHidden}`);
+    // 「上次整理」是这轮的驱动信号：密度 + 多久没整理，才知道该不该动手
+    // 末列的数是「多久以前」，三位数以上一定是单位/时间戳搞错了
+    // （踩过：把时间戳当成时长算，刚 VACUUM 的表显示「498171 小时前」）
+    const vacText = spUi.cells[spUi.cells.length - 1] || '';
+    check('空间表有「上次整理」列（表头与单元格对齐，值是「从未 / N 分钟前」这类相对时间）',
+      spUi.heads.length === 8 && spUi.heads[7] === '上次整理' &&
+      spUi.cells.length === 8 &&
+      /^(从未|刚刚|\d+ (秒|分钟|小时|天|个月)前)$/.test(vacText) &&
+      spUi.vacAll.every(v => /^(从未|刚刚|\d+ (秒|分钟|小时|天|个月)前)$/.test(v)),
+      `${spUi.heads.length} 列 · 末列「${vacText}」· 全部 ${JSON.stringify(spUi.vacAll)}`);
 
     await cdp.eval(`document.querySelector('#spaceBody tr').click()`);
     await sleep(1400);

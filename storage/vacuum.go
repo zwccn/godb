@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"godb/catalog"
 )
@@ -138,9 +139,13 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 		if st, err := os.Stat(td.pages.path); err == nil {
 			rep.Bytes = st.Size()
 		}
+		key := cleanName(t.Name)
 		s.loadMu.Lock()
-		s.hasSnap[cleanName(t.Name)] = true
-		s.tableGen[cleanName(t.Name)] = gen
+		s.hasSnap[key] = true
+		s.tableGen[key] = gen
+		// 记下「整理过了」的时刻：页密度低 + 这个时间很旧，才是「该整理了」的信号
+		prev := s.tableVac[key]
+		s.tableVac[key] = vacuumTimes{At: time.Now().UnixMilli(), Full: prev.Full}
 		s.loadMu.Unlock()
 		out = append(out, rep)
 	}
@@ -149,4 +154,14 @@ func (s *Store) Vacuum(name string) ([]VacuumReport, error) {
 		return out, err
 	}
 	return out, nil
+}
+
+// vacuumTimes 是某张表的整理历史（Unix 毫秒，0 = 从没整理过）。
+//
+// At 是「最后一次 VACUUM 或 VACUUM FULL」；Full 只有整份重写才更新。
+// 两者分开是因为它们的代价差一个量级：普通 VACUUM 只整理页内（页数不变），
+// VACUUM FULL 要整份重写、期间占着表锁。
+type vacuumTimes struct {
+	At   int64
+	Full int64
 }

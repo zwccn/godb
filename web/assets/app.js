@@ -2602,6 +2602,19 @@ async function loadSpace() {
   updateDiagSub();
 }
 
+// 时间戳 → 「多久以前」。注意和文件后面的 fmtAgo(时长) 不是一回事：
+// 那个收的是「差了多久（ms）」，这个收的是「某个时刻（Unix ms）」。同名会被后来的盖掉
+// —— 踩过一次：刚 VACUUM 过的表显示「498171 小时前」。
+function fmtSince(ts) {
+  if (!ts) return '从未';
+  const d = Date.now() - ts;
+  if (d < 90e3) return '刚刚';
+  if (d < 3600e3) return `${Math.round(d / 60e3)} 分钟前`;
+  if (d < 86400e3) return `${Math.round(d / 3600e3)} 小时前`;
+  if (d < 30 * 86400e3) return `${Math.round(d / 86400e3)} 天前`;
+  return `${Math.round(d / (30 * 86400e3))} 个月前`;
+}
+
 function spaceLegendItem(cls, label, bytes, total) {
   const item = el('span', 'space-item');
   item.appendChild(el('span', 'space-dot s-' + cls));
@@ -2657,6 +2670,12 @@ function renderSpace() {
     const fillText = t.fillKnown && (t.pages || 0) >= 8
       ? `${((t.fill || 0) * 100).toFixed(0)}%` : '—';
     tr.appendChild(el('td', 'c-num', fillText));
+    // 密度只说「现在多空」；配上「多久没整理」才是可执行的信息
+    const vacCell = el('td', 'c-num', fmtSince(t.vacuumAt));
+    vacCell.title = `上次整理：${fmtSince(t.vacuumAt)}`
+      + `\n上次整份重写：${fmtSince(t.rewriteAt)}（VACUUM FULL 才更新）`
+      + '\n整理 = VACUUM 或 VACUUM FULL；前者只收页内的洞，后者才降页数';
+    tr.appendChild(vacCell);
     tr.addEventListener('click', () => toggleSpaceDetail(t.name));
     monEls.spaceBody.appendChild(tr);
   }

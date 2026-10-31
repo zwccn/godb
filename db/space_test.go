@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 页密度 = 1 - 页里可复用的空闲字节 / 页容量。
@@ -155,5 +156,73 @@ func TestSpaceDetailSplitsHoleAndFree(t *testing.T) {
 	used := vac.LiveBytes + vac.FreeBytes + vac.HoleBytes
 	if used >= vac.Capacity || vac.Capacity-used > int64(vac.Pages)*512 {
 		t.Fatalf("三块之和 %d 与容量 %d 差得离谱（页数 %d）", used, vac.Capacity, vac.Pages)
+	}
+}
+
+// 整理时间：密度只说「现在多空」，回答不了「该不该现在整理」。
+// 所以 VACUUM / VACUUM FULL 各记一个时间戳，而且必须落盘（重启后还在）。
+func TestVacuumTimestamps(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferPoolPages: 64, Lock: testOptions().Lock})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	run(t, d, "s", `CREATE TABLE vt (id INTEGER PRIMARY KEY, pad TEXT)`)
+	pad := strings.Repeat("p", 200)
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO vt VALUES `)
+	for i := 1; i <= 1000; i++ {
+		if i > 1 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, "(%d,'%s')", i, pad)
+	}
+	run(t, d, "s", sb.String())
+	run(t, d, "s", `CHECKPOINT`)
+
+	get := func() (vac, full int64) {
+		ts := d.Store.TableSizes()
+		if len(ts) != 1 {
+			t.Fatalf("期望 1 张表，实际 %d", len(ts))
+		}
+		return ts[0].VacuumAt, ts[0].RewriteAt
+	}
+	if vac, full := get(); vac != 0 || full != 0 {
+		t.Fatalf("没整理过就不该有时间戳：%d / %d", vac, full)
+	}
+
+	run(t, d, "s", `DELETE FROM vt WHERE id % 10 <> 0`)
+	run(t, d, "s", `VACUUM vt`)
+	vac, full := get()
+	if vac == 0 {
+		t.Fatal("VACUUM 之后应该记下整理时间")
+	}
+	if full != 0 {
+		t.Fatalf("普通 VACUUM 不该动「整份重写」的时间：%d", full)
+	}
+	if d := time.Since(time.UnixMilli(vac)); d < 0 || d > time.Minute {
+		t.Fatalf("整理时间不像刚刚：%v 前", d)
+	}
+
+	if _, err := d.Exec(d.Session("s"), `VACUUM FULL vt`); err != nil {
+		t.Fatalf("vacuum full: %v", err)
+	}
+	vac2, full2 := get()
+	if full2 == 0 || vac2 < vac {
+		t.Fatalf("VACUUM FULL 之后两个时间都该刷新：vac %d→%d, full %d", vac, vac2, full2)
+	}
+
+	// 重启后从 meta 读回来（未加载的表也要能报）
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	d2, err := Open(dir, Options{BufferPoolPages: 64, Lock: testOptions().Lock})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+	ts := d2.Store.TableSizes()
+	if len(ts) != 1 || ts[0].VacuumAt != vac2 || ts[0].RewriteAt != full2 {
+		t.Fatalf("重启后整理时间没恢复：%+v，期望 vac=%d full=%d", ts, vac2, full2)
 	}
 }

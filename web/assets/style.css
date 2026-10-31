@@ -3441,8 +3441,9 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 /* 七列按固定比例分：数值列太窄会把「24.0 KB」截成「24.0 …」（踩过）。
    表名列吃剩下的，名字长的照样省略号，但数值一定看得全。 */
 .space-table { table-layout: fixed; }
-.space-table th.c-table { width: 34%; }
-.space-table th.c-num { width: 11%; }
+/* 八列：表名 26% + 7 个数值列各 10.5%。数值列太窄会把「24.0 KB」截成「24.0 …」 */
+.space-table th.c-table { width: 26%; }
+.space-table th.c-num { width: 10.5%; }
 .space-table td.c-table { overflow: hidden; text-overflow: ellipsis; }
 .space-table tbody tr { cursor: pointer; }
 .space-table tbody tr.on { background: var(--hint-active-bg); }

@@ -351,7 +351,7 @@ class CDP {
       fillRow.found && (/%|—/.test(fillRow.main)) && /VACUUM/.test(fillRow.tip),
       fillRow.found ? `${fillRow.main} · ${fillRow.sub}` : `缺行：${JSON.stringify(fillRow.keys)}`);
 
-    // 页面级 Tab：概览 / 存储 / 空间地图 / 诊断。诊断卡里的小 Tab 只留三类诊断。
+    // 页面级 Tab：概览 / 诊断 / 存储 / 空间地图。诊断卡里的小 Tab 只留三类诊断。
     const navUi = await cdp.eval(`(() => {
       const nav = document.getElementById('monNav');
       const tabs = nav ? [...nav.querySelectorAll('.mon-nav-tab')] : [];
@@ -362,8 +362,10 @@ class CDP {
             tabs.find(b => b.classList.contains('on')).dataset.page,
       };
     })()`);
-    check('监控顶部有页面级 Tab（概览 / 存储 / 空间地图 / 诊断），默认概览',
-      navUi.n === 4 && navUi.labels.join('/') === '概览/存储/空间地图/诊断' && navUi.on === 'overview',
+    // 顺序是「排查时先看哪个」：诊断紧跟概览（健康灯一亮就在这儿找原因），
+    // 存储排在它后面（确认是磁盘问题才去），空间地图最后。
+    check('监控顶部有页面级 Tab（概览 / 诊断 / 存储 / 空间地图），默认概览',
+      navUi.n === 4 && navUi.labels.join('/') === '概览/诊断/存储/空间地图' && navUi.on === 'overview',
       navUi.labels.join(' / ') + ' · 当前 ' + navUi.on);
 
     // 概览页底部留一行存储摘要：fsync 是最高频的排障入口，不该逼人先切页

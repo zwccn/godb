@@ -1583,11 +1583,13 @@ function toggleMonitor(force) {
   else setMonSettings(false);
 }
 
-/* ---- 页面级 Tab：概览 / 存储 / 空间地图 / 诊断 ----
-   按「回答什么问题」分：概览看健康与走势，存储看数字（够不够、该不该整理），
-   空间地图看「东西在哪、长什么样」，诊断看谁在捣乱。
+/* ---- 页面级 Tab：概览 / 诊断 / 存储 / 空间地图 ----
+   按「回答什么问题」分：概览看健康与走势，诊断看谁在捣乱，存储看数字（够不够、
+   该不该整理），空间地图看「东西在哪、长什么样」。
    诊断卡内部还有一层小 Tab（慢SQL/慢事务/锁），那是同一个问题的三种切面。 */
-const MON_PAGES = ['overview', 'storage', 'map', 'diag'];
+// Tab 顺序 = 使用顺序：先看健康（概览）、马上要排障就看谁在捣乱（诊断）、
+// 确认是磁盘问题才去存储、最后才是图形勘探（空间地图）。DOM 里的顺序要和这里一致。
+const MON_PAGES = ['overview', 'diag', 'storage', 'map'];
 let monPageTab = 'overview';
 
 function setMonPage(name) {

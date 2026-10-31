@@ -204,15 +204,17 @@ try {
     </div>
   </div>
 
-  <!-- 页面级 Tab：概览 / 存储 / 诊断。
+  <!-- 页面级 Tab：概览 / 诊断 / 存储 / 空间地图。
        原来「存储与 IO」在概览最下面、「空间」又混在诊断卡的 Tab 里，两处互不相干，
        而「提交为什么慢」既要看 fsync 又要看落盘 —— 干脆按「回答什么问题」分页：
-       概览看健康、存储看磁盘、诊断看谁在捣乱。概览底部留一行存储摘要，排障时不用来回切。 -->
+       概览看健康、诊断看谁在捣乱、存储看磁盘、空间地图看分布。
+       Tab 顺序按「排查时先看哪个」排：诊断紧跟概览（健康灯一亮就在这儿找原因）。
+       注意：正文容器的 DOM 顺序不影响切换（按 data-page 匹配），顺序只由这个 nav 决定。 -->
   <div class="mon-nav" id="monNav" role="tablist" aria-label="监控视图">
     <button type="button" class="mon-nav-tab on" data-page="overview" role="tab" aria-selected="true">概览</button>
+    <button type="button" class="mon-nav-tab" data-page="diag" role="tab" aria-selected="false">诊断</button>
     <button type="button" class="mon-nav-tab" data-page="storage" role="tab" aria-selected="false">存储</button>
     <button type="button" class="mon-nav-tab" data-page="map" role="tab" aria-selected="false">空间地图</button>
-    <button type="button" class="mon-nav-tab" data-page="diag" role="tab" aria-selected="false">诊断</button>
   </div>
 
   <div class="mon-body" id="monBody">

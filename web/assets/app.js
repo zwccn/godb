@@ -56,7 +56,7 @@ const THEME_KEY = 'godb.theme';
 const DEFAULT_THEME = 'steel';
 // 顺序即设置页里的展示顺序；默认的那套排第一
 const THEME_LIST = [
-  { id: 'steel', name: '炫酷科技灰' },
+  { id: 'steel', name: '科技灰' },
   { id: 'dark', name: '深色' },
   { id: 'sky', name: '淡蓝' },
   { id: 'taro', name: '芋紫' },

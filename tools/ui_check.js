@@ -1520,10 +1520,10 @@ class CDP {
         brand.shadow === 'none' && brand.bgImage === 'none' && /^GoDB/.test(brand.title),
       `${brand.text} · DB 色 ${brand.dbColor} · title ${brand.title}`);
     check('设置页有 5 个带名字的皮肤卡片',
-      setUi.picks === 5 && setUi.pickNames.join('/') === '炫酷科技灰/深色/淡蓝/芋紫/薄荷绿',
+      setUi.picks === 5 && setUi.pickNames.join('/') === '科技灰/深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);
 
-    // 炫酷科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）
+    // 科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）
     const steel = await cdp.eval(`(() => {
       applyTheme('steel', false);
       const cs = getComputedStyle(document.documentElement);
@@ -2073,7 +2073,7 @@ class CDP {
       && navAfter.order[0] === 'btnHome',
       `监控 ${navBefore.open} → 编辑器 ${!navAfter.open} · 顶栏 ${navAfter.order.join('/')}`);
 
-    /* 「炫酷科技灰」的四项增强：顶栏光带、十字准星光标、右键拦截、皮肤名。
+    /* 「科技灰」的四项增强：顶栏光带、十字准星光标、右键拦截、皮肤名。
        这些只在 steel 上开（其它皮肤一行都不该变），所以先切皮肤再断言，
        最后切回淡蓝，检查它确实没被污染 —— 浅色皮肤上叠一层蓝光会立刻显脏。 */
     await cdp.eval(`applyTheme('steel', false)`);
@@ -2095,9 +2095,9 @@ class CDP {
         shift: fire(blank, true),
       };
     })()`);
-    check('「炫酷科技灰」：顶栏光带 + 十字光标 + 右键拦截（Shift 和编辑器放行）',
+    check('「科技灰」：顶栏光带 + 十字光标 + 右键拦截（Shift 和编辑器放行）',
       fx.scan && fx.cursor && fx.blocked && !fx.editor && !fx.shift
-      && fx.labels[0] === '炫酷科技灰',
+      && fx.labels[0] === '科技灰',
       `${fx.labels.join(' / ')} · 拦截 ${fx.blocked} / 编辑器 ${fx.editor} / Shift ${fx.shift}`);
 
     /* 焦点环不能画在 outline 上：outline-offset 会在它和 border 之间留一道 1px 缝，

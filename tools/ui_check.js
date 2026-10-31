@@ -653,6 +653,60 @@ class CDP {
     await cdp.eval(`document.getElementById('mapZoomReset').click()`);
     await sleep(400);
 
+    /* 滚轮输入整形：一次手势的尾巴常带几个反向的小 delta，逐个取指数就会「放大着放大着
+       又缩一下」。这里直接喂事件对象：同向放大 → 反向小尾巴 → 真回头，看后两个判得对不对。 */
+    const zsh = await cdp.eval(`(() => {
+      const r = document.getElementById('pmGrid').getBoundingClientRect();
+      const ev = dy => ({ deltaY: dy, deltaMode: 0, clientX: r.left + 40, clientY: r.top + 40 });
+      const up = wheelZoom(ev(-120));      // 用户往上滚：放大
+      const tail = wheelZoom(ev(6));       // 尾巴：反向、幅度小、紧跟上一拍
+      const back = wheelZoom(ev(120));     // 用户真往回滚：该缩
+      return { up, tail, back };
+    })()`);
+    check('滚轮缩放手势整形：反向小尾巴被丢掉，真回头才缩',
+      zsh.up === true && zsh.tail === false && zsh.back === true,
+      `放大 ${zsh.up} · 尾巴 ${zsh.tail}（应为 false）· 回头 ${zsh.back}`);
+    await cdp.eval(`document.getElementById('mapZoomReset').click()`);
+    await sleep(400);
+
+    /* 放大过程中「只进不退」，而且不能重建格子：
+       - 回退的根因是滚动条一出现就压缩 clientWidth，基准格子跟着变小 → 内容收敛 →
+         滚动条消失 → 又变大，卡在临界点来回横跳。现在基准只乘倍数，不再按当帧宽度重算。
+       - 重建的根因是每帧 innerHTML=''，清空那一帧 scrollWidth 塌成 0，scrollLeft 被夹回去。 */
+    await cdp.eval(`(() => {
+      const g = document.getElementById('pmGrid');
+      g.scrollTop = 0; g.scrollLeft = 0;
+      window.__z0 = g.children[0];
+      window.__zt = [];
+      (function s(n) {
+        const c = document.querySelector('#pmGrid .pm-c');
+        window.__zt.push({
+          z: Math.round(mapZoom * 1000) / 1000,
+          cell: c ? Math.round(c.getBoundingClientRect().width) : 0,
+          same: c === window.__z0,
+        });
+        if (n < 42) requestAnimationFrame(() => s(n + 1));
+      })(0);
+    })()`);
+    for (let i = 0; i < 3; i++) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120 });
+      await sleep(140);
+    }
+    await sleep(700);
+    const zt = await cdp.eval(`window.__zt`);
+    let zBack = 0, zShrunk = 0, zRebuilt = 0;
+    for (let i = 1; i < zt.length; i++) {
+      if (zt[i].z < zt[i - 1].z - 1e-6) zBack++;
+      if (zt[i].cell < zt[i - 1].cell) zShrunk++;
+      if (!zt[i].same) zRebuilt++;
+    }
+    check('放大过程中倍数/格子只增不减，且格子 DOM 全程没被重建',
+      zt[zt.length - 1].z > zt[0].z + 0.2 && zBack === 0 && zShrunk === 0 && zRebuilt === 0,
+      `${zt[0].z}× → ${zt[zt.length - 1].z}× · 格子 ${zt[0].cell} → ${zt[zt.length - 1].cell}px`
+      + ` · 回退 ${zBack} 帧 / 变小 ${zShrunk} 帧 / 重建 ${zRebuilt} 帧`);
+    await cdp.eval(`document.getElementById('mapZoomReset').click()`);
+    await sleep(400);
+
     // 页检查器：点一格看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
     await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
     await sleep(1200);

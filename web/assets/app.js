@@ -2819,6 +2819,8 @@ const MAP_RAIL_DEFAULT = 460;
 const MAP_RAIL_MIN = 360;
 const MAP_RAIL_MAX = 760;
 const MAP_MAX_CELLS = 20;        // 树图最多铺多少块，多出来的合并成「其它」
+let treeCells = [];              // 树图当前复用的 DOM（缩放只摆位置，不重建）
+let treeKey = '';                // 树图结构签名：块构成没变就不重建
 let mapLevel = 'db';             // db | table
 let mapGroup = 'table';          // 树图分组：table（一张表一块）| file（数据 / 每棵索引 / 大字段）
 let mapSelTable = '';            // L1 选中的表（右栏详情 + 面包屑）
@@ -2967,21 +2969,34 @@ function renderTreemap() {
   const box = monEls.mapTree;
   if (!box) return;
   box.title = '滚轮缩放 · 放大后按住拖动平移 · 双击进页地图';
-  box.innerHTML = '';
   const items = treemapItems();
   if (!items.length) {
-    box.appendChild(el('div', 'map-empty', '还没有落过盘的表 —— 先 CHECKPOINT 一次，页才会写到磁盘上'));
+    if (!box.querySelector('.map-empty')) {
+      box.innerHTML = '';
+      box.appendChild(el('div', 'map-empty', '还没有落过盘的表 —— 先 CHECKPOINT 一次，页才会写到磁盘上'));
+    }
+    treeCells = [];
+    treeKey = '';
     return;
   }
   const W = box.clientWidth, H = box.clientHeight;
   if (W < 40 || H < 40) return;  // 页面还没显示出来（宽高为 0），切回来会重画
   clampTreePan(W, H);
   const { list } = mergeSmall(items);
+  // 结构（有哪些块、各占多少）没变就复用 DOM：缩放时每帧重建 20 个带监听器的 div，
+  // 鼠标底下的 :hover 会一帧一闪，看着像画面在抖。
+  const sig = mapGroup + '|' + list.map(it => `${it.name}:${it.value}`).join(',');
+  if (sig !== treeKey || treeCells.length !== list.length) {
+    box.innerHTML = '';
+    treeKey = sig;
+    treeCells = list.map(it => makeTreeCell(box, it));
+  }
   // 缩放不用 CSS transform，而是在「W×k / H×k 的虚拟画布」上重新排版：
   // 面积比例不变（还是正比于字节），但每个格子是实打实的屏幕像素 ——
   // 文字不会被拉伸，放大后小格子够大了，名字自然就出来了。
   const k = mapZoom;
-  for (const c of squarify(list, 0, 0, W * k, H * k)) drawTreeCell(box, c);
+  let i = 0;
+  for (const c of squarify(list, 0, 0, W * k, H * k)) placeTreeCell(treeCells[i++], c);
   renderZoomHud();
 }
 
@@ -3017,6 +3032,33 @@ let zoomRaf = 0;
 const ZOOM_EASE = 0.3;     // 每帧逼近 30%，约 250ms 收敛
 const REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
+/* 滚轮输入整形。鼠标滚轮一格 deltaY=100，触控板会拆成一串小 delta，
+   而且一次手势的尾巴常带几个反向的小值 —— 直接对每个事件取指数，
+   就成了「放大着放大着又缩一下、像在抖」。所以三件事：
+   噪声丢掉、反向短尾丢掉、单次幅度封顶。 */
+const WHEEL_GAIN = 0.0012;      // 每像素 delta 的对数增量（原 0.0018 一格 1.20×，太冲）
+const WHEEL_STEP_MAX = 0.22;    // 单次事件最多 1.25×，手指一抖不会冲出去
+const WHEEL_NOISE = 2;          // |delta| 小于它当噪声
+const WHEEL_TAIL_MS = 240;      // 反向、紧跟上一拍、幅度又小的 —— 判为手势尾巴
+const WHEEL_TAIL_MAX = 24;
+let wheelDir = 0, wheelAt = 0;
+
+// 返回 false = 这个事件被当噪声丢了；调用方仍要 preventDefault，否则页面会跟着滚。
+function wheelZoom(e) {
+  const d = e.deltaMode === 1 ? e.deltaY * 16 : (e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY);
+  const mag = Math.abs(d);
+  if (mag < WHEEL_NOISE) return false;
+  const t = performance.now();
+  const dir = d > 0 ? 1 : -1;
+  if (dir !== wheelDir && t - wheelAt < WHEEL_TAIL_MS && mag < WHEEL_TAIL_MAX) return false;
+  wheelDir = dir;
+  wheelAt = t;
+  const step = Math.max(-WHEEL_STEP_MAX, Math.min(WHEEL_STEP_MAX, -d * WHEEL_GAIN));
+  stopInertia();
+  requestZoom(Math.exp(step), { x: e.clientX, y: e.clientY });
+  return true;
+}
+
 function clampZoom(k) {
   return Math.max(1, Math.min(MAP_ZOOM_MAX, k));
 }
@@ -3038,8 +3080,9 @@ function applyZoomStep(kNew) {
       const fy = (g.scrollTop + ay) / Math.max(1, g.scrollHeight);
       mapZoom = kNew;
       renderPageMap();
-      g.scrollLeft = fx * g.scrollWidth - ax;
-      g.scrollTop = fy * g.scrollHeight - ay;
+      // 取整：半像素的 scrollLeft 会被浏览器各自舍入，逐帧累积成一眼可见的漂移
+      g.scrollLeft = Math.round(fx * g.scrollWidth - ax);
+      g.scrollTop = Math.round(fy * g.scrollHeight - ay);
     } else {
       mapZoom = kNew;
     }
@@ -3066,29 +3109,20 @@ function stopZoomAnim() {
 
 function runZoomAnim() {
   if (zoomRaf) return;
-  let lastPaint = 0;
-  const tick = now => {
+  const tick = () => {
     zoomRaf = 0;
     const diff = zoomTarget - mapZoom;
-    if (Math.abs(diff) <= 0.002 * Math.max(1, mapZoom)) {
+    if (Math.abs(diff) <= 0.0015 * Math.max(1, mapZoom)) {
       applyZoomStep(zoomTarget);
       zoomAnchor = null;
       return;
     }
-    if (mapLevel === 'table') {
-      // 网格每帧都要重建所有格子：785 格 5.5ms 还能扛，几千格就是 20ms+，
-      // 与其一卡一卡，不如直接跳到位（跳跃比掉帧好看）。
-      const cells = (monEls.pmGrid && monEls.pmGrid.children.length) || 0;
-      if (cells >= 2500) {
-        applyZoomStep(zoomTarget);
-        zoomAnchor = null;
-        return;
-      }
-      if (now - lastPaint < 30) {   // ~30fps
-        zoomRaf = requestAnimationFrame(tick);
-        return;
-      }
-      lastPaint = now;
+    // 格子太多时每帧重排要 20ms+，与其一卡一卡地动，不如一档跳到目标（跳跃比掉帧好看）。
+    // 其余档位一律按帧跑：不重建 DOM 之后，每帧只剩「改一个 CSS 变量 + 一次 layout」。
+    if (mapLevel === 'table' && ((monEls.pmGrid && monEls.pmGrid.children.length) || 0) >= 2500) {
+      applyZoomStep(zoomTarget);
+      zoomAnchor = null;
+      return;
     }
     applyZoomStep(mapZoom + diff * ZOOM_EASE);
     zoomRaf = requestAnimationFrame(tick);
@@ -3114,7 +3148,8 @@ function setMapZoom(next, anchor, instant) {
 
 function requestZoom(factor, anchor) {
   zoomTarget = clampZoom(zoomTarget * factor);
-  if (anchor) zoomAnchor = anchor;
+  // 动画在飞时不换锚点：滚轮时手抖那几像素会把画面带着横跳
+  if (anchor && !zoomRaf) zoomAnchor = anchor;
   if (REDUCED_MOTION) {
     stopZoomAnim();
     applyZoomStep(zoomTarget);
@@ -3130,6 +3165,7 @@ function resetMapZoom() {
   mapZoom = 1;
   tvPan.x = 0;
   tvPan.y = 0;
+  wheelDir = 0;      // 换了视图/层级，上一手势的方向别带过来
   renderZoomHud();
 }
 
@@ -3143,24 +3179,10 @@ function renderZoomHud() {
   if (monEls.mapTree) monEls.mapTree.classList.toggle('can-pan', mapLevel === 'db' && mapZoom > 1);
 }
 
-function drawTreeCell(box, c) {
-  const it = c.item;
-  const w = Math.max(2, c.w - 1), h = Math.max(2, c.h - 1);
-  const on = mapLevel === 'db' && mapSelTable && it.table === mapSelTable;
-  const d = el('div', 'tv-cell' + (it.kind === 'other' ? ' other' : '') + (on ? ' on' : ''));
-  d.dataset.bx = String(c.x);
-  d.dataset.by = String(c.y);
-  d.style.left = `${c.x + tvPan.x}px`;
-  d.style.top = `${c.y + tvPan.y}px`;
-  d.style.width = `${w}px`;
-  d.style.height = `${h}px`;
+// 树图的块只建一次（结构变才重建），之后每帧只摆位置 —— 见 renderTreemap。
+function makeTreeCell(box, it) {
+  const d = el('div', 'tv-cell' + (it.kind === 'other' ? ' other' : ''));
   d.title = treeTip(it);
-  // 细高的条（宽 54、高几千）横着排只能塞下四个字，名字得竖着写 ——
-  // 这正是「数据多时某些块太小」最难受的形态，放大之后要靠它才读得出来。
-  const vlabel = h >= 120 && w < 92;
-  if (vlabel) d.classList.add('vlabel');
-  if (w >= 54 && h >= 22) d.appendChild(el('span', 'tv-name', it.name));
-  if (!vlabel && w >= 54 && h >= 40) d.appendChild(el('span', 'tv-size', fmtBytes(it.value)));
   const p = it.parts || {};
   const segs = [['data', p.data], ['index', p.index], ['lob', p.lob], ['wal', p.wal]].filter(x => x[1] > 0);
   if (segs.length) {
@@ -3168,8 +3190,13 @@ function drawTreeCell(box, c) {
     const top = segs.slice().sort((a, b) => b[1] - a[1])[0][0];
     d.dataset.tint = top;
   }
-  if (segs.length && h >= 8) {
-    const bar = el('div', 'tv-parts');
+  const name = el('span', 'tv-name', it.name);
+  const size = el('span', 'tv-size', fmtBytes(it.value));
+  d.appendChild(name);
+  d.appendChild(size);
+  let bar = null;
+  if (segs.length) {
+    bar = el('div', 'tv-parts');
     for (const [cls, v] of segs) {
       const seg = el('i', 'p-' + cls);
       seg.style.flex = String(v);
@@ -3191,6 +3218,27 @@ function drawTreeCell(box, c) {
     d.addEventListener('dblclick', () => enterTable(it.table, it.target && it.target.kind, it.target && it.target.index));
   }
   box.appendChild(d);
+  return { it, d, name, size, bar };
+}
+
+function placeTreeCell(cell, c) {
+  const { it, d, name, size, bar } = cell;
+  const w = Math.max(2, c.w - 1), h = Math.max(2, c.h - 1);
+  d.dataset.bx = String(c.x);
+  d.dataset.by = String(c.y);
+  d.style.left = `${c.x + tvPan.x}px`;
+  d.style.top = `${c.y + tvPan.y}px`;
+  d.style.width = `${w}px`;
+  d.style.height = `${h}px`;
+  // 细高的条（宽 54、高几千）横着排只能塞下四个字，名字得竖着写 ——
+  // 这正是「数据多时某些块太小」最难受的形态，放大之后要靠它才读得出来。
+  const vlabel = h >= 120 && w < 92;
+  d.classList.toggle('vlabel', vlabel);
+  d.classList.toggle('on', mapLevel === 'db' && !!mapSelTable && it.table === mapSelTable);
+  // 标签只切显隐，不增删节点：缩放时这几行每秒要跑几十遍
+  name.classList.toggle('hidden', !(w >= 54 && h >= 22));
+  size.classList.toggle('hidden', vlabel || !(w >= 54 && h >= 40));
+  if (bar) bar.classList.toggle('hidden', h < 8);
 }
 
 function showOtherBlocks(tail) {
@@ -3365,22 +3413,21 @@ function renderFileBar() {
   if (!(t && (t.indexes || []).length)) box.appendChild(el('span', 'map-note', '这张表没有二级索引'));
 }
 
-// 格子大小随画布与页数自适应：目标是「尽量一屏铺完」，而不是固定 12px。
-function fitCell(box, count) {
+/* 格子大小随画布与页数自适应：目标是「尽量一屏铺完」，而不是固定 12px。
+   缩放时格子尺寸 = 基准 × 倍数，**基准绝不能按当帧的 clientWidth 重算** ——
+   放大到刚冒出滚动条那一刻会形成正反馈：滚动条吃掉 15px → 基准变小 → 内容收敛
+   → 滚动条消失 → 基准又变大 → 再溢出 …… 卡在临界点上左右横跳，
+   看上去就是「放大着放大着又缩回去了」。基准只在页数/容器真的变了时才算。 */
+let pmBase = { cell: 12, gap: 4, w: 0, h: 0 };
+let pmSig = '';       // 当前网格 DOM 对应的结构签名（表|类型|页数），没变就别重建
+
+function pmBaseSize(box, count) {
   const W = box.clientWidth, H = box.clientHeight;
   if (!W || !H) return;
   const gap = count > 2500 ? 2 : (count > 800 ? 3 : 4);
   let cell = Math.floor(Math.sqrt((W * H) / Math.max(1, count)) - gap);
   // 上限给到 72：页少的表就该画成大方块，卡在 30 会让一张 1 页的表缩在左上角像坏了。
   cell = Math.max(5, Math.min(72, cell));
-  // 放大：格子直接乘倍数，超过画布就滚动 —— 页数太多（格子掉到 5px 下限）时靠这个看清
-  if (mapZoom > 1) {
-    const z = Math.min(96, Math.max(5, Math.round(cell * mapZoom)));
-    box.style.setProperty('--pm-cell', `${z}px`);
-    box.style.setProperty('--pm-gap', `${gap}px`);
-    box.classList.remove('center');
-    return;
-  }
   // 再按「行数×行高」验一遍：flex 换行会有取整误差，差 1px 就冒出滚动条，
   // 而滚动条一出现又压缩可用宽度 —— 干脆缩到放得下为止。
   for (; cell > 5; cell--) {
@@ -3388,11 +3435,23 @@ function fitCell(box, count) {
     const rows = Math.ceil(count / cols);
     if (rows * (cell + gap) - gap <= H) break;
   }
-  box.style.setProperty('--pm-cell', `${cell}px`);
-  box.style.setProperty('--pm-gap', `${gap}px`);
+  // offsetWidth 是边框盒，滚动条出现与否都不变 —— 拿它当「容器有没有变」的判据才稳
+  pmBase = { cell, gap, w: box.offsetWidth, h: box.offsetHeight };
+}
+
+function applyGridSizing(box, count) {
+  if (!pmBase.cell || box.offsetWidth !== pmBase.w || box.offsetHeight !== pmBase.h) {
+    pmBaseSize(box, count);
+  }
+  // 240 上限：再大就只剩两三个格子铺满一屏，反而看不出密度分布
+  const z = mapZoom > 1
+    ? Math.max(5, Math.min(240, Math.round(pmBase.cell * mapZoom)))
+    : pmBase.cell;
+  box.style.setProperty('--pm-cell', `${z}px`);
+  box.style.setProperty('--pm-gap', `${pmBase.gap}px`);
   // 铺不满一半就居中，不然一两个格子孤零零贴在左上角
-  const used = count * (cell + gap) * (cell + gap);
-  box.classList.toggle('center', used < W * H * 0.5);
+  const used = count * (pmBase.cell + pmBase.gap) * (pmBase.cell + pmBase.gap);
+  box.classList.toggle('center', mapZoom <= 1 && used < box.clientWidth * box.clientHeight * 0.5);
 }
 
 function pmMapMatches() {
@@ -3455,12 +3514,45 @@ function pmCellClass(p) {
   return 'sparse';
 }
 
+// 网格的两块状态：有没有溢出（能不能拖）、还能不能再扫。重建和缩放两条路都要刷新。
+function syncGridFit(box) {
+  box.classList.toggle('can-pan',
+    box.scrollWidth > box.clientWidth + 1 || box.scrollHeight > box.clientHeight + 1);
+}
+
+function updateGridFoot(shown) {
+  if (!pmMap) return;
+  const kindText = pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页';
+  if (monEls.mapNote) {
+    const more = shown < pmMap.total
+      ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）`
+      : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
+    monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
+  }
+  if (monEls.pmMore) {
+    monEls.pmMore.classList.toggle('hidden', !pmMap.next);
+    monEls.pmMore.textContent = `继续扫描（已画 ${shown} / ${pmMap.total} 页）`;
+  }
+}
+
 function renderPageMap() {
   const box = monEls.pmGrid;
   if (!box || !pmMap) return;
   box.title = '滚轮缩放 · 按住拖动平移 · 滚动条也能翻页 · 单击看这一页';
   const pages = pmMap.pages || [];
-  fitCell(box, pages.length || pmMap.total || 1);
+  const count = pages.length || pmMap.total || 1;
+  const sig = `${pmSel.table}|${pmSel.kind}|${pmSel.index || ''}|${pages.length}|${pmMap.total}`;
+  // 缩放动画每帧都会走到这里。785 个格子重建一遍不光是白烧 CPU：
+  // 清空那一刻滚动宽度塌成 0，浏览器会把 scrollLeft 夹回去，下一帧再设 —— 看着就是抖。
+  if (sig === pmSig && box.childElementCount) {
+    applyGridSizing(box, count);
+    syncGridFit(box);
+    updateGridFoot(pages.length);
+    return;
+  }
+  pmSig = sig;
+  pmBase.w = 0;                  // 换了表 / 页数变了，基准尺寸要按新页数重算
+  applyGridSizing(box, count);
   box.innerHTML = '';
   const frag = document.createDocumentFragment();
   for (const p of pages) {
@@ -3476,7 +3568,6 @@ function renderPageMap() {
   }
   box.appendChild(frag);
 
-  const kindText = pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页';
   if (monEls.pmLegend) {
     monEls.pmLegend.innerHTML = '';
     const parts = pmSel.kind === 'index'
@@ -3492,20 +3583,8 @@ function renderPageMap() {
       monEls.pmLegend.appendChild(item);
     }
   }
-  if (monEls.mapNote) {
-    const shown = pages.length;
-    const more = shown < pmMap.total ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）` : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
-    monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
-  }
-  if (box.scrollWidth > box.clientWidth + 1 || box.scrollHeight > box.clientHeight + 1) {
-    box.classList.add('can-pan');
-  } else {
-    box.classList.remove('can-pan');
-  }
-  if (monEls.pmMore) {
-    monEls.pmMore.classList.toggle('hidden', !pmMap.next);
-    monEls.pmMore.textContent = `继续扫描（已画 ${pages.length} / ${pmMap.total} 页）`;
-  }
+  syncGridFit(box);
+  updateGridFoot(pages.length);
 }
 
 async function openPage(no) {
@@ -3919,8 +3998,7 @@ if (monEls.mapTree) {
   box.addEventListener('wheel', e => {
     if (monPageTab !== 'map' || mapLevel !== 'db') return;
     e.preventDefault();
-    stopInertia();
-    requestZoom(Math.exp(-e.deltaY * 0.0018), { x: e.clientX, y: e.clientY });
+    wheelZoom(e);
   }, { passive: false });
 
   let drag = null;
@@ -3994,8 +4072,7 @@ if (monEls.pmGrid) {
   g.addEventListener('wheel', e => {
     if (monPageTab !== 'map' || mapLevel !== 'table') return;
     e.preventDefault();   // 一格一页的网格里没有「滚轮翻页」，翻页靠拖动和滚动条
-    stopInertia();
-    requestZoom(Math.exp(-e.deltaY * 0.0018), { x: e.clientX, y: e.clientY });
+    wheelZoom(e);
   }, { passive: false });
 
   let gdrag = null;

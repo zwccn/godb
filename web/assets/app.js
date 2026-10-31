@@ -2224,7 +2224,9 @@ function renderIO(m) {
   box.appendChild(row('页密度',
     fillOk ? `${((sp.fill || 0) * 100).toFixed(0)}% · ${sp.pages} 页` : '—',
     !fillOk
-      ? '还没有表落过盘（或刚升级还没记录空闲字节）'
+      ? ((sp.pages || 0) > 0
+        ? '表都还小（不足 8 页），小表的最后一页天然不满，统计了反而误导'
+        : '还没有表落过盘')
       : (sparseLow
         ? `最稀疏：${sparse.name} ${((sparse.fill || 0) * 100).toFixed(0)}%` +
           `（${Math.round(sparse.rows / Math.max(1, sparse.pages))} 行/页）`

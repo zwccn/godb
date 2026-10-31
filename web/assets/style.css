@@ -3349,14 +3349,31 @@ body.editor-resizing * { cursor: ns-resize !important; }
 }
 .cm-s-godb .CodeMirror-matchingbracket { color: var(--ok-text); }
 
-/* 行号默认藏着（编辑器只有 4~6 行高，常驻的 gutter 要吃掉 30px 宽度）。
-   只在「SQL 报错」时临时露出来，这时行号才有用 —— 报错文本里带 (line N, column M)。
+/* 行号常驻（报错时能直接对上 (line N, column M)）。
    vendor 的 codemirror.css 给 gutter 配的是浅灰底，深色主题下会成一条白条，必须覆盖。 */
 .cm-s-godb .CodeMirror-gutters {
   background: var(--code-bg);
   border-right: 1px solid var(--border-soft);
 }
 .cm-s-godb .CodeMirror-linenumber { color: var(--text-3); }
+
+/* 空编辑器的占位符：淡 + 斜体，一眼看出「这不是内容」。
+   默认样式和正文一样亮，再被行号「1」衬着，读起来就是第一行 SQL ——
+   之前那句 `-- 在这里写 SQL…` 被当成代码，一半是这个原因。
+   空的时候连行号也一起藏起来，编辑器就真的像一个空输入框。 */
+/* 这里必须带 `pre` 且权重压过 vendor：codemirror.css 里
+   `.CodeMirror pre.CodeMirror-line-like { color: inherit }` 是 (0,2,1)，
+   光写 `.cm-s-godb .CodeMirror-placeholder` 是 (0,2,0) —— 会输，颜色照旧继承正文。 */
+.cm-s-godb pre.CodeMirror-placeholder {
+  color: var(--text-3);
+  font-style: italic;
+  opacity: .8;
+}
+/* 空的时候把行号也藏起来，编辑器就真的像一个空输入框。
+   注意行号**不**在 `.CodeMirror-gutters` 里 —— CM5 把每行的行号渲染成
+   `.CodeMirror-gutter-wrapper`（绝对定位），藏在 `CodeMirror-code` 里，
+   所以隐藏 gutters 是没用的（试过，`1` 照样在）。 */
+.cm-s-godb.CodeMirror-empty .CodeMirror-gutter-wrapper { display: none; }
 
 /* 出错那行：底色 + 左侧一条红杠（只靠底色在很暗的编辑器里不够显眼） */
 .cm-errline { background: var(--tint-danger); }

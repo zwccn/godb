@@ -136,7 +136,7 @@ try {
         </div>
       </div>
       <textarea id="editor" spellcheck="false" inputmode="latin" autocapitalize="off"
-                autocorrect="off" placeholder="-- 在这里写 SQL，Ctrl+Enter 执行&#10;SELECT * FROM employees LIMIT 10;"></textarea>
+                autocorrect="off" placeholder="在此输入 SQL"></textarea>
       <!-- 拖这条改编辑器高度（双击回到跟随内容） -->
       <div id="editorResize" class="editor-resize" title="拖动改变高度，双击恢复自动"></div>
     </div>
@@ -809,10 +809,11 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
 
       <div class="set-sec">快捷键与小技巧</div>
       <div class="help-keys">
-        <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 执行</span>
+        <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 或 <kbd>F5</kbd> 执行（有选区就只跑选区）</span>
         <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> 美化 SQL（有选中就只美化选中那几行）</span>
         <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> 唤出补全（中文输入法会抢这个键，直接打字也会自动弹）</span>
         <span><kbd>Esc</kbd> 关掉补全 / 弹窗</span>
+        <span><kbd>Ctrl</kbd>+<kbd>F5</kbd> 才是浏览器的硬刷新（F5 被用来执行了）</span>
         <span>拖编辑器底边改高度，双击恢复自动</span>
         <span>弹窗可拖标题栏移动、拖右下角改大小，双击标题栏复位</span>
       </div>

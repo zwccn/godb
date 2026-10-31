@@ -329,7 +329,9 @@ function initCodeMirror() {
     indentUnit: 2,
     tabSize: 2,
     lineNumbers: true,
-    placeholder: '-- 在这里写 SQL，Ctrl+Enter 执行；Ctrl+Space 唤出补全',
+    // 占位符不再写成 `-- 在这里写 SQL…`：带 -- 就像一条真注释，还占着行号「1」，
+    // 看着像编辑器里已经有内容了。短一句就够，快捷键在按钮 title 和帮助里。
+    placeholder: '在此输入 SQL',
     hintOptions: {
       hint: window.GodbHint.complete,
       // 渲染函数挂在每条候选上（show-hint 是逐条 render），这里不配全局 render
@@ -830,7 +832,7 @@ function setRunning(on) {
   lastRunLabel = label ? label.textContent : '';
   btn.title = on
     ? '停止执行（已提交的语句会跑完，结果不采用）'
-    : '执行 SQL · Ctrl+Enter';
+    : '执行 SQL · Ctrl+Enter 或 F5';
   if (on) startRunTimer();
   else stopRunTimer();
 }
@@ -6355,6 +6357,18 @@ document.addEventListener('keydown', e => {
   closeEditorMenu();
   e.stopPropagation();
 }, true);
+
+/* F5 = 执行。浏览器的默认动作是刷新，而这儿本来就是单页控制台 —— 刷新一次要重新
+   加载全部静态资源、丢掉当前结果，按错的代价比「没反应」大得多。
+   两个例外：**Ctrl+F5 / Shift+F5 放行**（真要硬刷新前端时用），
+   以及**弹窗打开时不动**（在设置里按 F5 跑一条 SQL，只会吓人一跳）。 */
+document.addEventListener('keydown', e => {
+  if (e.key !== 'F5' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  e.preventDefault();
+  if (document.querySelector('.modal:not(.hidden)')) return;
+  if (busy) stopRun();
+  else run();
+}, true);
 document.addEventListener('pointerdown', e => {
   if (!ctxMenu || ctxMenu.classList.contains('hidden')) return;
   // 飞出面板是独立元素，点它们不算「点到外面」
@@ -7344,7 +7358,7 @@ async function switchDB(name) {
     toast('已切到库 ' + name + '：编辑器里的 SQL 保留了，注意它可能是按原来的库写的', false, 6000);
   }
   const ed = document.getElementById('editor');
-  if (ed) ed.placeholder = `-- 当前库：${name}，Ctrl+Enter 执行\nSELECT * FROM …`;
+  if (ed) ed.placeholder = `当前库：${name}，在此输入 SQL`;
 }
 
 async function createDB() {

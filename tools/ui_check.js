@@ -206,6 +206,51 @@ class CDP {
       && parseFloat(tm2.text) >= 3 && tm2.slow && tm3,
       `${tm1.text} → ${tm2.text}（${tm2.color}）· 收回 ${tm3}`);
 
+    /* 空编辑器的占位符：淡色斜体一句、行号也收起来 —— 看着像个空输入框，
+       而不是「第一行写着一句 -- 注释」。 */
+    await cdp.eval(`cm.setValue('')`);
+    await sleep(300);
+    const phUi = await cdp.eval(`(() => {
+      const p = document.querySelector('.CodeMirror-placeholder');
+      const g = document.querySelector('.CodeMirror-gutter-wrapper');
+      const ed = document.querySelector('.CodeMirror');
+      return {
+        text: p ? p.textContent : '',
+        italic: p ? getComputedStyle(p).fontStyle === 'italic' : false,
+        dim: p ? getComputedStyle(p).color !== getComputedStyle(ed).color : false,
+        gutterW: g ? Math.round(g.getBoundingClientRect().width) : 0,
+      };
+    })()`);
+    check('空编辑器只有一句淡色斜体占位符（没有行号、不像一句注释）',
+      phUi.text === '在此输入 SQL' && phUi.italic && phUi.dim && phUi.gutterW === 0,
+      `「${phUi.text}」· 斜体 ${phUi.italic} · 比正文淡 ${phUi.dim} · 行号宽 ${phUi.gutterW}`);
+
+    /* F5 = 执行。用**真按键**发（合成事件不会触发浏览器默认动作，测不到「拦住刷新」），
+       顺带用一个 window 上的标记确认页面确实没被刷掉。 */
+    await cdp.eval(`cm.setValue('SELECT 7 AS f5;'); window.__f5mark = 'alive'; lastSubmittedSQL = null`);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'F5', code: 'F5', windowsVirtualKeyCode: 116, nativeVirtualKeyCode: 116 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'F5', code: 'F5', windowsVirtualKeyCode: 116, nativeVirtualKeyCode: 116 });
+    await sleep(1400);
+    const f5Ui = await cdp.eval(`({ sql: lastSubmittedSQL, alive: window.__f5mark })`);
+    check('F5 直接执行，而且页面没有被刷新',
+      f5Ui.sql === 'SELECT 7 AS f5;' && f5Ui.alive === 'alive',
+      `提交 ${JSON.stringify(f5Ui.sql)} · 页面存活 ${f5Ui.alive}`);
+
+    await cdp.eval(`document.getElementById('helpModal').classList.remove('hidden'); lastSubmittedSQL = null`);
+    await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F5', bubbles: true, cancelable: true }))`);
+    await sleep(600);
+    const f5Guard = await cdp.eval(`lastSubmittedSQL`);
+    await cdp.eval(`document.getElementById('helpModal').classList.add('hidden')`);
+    check('弹窗打开时 F5 不执行（免得在设置里按一下就跑了条 SQL）',
+      f5Guard === null, `提交 ${JSON.stringify(f5Guard)}`);
+
+    const ctrlF5 = await cdp.eval(`(() => {
+      const ev = new KeyboardEvent('keydown', { key: 'F5', ctrlKey: true, bubbles: true, cancelable: true });
+      document.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    })()`);
+    check('Ctrl+F5 不被拦，留给浏览器的硬刷新', ctrlF5 === false, `被拦 ${ctrlF5}`);
+
     // 0.1b) 美化 SQL：子句换行 + 关键字大写，字符串里的内容一个字都不能动
     await cdp.eval(`cm.setValue("select id,name from t where a='it''s' and b=1 order by id")`);
     await cdp.eval(`document.getElementById('btnFormat').click()`);

@@ -927,6 +927,9 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
 </div>
 
 <div id="toast" class="toast hidden"></div>
+<!-- SQL 编辑器的右键菜单：浏览器那张原生菜单和整套深色是两张皮，
+     但编辑器又确实需要剪切/粘贴 —— 所以自己画一个，项与快捷键都在这儿。 -->
+<div id="ctxMenu" class="ctx-menu hidden" role="menu" aria-label="编辑器操作"></div>
 
 <script src="/vendor/codemirror/lib/codemirror.js"></script>
 <script src="/vendor/codemirror/mode/sql.js"></script>

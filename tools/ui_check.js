@@ -2095,8 +2095,10 @@ class CDP {
         shift: fire(blank, true),
       };
     })()`);
-    check('「科技灰」：顶栏光带 + 十字光标 + 右键拦截（Shift 和编辑器放行）',
-      fx.scan && fx.cursor && fx.blocked && !fx.editor && !fx.shift
+    // 编辑器也从「放行」改成「拦住并弹自己的菜单」，所以这里期望 true；
+    // 菜单本身在下面单独测。
+    check('「科技灰」：顶栏光带 + 十字光标 + 右键拦截（编辑器弹自己的菜单，Shift 放行）',
+      fx.scan && fx.cursor && fx.blocked && fx.editor && !fx.shift
       && fx.labels[0] === '科技灰',
       `${fx.labels.join(' / ')} · 拦截 ${fx.blocked} / 编辑器 ${fx.editor} / Shift ${fx.shift}`);
 
@@ -2138,6 +2140,48 @@ class CDP {
     check('这些特效不外溢到其它皮肤（淡蓝下没有光带、没有定制光标）',
       !/gradient/.test(fxSky.scan || 'none') && !/^url/.test(fxSky.cursor),
       `光带 ${(fxSky.scan || 'none').slice(0, 12)} · 光标 ${fxSky.cursor}`);
+
+    /* 编辑器右键：自己画菜单（浏览器那张在深色界面上是块灰白板子）。
+       顺便测「有选区只跑选区」—— 改一条语句再试，不用把整段删掉重写。 */
+    // 换行用 fromCharCode(10) 拼：这段在模板字符串里，写 \n 会被解成真换行，
+    // 传过去的 JS 就变成「字符串字面量跨行」——SyntaxError。
+    await cdp.eval(`cm.setValue(['SELECT 1 AS a;', 'SELECT 2 AS b;'].join(String.fromCharCode(10)))`);
+    await sleep(200);
+    const ctx = await cdp.eval(`(() => {
+      const box = document.querySelector('.CodeMirror');
+      const r = box.getBoundingClientRect();
+      const ev = new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: r.left + 60, clientY: r.top + 18,
+      });
+      box.dispatchEvent(ev);
+      const m = document.getElementById('ctxMenu');
+      const b = m.getBoundingClientRect();
+      return {
+        prevented: ev.defaultPrevented,
+        open: !m.classList.contains('hidden'),
+        items: [...m.querySelectorAll('.ctx-item')].map(x => x.textContent.trim()),
+        seps: m.querySelectorAll('.ctx-sep').length,
+        inView: b.right <= window.innerWidth + 1 && b.bottom <= window.innerHeight + 1,
+      };
+    })()`);
+    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/执行）',
+      ctx.prevented && ctx.open && ctx.items.length === 6 && ctx.seps === 2 && ctx.inView,
+      ctx.items.join(' · '));
+
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(250);
+    const ctxClosed = await cdp.eval(`document.getElementById('ctxMenu').classList.contains('hidden')`);
+    check('右键菜单按 Esc 就关，不连带关掉别的面板', ctxClosed, `隐藏 ${ctxClosed}`);
+
+    await cdp.eval(`(() => {
+      const d = cm.getDoc();
+      d.setSelection({ line: 0, ch: 0 }, { line: 0, ch: cm.getLine(0).length });
+    })()`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(1400);
+    const selRun = await cdp.eval(`lastSubmittedSQL`);
+    check('有选区时只执行选区（改一句不用把整段删掉重写）',
+      selRun === 'SELECT 1 AS a;', JSON.stringify(selRun));
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

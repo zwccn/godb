@@ -692,7 +692,10 @@ function withExplain(raw) {
 
 async function run(prefix) {
   if (busy) return;
-  let sql = editor.value.trim();
+  // 有选区就只跑选区：改一条语句再试，不用把整段删掉重写。
+  // 选中的是空白时退回全文 —— 手滑选了个空格就什么都不跑，很难解释。
+  const sel = editorSelection().trim();
+  let sql = (sel || editor.value).trim();
   if (!sql) return;
   let skipped = [];
   if (prefix === 'explain') {
@@ -5763,20 +5766,122 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
 });
 
+/* ---------- 编辑器右键菜单 ---------- */
 /* 非菜单区域的右键不弹浏览器菜单 —— 那张灰白菜单和整套深色视觉是两张皮。
-   放行这几类，因为原生菜单在它们上面是真需求：
-   - 输入框 / 下拉 / 编辑器：剪切、粘贴、拼写建议
-   - **Shift + 右键**：调试时要「检查元素」，别把入口一刀切死。
-   这个逃生口是故意留的，别当成 bug 修掉。 */
+   SQL 编辑器是唯一需要「剪切/复制/粘贴」的地方，所以给它画一个自己的菜单
+   （项和快捷键见 openEditorMenu）；普通输入框仍放行原生菜单，拼写检查还要用它。
+   **Shift + 右键** 永远放行：调试时要「检查元素」，这个逃生口是故意留的。 */
+const ctxMenu = document.getElementById('ctxMenu');
+
+// 编辑器的当前选区（没有 CodeMirror 时退回 textarea 的 selectionStart/End）
+function editorSelection() {
+  if (cm) return cm.getSelection();
+  const a = editorEl.selectionStart, b = editorEl.selectionEnd;
+  return a == null || b == null ? '' : editorEl.value.slice(a, b);
+}
+
+function closeEditorMenu() {
+  if (ctxMenu) ctxMenu.classList.add('hidden');
+}
+
+async function ctxCopy(cut) {
+  const sel = editorSelection();
+  if (!sel) return;
+  try {
+    await navigator.clipboard.writeText(sel);
+  } catch (e) {
+    // 非 https / 非 localhost 访问时剪贴板 API 会被拒 —— 别静默失败，告诉人用快捷键
+    toast('浏览器不允许脚本写剪贴板，请用 Ctrl+C / Ctrl+X', true);
+    return;
+  }
+  if (!cut) return;
+  if (cm) cm.replaceSelection('');
+  else {
+    const a = editorEl.selectionStart, b = editorEl.selectionEnd;
+    editorEl.value = editorEl.value.slice(0, a) + editorEl.value.slice(b);
+    editorEl.selectionStart = editorEl.selectionEnd = a;
+  }
+}
+
+async function ctxPaste() {
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch (e) {
+    toast('浏览器不允许脚本读剪贴板，请用 Ctrl+V', true);
+    return;
+  }
+  if (!text) return;
+  if (cm) cm.replaceSelection(text);
+  else {
+    const a = editorEl.selectionStart, b = editorEl.selectionEnd;
+    editorEl.value = editorEl.value.slice(0, a) + text + editorEl.value.slice(b);
+    editorEl.selectionStart = editorEl.selectionEnd = a + text.length;
+  }
+}
+
+function openEditorMenu(x, y) {
+  if (!ctxMenu) return;
+  ctxMenu.innerHTML = '';
+  const hasSel = !!editorSelection();
+  const add = (label, key, fn, disabled) => {
+    const b = el('button', 'ctx-item', label);
+    b.type = 'button';
+    b.disabled = !!disabled;
+    if (key) b.appendChild(el('kbd', null, key));
+    b.addEventListener('click', () => { closeEditorMenu(); fn(); });
+    ctxMenu.appendChild(b);
+  };
+  const sep = () => ctxMenu.appendChild(el('div', 'ctx-sep'));
+  add('剪切', 'Ctrl+X', () => ctxCopy(true), !hasSel);
+  add('复制', 'Ctrl+C', () => ctxCopy(false), !hasSel);
+  add('粘贴', 'Ctrl+V', ctxPaste, false);
+  sep();
+  add('全选', 'Ctrl+A', () => { if (cm) cm.execCommand('selectAll'); else editorEl.select(); });
+  add('美化 SQL', 'Shift+Ctrl+F', () => formatSQL());
+  sep();
+  // 这是「光标离开菜单」的入口：菜单里有执行，会立刻关掉面板，不用先点空白
+  add('执行', 'Ctrl+Enter', () => run());
+  // 先挪到屏幕外量尺寸再摆位，避免在鼠标处闪一下
+  ctxMenu.style.left = '-9999px';
+  ctxMenu.style.top = '0px';
+  ctxMenu.classList.remove('hidden');
+  const r = ctxMenu.getBoundingClientRect();
+  const left = Math.min(x, window.innerWidth - r.width - 8);
+  const top = Math.min(y, window.innerHeight - r.height - 8);
+  ctxMenu.style.left = `${Math.max(8, left)}px`;
+  ctxMenu.style.top = `${Math.max(8, top)}px`;
+}
+
 document.addEventListener('contextmenu', e => {
-  if (e.shiftKey) return;
+  if (e.shiftKey) { closeEditorMenu(); return; }
   const t = e.target;
+  if (t instanceof Element && t.closest('.CodeMirror')) {
+    e.preventDefault();
+    openEditorMenu(e.clientX, e.clientY);
+    return;
+  }
   if (t instanceof Element &&
-    t.closest('input, textarea, select, .CodeMirror, [contenteditable="true"], [contenteditable=""]')) {
+    t.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) {
     return;
   }
   e.preventDefault();
+  closeEditorMenu();
 });
+
+// 捕获阶段关菜单：要抢在已有的 keydown / pointerdown 处理之前，否则按 Esc
+// 会先把整个监控面板关掉，菜单还留在屏幕上。
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !ctxMenu || ctxMenu.classList.contains('hidden')) return;
+  closeEditorMenu();
+  e.stopPropagation();
+}, true);
+document.addEventListener('pointerdown', e => {
+  if (!ctxMenu || ctxMenu.classList.contains('hidden')) return;
+  if (!ctxMenu.contains(e.target)) closeEditorMenu();
+}, true);
+window.addEventListener('blur', closeEditorMenu);
+window.addEventListener('scroll', closeEditorMenu, true);
 
 /* ---------------- 窄屏：表结构抽屉 ---------------- */
 

@@ -4092,3 +4092,46 @@ html[data-theme="steel"] .map-grid.panning,
 html[data-theme="steel"] .map-grid.panning .pm-c,
 html[data-theme="steel"] .map-tree.panning,
 html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }
+
+/* ---------- 编辑器右键菜单 ---------- */
+/* 自己画的原因：浏览器原生菜单在深色界面上是块灰白色板子，而且它给的「剪切/复制/粘贴」
+   我们本来就能做（选区在 CodeMirror 手里）。这里把常用的几项按本项目的语言重排一遍。 */
+.ctx-menu {
+  position: fixed;
+  z-index: 240;
+  min-width: 202px;   /* 要容得下「美化 SQL」+「Shift+Ctrl+F」不贴边 */
+  padding: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px var(--shadow-color);
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: calc(12px * var(--fs));
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-item:hover:not(:disabled) { background: var(--hint-active-bg); color: var(--text); }
+.ctx-item:disabled { opacity: .38; cursor: default; }
+.ctx-item kbd {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-3);
+}
+.ctx-item:hover:not(:disabled) kbd { color: var(--text-2); }
+.ctx-sep { height: 1px; margin: 4px 6px; background: var(--border-soft); }
+/* 科技灰下给菜单一点光，和顶栏光带、焦点环是一套语言 */
+html[data-theme="steel"] .ctx-menu {
+  box-shadow: 0 12px 32px var(--shadow-color), 0 0 0 1px var(--fx-glow-soft);
+}

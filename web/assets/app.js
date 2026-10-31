@@ -1471,6 +1471,11 @@ const monEls = {
     sql: document.getElementById('monTabSqlN'),
     tx: document.getElementById('monTabTxN'),
   },
+  spaceBar: document.getElementById('spaceBar'),
+  spaceLegend: document.getElementById('spaceLegend'),
+  spaceBody: document.getElementById('spaceBody'),
+  spaceDetail: document.getElementById('spaceDetail'),
+  spaceOk: document.getElementById('spaceOk'),
   setPop: document.getElementById('monSetPop'),
   setBtn: document.getElementById('btnMonSettings'),
   rates: document.getElementById('monRate'),
@@ -1504,7 +1509,7 @@ let monTab = '';
 let monTabAuto = true;
 
 // 顺序 = 页面上的顺序。锁明细放最后：它是「出事才看」的，平时先看慢SQL/慢事务。
-const MON_TABS = ['sql', 'tx', 'lock'];
+const MON_TABS = ['sql', 'tx', 'lock', 'space'];
 
 // 慢SQL/慢事务的排序口径。两个榜单后端都算好了（slowSql / slowSqlMax），
 // 切换时不发请求、不等下一轮轮询。
@@ -1523,7 +1528,7 @@ function monTxRows(m) {
 // 锁明细没有「累计/单次」之分，切到锁 Tab 时把切换器藏起来。
 function syncSortToggle() {
   if (!monEls.sort) return;
-  monEls.sort.classList.toggle('hidden', monTab === 'lock');
+  monEls.sort.classList.toggle('hidden', monTab === 'lock' || monTab === 'space');
   for (const b of monEls.sort.querySelectorAll('button')) {
     b.classList.toggle('on', b.dataset.sort === monSortBy);
   }
@@ -1568,6 +1573,8 @@ function setMonTab(name, manual) {
   }
   syncSortToggle();
   updateDiagSub();
+  // 空间是「点开才算」的：扫描要 stat 每张表的文件，没必要跟着每秒轮询跑。
+  if (name === 'space' && !spaceData) loadSpace();
 }
 
 function monCounts() {
@@ -1593,6 +1600,7 @@ function updateDiagSub() {
     lock: n.lock ? `${n.lock} 把锁 · 按持有时长降序 · 点行展开事务详情` : '当前没有表锁',
     sql: n.sql ? `跟踪 ${n.sql} 个结构 · 按${by} · 点行看明细` : '还没有执行记录',
     tx: n.tx ? `跟踪 ${n.tx} 个结构 · 按${byTx} · 点行看明细` : '还没有结束的事务',
+    space: spaceSubText(),
   };
   for (const k of MON_TABS) {
     const b = monEls.tabN[k];
@@ -2487,6 +2495,172 @@ function renderSlowTx(m) {
     tr.appendChild(el('td', 'c-sql', label));
     tr.addEventListener('click', () => openSlowDetail('tx', r));
     box.appendChild(tr);
+  });
+}
+
+/* ---- 5. 空间：四块占比 + 逐表明细（点一行下钻到页级构成） ----
+   后端两档代价差一个量级：
+   - GET /api/space          只 stat 文件 + 读 meta，毫秒级；
+   - GET /api/space?table=x  逐页扫（8KB×页数），点开某张表才算。
+   所以这里不跟轮询，只在切到本 Tab / 点「重新扫描」时取。 */
+let spaceData = null;   // { space, tables }
+let spaceOpenName = ''; // 当前展开的表名（点击同一行=收起）
+
+function spaceSubText() {
+  if (!spaceData) return '打开时扫描一次 · 点表名看页级构成';
+  const sp = spaceData.space || {};
+  const n = (spaceData.tables || []).length;
+  const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0) + (sp.walBytes || 0);
+  return `${n} 张表 · 合计 ${fmtBytes(total)} · 点表名看页级构成`;
+}
+
+async function loadSpace() {
+  try {
+    spaceData = await api('/api/space');
+  } catch (e) {
+    spaceData = { space: {}, tables: [] };
+    if (monEls.spaceLegend) monEls.spaceLegend.textContent = '扫描失败：' + e.message;
+    return;
+  }
+  renderSpace();
+  updateDiagSub();
+}
+
+function spaceLegendItem(cls, label, bytes, total) {
+  const item = el('span', 'space-item');
+  item.appendChild(el('span', 'space-dot s-' + cls));
+  item.appendChild(el('span', null, label));
+  const b = el('b', null, fmtBytes(bytes));
+  item.appendChild(b);
+  if (total > 0) item.appendChild(el('span', null, `${((bytes / total) * 100).toFixed(0)}%`));
+  return item;
+}
+
+function renderSpace() {
+  if (!spaceData || !monEls.spaceBody) return;
+  const sp = spaceData.space || {};
+  const tables = spaceData.tables || [];
+  const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0) + (sp.walBytes || 0);
+
+  // 占比条：四块按字节比例分宽度；总和为 0 时留一条空槽
+  monEls.spaceBar.innerHTML = '';
+  monEls.spaceLegend.innerHTML = '';
+  const parts = [
+    ['data', '数据', sp.dataBytes || 0],
+    ['index', '索引', sp.indexBytes || 0],
+    ['lob', '大字段', sp.lobBytes || 0],
+    ['wal', 'WAL', sp.walBytes || 0],
+  ];
+  for (const [cls, label, bytes] of parts) {
+    const seg = el('div', 'space-seg s-' + cls);
+    seg.style.flex = total > 0 ? String(bytes) : '0';
+    seg.title = `${label} ${fmtBytes(bytes)}` + (total > 0 ? ` · ${((bytes / total) * 100).toFixed(1)}%` : '');
+    monEls.spaceBar.appendChild(seg);
+    monEls.spaceLegend.appendChild(spaceLegendItem(cls, label, bytes, total));
+  }
+
+  monEls.spaceBody.innerHTML = '';
+  const empty = tables.length === 0;
+  monEls.spaceOk.classList.toggle('hidden', !empty);
+  if (empty) {
+    monEls.spaceOk.textContent = '还没有表';
+    return;
+  }
+  for (const t of tables) {
+    const tr = el('tr');
+    if (t.name === spaceOpenName) tr.classList.add('on');
+    tr.title = '点击逐页统计这张表的「已用 / 空闲 / 洞」';
+    tr.appendChild(el('td', 'c-table', t.name));
+    tr.appendChild(el('td', 'c-num', fmtBytes(t.bytes || 0)));
+    tr.appendChild(el('td', 'c-num', fmtBytes(t.indexBytes || 0)));
+    tr.appendChild(el('td', 'c-num', fmtBytes(t.lobBytes || 0)));
+    tr.appendChild(el('td', 'c-num', fmtCount(t.rows || 0)));
+    tr.appendChild(el('td', 'c-num', String(t.pages || 0)));
+    tr.appendChild(el('td', 'c-num', t.fillKnown ? `${((t.fill || 0) * 100).toFixed(0)}%` : '—'));
+    tr.addEventListener('click', () => toggleSpaceDetail(t.name));
+    monEls.spaceBody.appendChild(tr);
+  }
+}
+
+async function toggleSpaceDetail(name) {
+  const box = monEls.spaceDetail;
+  if (!box) return;
+  if (spaceOpenName === name) { // 再点一次收起
+    spaceOpenName = '';
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    renderSpace();
+    return;
+  }
+  spaceOpenName = name;
+  renderSpace();
+  box.classList.remove('hidden');
+  box.innerHTML = '';
+  box.appendChild(el('div', 'space-note', '正在逐页统计…'));
+  try {
+    const d = await api('/api/space?table=' + encodeURIComponent(name));
+    if (spaceOpenName !== name) return; // 期间又点了别的表
+    renderSpaceDetail(d);
+  } catch (e) {
+    box.innerHTML = '';
+    box.appendChild(el('div', 'space-note', '统计失败：' + e.message));
+  }
+}
+
+// 页级构成：把 页数×8KB 拆成 已用 / 空闲 / 洞。三者回收手段不同，所以分开画。
+function renderSpaceDetail(d) {
+  const box = monEls.spaceDetail;
+  if (!box) return;
+  box.innerHTML = '';
+  const cap = d.capacity || 0;
+  const used = d.liveBytes || 0;
+  const free = d.freeBytes || 0;
+  const hole = d.holeBytes || 0;
+  const mine = Math.max(1, used + free + hole); // 剩余的是页头+槽位目录
+
+  const head = el('div', 'space-dhead');
+  head.appendChild(el('span', 'space-dname', d.table));
+  head.appendChild(el('span', 'space-dmeta',
+    `${d.pages} 页 · 容量 ${fmtBytes(cap)} · ${fmtCount(d.liveRows)} 行`
+    + (d.deadSlots ? ` · ${fmtCount(d.deadSlots)} 个空槽` : '')));
+  box.appendChild(head);
+
+  const bar = el('div', 'space-dbar');
+  for (const [cls, bytes] of [['used', used], ['free', free], ['hole', hole]]) {
+    const seg = el('div', 'space-dseg s-' + cls);
+    seg.style.flex = String(Math.max(0, bytes));
+    bar.appendChild(seg);
+  }
+  box.appendChild(bar);
+
+  const legend = el('div', 'space-legend');
+  legend.appendChild(spaceLegendItem('used', '已用', used, mine));
+  legend.appendChild(spaceLegendItem('free', '空闲', free, mine));
+  legend.appendChild(spaceLegendItem('hole', '洞', hole, mine));
+  box.appendChild(legend);
+
+  const note = el('div', 'space-note');
+  if (hole > 0) {
+    // 表名来自库里的对象，一律 textContent，不拼 HTML
+    note.textContent = '「洞」是被删掉的行留下的字节：插入用不上它，只有 VACUUM 能把它变成空闲。'
+      + `跑一次 VACUUM ${d.table} 就能收回；页数要降下来还得 VACUUM FULL（整份重写，期间占表锁）。`;
+  } else if (free > 0) {
+    note.textContent = '没有洞：空闲字节是整理过的，插入可以直接复用。'
+      + '要让页数真的降下来（扫描少读页）才需要 VACUUM FULL。';
+  } else {
+    note.textContent = '这一页数据很满，没什么可回收的。';
+  }
+  box.appendChild(note);
+}
+
+if (document.getElementById('spaceRescan')) {
+  document.getElementById('spaceRescan').addEventListener('click', () => {
+    spaceOpenName = '';
+    if (monEls.spaceDetail) {
+      monEls.spaceDetail.classList.add('hidden');
+      monEls.spaceDetail.innerHTML = '';
+    }
+    loadSpace();
   });
 }
 

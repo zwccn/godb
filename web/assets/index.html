@@ -227,6 +227,9 @@ try {
           <button class="mon-tab" type="button" role="tab" data-tab="lock" aria-selected="false">
             锁明细<b class="mon-tab-n" id="monTabLockN"></b>
           </button>
+          <button class="mon-tab" type="button" role="tab" data-tab="space" aria-selected="false">
+            空间<b class="mon-tab-n" id="monTabSpaceN"></b>
+          </button>
         </div>
         <div class="mon-sort" id="monSort" role="group" aria-label="排序方式">
           <button type="button" data-sort="total" class="on">按累计</button>
@@ -296,6 +299,37 @@ try {
         </div>
         <div class="mon-ok hidden" id="monTxOk">还没有结束的事务（BEGIN … COMMIT 之后记一条）</div>
         <div class="mon-pager hidden" id="monTxPager"></div>
+      </div>
+
+      <!-- 4d. 空间：四块占比 + 每张表占多少、有多满。点一行才去逐页算「洞」——
+           扫描是 8KB×页数 的读，不能跟着每秒轮询跑。 -->
+      <div class="mon-panel hidden" data-panel="space" id="monTabSpace" role="tabpanel">
+        <div class="space-top">
+          <div class="space-head">
+            <span class="space-title">全库占用（数据 / 索引 / 大字段 / WAL）</span>
+            <button class="space-rescan" id="spaceRescan" type="button">重新扫描</button>
+          </div>
+          <div class="space-bar" id="spaceBar" aria-hidden="true"></div>
+          <div class="space-legend" id="spaceLegend"></div>
+        </div>
+        <div class="mon-tw">
+          <table class="mon-slow space-table">
+            <thead>
+              <tr>
+                <th class="c-table">表</th>
+                <th class="c-num">数据</th>
+                <th class="c-num">索引</th>
+                <th class="c-num">大字段</th>
+                <th class="c-num">行数</th>
+                <th class="c-num">页数</th>
+                <th class="c-num">页密度</th>
+              </tr>
+            </thead>
+            <tbody id="spaceBody"></tbody>
+          </table>
+        </div>
+        <div class="space-detail hidden" id="spaceDetail"></div>
+        <div class="mon-ok hidden" id="spaceOk">还没有表</div>
       </div>
     </section>
 

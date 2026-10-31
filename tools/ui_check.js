@@ -350,6 +350,41 @@ class CDP {
     check('存储卡有「页密度」行（百分比或「—」+ 说明洞不算空闲）',
       fillRow.found && (/%|—/.test(fillRow.main)) && /VACUUM/.test(fillRow.tip),
       fillRow.found ? `${fillRow.main} · ${fillRow.sub}` : `缺行：${JSON.stringify(fillRow.keys)}`);
+
+    // 空间 Tab：四块占比条 + 明细表；点一行才去逐页扫「洞」
+    await cdp.eval(`document.querySelector('.mon-tab[data-tab="space"]').click()`);
+    await sleep(1400);
+    const spUi = await cdp.eval(`(() => {
+      const rows = document.querySelectorAll('#spaceBody tr');
+      return {
+        segs: document.querySelectorAll('#spaceBar .space-seg').length,
+        legend: document.querySelectorAll('#spaceLegend .space-item').length,
+        rows: rows.length,
+        sortHidden: document.getElementById('monSort').classList.contains('hidden'),
+        sub: (document.getElementById('monDiagSub') || {}).textContent || '',
+      };
+    })()`);
+    check('空间 Tab：四块占比 + 四段图例 + 明细行、排序切换藏起',
+      spUi.segs === 4 && spUi.legend === 4 && spUi.rows > 0 && spUi.sortHidden,
+      `${spUi.segs} 段 / 图例 ${spUi.legend} / ${spUi.rows} 行 / 排序隐藏 ${spUi.sortHidden}`);
+
+    await cdp.eval(`document.querySelector('#spaceBody tr').click()`);
+    await sleep(1400);
+    const spDet = await cdp.eval(`(() => {
+      const d = document.getElementById('spaceDetail');
+      return {
+        open: !d.classList.contains('hidden'),
+        segs: d.querySelectorAll('.space-dbar .space-dseg').length,
+        legend: d.querySelectorAll('.space-legend .space-item').length,
+        text: d.textContent,
+      };
+    })()`);
+    check('点表名展开页级构成（已用 / 空闲 / 洞 + 怎么回收）',
+      spDet.open && spDet.segs === 3 && spDet.legend === 3 && /VACUUM/.test(spDet.text),
+      `${spDet.segs} 段 / 图例 ${spDet.legend} / ${spDet.text.slice(0, 50)}`);
+
+    await cdp.eval(`document.querySelector('.mon-tab[data-tab="sql"]').click()`);
+    await sleep(400);
     await cdp.eval(`document.querySelector('#monSlowSQL tr').click()`);
     await sleep(700);
     const detUi = await cdp.eval(`(() => {

@@ -7,6 +7,7 @@ import (
 
 	"godb/config"
 	"godb/db"
+	"godb/storage"
 )
 
 // 本文件是监控面板的 HTTP 接口。
@@ -23,6 +24,30 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	snap := d.Monitor(d.Timeouts())
 	snap.ClockGranNs = d.ClockGranNs
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// handleSpace 返回空间构成；带 ?table= 时下钻到单张表的页级构成。
+//
+// 两档代价差一个量级，所以分开：
+//   - 不给表名：只 stat 文件 + 读 meta，毫秒级，可以跟着轮询；
+//   - 给表名：要逐页扫（8KB×页数），按需点开才算，不放进每秒轮询。
+func (s *Server) handleSpace(w http.ResponseWriter, r *http.Request) {
+	d := s.currentDB(r)
+	name := strings.TrimSpace(r.URL.Query().Get("table"))
+	if name == "" {
+		tables := d.Store.TableSizes()
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"space":  storage.SumSpace(tables, d.Store.WalBytes()),
+			"tables": tables,
+		})
+		return
+	}
+	det, err := d.Store.SpaceDetail(name)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, det)
 }
 
 // handleMonitorKill 取消一个会话当前的活。

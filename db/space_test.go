@@ -89,3 +89,71 @@ func TestSpaceFill(t *testing.T) {
 		t.Fatalf("重启后（未加载表的 meta 值）密度漂了：%.3f vs %.3f", loaded.Fill, tight.Fill)
 	}
 }
+
+// 下钻到页级：删出来的洞只有 VACUUM 能收，所以「洞」和「空闲」必须分开报。
+func TestSpaceDetailSplitsHoleAndFree(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferPoolPages: 64, Lock: testOptions().Lock})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	run(t, d, "s", `CREATE TABLE dt (id INTEGER PRIMARY KEY, pad TEXT)`)
+	pad := strings.Repeat("p", 200)
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO dt VALUES `)
+	for i := 1; i <= 2000; i++ {
+		if i > 1 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, "(%d,'%s')", i, pad)
+	}
+	run(t, d, "s", sb.String())
+	run(t, d, "s", `CHECKPOINT`)
+
+	full, err := d.Store.SpaceDetail("dt")
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if full.HoleBytes != 0 {
+		t.Fatalf("刚写完的表不该有洞：%+v", full)
+	}
+	if full.LiveRows != 2000 || full.LiveBytes == 0 || full.Capacity != int64(full.Pages)*8192 {
+		t.Fatalf("页级构成不完整：%+v", full)
+	}
+
+	// 删九成：字节还在页里，只是变成「洞」，此时不能算可复用空闲
+	run(t, d, "s", `DELETE FROM dt WHERE id % 10 <> 0`)
+	run(t, d, "s", `CHECKPOINT`)
+	del, err := d.Store.SpaceDetail("dt")
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if del.HoleBytes == 0 {
+		t.Fatalf("删完应该有洞（洞要靠 VACUUM 才收得回来）：%+v", del)
+	}
+	if del.LiveRows != 200 {
+		t.Fatalf("页里存活元组应是 200，实际 %d", del.LiveRows)
+	}
+
+	// VACUUM 之后洞变成空闲，页数不变
+	run(t, d, "s", `VACUUM dt`)
+	vac, err := d.Store.SpaceDetail("dt")
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if vac.Pages != del.Pages {
+		t.Fatalf("VACUUM 不该改页数：%d → %d", del.Pages, vac.Pages)
+	}
+	if vac.HoleBytes != 0 {
+		t.Fatalf("整理之后不该还有洞：%+v", vac)
+	}
+	if vac.FreeBytes <= del.FreeBytes {
+		t.Fatalf("整理出来的空闲应该变多：%d → %d", del.FreeBytes, vac.FreeBytes)
+	}
+	// 三块加起来应该能解释掉几乎整个容量：剩下的只有页头 + 槽位目录（实测 ~313B/页）
+	used := vac.LiveBytes + vac.FreeBytes + vac.HoleBytes
+	if used >= vac.Capacity || vac.Capacity-used > int64(vac.Pages)*512 {
+		t.Fatalf("三块之和 %d 与容量 %d 差得离谱（页数 %d）", used, vac.Capacity, vac.Pages)
+	}
+}

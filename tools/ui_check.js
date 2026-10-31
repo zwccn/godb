@@ -636,7 +636,8 @@ class CDP {
       const g = document.getElementById('pmGrid');
       const c = document.querySelector('#pmGrid .pm-c').getBoundingClientRect();
       return { zoom: document.getElementById('mapZoomVal').textContent, cell: Math.round(c.width),
-        st: Math.round(g.scrollTop), canPan: g.classList.contains('can-pan') };
+        st: Math.round(g.scrollTop), canPan: g.classList.contains('can-pan'),
+        sw: g.scrollWidth, cw: g.clientWidth };
     })()`);
     await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: gbox.x, y: gbox.y, button: 'left', clickCount: 1 });
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gbox.x, y: gbox.y - 120, button: 'left', buttons: 1 });
@@ -650,6 +651,26 @@ class CDP {
     check('页网格：滚轮直接放大、按住拖动平移（拖动不会误开某一页）',
       /×/.test(gImg.zoom) && gImg.cell > 0 && gImg.canPan && gPan.st > gImg.st && gPan.rail === '',
       `${gImg.zoom} · 格子 ${gImg.cell}px · 滚动 ${gImg.st} → ${gPan.st} · 右栏「${gPan.rail || '空'}」`);
+
+    /* 横向也要能拖。用户报「拖动只能上下、不能左右」—— 根因是网格原来用 flex-wrap：
+       换行时内容宽度恒等于容器宽度，横向根本没有可滚区域，放大只是行数变多。
+       改成固定列数的 grid 后整张图等比撑开，两边都得能动。 */
+    await cdp.eval(`document.getElementById('pmGrid').scrollLeft = 0`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: gbox.x, y: gbox.y, button: 'left', clickCount: 1 });
+    for (let i = 1; i <= 3; i++) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gbox.x - 50 * i, y: gbox.y, button: 'left', buttons: 1 });
+      await sleep(16);
+    }
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: gbox.x - 150, y: gbox.y, button: 'left' });
+    await sleep(1400);                 // 等惯性尾巴走完，否则读到的是滑行中间值
+    const gPanX = await cdp.eval(`(() => {
+      const g = document.getElementById('pmGrid');
+      return { sl: Math.round(g.scrollLeft), sw: g.scrollWidth, cw: g.clientWidth,
+        cols: getComputedStyle(g).gridTemplateColumns.split(' ').length };
+    })()`);
+    check('页网格放大后横向也能拖（列数固定、内容等比撑开）',
+      gImg.sw > gImg.cw + 2 && gPanX.sl > 0 && gPanX.sw > gPanX.cw + 2,
+      `内容 ${gImg.sw}px / 视口 ${gImg.cw}px · ${gPanX.cols} 列 · scrollLeft 0 → ${gPanX.sl}`);
     await cdp.eval(`document.getElementById('mapZoomReset').click()`);
     await sleep(400);
 

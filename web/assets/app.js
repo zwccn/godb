@@ -3418,7 +3418,7 @@ function renderFileBar() {
    放大到刚冒出滚动条那一刻会形成正反馈：滚动条吃掉 15px → 基准变小 → 内容收敛
    → 滚动条消失 → 基准又变大 → 再溢出 …… 卡在临界点上左右横跳，
    看上去就是「放大着放大着又缩回去了」。基准只在页数/容器真的变了时才算。 */
-let pmBase = { cell: 12, gap: 4, w: 0, h: 0 };
+let pmBase = { cell: 12, gap: 4, cols: 8, w: 0, h: 0 };
 let pmSig = '';       // 当前网格 DOM 对应的结构签名（表|类型|页数），没变就别重建
 
 function pmBaseSize(box, count) {
@@ -3428,27 +3428,30 @@ function pmBaseSize(box, count) {
   let cell = Math.floor(Math.sqrt((W * H) / Math.max(1, count)) - gap);
   // 上限给到 72：页少的表就该画成大方块，卡在 30 会让一张 1 页的表缩在左上角像坏了。
   cell = Math.max(5, Math.min(72, cell));
-  // 再按「行数×行高」验一遍：flex 换行会有取整误差，差 1px 就冒出滚动条，
+  let cols = Math.max(1, Math.floor((W + gap) / (cell + gap)));
+  // 再按「行数×行高」验一遍：grid 的列宽是整数，差 1px 就冒出滚动条，
   // 而滚动条一出现又压缩可用宽度 —— 干脆缩到放得下为止。
   for (; cell > 5; cell--) {
-    const cols = Math.max(1, Math.floor((W + gap) / (cell + gap)));
+    cols = Math.max(1, Math.floor((W + gap) / (cell + gap)));
     const rows = Math.ceil(count / cols);
     if (rows * (cell + gap) - gap <= H) break;
   }
-  // offsetWidth 是边框盒，滚动条出现与否都不变 —— 拿它当「容器有没有变」的判据才稳
-  pmBase = { cell, gap, w: box.offsetWidth, h: box.offsetHeight };
+  // offsetWidth 是边框盒，滚动条出现与否都不变 —— 拿它当「容器有没有变」的判据才稳。
+  // cols 只在这里算一次：缩放时列数不变、格子等比变大，整张图才是「放大」而不是「重排」。
+  pmBase = { cell, gap, cols, w: box.offsetWidth, h: box.offsetHeight };
 }
 
 function applyGridSizing(box, count) {
   if (!pmBase.cell || box.offsetWidth !== pmBase.w || box.offsetHeight !== pmBase.h) {
     pmBaseSize(box, count);
   }
-  // 240 上限：再大就只剩两三个格子铺满一屏，反而看不出密度分布
+  // 320 上限：够看清一格里的十六进制，又不至于把滚动区撑到上千万像素
   const z = mapZoom > 1
-    ? Math.max(5, Math.min(240, Math.round(pmBase.cell * mapZoom)))
+    ? Math.max(5, Math.min(320, Math.round(pmBase.cell * mapZoom)))
     : pmBase.cell;
   box.style.setProperty('--pm-cell', `${z}px`);
   box.style.setProperty('--pm-gap', `${pmBase.gap}px`);
+  box.style.setProperty('--pm-cols', String(pmBase.cols));
   // 铺不满一半就居中，不然一两个格子孤零零贴在左上角
   const used = count * (pmBase.cell + pmBase.gap) * (pmBase.cell + pmBase.gap);
   box.classList.toggle('center', mapZoom <= 1 && used < box.clientWidth * box.clientHeight * 0.5);

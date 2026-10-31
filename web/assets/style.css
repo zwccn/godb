@@ -3726,14 +3726,18 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 @media (max-width: 720px) {
   .map-zoom { right: 14px; bottom: 30px; }
 }
+/* 页网格用 grid 而不是 flex-wrap：**flex 换行时内容宽度恒等于容器宽度**
+   （行尾自动断行），放大后只有行数变多 —— 横向永远没有可滚区域，
+   拖动就只剩上下。列数在 1× 时算一次并固定，放大后整张图等比撑开，四个方向都能拖。 */
 .map-grid {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(var(--pm-cols, 8), var(--pm-cell, 14px));
   gap: var(--pm-gap, 4px);
-  align-content: flex-start;
+  align-content: start;
+  justify-content: start;
 }
 /* 页少的表铺不满画布：居中，别把一两个格子孤零零丢在左上角 */
 .map-grid.center { align-content: center; justify-content: center; }

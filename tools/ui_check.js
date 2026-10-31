@@ -409,6 +409,11 @@ class CDP {
     // 末列的数是「多久以前」，三位数以上一定是单位/时间戳搞错了
     // （踩过：把时间戳当成时长算，刚 VACUUM 的表显示「498171 小时前」）
     const vacText = spUi.cells[spUi.cells.length - 1] || '';
+    // 列顺序和占比条一致：索引在前、数据在后（两种视图对不上就得来回找）
+    check('空间表前两列是「索引」「数据」（和占比条同序）',
+      spUi.heads[1] === '索引' && spUi.heads[2] === '数据',
+      `第 2/3 列：${spUi.heads[1]} / ${spUi.heads[2]}`);
+
     check('空间表有「上次整理」列（表头与单元格对齐，值是「从未 / N 分钟前」这类相对时间）',
       spUi.heads.length === 8 && spUi.heads[7] === '上次整理' &&
       spUi.cells.length === 8 &&

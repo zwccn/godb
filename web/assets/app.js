@@ -2662,8 +2662,9 @@ function renderSpace() {
     if (t.name === spaceOpenName) tr.classList.add('on');
     tr.title = '点击逐页统计这张表的「已用 / 空闲 / 洞」';
     tr.appendChild(el('td', 'c-table', t.name));
-    tr.appendChild(el('td', 'c-num', fmtBytes(t.bytes || 0)));
+    // 列顺序和卡片顶部的占比条保持一致：索引在前、数据在后
     tr.appendChild(el('td', 'c-num', fmtBytes(t.indexBytes || 0)));
+    tr.appendChild(el('td', 'c-num', fmtBytes(t.bytes || 0)));
     tr.appendChild(el('td', 'c-num', fmtBytes(t.lobBytes || 0)));
     tr.appendChild(el('td', 'c-num', fmtCount(t.rows || 0)));
     tr.appendChild(el('td', 'c-num', String(t.pages || 0)));

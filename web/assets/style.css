@@ -3629,3 +3629,30 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 }
 .pm-c.hdr { background: var(--bg-3); box-shadow: inset 0 0 0 1px var(--border-hover); }
 .pm-c.inner { background: transparent; box-shadow: inset 0 0 0 2px var(--ok); }
+/* 关联链：索引项 → 堆页 → 大字段 */
+.pm-row.linkable { cursor: pointer; }
+.pm-row.on { background: var(--hint-active-bg); }
+.pm-row.on .pm-val { color: var(--text); }
+.pm-link {
+  border: 1px solid var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  border-radius: 6px;
+  padding: 7px 9px;
+  margin-bottom: 8px;
+}
+.pm-link-head { display: flex; gap: 8px; align-items: baseline; font-size: calc(11.5px * var(--fs)); }
+.pm-link-tag {
+  font-size: calc(10px * var(--fs));
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.pm-link-row {
+  font-size: calc(11px * var(--fs));
+  color: var(--text-2);
+  margin-top: 4px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.pm-link-row.bad { color: var(--danger-text); }

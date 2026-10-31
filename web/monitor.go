@@ -94,6 +94,29 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, d)
 }
 
+// handleRID 按 RID 定位一行：它在哪一页哪一槽、列值是什么、挂没挂大字段。
+//
+// 这是「索引项 → 堆页那一行」的桥：索引叶子存的就是 RID。
+func (s *Server) handleRID(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	table := strings.TrimSpace(q.Get("table"))
+	if table == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 table 参数"})
+		return
+	}
+	rid, err := strconv.Atoi(q.Get("rid"))
+	if err != nil || rid < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rid 参数必须是槽位号（>=0）"})
+		return
+	}
+	d, err := s.currentDB(r).Store.LocateRID(table, uint32(rid))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
 // handleMonitorKill 取消一个会话当前的活。
 //
 // 语义按「保守版」约定：空闲事务立刻回滚；等锁/排队的请求立刻退出；

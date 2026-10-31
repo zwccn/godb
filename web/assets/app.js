@@ -2783,6 +2783,8 @@ if (document.getElementById('spaceRescan')) {
 let pmMap = null;   // { table, kind, index, total, pages, next, bytes }
 let pmSel = { table: '', kind: 'data', index: '' };
 let pmOpen = -1;    // 当前打开的页号
+let pmDetail = null; // 当前页的详情（重渲染用）
+let pmLink = null;   // 「索引项 → 堆页 → 大字段」定位结果
 let pmTab = 'struct'; // struct | text | hex
 
 function pmFillPick() {
@@ -2919,6 +2921,7 @@ async function openPage(no) {
   try {
     const d = await api('/api/page?' + q);
     if (pmOpen !== no) return;
+    pmDetail = d;
     renderPageDetail(d);
   } catch (e) {
     side.innerHTML = '';
@@ -2965,11 +2968,73 @@ function renderPageDetail(d) {
   }
   side.appendChild(tabs);
 
+  if (pmLink) side.appendChild(pmLinkBox(pmLink));
+
   const body = el('div', 'pm-tabbody');
   if (pmTab === 'struct') body.appendChild(pmStructView(d));
   else if (pmTab === 'text') body.appendChild(pmTextView(d));
   else body.appendChild(pmHexView(d));
   side.appendChild(body);
+}
+
+// 关联链：索引叶子里的 RID → 堆页那一行 → 行内大字段。点 RID 就走这一条。
+// 后端 LocateRID 只扫槽位目录、命中即停，同样不进缓冲池。
+async function locateRID(rid) {
+  const table = pmSel.table;
+  let d;
+  try {
+    d = await api(`/api/rid?table=${encodeURIComponent(table)}&rid=${rid}`);
+  } catch (e) {
+    pmLink = null;
+    if (monEls.pmSide) {
+      monEls.pmSide.appendChild(el('div', 'pm-hint', '定位失败：' + e.message));
+    }
+    return;
+  }
+  pmLink = d;
+  // 从索引视图点过来时，顺手把页地图切到「数据页」并打开那一页：
+  // 这样「索引项 → 物理页」是一次点击看到的，不用自己去翻。
+  if (pmSel.kind !== 'data') {
+    const sel = monEls.pmPick;
+    const want = `${table}|data|`;
+    if (sel && [...sel.options].some(o => o.value === want)) {
+      sel.value = want;
+      pmSel = { table, kind: 'data', index: '' };
+      await loadPageMap(false);
+    }
+  }
+  if (pmOpen === d.page && pmDetail) renderPageDetail(pmDetail);
+  else await openPage(d.page);
+}
+
+// pmLinkBox 是检查器顶上那块「这一项指到哪」。
+function pmLinkBox(d) {
+  const box = el('div', 'pm-link');
+  const head = el('div', 'pm-link-head');
+  head.appendChild(el('span', 'pm-link-tag', '关联'));
+  head.appendChild(el('span', null,
+    `RID ${d.rid} → 堆页 ${d.page} 槽 ${d.slot}` + (d.live ? '' : '（空槽：这一行已被删）')));
+  box.appendChild(head);
+
+  if ((d.cols || []).length) {
+    box.appendChild(el('div', 'pm-link-row', '列值：' + d.cols.join(' | ')));
+  }
+  const lobs = d.lobs || [];
+  if (!lobs.length) {
+    box.appendChild(el('div', 'pm-link-row', '这一行没有大字段'));
+  } else {
+    for (const l of lobs) {
+      const okText = l.headerOk ? '头校验通过' : '头对不上（偏移可能错了）';
+      box.appendChild(el('div', 'pm-link-row' + (l.headerOk ? '' : ' bad'),
+        `列 ${l.col + 1} · 大字段 ${fmtBytes(l.len)} @${l.off} · ${okText}`
+        + (l.preview ? ` · 预览「${l.preview}」` : '')));
+    }
+    box.appendChild(el('div', 'pm-link-row',
+      `.lob 文件共 ${fmtBytes(d.lobFileBytes || 0)}，这一行引用 `
+      + `${fmtBytes(lobs.reduce((a, x) => a + x.len, 0))}；`
+      + '其余是别的行 —— UPDATE 留下的旧正文也只在这里，只有 VACUUM FULL 能回收'));
+  }
+  return box;
 }
 
 function pmStructView(d) {
@@ -2988,12 +3053,16 @@ function pmStructView(d) {
   if (d.data) {
     for (const e of d.data.entries || []) {
       const row = el('div', 'pm-row' + (e.live ? '' : ' dead'));
+      if (pmLink && pmLink.rid === e.gid) row.classList.add('on');
       row.appendChild(el('span', 'pm-no', `#${e.no}`));
       const val = el('span', 'pm-val',
         (e.live ? `RID ${e.gid} · ${e.len} B · ` : '空槽 · ')
         + ((e.cols || []).join(' | ') || (e.note || '')));
       row.appendChild(val);
-      if (e.live) row.title = `偏移 ${e.off} · 长度 ${e.len} · RID ${e.gid}`;
+      if (e.live) {
+        row.title = `偏移 ${e.off} · 长度 ${e.len} · RID ${e.gid} · 点一下看大字段`;
+        row.addEventListener('click', () => locateRID(e.gid));
+      }
       box.appendChild(row);
     }
   } else if (d.indexPage) {
@@ -3001,9 +3070,16 @@ function pmStructView(d) {
       const row = el('div', 'pm-row');
       row.appendChild(el('span', 'pm-no', `#${e.i}`));
       const label = e.vals && e.vals.length ? e.vals.join(' | ') : e.key;
-      row.appendChild(el('span', 'pm-val',
-        label + ` → ${d.indexPage.leaf ? 'RID ' + e.val : '子页 ' + e.val}`));
-      row.title = `键 ${e.len} 字节`;
+      const tail = d.indexPage.leaf ? `RID ${e.val}` : `子页 ${e.val}`;
+      const val = el('span', 'pm-val', label + ' → ' + tail);
+      row.appendChild(val);
+      if (d.indexPage.leaf) {
+        row.title = '点一下：跳到这一行在堆页里的位置（并看它挂的大字段）';
+        row.classList.add('linkable');
+        row.addEventListener('click', () => locateRID(e.val));
+      } else {
+        row.title = `键 ${e.len} 字节 · 子页 ${e.val}`;
+      }
       box.appendChild(row);
     }
   }

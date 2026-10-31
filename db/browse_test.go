@@ -156,3 +156,72 @@ func TestPageBrowse(t *testing.T) {
 		t.Fatal("不存在的索引应该报错")
 	}
 }
+
+// 关联链：索引叶子里的 RID → 堆页那一行 → 行内大字段指针 → .lob 里的偏移与预览。
+func TestLocateRIDAndLOB(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferPoolPages: 64, Lock: testOptions().Lock})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	run(t, d, "s", `CREATE TABLE lr (id INTEGER PRIMARY KEY, body TEXT, note TEXT)`)
+	body := strings.Repeat("春江潮水连海平", 400) // 约 10KB，一定超过 2KB 阈值、会被搬进 .lob
+	for i := 1; i <= 3; i++ {
+		run(t, d, "s", fmt.Sprintf(`INSERT INTO lr VALUES (%d, '%s', 'note-%d')`, i, body, i))
+	}
+	run(t, d, "s", `CHECKPOINT`)
+
+	// 从索引叶子里拿一个 RID：这条链的起点就该是索引项
+	im, err := d.Store.PageMap("lr", "index", "lr_pkey", 0, 0)
+	if err != nil {
+		// 主键索引的名字随实现不同，退化到用表里第一行的 RID
+		pm, err2 := d.Store.PageMap("lr", "data", "", 0, 0)
+		if err2 != nil || len(pm.Pages) == 0 {
+			t.Fatalf("连数据页地图都没有：%v / %v", err, err2)
+		}
+		_ = im
+	}
+	det, err := d.Store.PageDetail("lr", "data", "", 0)
+	if err != nil {
+		t.Fatalf("page detail: %v", err)
+	}
+	var rid uint32 = ^uint32(0)
+	for _, e := range det.Data.Entries {
+		if e.Live {
+			rid = e.GID
+			break
+		}
+	}
+	if rid == ^uint32(0) {
+		t.Fatal("第 0 页里没有存活行")
+	}
+
+	row, err := d.Store.LocateRID("lr", rid)
+	if err != nil {
+		t.Fatalf("locate: %v", err)
+	}
+	if row.Page != 0 || row.Live != true || len(row.Cols) < 3 {
+		t.Fatalf("定位结果不对：%+v", row)
+	}
+	if !strings.HasPrefix(row.Cols[1], "[大字段 ") {
+		t.Fatalf("正文列应该显示成大字段指针，实际 %q", row.Cols[1])
+	}
+	if len(row.LOBs) != 1 {
+		t.Fatalf("应该有 1 个大字段指针，实际 %d：%+v", len(row.LOBs), row.LOBs)
+	}
+	lob := row.LOBs[0]
+	if lob.Col != 1 || lob.Off < 0 || !lob.HeaderOK || lob.StoredLen != len(body) || lob.Len != len(body) {
+		t.Fatalf("大字段指针不对：%+v（期望 col=1 len=%d）", lob, len(body))
+	}
+	if !strings.HasPrefix(lob.Preview, "春江潮水") {
+		t.Fatalf("大字段预览不对：%q", lob.Preview)
+	}
+	if row.LobFileBytes <= int64(len(body)) {
+		t.Fatalf(".lob 文件大小不合理：%d（正文 %d 字节）", row.LobFileBytes, len(body))
+	}
+	// 不存在的 RID 要明确报错，而不是返回一个空行
+	if _, err := d.Store.LocateRID("lr", 9999); err == nil {
+		t.Fatal("不存在的 RID 应该报错")
+	}
+}

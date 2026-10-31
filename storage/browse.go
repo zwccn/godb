@@ -613,3 +613,151 @@ func fmtBytes(n int) string {
 	}
 	return strconv.Itoa(n) + " B"
 }
+
+// LOBRef 是一行里某个大字段指针的去向（.lob 文件里的偏移与长度）。
+type LOBRef struct {
+	Col       int    `json:"col"`       // 第几列（0 起）
+	Off       int64  `json:"off"`       // 指针指向的「blob 头」偏移
+	Len       int    `json:"len"`       // 指针里记的数据长度
+	HeaderOK  bool   `json:"headerOk"`  // 头里的魔数/长度是否对得上
+	StoredLen int    `json:"storedLen"` // 头里记的长度
+	Preview   string `json:"preview,omitempty"`
+}
+
+// RowDetail 是「按 RID 定位一行」的结果：它在哪一页、哪一槽、列值、以及挂的大字段。
+type RowDetail struct {
+	Table        string   `json:"table"`
+	RID          uint32   `json:"rid"`
+	Page         int      `json:"page"`
+	Slot         int      `json:"slot"`
+	Off          int      `json:"off"`
+	Len          int      `json:"len"`
+	Live         bool     `json:"live"`
+	Cols         []string `json:"cols"`
+	LOBs         []LOBRef `json:"lobs"`
+	LobFileBytes int64    `json:"lobFileBytes"`
+	Note         string   `json:"note,omitempty"`
+}
+
+// LocateRID 找「RID 为 rid 的那一行在哪一页哪一槽」，并把它挂的大字段一并解析出来。
+//
+// 索引叶子存的就是 RID，所以这一步是「索引项 → 堆页那一行」的桥。
+// 找法是直接扫数据文件的槽位目录（只看目录、不解元组），命中即停 ——
+// 和页地图同一套只读路径，不进缓冲池。
+func (s *Store) LocateRID(table string, rid uint32) (*RowDetail, error) {
+	bt, err := s.browseTarget(table, "data", "")
+	if err != nil {
+		return nil, err
+	}
+	rf, err := openRawPages(bt.path)
+	if err != nil {
+		return nil, err
+	}
+	defer rf.close()
+
+	out := &RowDetail{Table: bt.table, RID: rid, Page: -1, Slot: -1}
+	// 大字段文件的大小也报出来：一行引用多少 vs 文件总大小，是判断「有没有垃圾」的第一步
+	if st, err := os.Stat(lobPathOf(bt.path)); err == nil {
+		out.LobFileBytes = st.Size()
+	}
+	for start := 0; start < rf.pages; start += 128 {
+		n := rf.pages - start
+		if n > 128 {
+			n = 128
+		}
+		chunk, _, err := rf.readChunk(uint32(start), n)
+		if err != nil {
+			return nil, err
+		}
+		for i := 0; i < n; i++ {
+			b := chunk[i]
+			if len(b) < pageHeaderSize || string(b[0:4]) != pageMagic {
+				continue
+			}
+			slots := int(binary.LittleEndian.Uint16(b[8:]))
+			for si := 0; si < slots; si++ {
+				off := pageHeaderSize + si*slotEntrySize
+				if off+slotEntrySize > len(b) {
+					break
+				}
+				if binary.LittleEndian.Uint32(b[off+4:]) != rid {
+					continue
+				}
+				out.Page = start + i
+				out.Slot = si
+				out.Off = int(binary.LittleEndian.Uint16(b[off:]))
+				out.Len = int(binary.LittleEndian.Uint16(b[off+2:]))
+				out.Live = out.Len > 0
+				if out.Live {
+					out.Cols, out.Note = decodeTupleForDisplay(b, out.Off, out.Len)
+					out.LOBs = parseTupleLOBs(b, out.Off, out.Len, lobPathOf(bt.path))
+				}
+				return out, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("RID %d 不在这张表的任何页里（可能已被删除，或索引里有陈旧条目）", rid)
+}
+
+// parseTupleLOBs 扫一遍元组，把大字段指针挑出来并核对 .lob 里的头。
+func parseTupleLOBs(page []byte, off, ln int, lobPath string) []LOBRef {
+	if off < 0 || ln < 4 || off+ln > len(page) {
+		return nil
+	}
+	tuple := page[off : off+ln]
+	n := int(binary.LittleEndian.Uint32(tuple))
+	pos := 4
+	var out []LOBRef
+	for i := 0; i < n && pos < len(tuple); i++ {
+		if tuple[pos] == tagLOB {
+			if pos+lobRefSize > len(tuple) {
+				break
+			}
+			ref := LOBRef{
+				Col: i,
+				Off: int64(binary.LittleEndian.Uint64(tuple[pos+1:])),
+				Len: int(binary.LittleEndian.Uint32(tuple[pos+9:])),
+			}
+			ref.StoredLen, ref.HeaderOK, ref.Preview = probeLob(lobPath, ref.Off, ref.Len)
+			out = append(out, ref)
+			pos += lobRefSize
+			continue
+		}
+		_, next, err := readValue(tuple, pos)
+		if err != nil {
+			break
+		}
+		pos = next
+	}
+	return out
+}
+
+// probeLob 读 blob 头核对偏移是否指对了，并取一小段正文当预览。
+func probeLob(path string, off int64, wantLen int) (storedLen int, ok bool, preview string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false, ""
+	}
+	defer f.Close()
+	hdr := make([]byte, lobHdrSize)
+	if _, err := f.ReadAt(hdr, off); err != nil {
+		return 0, false, ""
+	}
+	if string(hdr[0:4]) != lobMagic {
+		return 0, false, ""
+	}
+	storedLen = int(binary.LittleEndian.Uint32(hdr[4:]))
+	ok = storedLen == wantLen
+	// 预览只读前 96 字节，够看出「这是段什么文本」
+	n := storedLen
+	if n > 96 {
+		n = 96
+	}
+	if n > 0 {
+		buf := make([]byte, n)
+		if _, err := f.ReadAt(buf, off+lobHdrSize); err == nil {
+			preview = truncate(strings.ToValidUTF8(string(buf), "?"), 60)
+		}
+	}
+	return storedLen, ok, preview
+}

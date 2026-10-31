@@ -83,6 +83,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/space", s.handleSpace)
 	mux.HandleFunc("/api/pages", s.handlePages)
 	mux.HandleFunc("/api/page", s.handlePage)
+	mux.HandleFunc("/api/rid", s.handleRID)
 	mux.HandleFunc("/api/monitor/detail", s.handleMonitorDetail)
 	mux.HandleFunc("/api/monitor/kill", s.handleMonitorKill)
 	mux.HandleFunc("/api/monitor/timeouts", s.handleMonitorTimeouts)

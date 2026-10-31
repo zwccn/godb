@@ -464,6 +464,17 @@ class CDP {
       pmStruct.rows > 0 && /结构,文本,十六进制/.test(pmStruct.tabs) && /第 \d+ 页/.test(pmStruct.head),
       `${pmStruct.head} · ${pmStruct.rows} 条 · ${pmStruct.sample.slice(0, 40)}`);
 
+    // 关联链：点一条行（不论是从数据页还是索引叶子点），应该出现「RID → 堆页 N 槽 M」
+    await cdp.eval(`document.querySelector('#pmSide .pm-row').click()`);
+    await sleep(1200);
+    const pmLink = await cdp.eval(`(() => {
+      const box = document.querySelector('#pmSide .pm-link');
+      return { text: box ? box.textContent : '', onRow: document.querySelectorAll('#pmSide .pm-row.on').length };
+    })()`);
+    check('点一行能定位到「堆页 N 槽 M」（关联链的第一跳）',
+      /RID \d+ → 堆页 \d+ 槽 \d+/.test(pmLink.text),
+      pmLink.text.slice(0, 60) || '没有关联块');
+
     // 文本视图：页里能认出业务文本（这个库的示例数据是中文）
     await cdp.eval(`[...document.querySelectorAll('#pmSide .pm-tab')].find(b => b.textContent === '文本').click()`);
     await sleep(400);

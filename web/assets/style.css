@@ -3982,3 +3982,102 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   word-break: break-all;
 }
 .pm-link-row.bad { color: var(--danger-text); }
+
+/* ================= 「炫酷科技灰」专属增强 =================
+   为什么全部挂在 html[data-theme="steel"] 下，而不是改公共变量：
+   另外四套皮肤（含默认深色）一行都不该被这些光晕和纹理影响 —— 浅色皮肤上
+   叠一层蓝灰光会立刻显脏。这样做还有个好处：不合口味时删掉这一节就干净回滚。
+
+   原则：静态只加「几乎看不见」的层次（1px 光带、0.045 的网格），
+   动效只发生在交互态（hover / focus）。科技感来自「精密」，不是「闪烁」。 */
+
+html[data-theme="steel"] {
+  --fx-glow: rgba(76, 158, 240, .34);
+  --fx-glow-soft: rgba(76, 158, 240, .16);
+  --fx-grid: rgba(122, 172, 232, .045);
+  --fx-scan: rgba(96, 168, 248, .55);
+  /* 十字准星：24×24，热点正对中心。★ 数据 URI 里 # 必须写成 %23，否则整条声明作废 */
+  --fx-cur-cross: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Cg stroke='%234c9ef0' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M12 2v6M12 16v6M2 12h6M16 12h6'/%3E%3C/g%3E%3Ccircle cx='12' cy='12' r='1.6' fill='%234c9ef0'/%3E%3C/svg%3E") 12 12, crosshair;
+}
+
+/* 顶栏底边一条横向光带：静态就有「面板通电」的感觉，1px + 0.42 透明度，
+   再亮就成廉价霓虹了。 */
+html[data-theme="steel"] .topbar { position: relative; }
+html[data-theme="steel"] .topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  /* 中间一段亮、两端淡出：全宽等亮会像一条装错的边框 */
+  background: linear-gradient(90deg,
+    transparent 0, var(--fx-scan) 24%, var(--fx-scan) 76%, transparent 100%);
+  pointer-events: none;
+}
+
+/* 监控面板底纹：28px 网格，透明度 0.045。
+   只铺面板，不给整页铺 —— 编辑器区域有网格会让 SQL 读起来发花。 */
+html[data-theme="steel"] .mon-body {
+  background-image:
+    linear-gradient(var(--fx-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--fx-grid) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: -1px -1px;
+}
+
+/* 执行按钮 hover：一圈淡光。用 box-shadow 而不是 filter：只重绘按钮周围一小块，
+   暗色大面上不会有整屏重绘的代价。 */
+html[data-theme="steel"] .btn-run:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 1px var(--fx-glow-soft), 0 0 14px var(--fx-glow-soft);
+}
+
+/* 健康灯自带辉光：绿点本身就在说「没事」，让它亮一点比加装饰更有信息量 */
+html[data-theme="steel"] .mon-dot.green {
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, .16), 0 0 10px rgba(63, 185, 80, .45);
+}
+html[data-theme="steel"] .mon-dot.yellow {
+  box-shadow: 0 0 0 3px rgba(217, 164, 65, .16), 0 0 10px rgba(217, 164, 65, .45);
+}
+html[data-theme="steel"] .mon-dot.red {
+  box-shadow: 0 0 0 3px rgba(240, 97, 109, .18), 0 0 12px rgba(240, 97, 109, .55);
+}
+
+/* 水位和速率上的大数字：等宽 + 同色微光，像仪表读数。
+   只给这两处，不给正文 —— 满屏发光的数字读久了眼睛累。 */
+html[data-theme="steel"] .w-v,
+html[data-theme="steel"] .pc-value {
+  text-shadow: 0 0 16px var(--fx-glow);
+}
+/* 页面级 Tab 的选中项：底下那条 accent 线配一点文字光，视线一眼落上去 */
+html[data-theme="steel"] .mon-nav-tab.on {
+  text-shadow: 0 0 12px var(--fx-glow-soft);
+}
+
+/* 键盘焦点：1px 亮边 + 4px 淡光，比默认 outline 在暗色上更容易看清 */
+html[data-theme="steel"] .btn:focus-visible,
+html[data-theme="steel"] .mon-nav-tab:focus-visible,
+html[data-theme="steel"] .mon-win button:focus-visible,
+html[data-theme="steel"] input:focus-visible,
+html[data-theme="steel"] select:focus-visible,
+html[data-theme="steel"] textarea:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px var(--fx-glow-soft);
+}
+
+/* 光标：监控面板和空间地图的空白处用十字准星，格子也用它 ——
+   格子只有 5~20px，手型的指尖在左上角反而容易点偏，准星的中心点正好用来瞄。
+   **输入框 / 编辑器一律不动**：文本光标变形状是硬伤。 */
+html[data-theme="steel"] .mon-body { cursor: var(--fx-cur-cross); }
+html[data-theme="steel"] .mon-body input,
+html[data-theme="steel"] .mon-body textarea,
+html[data-theme="steel"] .mon-body select { cursor: auto; }
+html[data-theme="steel"] .pm-c,
+html[data-theme="steel"] .tv-cell { cursor: var(--fx-cur-cross); }
+/* 拖动中给抓手：原来格子的 pointer 优先于容器的 grabbing，拖起来光标不变，像卡住了 */
+html[data-theme="steel"] .map-grid.panning,
+html[data-theme="steel"] .map-grid.panning .pm-c,
+html[data-theme="steel"] .map-tree.panning,
+html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }

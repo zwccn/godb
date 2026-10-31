@@ -1520,10 +1520,10 @@ class CDP {
         brand.shadow === 'none' && brand.bgImage === 'none' && /^GoDB/.test(brand.title),
       `${brand.text} · DB 色 ${brand.dbColor} · title ${brand.title}`);
     check('设置页有 5 个带名字的皮肤卡片',
-      setUi.picks === 5 && setUi.pickNames.join('/') === '科技灰/深色/淡蓝/芋紫/薄荷绿',
+      setUi.picks === 5 && setUi.pickNames.join('/') === '炫酷科技灰/深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);
 
-    // 科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）
+    // 炫酷科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）
     const steel = await cdp.eval(`(() => {
       applyTheme('steel', false);
       const cs = getComputedStyle(document.documentElement);
@@ -2072,6 +2072,43 @@ class CDP {
       && !navAfter.open && navAfter.home && !navAfter.mon
       && navAfter.order[0] === 'btnHome',
       `监控 ${navBefore.open} → 编辑器 ${!navAfter.open} · 顶栏 ${navAfter.order.join('/')}`);
+
+    /* 「炫酷科技灰」的四项增强：顶栏光带、十字准星光标、右键拦截、皮肤名。
+       这些只在 steel 上开（其它皮肤一行都不该变），所以先切皮肤再断言，
+       最后切回淡蓝，检查它确实没被污染 —— 浅色皮肤上叠一层蓝光会立刻显脏。 */
+    await cdp.eval(`applyTheme('steel', false)`);
+    await sleep(300);
+    const fx = await cdp.eval(`(() => {
+      const after = getComputedStyle(document.querySelector('.topbar'), '::after');
+      const fire = (el, shift) => {
+        const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, shiftKey: !!shift });
+        el.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      };
+      const blank = document.getElementById('monBody');
+      return {
+        scan: /gradient/.test(after.backgroundImage || 'none'),
+        cursor: getComputedStyle(document.querySelector('.mon-body')).cursor.startsWith('url('),
+        labels: THEME_LIST.map(t => t.name),
+        blocked: fire(blank),
+        editor: fire(document.querySelector('.CodeMirror')),
+        shift: fire(blank, true),
+      };
+    })()`);
+    check('「炫酷科技灰」：顶栏光带 + 十字光标 + 右键拦截（Shift 和编辑器放行）',
+      fx.scan && fx.cursor && fx.blocked && !fx.editor && !fx.shift
+      && fx.labels[0] === '炫酷科技灰',
+      `${fx.labels.join(' / ')} · 拦截 ${fx.blocked} / 编辑器 ${fx.editor} / Shift ${fx.shift}`);
+
+    await cdp.eval(`applyTheme('sky', false)`);
+    await sleep(300);
+    const fxSky = await cdp.eval(`(() => ({
+      scan: getComputedStyle(document.querySelector('.topbar'), '::after').backgroundImage,
+      cursor: getComputedStyle(document.querySelector('.mon-body')).cursor,
+    }))()`);
+    check('这些特效不外溢到其它皮肤（淡蓝下没有光带、没有定制光标）',
+      !/gradient/.test(fxSky.scan || 'none') && !/^url/.test(fxSky.cursor),
+      `光带 ${(fxSky.scan || 'none').slice(0, 12)} · 光标 ${fxSky.cursor}`);
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

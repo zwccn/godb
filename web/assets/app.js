@@ -56,7 +56,7 @@ const THEME_KEY = 'godb.theme';
 const DEFAULT_THEME = 'steel';
 // 顺序即设置页里的展示顺序；默认的那套排第一
 const THEME_LIST = [
-  { id: 'steel', name: '科技灰' },
+  { id: 'steel', name: '炫酷科技灰' },
   { id: 'dark', name: '深色' },
   { id: 'sky', name: '淡蓝' },
   { id: 'taro', name: '芋紫' },
@@ -5761,6 +5761,21 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
+});
+
+/* 非菜单区域的右键不弹浏览器菜单 —— 那张灰白菜单和整套深色视觉是两张皮。
+   放行这几类，因为原生菜单在它们上面是真需求：
+   - 输入框 / 下拉 / 编辑器：剪切、粘贴、拼写建议
+   - **Shift + 右键**：调试时要「检查元素」，别把入口一刀切死。
+   这个逃生口是故意留的，别当成 bug 修掉。 */
+document.addEventListener('contextmenu', e => {
+  if (e.shiftKey) return;
+  const t = e.target;
+  if (t instanceof Element &&
+    t.closest('input, textarea, select, .CodeMirror, [contenteditable="true"], [contenteditable=""]')) {
+    return;
+  }
+  e.preventDefault();
 });
 
 /* ---------------- 窄屏：表结构抽屉 ---------------- */

@@ -326,7 +326,7 @@ function initCodeMirror() {
     lineWrapping: true,
     indentUnit: 2,
     tabSize: 2,
-    lineNumbers: false,
+    lineNumbers: true,
     placeholder: '-- 在这里写 SQL，Ctrl+Enter 执行；Ctrl+Space 唤出补全',
     hintOptions: {
       hint: window.GodbHint.complete,
@@ -346,8 +346,8 @@ function initCodeMirror() {
   cm.on('change', onEditorChange);
 
   /* ---------- 编辑器里的两处标记：出错行、当前语句 ----------
-     都不常驻：行号默认隐藏（编辑器只有 4~6 行高，gutter 要吃 30px 宽度），
-     只在报错时露出来 —— 那时它才有用，因为后端报错文本带 (line N, column M)。 */
+     行号常驻（写了行号才能在报错时对上 (line N, column M)）；
+     出错那行的行号会额外染红。 */
   cm.on('change', () => { if (errLine >= 0) clearSqlError(); });
   cm.on('change', scheduleStmt);
   cm.on('cursorActivity', scheduleStmt);
@@ -777,17 +777,11 @@ let errLine = -1;        // 当前标着「出错」的行（-1 = 没有）
 let stmtMark = null;     // 当前语句的 markText 句柄
 let stmtTimer = 0;
 
-function setGutter(on) {
-  if (!cm) return;
-  if (cm.getOption('lineNumbers') !== on) cm.setOption('lineNumbers', on);
-}
-
 function clearSqlError() {
   if (!cm || errLine < 0) return;
   cm.removeLineClass(errLine, 'background', 'cm-errline');
   cm.removeLineClass(errLine, 'gutter', 'cm-errline-gutter');
   errLine = -1;
-  setGutter(false);
 }
 
 /* markSqlError 把「第几行第几列」标到编辑器上。
@@ -812,7 +806,6 @@ function markSqlError(err, baseLine) {
   errLine = line;
   cm.addLineClass(line, 'background', 'cm-errline');
   cm.addLineClass(line, 'gutter', 'cm-errline-gutter');
-  setGutter(true);
   const ch = Math.max(0, Math.min(col, cm.getLine(line).length));
   cm.setCursor({ line, ch });
   cm.scrollIntoView({ line, ch }, 140);

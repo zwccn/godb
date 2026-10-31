@@ -2204,7 +2204,7 @@ class CDP {
       gutter: cm.getOption('lineNumbers'),
       cur: cm.getCursor(),
     }))()`);
-    check('SQL 报错时标红出错那行，并临时露出行号',
+    check('SQL 报错时标红出错那行（行号常驻，这一步只验红行）',
       errMark.lines === 1 && errMark.gutter === true
       && errMark.cur.line === 1 && errMark.cur.ch === 7,
       `红行 ${errMark.lines} · 行号 ${errMark.gutter} · 光标 ${errMark.cur.line}:${errMark.cur.ch}`);
@@ -2217,8 +2217,8 @@ class CDP {
       lines: document.querySelectorAll('.cm-errline').length,
       gutter: cm.getOption('lineNumbers'),
     }))()`);
-    check('执行成功后出错标记与行号一起收回去',
-      errGone.lines === 0 && errGone.gutter === false,
+    check('执行成功后红行清掉，行号常驻不动',
+      errGone.lines === 0 && errGone.gutter === true,
       `红行 ${errGone.lines} · 行号 ${errGone.gutter}`);
 
     const bad = results.filter(r => !r.ok);

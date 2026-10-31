@@ -105,3 +105,54 @@ func TestMiddlePageReuseKeepsFileSmall(t *testing.T) {
 	assertRows(t, run(t, d2, "s", `SELECT count(*) FROM re`), []string{"2000"})
 	assertRows(t, run(t, d2, "s", `SELECT pad FROM re WHERE id = 9200`), []string{pad + "-009200"})
 }
+
+// 小元组版本：一行只有几十字节，档位（64 字节一档）的取整方式就很要命。
+//
+// 找页时若用 need/64 向下取整，「要 51 字节」会从档 0 开始找 —— 那一档装的是
+// 「只剩 0~63 字节」的挤满页，命中后必然放不下，插入只好开新页。表现出来就是
+// 「删掉九成再插回九成」文件翻倍（1450 页 → 2754 页），而且 VACUUM 治不好：
+// 它只整理页内、摘文件尾部的空页，新页都在尾部且是满的。
+func TestSmallTupleReuseAfterMassDelete(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferPoolPages: 64, Lock: testOptions().Lock})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+	run(t, d, "s", `CREATE TABLE sm (id INTEGER PRIMARY KEY, n INTEGER)`)
+
+	insert := func(from, to int) {
+		for start := from; start <= to; start += 5000 {
+			var sb strings.Builder
+			sb.WriteString(`INSERT INTO sm VALUES `)
+			for i := start; i <= to && i < start+5000; i++ {
+				if i > start {
+					sb.WriteString(",")
+				}
+				fmt.Fprintf(&sb, "(%d,%d)", i, i%1000)
+			}
+			run(t, d, "s", sb.String())
+		}
+	}
+
+	insert(1, 20000)
+	run(t, d, "s", `CHECKPOINT`)
+	full := dataFileSize(t, dir)
+
+	// 删掉九成（保留 10 的倍数），按「先整理再插回」的正常运维顺序来
+	run(t, d, "s", `DELETE FROM sm WHERE id % 10 <> 0`)
+	run(t, d, "s", `CHECKPOINT`)
+	run(t, d, "s", `VACUUM sm`)
+	afterDelete := dataFileSize(t, dir)
+
+	insert(20001, 38000)
+	run(t, d, "s", `CHECKPOINT`)
+	afterInsert := dataFileSize(t, dir)
+	t.Logf("文件大小：满 %d → 删九成 %d → 插回 1.8 万 %d 字节", full, afterDelete, afterInsert)
+	if afterInsert > afterDelete {
+		t.Fatalf("小元组没有复用被整理出来的空闲：删后 %d 字节，插回后涨到 %d 字节",
+			afterDelete, afterInsert)
+	}
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM sm`), []string{"20000"})
+	assertRows(t, run(t, d, "s", `SELECT count(*) FROM sm WHERE id > 20000`), []string{"18000"})
+}

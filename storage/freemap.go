@@ -126,7 +126,12 @@ func (m *freeMap) find(need int) (uint32, bool) {
 	if need < 0 {
 		need = 0
 	}
-	b := need / fsmBucketBytes
+	// 档位是 floor(free/64)：档 c 装的是 free ∈ [c*64, c*64+63] 的页。
+	// 所以「放得下 need 字节」的最小档是 ceil(need/64)，不是 need/64 ——
+	// 用 floor 会让 need=51 从档 0 开始找，而档 0 里是「只剩 0~63 字节」的满页：
+	// 它们排在 best-fit 最前面，每次都命中、每次都放不下，插入只好开新页。
+	// （实测：删 90% 再插回等量数据，表文件 1450 页 → 2754 页。）
+	b := (need + fsmBucketBytes - 1) / fsmBucketBytes
 	if b >= fsmBuckets {
 		return noPage, false
 	}

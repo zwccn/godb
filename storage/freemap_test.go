@@ -61,6 +61,34 @@ func TestFreeMapBasics(t *testing.T) {
 	}
 }
 
+// 档位是 floor(free/64)，所以「要 need 字节」必须从 ceil(need/64) 档开始找。
+//
+// 用 floor 的后果：需要 51 字节时会从档 0（只剩 0~63 字节的挤满页）开始找，
+// 命中一页放不下的，插入只好开新页 —— 踩过一次：删 90% 再插回等量数据，
+// 表文件从 1450 页涨到 2754 页，VACUUM 也治不好（它只能摘尾部的空页）。
+func TestFreeMapFindRoundsNeedUp(t *testing.T) {
+	m := newFreeMap()
+	m.update(0, 22, 138)  // 挤满的页：只剩 22 字节
+	m.update(1, 300, 130) // 还放得下 51 字节
+
+	if p, ok := m.find(51); !ok || p != 1 {
+		t.Fatalf("find(51) = %d,%v，期望 1（只剩 22 字节的满页不该被选中）", p, ok)
+	}
+	// 要 320 字节：两页都放不下 → 调用方应该开新页
+	if _, ok := m.find(320); ok {
+		t.Fatal("find(320) 不该命中：0 号只剩 22 字节、1 号只剩 300 字节")
+	}
+	// 挤满的页被打扫干净（free 回到一页）之后又能用了，但仍排在最后：
+	// 1 号页还放得下 51 字节，best-fit 会继续把它填满
+	m.update(0, 8000, 0)
+	if p, ok := m.find(51); !ok || p != 1 {
+		t.Fatalf("find(51) = %d,%v，期望 1（best-fit 先填还放得下的页）", p, ok)
+	}
+	if p, ok := m.find(6000); !ok || p != 0 {
+		t.Fatalf("find(6000) = %d,%v，期望 0（只有整页空的页放得下）", p, ok)
+	}
+}
+
 // 中间页被删空之后，新插入的行要**填回那一页**，而不是继续往后开新页。
 //
 // 这是 FSM 存在的理由：老实现只往回看最后 8 页，中间的空洞永远用不上。

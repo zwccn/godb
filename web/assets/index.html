@@ -600,9 +600,6 @@ try {
   </div>
 </div>
 
-<!-- 右键菜单 -->
-<div id="ctxMenu" class="ctx-menu hidden" role="menu"></div>
-
 <!-- 帮助：示例查询 / 支持的语法 / 快捷键。
      原来这些挤在侧栏底部和编辑器下面，占地方又只能看一半，挪进来一次讲清楚。 -->
 <div id="helpModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="帮助">
@@ -933,6 +930,10 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
 <!-- SQL 编辑器的右键菜单：浏览器那张原生菜单和整套深色是两张皮，
      但编辑器又确实需要剪切/粘贴 —— 所以自己画一个，项与快捷键都在这儿。 -->
 <div id="ctxMenu" class="ctx-menu hidden" role="menu" aria-label="编辑器操作"></div>
+<!-- 模板子菜单：右键 →「插入 SQL 模板」飞出来的那一栏。
+     单独一个元素而不是嵌在父菜单里 —— 它要能自己溢出到父菜单外面，
+     塞在父元素里会被 overflow / 定位链条带着走。 -->
+<div id="ctxSub" class="ctx-menu ctx-sub hidden" role="menu" aria-label="SQL 模板"></div>
 
 <script src="/vendor/codemirror/lib/codemirror.js"></script>
 <script src="/vendor/codemirror/mode/sql.js"></script>

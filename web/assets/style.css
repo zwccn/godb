@@ -4161,6 +4161,36 @@ html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }
 }
 .ctx-item:hover:not(:disabled) kbd { color: var(--text-2); }
 .ctx-sep { height: 1px; margin: 4px 6px; background: var(--border-soft); }
+
+/* 「插入 SQL 模板」那一项右边的小箭头：说明它还有下一层，不是又一个动作 */
+.ctx-item .ctx-arrow {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
+}
+.ctx-item.open { background: var(--hint-active-bg); color: var(--text); }
+.ctx-item.open .ctx-arrow { color: var(--text); }
+
+/* 模板子菜单：比主菜单宽（模板名 + 右侧说明），太高时自己滚，
+   不让它顶出屏幕外 */
+.ctx-sub {
+  min-width: 258px;
+  /* 15 项 + 4 个分组标题实测 577px，上限给到 600 就不用滚了；
+     屏幕矮的时候退到 80vh，让它在视口内自己滚 */
+  max-height: min(80vh, 600px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 分组标题：建表 / 修改表 / 查询 / 更新与删除 */
+.ctx-group {
+  padding: 6px 9px 3px;
+  font-size: calc(10.5px * var(--fs));
+  letter-spacing: .5px;
+  color: var(--text-3);
+}
+.ctx-sub .ctx-item { gap: 12px; padding: 4px 9px; }
+.ctx-sub .ctx-item kbd { font-size: calc(10px * var(--fs)); }
 /* 科技灰下给菜单一点光，和顶栏光带、焦点环是一套语言 */
 html[data-theme="steel"] .ctx-menu {
   box-shadow: 0 12px 32px var(--shadow-color), 0 0 0 1px var(--fx-glow-soft);

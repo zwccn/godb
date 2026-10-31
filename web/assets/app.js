@@ -1671,6 +1671,7 @@ function renderSchema(tables) {
       cr.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}${c.default ? ' DEFAULT ' + c.default : ''}`;
       cr.addEventListener('click', ev => {
         ev.stopPropagation();
+        lastTableName = t.name;
         editor.value = `SELECT ${qi(c.name)} FROM ${qi(t.name)} LIMIT 100;`;
         autoSize();
         run();
@@ -5998,6 +5999,7 @@ function editorSelection() {
 
 function closeEditorMenu() {
   if (ctxMenu) ctxMenu.classList.add('hidden');
+  closeTemplateMenu();
 }
 
 async function ctxCopy(cut) {
@@ -6036,8 +6038,233 @@ async function ctxPaste() {
   }
 }
 
+/* ---------- SQL 模板 ----------
+   右键菜单里的「插入 SQL 模板」。目的是**直接上手**：空编辑器里点两下就得到一段能跑的骨架，
+   不用先记住这个库支持哪些写法。
+
+   占位符写成 {{名字}}，插入后会**选中第一个还没填的** —— 直接敲字就替换，不用自己找。
+   如果刚在侧栏点过某张表（lastTableName），{{表名}} 自动填好，多数模板这时就能直接跑。 */
+
+let lastTableName = '';   // 侧栏最近一次打开/点过的表，用来预填模板里的表名
+
+const SQL_TEMPLATES = [
+  {
+    group: '建表',
+    items: [
+      {
+        label: '新建表', hint: 'CREATE TABLE',
+        tip: '主键 + 非空文本 + 带默认值的金额 + 创建时间',
+        text: 'CREATE TABLE {{表名}} (\n'
+          + '  id INTEGER PRIMARY KEY,\n'
+          + '  name TEXT NOT NULL,\n'
+          + '  amount NUMERIC(12, 2) DEFAULT 0,\n'
+          + '  created_at TIMESTAMP DEFAULT now()\n'
+          + ');',
+      },
+      {
+        label: '建索引', hint: 'CREATE INDEX',
+        tip: '普通索引；建完写索引列上的查询会自动走它',
+        text: 'CREATE INDEX {{索引名}} ON {{表名}} ({{列名}});',
+      },
+    ],
+  },
+  {
+    group: '修改表',
+    items: [
+      {
+        label: '加字段', hint: 'ADD COLUMN',
+        tip: '已有行会补这个列的默认值（没有 DEFAULT 就是 NULL）',
+        text: 'ALTER TABLE {{表名}} ADD COLUMN {{列名}} TEXT;',
+      },
+      {
+        label: '改字段类型', hint: 'SET DATA TYPE',
+        tip: '按现有数据转换；转不了会报错，原数据不动',
+        text: 'ALTER TABLE {{表名}} ALTER COLUMN {{列名}} TYPE TEXT;',
+      },
+      {
+        label: '删字段', hint: 'DROP COLUMN',
+        tip: '列和它的数据一起删，不可撤销',
+        text: 'ALTER TABLE {{表名}} DROP COLUMN {{列名}};',
+      },
+      {
+        label: '重命名表', hint: 'RENAME TO',
+        tip: '数据、索引、外键跟着走',
+        text: 'ALTER TABLE {{表名}} RENAME TO {{新表名}};',
+      },
+    ],
+  },
+  {
+    group: '查询',
+    items: [
+      {
+        label: '单表查询', hint: 'LIMIT 100',
+        tip: '先看 100 行，别一上来就全表拉',
+        text: 'SELECT *\nFROM {{表名}}\nLIMIT 100;',
+      },
+      {
+        label: '条件 + 排序 + 分页', hint: 'WHERE · ORDER BY',
+        tip: '最常见的三段：过滤、排序、翻页',
+        text: 'SELECT *\nFROM {{表名}}\nWHERE {{条件}}\nORDER BY {{排序列}} DESC\nLIMIT 50 OFFSET 0;',
+      },
+      {
+        label: '分组统计', hint: 'GROUP BY · HAVING',
+        tip: '按一列分组，数条数、求和，再按结果排序',
+        text: 'SELECT {{分组列}}, count(*) AS n, sum({{数值列}}) AS total\n'
+          + 'FROM {{表名}}\n'
+          + 'GROUP BY {{分组列}}\n'
+          + 'HAVING count(*) > 1\n'
+          + 'ORDER BY n DESC;',
+      },
+      {
+        label: '多表连接', hint: 'JOIN … ON',
+        tip: '两张表按外键连起来；两个别名 a / b 在 WHERE 里也能用（注意加前缀，别写裸 id）',
+        text: 'SELECT a.{{列名}}, b.{{列名}}\n'
+          + 'FROM {{表名}} a\n'
+          + 'JOIN {{另一张表}} b ON b.{{外键列}} = a.id\n'
+          + 'LIMIT 100;',
+      },
+      {
+        label: '子查询 EXISTS', hint: 'WHERE EXISTS',
+        tip: '「另一张表里有它才留下」——比 IN 更直观，也不怕 NULL',
+        text: 'SELECT *\n'
+          + 'FROM {{表名}} t\n'
+          + 'WHERE EXISTS (\n'
+          + '  SELECT 1 FROM {{另一张表}} x WHERE x.{{外键列}} = t.id\n'
+          + ');',
+      },
+    ],
+  },
+  {
+    group: '更新与删除',
+    items: [
+      {
+        label: '单表更新', hint: 'UPDATE … WHERE',
+        tip: 'WHERE 不写就是改全表 —— 先拿 SELECT 试一遍条件',
+        text: 'UPDATE {{表名}} SET {{列名}} = {{值}} WHERE {{条件}};',
+      },
+      {
+        label: '多表更新', hint: 'UPDATE … FROM',
+        tip: '拿另一张表的值来改这张表（按 id 对上）',
+        text: 'UPDATE {{表名}} t\n'
+          + 'SET {{列名}} = s.{{列名}}\n'
+          + 'FROM {{另一张表}} s\n'
+          + 'WHERE s.id = t.{{外键列}};',
+      },
+      {
+        label: '删除', hint: 'DELETE … WHERE',
+        tip: '同样：先 SELECT 看看会删掉哪些',
+        text: 'DELETE FROM {{表名}} WHERE {{条件}};',
+      },
+      {
+        label: '多表删除', hint: 'DELETE … USING',
+        tip: '按另一张表的条件删这张表',
+        text: 'DELETE FROM {{表名}} t\n'
+          + 'USING {{另一张表}} s\n'
+          + 'WHERE s.id = t.{{外键列}};',
+      },
+    ],
+  },
+];
+
+/* applyTemplate 把 {{x}} 换成文本，并记下每段在结果串里的位置，
+   好让插入后能把第一个「还没填」的占位符选中。 */
+function applyTemplate(tpl) {
+  const parts = [];
+  const slots = [];
+  const re = /\{\{([^}]+)\}\}/g;
+  let last = 0, len = 0, m;
+  while ((m = re.exec(tpl))) {
+    const seg = tpl.slice(last, m.index);
+    parts.push(seg);
+    len += seg.length;
+    // 表名能填就填：填好之后一段模板基本可以直接跑，「直接上手」靠的就是这一步
+    const prefill = m[1] === '表名' && lastTableName;
+    const val = prefill ? qi(lastTableName) : m[1];
+    parts.push(val);
+    slots.push({ key: m[1], a: len, b: len + val.length, filled: !!prefill });
+    len += val.length;
+    last = m.index + m[0].length;
+  }
+  parts.push(tpl.slice(last));
+  return { text: parts.join(''), slots: slots };
+}
+
+function insertTemplate(tpl) {
+  const { text, slots } = applyTemplate(tpl);
+  if (!cm) {
+    editor.append(text);
+    return;
+  }
+  cm.replaceSelection(text);
+  const base = cm.indexFromPos(cm.getCursor()) - text.length;
+  /* 同一个占位符在一段 SQL 里可能出现两次（分组列既在 SELECT 也在 GROUP BY、
+     列名在 JOIN 的 select 列表里出现两次）。把**同名且未填的**一起选中，
+     敲一次字全部替换 —— 只选第一个的话，剩下的会留下「列名」这种中文字面量，
+     模板插进去就直接是语法错。 */
+  const pending = slots.filter(x => !x.filled);
+  const first = pending[0];
+  if (first) {
+    const same = pending.filter(x => x.key === first.key);
+    cm.setSelections(same.map(x => ({
+      anchor: cm.posFromIndex(base + x.a),
+      head: cm.posFromIndex(base + x.b),
+    })));
+    cm.scrollIntoView(cm.posFromIndex(base + first.a), 80);
+  } else {
+    cm.setCursor(cm.posFromIndex(base + text.length));
+  }
+  cm.focus();
+  autoSize();
+  syncRunLabel();
+}
+
+const ctxSub = document.getElementById('ctxSub');
+
+function closeTemplateMenu() {
+  if (ctxSub) ctxSub.classList.add('hidden');
+  if (ctxMenu) {
+    for (const b of ctxMenu.querySelectorAll('.ctx-item.open')) b.classList.remove('open');
+  }
+}
+
+/* openTemplateMenu 把子菜单摆在「插入 SQL 模板」这一项的右边；
+   右边放不下就翻到左边（窄屏窗口常见），上下再夹一次别出屏。 */
+function openTemplateMenu(anchor) {
+  if (!ctxSub) return;
+  for (const b of ctxMenu.querySelectorAll('.ctx-item.open')) b.classList.remove('open');
+  anchor.classList.add('open');
+  ctxSub.innerHTML = '';
+  for (const g of SQL_TEMPLATES) {
+    ctxSub.appendChild(el('div', 'ctx-group', g.group));
+    for (const it of g.items) {
+      const b = el('button', 'ctx-item', it.label);
+      b.type = 'button';
+      b.title = it.tip;
+      b.appendChild(el('kbd', null, it.hint));
+      b.addEventListener('click', () => { closeEditorMenu(); insertTemplate(it.text); });
+      ctxSub.appendChild(b);
+    }
+  }
+  // 先挪到屏幕外量尺寸再摆位，否则会在鼠标处闪一下再跳走
+  ctxSub.style.left = '-9999px';
+  ctxSub.style.top = '0px';
+  ctxSub.classList.remove('hidden');
+  const a = anchor.getBoundingClientRect();
+  const m = ctxMenu.getBoundingClientRect();
+  const r = ctxSub.getBoundingClientRect();
+  // 横向贴**菜单**的边，不是贴这一项的边：项比菜单窄（菜单有 4px padding），
+  // 贴项的话子菜单会压住菜单右边框，看起来像叠在一起。
+  let left = m.right + 2;
+  if (left + r.width > window.innerWidth - 8) left = m.left - r.width - 2;
+  let top = a.top - 5;
+  if (top + r.height > window.innerHeight - 8) top = window.innerHeight - r.height - 8;
+  ctxSub.style.left = `${Math.max(8, left)}px`;
+  ctxSub.style.top = `${Math.max(8, top)}px`;
+}
+
 function openEditorMenu(x, y) {
   if (!ctxMenu) return;
+  closeTemplateMenu();
   ctxMenu.innerHTML = '';
   const hasSel = !!editorSelection();
   const add = (label, key, fn, disabled) => {
@@ -6055,6 +6282,19 @@ function openEditorMenu(x, y) {
   sep();
   add('全选', 'Ctrl+A', () => { if (cm) cm.execCommand('selectAll'); else editorEl.select(); });
   add('美化 SQL', 'Shift+Ctrl+F', () => formatSQL());
+  sep();
+  /* 模板：hover 和点击都能展开。只有 click 的话，鼠标移到这儿还得再点一下；
+     只有 hover 的话，触控板和键盘用户进不去。两个都接。 */
+  const tplItem = el('button', 'ctx-item has-sub', '插入 SQL 模板');
+  tplItem.type = 'button';
+  tplItem.setAttribute('aria-haspopup', 'menu');
+  tplItem.title = lastTableName
+    ? `建表 / 改表 / 查询 / 多表更新 的骨架 —— 表名会自动填成 ${lastTableName}`
+    : '建表 / 改表 / 查询 / 多表更新 的骨架（先点一下侧栏的表，表名会自动填好）';
+  tplItem.appendChild(el('span', 'ctx-arrow', '›'));
+  tplItem.addEventListener('mouseenter', () => openTemplateMenu(tplItem));
+  tplItem.addEventListener('click', () => openTemplateMenu(tplItem));
+  ctxMenu.appendChild(tplItem);
   sep();
   // 这是「光标离开菜单」的入口：菜单里有执行，会立刻关掉面板，不用先点空白
   add('执行', 'Ctrl+Enter', () => run());
@@ -6094,8 +6334,19 @@ document.addEventListener('keydown', e => {
 }, true);
 document.addEventListener('pointerdown', e => {
   if (!ctxMenu || ctxMenu.classList.contains('hidden')) return;
+  // 子菜单是独立元素，点它不算「点到外面」
+  if (ctxSub && ctxSub.contains(e.target)) return;
   if (!ctxMenu.contains(e.target)) closeEditorMenu();
 }, true);
+
+/* 鼠标移到别的项上就把子菜单收掉 —— 否则它会一直挂在屏幕右边，
+   看起来像「菜单卡住了」。只挂在 ctxMenu 上，子菜单内部不触发。 */
+if (ctxMenu) {
+  ctxMenu.addEventListener('mouseover', e => {
+    const it = e.target instanceof Element ? e.target.closest('.ctx-item') : null;
+    if (it && !it.classList.contains('has-sub')) closeTemplateMenu();
+  });
+}
 window.addEventListener('blur', closeEditorMenu);
 window.addEventListener('scroll', closeEditorMenu, true);
 
@@ -6304,6 +6555,7 @@ function insertSql(text) {
 }
 
 function openTable(name) {
+  lastTableName = name;      // 模板里 {{表名}} 会自动填成它
   editor.value = `SELECT * FROM ${qi(name)} LIMIT 100;`;
   autoSize();
   run();

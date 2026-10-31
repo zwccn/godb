@@ -2196,8 +2196,9 @@ class CDP {
         inView: b.right <= window.innerWidth + 1 && b.bottom <= window.innerHeight + 1,
       };
     })()`);
-    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/执行）',
-      ctx.prevented && ctx.open && ctx.items.length === 6 && ctx.seps === 2 && ctx.inView,
+    // 7 项：剪切 / 复制 / 粘贴 / 全选 / 美化 / 插入 SQL 模板 / 执行（模板那一项另有专门断言）
+    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/模板/执行）',
+      ctx.prevented && ctx.open && ctx.items.length === 7 && ctx.seps === 3 && ctx.inView,
       ctx.items.join(' · '));
 
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 });
@@ -2205,6 +2206,53 @@ class CDP {
     const ctxClosed = await cdp.eval(`document.getElementById('ctxMenu').classList.contains('hidden')`);
     check('右键菜单按 Esc 就关，不连带关掉别的面板', ctxClosed, `隐藏 ${ctxClosed}`);
 
+    /* SQL 模板：右键 →「插入 SQL 模板」飞出 15 条骨架（建表 / 改表 / 查询 / 更新删除）。
+       验三件事 —— 位置（贴在主菜单右侧、不出屏）、占位符（表名自动填、同名的多选）、
+       以及选完就收菜单。模板本身的语法在 tools 里另有一次性脚本真跑过一遍。 */
+    await cdp.eval(`lastTableName = 'employees'; cm.setValue(''); openEditorMenu(320, 200)`);
+    await sleep(300);
+    await cdp.eval(`(() => {
+      const it = [...document.querySelectorAll('#ctxMenu .ctx-item')].find(x => x.textContent.includes('插入 SQL 模板'));
+      it.dispatchEvent(new MouseEvent('mouseenter'));
+    })()`);
+    await sleep(350);
+    const tplUi = await cdp.eval(`(() => {
+      const s = document.getElementById('ctxSub');
+      const r = s.getBoundingClientRect();
+      const m = document.getElementById('ctxMenu').getBoundingClientRect();
+      return {
+        open: !s.classList.contains('hidden'),
+        groups: [...s.querySelectorAll('.ctx-group')].map(g => g.textContent),
+        n: s.querySelectorAll('.ctx-item').length,
+        right: r.left >= m.right,
+        inView: r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
+        noScroll: s.scrollHeight <= s.clientHeight + 1,
+      };
+    })()`);
+    check('右键「插入 SQL 模板」飞出 15 条骨架，分四组、贴主菜单右侧、不用滚',
+      tplUi.open && tplUi.n === 15 && tplUi.groups.join('/') === '建表/修改表/查询/更新与删除'
+      && tplUi.right && tplUi.inView && tplUi.noScroll,
+      `${tplUi.n} 条 · ${tplUi.groups.join('/')} · 右侧 ${tplUi.right} · 不滚 ${tplUi.noScroll}`);
+
+    await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('#ctxSub .ctx-item')].find(x => x.textContent.includes('分组统计'));
+      b.click();
+    })()`);
+    await sleep(400);
+    const tplIns = await cdp.eval(`(() => ({
+      text: cm.getValue(),
+      sels: cm.listSelections().length,
+      selText: cm.listSelections().map(x => cm.getRange(x.anchor, x.head)),
+      closed: document.getElementById('ctxMenu').classList.contains('hidden')
+        && document.getElementById('ctxSub').classList.contains('hidden'),
+    }))()`);
+    check('选一个模板：表名自动填、同名的占位符一起选中、菜单随即收起',
+      /FROM employees/.test(tplIns.text) && /GROUP BY 分组列/.test(tplIns.text)
+      && tplIns.sels === 2 && tplIns.selText.every(t => t === '分组列') && tplIns.closed,
+      `选中 ${tplIns.sels} 处 ${JSON.stringify(tplIns.selText)} · 收起 ${tplIns.closed}`);
+
+    // 自带内容，别依赖前面谁留下的编辑器状态（模板断言会改它）
+    await cdp.eval(`cm.setValue(['SELECT 1 AS a;', 'SELECT 2 AS b;'].join(String.fromCharCode(10)))`);
     await cdp.eval(`(() => {
       const d = cm.getDoc();
       d.setSelection({ line: 0, ch: 0 }, { line: 0, ch: cm.getLine(0).length });

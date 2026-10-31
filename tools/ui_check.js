@@ -369,14 +369,20 @@ class CDP {
     // 概览页底部留一行存储摘要：fsync 是最高频的排障入口，不该逼人先切页
     const sumUi = await cdp.eval(`(() => {
       const box = document.getElementById('monIOSum');
+      const items = box ? [...box.querySelectorAll('.sum-item')] : [];
+      const card = box ? box.closest('.mon-card').getBoundingClientRect() : null;
+      const panel = document.getElementById('monPanel').getBoundingClientRect();
       return {
-        rows: box ? box.querySelectorAll('.io-row').length : -1,
-        keys: box ? [...box.querySelectorAll('.io-k')].map(e => e.textContent) : [],
+        n: items.length,
+        keys: items.map(e => (e.querySelector('.sum-k') || {}).textContent),
+        // 摘要必须在概览首屏内：要滚一下才能看见就白放了
+        inView: card ? card.bottom <= panel.bottom + 1 : false,
+        h: card ? Math.round(card.height) : 0,
       };
     })()`);
-    check('概览页有存储摘要（fsync / 缓冲池 / 页密度）',
-      sumUi.rows === 3 && sumUi.keys.join('/') === 'fsync/缓冲池/页密度',
-      sumUi.keys.join(' / '));
+    check('概览页有存储摘要（fsync / 缓冲池 / 页密度），且一屏放得下',
+      sumUi.n === 3 && sumUi.keys.join('/') === 'fsync/缓冲池/页密度' && sumUi.inView,
+      `${sumUi.keys.join(' / ')} · 卡片 ${sumUi.h}px · 首屏内 ${sumUi.inView}`);
 
     // 存储页：四块占比条 + 明细表；点一行才去逐页扫「洞」
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="storage"]').click()`);

@@ -3548,3 +3548,18 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   .mon-io.wide { grid-template-columns: 1fr; }
   .mon-nav { padding: 6px 10px 0; }
 }
+
+/* 概览页的存储摘要：一行三项。做成一行是为了让概览一屏放得下，
+   滚一下才能看见的摘要等于没放。 */
+.mon-io.mon-sum {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  padding: 9px 12px;
+}
+.sum-item { display: inline-flex; align-items: baseline; gap: 6px; font-size: calc(11.5px * var(--fs)); }
+.sum-k { color: var(--text-3); }
+.sum-v { font-family: var(--mono); font-weight: 500; color: var(--text); }
+.sum-sub { color: var(--text-3); font-size: calc(11px * var(--fs)); }
+.sum-item.bad .sum-v { color: var(--danger-text); }
+.sum-item.warn .sum-v { color: var(--warn-text); }

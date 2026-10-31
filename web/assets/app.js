@@ -2304,9 +2304,10 @@ function renderIO(m) {
     '各表页文件（tables/tXXXXXX.dat）的大小；行内超过 2KB 的文本另存进 .lob，单独算'));
 }
 
-// 概览页的存储摘要：只放三行 —— fsync（提交的实际等待）、缓冲池命中率、页密度。
-// 完整的那张卡在「存储」页；这里放摘要是因为「提交变慢」是最高频的排障入口，
-// 不该让人先切页才能看到 fsync。
+// 概览页的存储摘要：一行三个数（fsync / 缓冲池 / 页密度）。
+// 完整的那张卡在「存储」页；这里放摘要，是因为「提交变慢」是最高频的排障入口，
+// 不该让人先切页才能看到 fsync。做成一行而不是三行，是为了让概览一屏放得下 ——
+// 摘要要滚一下才能看见就白放了。
 function renderIOSummary(m) {
   const box = monEls.ioSum;
   if (!box) return;
@@ -2317,25 +2318,32 @@ function renderIOSummary(m) {
   const rt = io.rates || {};
   box.innerHTML = '';
 
-  box.appendChild(ioRow('fsync',
-    f.runs ? `${fmtNs(f.p95Ns)} p95` : '—',
-    f.runs
-      ? `${fmtNs(f.p50Ns)} p50 · ${rt.fsyncPerSec || 0} 次/s 服务 ${rt.commitsPerSec || 0} 提交/s`
-      : '还没有写过盘',
-    'fsync 延迟就是提交实际等待；WAL / 快照 / 缓冲池的完整数字在「存储」页',
+  const item = (label, value, sub, tip, cls) => {
+    const it = el('span', 'sum-item' + (cls ? ' ' + cls : ''));
+    it.title = tip;
+    it.appendChild(el('span', 'sum-k', label));
+    it.appendChild(el('b', 'sum-v', value));
+    if (sub) it.appendChild(el('span', 'sum-sub', sub));
+    return it;
+  };
+
+  box.appendChild(item('fsync',
+    f.runs ? fmtNs(f.p95Ns) : '—',
+    f.runs ? `p95 · ${rt.fsyncPerSec || 0} 次/s` : '还没写过盘',
+    'fsync 延迟就是提交的实际等待；WAL / 快照 / 缓冲池的完整数字在「存储」页',
     (f.p95Ns || 0) >= 10e6 ? 'bad' : ''));
 
   const look = (pool.hits || 0) + (pool.misses || 0);
-  const hit = look > 0 ? `${((pool.hits / look) * 100).toFixed(1)}%` : '—';
-  box.appendChild(ioRow('缓冲池', hit,
-    look > 0 ? `${pool.resident || 0}/${pool.budget || 0} 页 · 脏页 ${pool.dirty || 0}` : '还没有页被读过',
-    '命中率高 = 页都在内存里；超预算说明 bufferPoolPages 该调大了',
+  box.appendChild(item('缓冲池',
+    look > 0 ? `${((pool.hits / look) * 100).toFixed(1)}%` : '—',
+    look > 0 ? `${pool.resident || 0}/${pool.budget || 0} 页` : '还没读过页',
+    '命中率高 = 页都在内存里；出现「超预算」说明 bufferPoolPages 该调大了',
     look > 0 && pool.hits / look < 0.8 ? 'warn' : ''));
 
   const fillOk = (sp.fillPages || 0) > 0;
-  box.appendChild(ioRow('页密度',
+  box.appendChild(item('页密度',
     fillOk ? `${((sp.fill || 0) * 100).toFixed(0)}%` : '—',
-    fillOk ? `${sp.pages || 0} 页 · 逐表明细在「存储」页` : '表都还小（不足 8 页）或还没落盘',
+    fillOk ? `${sp.pages || 0} 页` : '表都还小',
     '页密度 = 1 - 页里可复用空闲 / 页容量；掉下来通常是删了很多行还没整理',
     fillOk && (sp.fill || 0) < 0.5 ? 'warn' : ''));
 }

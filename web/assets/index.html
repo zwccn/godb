@@ -222,6 +222,17 @@ try {
       <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
       <div class="mon-layers" id="monLayers"></div>
 
+      <!-- 存储摘要：排障时先看这一行（fsync 就是提交的实际等待），
+           要看 WAL / 快照 / 缓冲池与逐表空间，再切「存储」页。 -->
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>存储</span>
+          <span class="mon-sub">摘要 · 明细在「存储」页</span>
+          <button class="space-rescan" id="btnGoStorage" type="button">看明细</button>
+        </div>
+        <div class="mon-io mon-sum" id="monIOSum"></div>
+      </section>
+
       <!-- 4. 吞吐走势：QPS / TPS / 连接数。
            水位是瞬时快照，这里是走势 —— 「刚才那阵子忙成什么样、什么时候掉下去的」
            只有曲线答得出来。和进程资源用同一个秒级节拍，横轴天然对齐。 -->
@@ -244,16 +255,6 @@ try {
             <span class="mon-sub" id="monProcSub">每秒采样 · 最近 5 分钟</span>
           </div>
           <div class="mon-proc" id="monProc"></div>
-      </section>
-      <!-- 存储摘要：排障时先看这一行（fsync 就是提交的实际等待），
-           要看 WAL / 快照 / 缓冲池与逐表空间，再切「存储」页。 -->
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>存储</span>
-          <span class="mon-sub">摘要 · 明细在「存储」页</span>
-          <button class="space-rescan" id="btnGoStorage" type="button">看明细</button>
-        </div>
-        <div class="mon-io" id="monIOSum"></div>
       </section>
     </div>
 

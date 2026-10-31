@@ -245,14 +245,21 @@ function fmtTook(ns) {
 //   手动（拖过底边）—— 固定高度，存在 localStorage，下次打开还是这么高。
 // 双击拖手回到自动模式。
 
-const EDITOR_MIN = 180;               // 约 8 行，也是 CSS 的 min-height
+const EDITOR_MIN = 180;               // 桌面：约 8 行，也是 CSS 的 min-height
+const EDITOR_MIN_NARROW = 104;        // 窄屏：约 4 行
 const EDITOR_RESULT_ROOM = 320;       // 至少给下面的结果区留这么多
 const EDITOR_H_KEY = 'godb.editorH';
 
 let editorManualH = 0; // 0 表示自动
 
+// 手机上一行 SQL 配 180px 的编辑器会吃掉半屏（390×844 里编辑器占了 1/3），
+// 所以窄屏把「最低高度」降到 4 行左右，其余照样跟着内容长。
+function editorMinH() {
+  return window.innerWidth <= 720 ? EDITOR_MIN_NARROW : EDITOR_MIN;
+}
+
 function editorMaxH() {
-  return Math.max(EDITOR_MIN, window.innerHeight - EDITOR_RESULT_ROOM);
+  return Math.max(editorMinH(), window.innerHeight - EDITOR_RESULT_ROOM);
 }
 
 function setEditorHeight(h) {
@@ -283,13 +290,13 @@ function autoSize() {
     editorEl.style.height = 'auto';
     content = editorEl.scrollHeight + 2;
   }
-  const h = Math.max(EDITOR_MIN, Math.min(content, window.innerHeight * 0.55));
+  const h = Math.max(editorMinH(), Math.min(content, window.innerHeight * 0.55));
   setEditorHeight(h);
 }
 
 function loadEditorHeight() {
   const n = parseInt(localStorage.getItem(EDITOR_H_KEY), 10);
-  if (n > 0) editorManualH = Math.max(EDITOR_MIN, n);
+  if (n > 0) editorManualH = Math.max(editorMinH(), n);
 }
 
 // initCodeMirror 把 textarea 换成 CodeMirror（本地 vendor），并接上补全。
@@ -366,7 +373,7 @@ function initCodeMirror() {
     try { grip.setPointerCapture(ev.pointerId); } catch (e) {}
 
     const move = e => {
-      const h = Math.max(EDITOR_MIN, Math.min(startH + (e.clientY - startY), editorMaxH()));
+      const h = Math.max(editorMinH(), Math.min(startH + (e.clientY - startY), editorMaxH()));
       editorManualH = h;
       setEditorHeight(h);
     };
@@ -1687,7 +1694,26 @@ function fmtNs(ns) {
   return fmtMs(ns / 1e6);
 }
 
+// monPaused：暂停轮询。截图取证、对比两条 SQL 前后的水位时，画面每秒在跳没法看。
+// 暂停只停「取数据」，已经画出来的内容原样留着；点一下继续会立刻拉一次。
+let monPaused = false;
+
+function setMonPaused(on) {
+  monPaused = on;
+  const b = document.getElementById('btnMonPause');
+  b.textContent = on ? '▶' : 'Ⅱ';
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  b.title = on ? '继续刷新' : '暂停刷新';
+  b.classList.toggle('on', on);
+  if (on) {
+    monEls.updated.textContent = '已暂停';
+  } else {
+    pollMonitor();
+  }
+}
+
 async function pollMonitor() {
+  if (monPaused) return;
   let m;
   try {
     m = await api('/api/monitor');
@@ -2840,7 +2866,11 @@ document.getElementById('sbSearchClear').addEventListener('click', () => {
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
 document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
-document.getElementById('btnMonRefresh').addEventListener('click', () => pollMonitor());
+document.getElementById('btnMonRefresh').addEventListener('click', () => {
+  if (monPaused) setMonPaused(false); // 手动刷新 = 隐含继续
+  else pollMonitor();
+});
+document.getElementById('btnMonPause').addEventListener('click', () => setMonPaused(!monPaused));
 document.getElementById('btnMonSaveTimeouts').addEventListener('click', saveTimeouts);
 
 // 齿轮：点开 / 再点收起；点浮层外面也收起（点到输入框里不算外面）

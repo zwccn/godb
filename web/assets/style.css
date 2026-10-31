@@ -690,6 +690,13 @@ body {
 }
 .more-menu button:hover { background: var(--row-hover); }
 
+/* 监控「暂停刷新」按下去要有明确状态，否则看不出来是不是还在跳 */
+#btnMonPause.on {
+  color: var(--accent);
+  background: var(--accent-soft-bg);
+  border-color: transparent;
+}
+
 #editor {
   display: block;
   width: 100%;
@@ -1425,6 +1432,9 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   /* 低频按钮收进「更多」，而不是直接删掉 —— 手机上也还能用执行计划和清空 */
   #btnExplain, #btnClear { display: none; }
   .more-btn { display: inline-flex; align-items: center; }
+  /* 窄屏的编辑器最低高度跟 JS 的 editorMinH() 对齐（4 行左右）：
+     CSS 里写死 180px 会让「跟着内容长」永远退化成 180，两行 SQL 也占半屏。 */
+  #editor, .CodeMirror { min-height: 104px; }
   .editor-lead { gap: 8px; }
 }
 

@@ -540,6 +540,44 @@ class CDP {
       /^1\.0×$/.test(zReset.label) && zReset.left === 0 && !zReset.canPan,
       `${zReset.label} · 偏移 ${zReset.left}`);
 
+    // 平滑：滚一格不是瞬间跳到位，而是逐帧滑过去（每帧记一次 mapZoom，看有没有中间值）
+    await cdp.eval(`window.__zv=[];(function s(){window.__zv.push(mapZoom);if(window.__zv.length<45)requestAnimationFrame(s);})()`);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel', x: dragBase.x, y: dragBase.y, deltaX: 0, deltaY: -120,
+    });
+    await sleep(800);
+    const zSeries = await cdp.eval(`window.__zv`);
+    const zFirst = zSeries[0];
+    const zLast = zSeries[zSeries.length - 1];
+    const zMid = zSeries.filter(v => v > zFirst + 1e-3 && v < zLast - 1e-3).length;
+    check('滚轮缩放是「滑过去」的（逐帧有中间值，不是一步跳到位）',
+      zLast > zFirst + 0.05 && zMid >= 3,
+      `${zFirst.toFixed(3)} → ${zLast.toFixed(3)}，中间帧 ${zMid} 个`);
+
+    // 惯性：快速拖一把松手，画面还会继续滑一段然后停住
+    await cdp.eval(`setMapZoom(4, null)`);
+    await sleep(700);
+    const ipos = `(() => { const c = document.querySelector('#mapTree .tv-cell').getBoundingClientRect();
+      return { left: Math.round(c.left), top: Math.round(c.top) }; })()`;
+    const glide0 = await cdp.eval(ipos);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dragBase.x, y: dragBase.y, button: 'left', clickCount: 1 });
+    for (let i = 1; i <= 4; i++) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dragBase.x + 45 * i, y: dragBase.y, button: 'left', buttons: 1 });
+      await sleep(16);
+    }
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dragBase.x + 180, y: dragBase.y, button: 'left' });
+    const glideRel = await cdp.eval(ipos);
+    await sleep(300);
+    const glideMid = await cdp.eval(ipos);
+    await sleep(1500);                 // 衰减尾巴要走一会儿，别在滑行中途取样
+    const glideEnd = await cdp.eval(ipos);
+    await sleep(500);
+    const glideRest = await cdp.eval(ipos);
+    check('松手后有惯性滑行，随后自己停住',
+      glideRel.left > glide0.left && glideMid.left > glideRel.left + 10 &&
+        glideEnd.left >= glideMid.left && glideRest.left === glideEnd.left,
+      `拖到 ${glideRel.left} → 滑到 ${glideMid.left} → 停在 ${glideEnd.left}（再看 ${glideRest.left}）`);
+
     // 双击一块进表视图：页网格
     await cdp.eval(`(() => {
       const c = document.querySelector('#mapTree .tv-cell');

@@ -3008,36 +3008,125 @@ function applyTreePan() {
   }
 }
 
-let tvRaf = 0;
-function scheduleTreemap() {
-  if (tvRaf) return;
-  tvRaf = requestAnimationFrame(() => {
-    tvRaf = 0;
-    renderTreemap();
-  });
+/* 缩放用「目标值 + 每帧逼近」，滚一格不是瞬间跳到位，而是滑过去（地图那种手感）。
+   实测重排成本：树图 0.17ms/帧（块数上限 20）、页网格 5.5ms（785 格）——
+   所以树图每帧真重排（文字全程清晰），网格降帧，格子太多时干脆一档一跳。 */
+let zoomTarget = 1;        // 目标倍数（滚轮在它上面累乘）
+let zoomAnchor = null;     // 动画期间锁定的锚点（屏幕坐标）；null = 画布中心
+let zoomRaf = 0;
+const ZOOM_EASE = 0.3;     // 每帧逼近 30%，约 250ms 收敛
+const REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+function clampZoom(k) {
+  return Math.max(1, Math.min(MAP_ZOOM_MAX, k));
 }
 
-// 以画布里的某个点为锚缩放：那个点在缩放前后停在原地（滚轮缩放的手感）。
-function setMapZoom(next, anchor) {
-  const box = monEls.mapTree;
-  if (!box) return;
+// applyZoomStep 把缩放推到 kNew：先按锚点修正平移/滚动，再重排。
+function applyZoomStep(kNew) {
   const old = mapZoom;
-  const k = Math.max(1, Math.min(MAP_ZOOM_MAX, next));
-  if (Math.abs(k - old) < 1e-4) return;
-  if (mapLevel === 'db' && box.clientWidth > 40) {
-    const r = box.getBoundingClientRect();
-    const ax = anchor ? anchor.x - r.left : box.clientWidth / 2;
-    const ay = anchor ? anchor.y - r.top : box.clientHeight / 2;
-    tvPan.x = ax - (ax - tvPan.x) * (k / old);
-    tvPan.y = ay - (ay - tvPan.y) * (k / old);
+  if (Math.abs(kNew - old) < 1e-6) {
+    renderZoomHud();
+    return;
   }
-  mapZoom = k;
-  if (mapLevel === 'table') renderPageMap();
-  else scheduleTreemap();
+  if (mapLevel === 'table') {
+    const g = monEls.pmGrid;
+    if (g) {
+      const r = g.getBoundingClientRect();
+      const ax = zoomAnchor ? zoomAnchor.x - r.left : g.clientWidth / 2;
+      const ay = zoomAnchor ? zoomAnchor.y - r.top : g.clientHeight / 2;
+      const fx = (g.scrollLeft + ax) / Math.max(1, g.scrollWidth);
+      const fy = (g.scrollTop + ay) / Math.max(1, g.scrollHeight);
+      mapZoom = kNew;
+      renderPageMap();
+      g.scrollLeft = fx * g.scrollWidth - ax;
+      g.scrollTop = fy * g.scrollHeight - ay;
+    } else {
+      mapZoom = kNew;
+    }
+  } else {
+    const box = monEls.mapTree;
+    if (box && box.clientWidth > 40) {
+      const r = box.getBoundingClientRect();
+      const ax = zoomAnchor ? zoomAnchor.x - r.left : box.clientWidth / 2;
+      const ay = zoomAnchor ? zoomAnchor.y - r.top : box.clientHeight / 2;
+      tvPan.x = ax - (ax - tvPan.x) * (kNew / old);
+      tvPan.y = ay - (ay - tvPan.y) * (kNew / old);
+    }
+    mapZoom = kNew;
+    renderTreemap();
+  }
   renderZoomHud();
 }
 
+function stopZoomAnim() {
+  if (zoomRaf) cancelAnimationFrame(zoomRaf);
+  zoomRaf = 0;
+  zoomAnchor = null;
+}
+
+function runZoomAnim() {
+  if (zoomRaf) return;
+  let lastPaint = 0;
+  const tick = now => {
+    zoomRaf = 0;
+    const diff = zoomTarget - mapZoom;
+    if (Math.abs(diff) <= 0.002 * Math.max(1, mapZoom)) {
+      applyZoomStep(zoomTarget);
+      zoomAnchor = null;
+      return;
+    }
+    if (mapLevel === 'table') {
+      // 网格每帧都要重建所有格子：785 格 5.5ms 还能扛，几千格就是 20ms+，
+      // 与其一卡一卡，不如直接跳到位（跳跃比掉帧好看）。
+      const cells = (monEls.pmGrid && monEls.pmGrid.children.length) || 0;
+      if (cells >= 2500) {
+        applyZoomStep(zoomTarget);
+        zoomAnchor = null;
+        return;
+      }
+      if (now - lastPaint < 30) {   // ~30fps
+        zoomRaf = requestAnimationFrame(tick);
+        return;
+      }
+      lastPaint = now;
+    }
+    applyZoomStep(mapZoom + diff * ZOOM_EASE);
+    zoomRaf = requestAnimationFrame(tick);
+  };
+  zoomRaf = requestAnimationFrame(tick);
+}
+
+// setMapZoom 直接指定倍数（按钮 / 外层调用）；滚轮走 requestZoom，在目标上累乘，
+// 连续滚几格不会各自为政。
+function setMapZoom(next, anchor, instant) {
+  stopInertia();     // 缩放是新的动作，别让还在滑的平移把画面推走
+  const k = clampZoom(next);
+  if (instant || REDUCED_MOTION) {
+    zoomTarget = k;
+    stopZoomAnim();
+    applyZoomStep(k);
+    return;
+  }
+  zoomTarget = k;
+  zoomAnchor = anchor || null;
+  runZoomAnim();
+}
+
+function requestZoom(factor, anchor) {
+  zoomTarget = clampZoom(zoomTarget * factor);
+  if (anchor) zoomAnchor = anchor;
+  if (REDUCED_MOTION) {
+    stopZoomAnim();
+    applyZoomStep(zoomTarget);
+    return;
+  }
+  runZoomAnim();
+}
+
 function resetMapZoom() {
+  stopInertia();
+  zoomTarget = 1;
+  stopZoomAnim();
   mapZoom = 1;
   tvPan.x = 0;
   tvPan.y = 0;
@@ -3760,120 +3849,209 @@ if (monEls.mapJump) {
   });
 }
 
-/* ---- 缩放交互：滚轮（以光标为锚）+ 拖动平移 + 按钮 ---- */
+/* ---- 交互：滚轮缩放（滑过去）+ 拖动平移（松手带惯性）+ 按钮 ---- */
+
+let inertiaRaf = 0;
+let inertiaActive = false;
+let inertiaGen = 0;
+
+function stopInertia() {
+  inertiaGen++;
+  if (inertiaRaf) cancelAnimationFrame(inertiaRaf);
+  inertiaRaf = 0;
+  inertiaActive = false;
+}
+
+// 松手后的滑行：速度指数衰减；位置顶到边界就提前收工，别空转。
+function runInertia(vx, vy, applyDelta) {
+  if (REDUCED_MOTION) return;
+  if (Math.abs(vx) < 0.05 && Math.abs(vy) < 0.05) return;
+  stopInertia();
+  inertiaActive = true;
+  const gen = inertiaGen;
+  let last = performance.now();
+  const step = now => {
+    if (gen !== inertiaGen) return;
+    const dt = Math.min(32, Math.max(1, now - last));
+    last = now;
+    const decay = Math.pow(0.9, dt / 16);
+    vx *= decay;
+    vy *= decay;
+    if (Math.abs(vx) < 0.03 && Math.abs(vy) < 0.03) {
+      inertiaRaf = 0;
+      inertiaActive = false;
+      return;
+    }
+    applyDelta(vx * dt, vy * dt);
+    if (gen === inertiaGen) inertiaRaf = requestAnimationFrame(step);
+  };
+  inertiaRaf = requestAnimationFrame(step);
+}
+
+// 速度采样：取最近几次移动的平均速度，单帧抖动不会把图甩飞。
+function makeTracker() {
+  let pts = [];
+  return {
+    reset(x, y) { pts = [{ x, y, t: performance.now() }]; },
+    add(x, y) {
+      pts.push({ x, y, t: performance.now() });
+      if (pts.length > 5) pts.shift();
+    },
+    velocity() {
+      if (pts.length < 2) return { vx: 0, vy: 0 };
+      const a = pts[0], b = pts[pts.length - 1];
+      const dt = b.t - a.t;
+      if (dt <= 0) return { vx: 0, vy: 0 };
+      const cap = 3;   // px/ms：甩得再猛也就这么多
+      return {
+        vx: Math.max(-cap, Math.min(cap, (b.x - a.x) / dt)),
+        vy: Math.max(-cap, Math.min(cap, (b.y - a.y) / dt)),
+      };
+    },
+  };
+}
 
 let treeSuppressClick = false;
 if (monEls.mapTree) {
-  monEls.mapTree.addEventListener('wheel', e => {
+  const box = monEls.mapTree;
+  const track = makeTracker();
+
+  box.addEventListener('wheel', e => {
     if (monPageTab !== 'map' || mapLevel !== 'db') return;
     e.preventDefault();
-    setMapZoom(mapZoom * Math.exp(-e.deltaY * 0.0018), { x: e.clientX, y: e.clientY });
+    stopInertia();
+    requestZoom(Math.exp(-e.deltaY * 0.0018), { x: e.clientX, y: e.clientY });
   }, { passive: false });
 
   let drag = null;
-  monEls.mapTree.addEventListener('pointerdown', e => {
-    if (mapLevel !== 'db' || mapZoom <= 1 || e.button !== 0) return;
+  box.addEventListener('pointerdown', e => {
+    if (mapLevel !== 'db' || e.button !== 0) return;
+    // 滑行中按一下：先让图停住，并且吞掉这次点击（地图就是这么处理的），
+    // 否则惯性还没停，顺手一点就选中/进了别的块。
+    if (inertiaActive) {
+      stopInertia();
+      treeSuppressClick = true;
+      // 别用 setTimeout(0)：click 是独立任务，0ms 的定时器可能先跑掉，
+      // 标记被清了，这一下就变成「顺手选中了一块」（实测复现）。留 400ms 的窗口。
+      setTimeout(() => { treeSuppressClick = false; }, 400);
+      return;
+    }
+    if (mapZoom <= 1) return;
     drag = { sx: e.clientX, sy: e.clientY, px: tvPan.x, py: tvPan.y, moved: false };
-    try { monEls.mapTree.setPointerCapture(e.pointerId); } catch (_) { /* 老浏览器 */ }
+    track.reset(e.clientX, e.clientY);
+    try { box.setPointerCapture(e.pointerId); } catch (_) { /* 老浏览器 */ }
   });
-  monEls.mapTree.addEventListener('pointermove', e => {
+  box.addEventListener('pointermove', e => {
     if (!drag) return;
     const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
     if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
-    drag.moved = true;
-    monEls.mapTree.classList.add('panning');
+    if (!drag.moved) {
+      drag.moved = true;
+      box.classList.add('panning');
+    }
+    track.add(e.clientX, e.clientY);
     tvPan.x = drag.px + dx;
     tvPan.y = drag.py + dy;
-    clampTreePan(monEls.mapTree.clientWidth, monEls.mapTree.clientHeight);
+    clampTreePan(box.clientWidth, box.clientHeight);
     applyTreePan();
   });
   const endDrag = () => {
     if (!drag) return;
     const moved = drag.moved;
+    const v = track.velocity();
     drag = null;
-    monEls.mapTree.classList.remove('panning');
+    box.classList.remove('panning');
     if (!moved) return;
-    // 拖完浏览器还会补一个 click：别让它顺手把这块选中、或者当成双击进表
+    // 拖完浏览器还会补一个 click：别让它顺手选中或双击进表
     treeSuppressClick = true;
-    setTimeout(() => { treeSuppressClick = false; }, 0);
+    setTimeout(() => { treeSuppressClick = false; }, 400);
+    runInertia(v.vx, v.vy, (dx, dy) => {
+      const bx = tvPan.x, by = tvPan.y;
+      tvPan.x += dx;
+      tvPan.y += dy;
+      clampTreePan(box.clientWidth, box.clientHeight);
+      applyTreePan();
+      if (tvPan.x === bx && tvPan.y === by) stopInertia();  // 顶到边界就别空转
+    });
   };
-  monEls.mapTree.addEventListener('pointerup', endDrag);
-  monEls.mapTree.addEventListener('pointercancel', endDrag);
+  box.addEventListener('pointerup', endDrag);
+  box.addEventListener('pointercancel', endDrag);
   // 捕获阶段拦：格子自己的 click 在冒泡阶段
-  monEls.mapTree.addEventListener('click', e => {
+  box.addEventListener('click', e => {
     if (treeSuppressClick) {
+      treeSuppressClick = false;   // 只吞这一下
       e.stopPropagation();
       e.preventDefault();
     }
   }, true);
-}
-
-// 页网格：滚轮就是缩放（和树图一致），按住拖动平移，滚动条也照样能翻 ——
-// 一度把滚轮留给「滚动列表」，但网格在 1× 时正好铺满、根本没有可滚的内容，
-// 滚起来毫无反应，看着就像「缩放没实现」。
-function zoomGridAt(factor, clientX, clientY) {
-  const g = monEls.pmGrid;
-  if (!g) return;
-  const r = g.getBoundingClientRect();
-  // 光标在视口里的位置 → 它对应内容里的比例；缩放后把这个比例放回同一像素位置
-  const ax = clientX === undefined ? g.clientWidth / 2 : clientX - r.left;
-  const ay = clientY === undefined ? g.clientHeight / 2 : clientY - r.top;
-  const fx = (g.scrollLeft + ax) / Math.max(1, g.scrollWidth);
-  const fy = (g.scrollTop + ay) / Math.max(1, g.scrollHeight);
-  const old = mapZoom;
-  setMapZoom(old * factor, null);   // 内部会同步重排网格
-  if (Math.abs(mapZoom - old) < 1e-4) return;
-  g.scrollLeft = fx * g.scrollWidth - ax;
-  g.scrollTop = fy * g.scrollHeight - ay;
 }
 
 let gridSuppressClick = false;
 if (monEls.pmGrid) {
-  monEls.pmGrid.addEventListener('wheel', e => {
+  const g = monEls.pmGrid;
+  const track = makeTracker();
+
+  g.addEventListener('wheel', e => {
     if (monPageTab !== 'map' || mapLevel !== 'table') return;
-    e.preventDefault();   // 这一格一页的网格里没有「滚轮滚动」，翻页靠拖动或滚动条
-    zoomGridAt(Math.exp(-e.deltaY * 0.0018), e.clientX, e.clientY);
+    e.preventDefault();   // 一格一页的网格里没有「滚轮翻页」，翻页靠拖动和滚动条
+    stopInertia();
+    requestZoom(Math.exp(-e.deltaY * 0.0018), { x: e.clientX, y: e.clientY });
   }, { passive: false });
 
   let gdrag = null;
-  monEls.pmGrid.addEventListener('pointerdown', e => {
+  g.addEventListener('pointerdown', e => {
     if (mapLevel !== 'table' || e.button !== 0) return;
-    gdrag = {
-      sx: e.clientX, sy: e.clientY,
-      sl: monEls.pmGrid.scrollLeft, st: monEls.pmGrid.scrollTop, moved: false,
-    };
+    if (inertiaActive) {
+      stopInertia();
+      gridSuppressClick = true;
+      setTimeout(() => { gridSuppressClick = false; }, 400);
+      return;
+    }
+    gdrag = { sx: e.clientX, sy: e.clientY, sl: g.scrollLeft, st: g.scrollTop, moved: false };
+    track.reset(e.clientX, e.clientY);
   });
-  monEls.pmGrid.addEventListener('pointermove', e => {
+  g.addEventListener('pointermove', e => {
     if (!gdrag) return;
     const dx = e.clientX - gdrag.sx, dy = e.clientY - gdrag.sy;
     if (!gdrag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
-    gdrag.moved = true;
-    monEls.pmGrid.classList.add('panning');
-    monEls.pmGrid.scrollLeft = gdrag.sl - dx;
-    monEls.pmGrid.scrollTop = gdrag.st - dy;
+    if (!gdrag.moved) {
+      gdrag.moved = true;
+      g.classList.add('panning');
+    }
+    track.add(e.clientX, e.clientY);
+    g.scrollLeft = gdrag.sl - dx;
+    g.scrollTop = gdrag.st - dy;
   });
   const endGridDrag = () => {
     if (!gdrag) return;
     const moved = gdrag.moved;
+    const v = track.velocity();
     gdrag = null;
-    monEls.pmGrid.classList.remove('panning');
+    g.classList.remove('panning');
     if (!moved) return;
-    // 拖完会补一个 click：别让它顺手把某一页打开
     gridSuppressClick = true;
-    setTimeout(() => { gridSuppressClick = false; }, 0);
+    setTimeout(() => { gridSuppressClick = false; }, 400);
+    // 内容位移与指针位移反向，所以速度取负
+    runInertia(-v.vx, -v.vy, (dx, dy) => {
+      const sl = g.scrollLeft, st = g.scrollTop;
+      g.scrollLeft = sl + dx;
+      g.scrollTop = st + dy;
+      if (g.scrollLeft === sl && g.scrollTop === st) stopInertia();
+    });
   };
-  monEls.pmGrid.addEventListener('pointerup', endGridDrag);
-  monEls.pmGrid.addEventListener('pointercancel', endGridDrag);
-  monEls.pmGrid.addEventListener('click', e => {
+  g.addEventListener('pointerup', endGridDrag);
+  g.addEventListener('pointercancel', endGridDrag);
+  g.addEventListener('click', e => {
     if (gridSuppressClick) {
+      gridSuppressClick = false;   // 只吞这一下
       e.stopPropagation();
       e.preventDefault();
     }
   }, true);
 }
 
-if (monEls.mapZoomIn) monEls.mapZoomIn.addEventListener('click', () => setMapZoom(mapZoom * 1.5, null));
-if (monEls.mapZoomOut) monEls.mapZoomOut.addEventListener('click', () => setMapZoom(mapZoom / 1.5, null));
+if (monEls.mapZoomIn) monEls.mapZoomIn.addEventListener('click', () => setMapZoom(zoomTarget * 1.5, null));
+if (monEls.mapZoomOut) monEls.mapZoomOut.addEventListener('click', () => setMapZoom(zoomTarget / 1.5, null));
 if (monEls.mapZoomReset) {
   monEls.mapZoomReset.addEventListener('click', () => {
     resetMapZoom();

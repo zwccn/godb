@@ -3396,6 +3396,7 @@ function enterTable(table, kind, index) {
   pmSel = { table, kind: kind || 'data', index: index || '' };
   pmWin = { from: 0, limit: 0 };
   pmMap = null;
+  pmIdxPath = [];
   pmOpen = -1; pmDetail = null; pmLink = null;
   resetMapZoom();
   renderMap();
@@ -3417,6 +3418,7 @@ function selectTarget(table, kind, index) {
   pmSel = { table, kind, index: index || '' };
   pmWin = { from: 0, limit: 0 };
   pmMap = null;
+  pmIdxPath = [];
   pmOpen = -1; pmDetail = null; pmLink = null;
   renderFileBar();
   renderCrumbs();
@@ -3732,8 +3734,19 @@ function inBlock() {
   return pmWin.limit > 0;
 }
 
-async function openPage(no) {
+/* 索引页的下钻路径。B+Tree 在磁盘上是「头页 → 根 → 内部节点 → 叶子」，
+   一路点下去之后没有这条路径，就不知道自己在树的第几层、是从哪儿来的。
+   nav：'child' 顺着子页指针往下、'root' 从头页跳到根、'keep' 点路径条退回某一层、
+   不给 = 直接点网格里的一格（新的起点）。 */
+let pmIdxPath = [];
+
+async function openPage(no, nav) {
   pmOpen = no;
+  if (pmSel.kind === 'index') {
+    if (nav === 'child') pmIdxPath.push({ no, kind: '' });
+    else if (nav === 'root') pmIdxPath = [{ no: 0, kind: '头页' }, { no, kind: '' }];
+    else if (nav !== 'keep') pmIdxPath = [{ no, kind: '' }];
+  }
   for (const c of monEls.pmGrid.querySelectorAll('.pm-c.on')) c.classList.remove('on');
   const cell = monEls.pmGrid.querySelector(`.pm-c[data-no="${no}"]`);
   if (cell) {
@@ -3749,11 +3762,40 @@ async function openPage(no) {
     const d = await api('/api/page?' + q);
     if (pmOpen !== no) return;
     pmDetail = d;
+    // 这一页到底是头页/内部/叶子，得等内容回来才知道 —— 路径上的标签在这补
+    const last = pmIdxPath[pmIdxPath.length - 1];
+    if (last && last.no === no) {
+      last.kind = d.indexHeader ? '头页'
+        : (d.indexPage ? (d.indexPage.leaf ? '叶子' : '内部') : '');
+    }
     renderPageDetail(d);
   } catch (e) {
     side.innerHTML = '';
     side.appendChild(el('div', 'pm-hint', '读取失败：' + e.message));
   }
+}
+
+// pmIdxBar 是索引页顶部的下钻路径：头页 › 内部 › 叶子，点上面任意一层就退回去。
+function pmIdxBar(d) {
+  const bar = el('div', 'pm-path');
+  pmIdxPath.forEach((p, i) => {
+    if (i) bar.appendChild(el('span', 'pm-path-sep', '›'));
+    const here = p.no === d.no;
+    const label = `${p.kind || '页'} ${p.no}`;
+    if (here) {
+      bar.appendChild(el('span', 'pm-path-i here', label));
+      return;
+    }
+    const b = el('button', 'pm-path-i', label);
+    b.type = 'button';
+    b.title = '回到这一层';
+    b.addEventListener('click', () => {
+      pmIdxPath = pmIdxPath.slice(0, i + 1);
+      openPage(p.no, 'keep');
+    });
+    bar.appendChild(b);
+  });
+  return bar;
 }
 
 function renderPageDetail(d) {
@@ -3763,6 +3805,7 @@ function renderPageDetail(d) {
     `第 ${d.no} 页 · ${d.kind === 'index' ? '索引 ' + d.index : '数据页'}`
     + (d.crc === 'ok' ? '' : ` · ${d.crc === 'zero' ? '空页' : '页头异常'}`));
   side.appendChild(head);
+  if (pmSel.kind === 'index' && pmIdxPath.length) side.appendChild(pmIdxBar(d));
 
   const kv = el('div', 'pm-kv');
   const addKV = (k, v) => {
@@ -3862,6 +3905,12 @@ function pmStructView(d) {
       const row = el('div', 'pm-row');
       row.appendChild(el('span', 'pm-no', ''));
       row.appendChild(el('span', 'pm-val', `${k}：${v}`));
+      // 头页是这棵树的入口：从这儿顺着根一路点下去，才是「看一棵 B+Tree」的走法
+      if (k === '根页' && h.root > 0) {
+        row.classList.add('linkable');
+        row.title = `跳到根页第 ${h.root} 页，一路往下钻`;
+        row.addEventListener('click', () => openPage(h.root, 'root'));
+      }
       box.appendChild(row);
     }
     return box;
@@ -3894,7 +3943,10 @@ function pmStructView(d) {
         row.classList.add('linkable');
         row.addEventListener('click', () => locateRID(e.val));
       } else {
-        row.title = `键 ${e.len} 字节 · 子页 ${e.val}`;
+        // 内部节点的一项 = 一个子页指针：点下去就是下一层
+        row.title = `键 ${e.len} 字节 · 点一下下钻到子页 ${e.val}`;
+        row.classList.add('linkable');
+        row.addEventListener('click', () => openPage(e.val, 'child'));
       }
       box.appendChild(row);
     }

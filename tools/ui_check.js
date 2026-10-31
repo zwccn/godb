@@ -762,6 +762,50 @@ class CDP {
       /RID \d+ → 堆页 \d+ 槽 \d+/.test(pmLink.text),
       pmLink.text.slice(0, 60) || '没有关联块');
 
+    /* 索引树能一路下钻：头页（root/高度）→ 根 → 内部节点 → 叶子。
+       B+Tree 在磁盘上是一棵真的树，但页网格里它只是 212 个同色的方格 ——
+       不能从根顺着指针走一遍，就永远只是在看一堆页。路径条同时解决「我在第几层」。 */
+    const ixNav = await cdp.eval(`(() => {
+      const t = (spaceData.tables || []).find(x => (x.indexes || []).length);
+      return t ? { table: t.name, ix: t.indexes[0].name } : null;
+    })()`);
+    if (ixNav) {
+      await cdp.eval(`enterTable(${JSON.stringify(ixNav.table)}, 'index', ${JSON.stringify(ixNav.ix)})`);
+      await sleep(1600);
+      // 右栏可能还停在上一条断言切的「十六进制」页，先回结构页 —— 结构页才有 RID
+      await cdp.eval(`pmTab = 'struct'`);
+      await cdp.eval(`document.querySelector('#pmGrid .pm-c[data-no="0"]').click()`);
+      await sleep(1000);
+      const idxHead = await cdp.eval(`(() => ({
+        path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
+        rootLink: document.querySelectorAll('#pmSide .pm-row.linkable').length,
+      }))()`);
+      await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
+      await sleep(1000);
+      const idxRoot = await cdp.eval(`(() => ({
+        path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
+        inner: /内部节点/.test(document.getElementById('pmSide').textContent),
+        links: document.querySelectorAll('#pmSide .pm-row.linkable').length,
+      }))()`);
+      await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
+      await sleep(1000);
+      const idxLeaf = await cdp.eval(`(() => ({
+        path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
+        leaf: /叶子/.test(document.getElementById('pmSide').textContent),
+        rid: document.getElementById('pmSide').textContent.includes('RID '),
+      }))()`);
+      check('索引树能从根一路下钻到叶子，路径条标出层级',
+        idxHead.path === '头页 0' && idxHead.rootLink === 1
+        && /^头页 0›内部 \d+$/.test(idxRoot.path) && idxRoot.inner && idxRoot.links > 1
+        && /^头页 0›内部 \d+›叶子 \d+$/.test(idxLeaf.path) && idxLeaf.leaf && idxLeaf.rid,
+        `${idxHead.path} → ${idxRoot.path} → ${idxLeaf.path}`);
+      await cdp.eval(`document.querySelector('#pmSide .pm-path-i').click()`);
+      await sleep(900);
+      const idxBack = await cdp.eval(
+        `(document.querySelector('#pmSide .pm-path') || {}).textContent || ''`);
+      check('点路径条能退回上一层（不用重新点网格）', idxBack === '头页 0', idxBack || '路径条没了');
+    }
+
     // 整条链：索引叶子 → RID → 堆页（换文件、高亮、关联块三件事必须一起发生）
     const hasIx = await cdp.eval(`(() => {
       const t = (spaceData.tables || []).find(x => (x.indexes || []).length);

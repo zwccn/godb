@@ -3927,6 +3927,35 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .pm-row.linkable { cursor: pointer; }
 .pm-row.on { background: var(--hint-active-bg); }
 .pm-row.on .pm-val { color: var(--text); }
+
+/* 索引页的下钻路径：头页 › 内部 › 叶子。从根一路点到叶子之后，
+   没有这条就不知道自己在树的第几层、是从哪儿下来的。点任意一层能退回去。 */
+.pm-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  margin: 0 0 8px;
+  font-size: calc(11px * var(--fs));
+}
+.pm-path-i {
+  font: inherit;
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.pm-path-i:hover { border-color: var(--border-hover); color: var(--text); }
+.pm-path-i.here {
+  background: var(--hint-active-bg);
+  border-color: var(--border-hover);
+  color: var(--text);
+  cursor: default;
+}
+.pm-path-sep { color: var(--text-3); }
 .pm-link {
   border: 1px solid var(--accent-soft-border);
   background: var(--accent-soft-bg);

@@ -116,6 +116,9 @@ try {
             <span class="run-stop" aria-hidden="true"></span>
             <span id="btnRunText">执行</span>
           </button>
+          <!-- 执行秒表：慢查询时唯一能回答「到底跑了多久」的东西。
+               平时不占位（hidden），窄屏直接不显示 —— 那一行实在放不下第四样东西。 -->
+          <span class="run-timer hidden" id="runTimer" aria-live="off"></span>
         </div>
         <div class="editor-actions">
           <button id="btnFormat" class="btn btn-ghost btn-sm" title="美化 SQL：子句换行、关键字大写、列表对齐（Ctrl+Shift+F）">美化</button>

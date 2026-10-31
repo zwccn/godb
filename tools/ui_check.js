@@ -182,6 +182,30 @@ class CDP {
         !running.disabled && back === '执行',
       `${running.label} / 方块 ${running.stopW}px / 三角 ${running.icoW}px / 禁用 ${running.disabled} → ${back}`);
 
+    /* 秒表：执行期间按钮旁边显示并持续走字，超过 3 秒转警示色，跑完收回。
+       慢查询时人靠它决定「再等等」还是「点停止」——原来只有「停止」两个字，
+       跑 0.8 秒和跑 40 秒看起来一模一样。 */
+    await cdp.eval(`setRunning(true)`);
+    await sleep(450);
+    const tm1 = await cdp.eval(`(() => {
+      const b = document.getElementById('runTimer');
+      return { text: b.textContent, shown: getComputedStyle(b).display !== 'none',
+               w: Math.round(b.getBoundingClientRect().width) };
+    })()`);
+    await sleep(3100);
+    const tm2 = await cdp.eval(`(() => {
+      const b = document.getElementById('runTimer');
+      return { text: b.textContent, slow: b.classList.contains('slow'),
+               color: getComputedStyle(b).color };
+    })()`);
+    await cdp.eval(`setRunning(false)`);
+    await sleep(200);
+    const tm3 = await cdp.eval(`document.getElementById('runTimer').classList.contains('hidden')`);
+    check('执行中按钮旁有秒表，超过 3 秒转警示色，结束后收回',
+      tm1.shown && /^\d+\.\ds$/.test(tm1.text) && parseFloat(tm1.text) >= 0.2 && tm1.w > 20
+      && parseFloat(tm2.text) >= 3 && tm2.slow && tm3,
+      `${tm1.text} → ${tm2.text}（${tm2.color}）· 收回 ${tm3}`);
+
     // 0.1b) 美化 SQL：子句换行 + 关键字大写，字符串里的内容一个字都不能动
     await cdp.eval(`cm.setValue("select id,name from t where a='it''s' and b=1 order by id")`);
     await cdp.eval(`document.getElementById('btnFormat').click()`);
@@ -1774,6 +1798,13 @@ class CDP {
     check('窄屏下有 ☰ 按钮', mob.toggle !== 'none', mob.toggle);
     check('窄屏顶栏不撑破页面（无横向滚动）',
       mob.bodyScroll <= mob.inner + 1, `${mob.bodyScroll} / ${mob.inner}`);
+
+    // 秒表在窄屏让位：帮助 + 标题 + 执行 + 秒表 + 四个操作，那一行实在塞不下
+    await cdp.eval(`setRunning(true)`);
+    await sleep(200);
+    const mobTimer = await cdp.eval(`getComputedStyle(document.getElementById('runTimer')).display`);
+    await cdp.eval(`setRunning(false)`);
+    check('窄屏下秒表自动让位（不挤执行按钮）', mobTimer === 'none', mobTimer);
 
     await cdp.eval(`document.getElementById('btnSidebar').click()`);
     await sleep(400);

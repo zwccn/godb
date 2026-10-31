@@ -778,6 +778,48 @@ async function run(prefix) {
   }
 }
 
+/* ---------- 执行秒表 ----------
+   慢查询时界面上只有「停止」两个字，人不知道已经跑了几秒 —— 是 0.8 秒还是 40 秒，
+   决定的是「再等等」还是「点停止」。所以按钮旁边挂一个计秒。
+   只在执行期间存在，跑完就收（结果栏本来就有「往返 xx ms」，那里才是精确值）。 */
+let runT0 = 0;
+let runTick = 0;
+
+/* 数字和单位不留空格：等宽字体里一个空格就有半格宽，"3.3  s" 看着像两个字段。
+   超过一分钟换成 1m05s —— 这个位置只有 40px，中文的「分/秒」会把格子撑开。 */
+function fmtElapsed(ms) {
+  const sec = ms / 1000;
+  if (sec < 60) return sec.toFixed(1) + 's';
+  const m = Math.floor(sec / 60);
+  const r = Math.floor(sec - m * 60);
+  return m + 'm' + String(r).padStart(2, '0') + 's';
+}
+
+function startRunTimer() {
+  stopRunTimer();
+  const box = document.getElementById('runTimer');
+  if (!box) return;
+  runT0 = performance.now();
+  box.textContent = '0.0s';
+  box.classList.remove('hidden', 'slow');
+  // 100ms 一刷：0.1 秒的精度足够回答「现在几秒了」，再密只是白烧 CPU。
+  // setInterval 而不是 rAF：这个数字跟画面刷新率无关，掉帧时也不该跟着停。
+  runTick = setInterval(() => {
+    const ms = performance.now() - runT0;
+    box.textContent = fmtElapsed(ms);
+    box.classList.toggle('slow', ms >= 3000);
+  }, 100);
+}
+
+function stopRunTimer() {
+  if (runTick) {
+    clearInterval(runTick);
+    runTick = 0;
+  }
+  const box = document.getElementById('runTimer');
+  if (box) box.classList.add('hidden');
+}
+
 function setRunning(on) {
   const btn = document.getElementById('btnRun');
   const label = document.getElementById('btnRunText');
@@ -789,6 +831,8 @@ function setRunning(on) {
   btn.title = on
     ? '停止执行（已提交的语句会跑完，结果不采用）'
     : '执行 SQL · Ctrl+Enter';
+  if (on) startRunTimer();
+  else stopRunTimer();
 }
 
 // 有选区时按钮写「执行选中」—— 只跑一段这件事必须在按下去之前就能看出来

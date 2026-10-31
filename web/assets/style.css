@@ -512,6 +512,21 @@ body {
   gap: 5px;
 }
 .btn-run .run-ico { display: inline-flex; align-items: center; color: var(--accent); }
+/* 执行秒表：等宽数字 + tabular-nums，跳秒时宽度不变，不会推着按钮左右晃 */
+.run-timer {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  min-width: 40px;
+}
+/* 超过 3 秒转警示色：不是错误，只是「这次比平常慢」，让视线能注意到 */
+.run-timer.slow { color: var(--warn-text); }
+/* 窄屏那一行塞不下（帮助 + 标题 + 执行 + 秒表 + 四个操作），秒表优先让位 */
+@media (max-width: 720px) {
+  .run-timer { display: none !important; }
+}
+
 /* 执行中：图标换成一个方块（可点 = 停止），不再是「转圈 + 按钮禁用」——
    转圈的意思是「等着吧」，而这里其实能中断。 */
 .btn-run .run-stop { display: none; }

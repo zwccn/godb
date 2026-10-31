@@ -818,13 +818,20 @@ function resultTabModels(data) {
   const list = (data && data.results) || [];
   const models = [{ kind: 'info' }];
   list.forEach((r, i) => {
+    if (hiddenResults.has(i)) return; // 手动关掉的
     if (r.rows && r.rows.length) models.push({ kind: 'res', r: r, idx: i });
   });
   return models;
 }
 
+// hiddenResults 记「用户手动关掉的第几个结果」。
+// 新一次执行就清空（renderResults 里），所以关掉只是当前这份结果的视图操作，
+// 不影响数据本身 —— CSV/JSON 导出读的还是完整 rows。
+const hiddenResults = new Set();
+
 function renderResults(data, keepTab) {
   if (!data) return;
+  hiddenResults.clear();
   lastData = data;
   lastResults = (data.results || []).slice();
   if (data.clockGranNs) clockGranNs = data.clockGranNs;
@@ -843,8 +850,13 @@ function renderResultTabs(data) {
   const stmts = splitStatements(lastSubmittedSQL || '');
   tabs.innerHTML = '';
 
-  const addTab = (label, idx, extra, tip) => {
-    const b = el('button', 'result-tab' + (resultTab === idx ? ' on' : '') + (extra ? ' ' + extra : ''), label);
+  if (resultTab > models.length - 1) resultTab = 0;
+
+  const addTab = (label, idx, extra, tip, closeFor) => {
+    // 文字单独放一层 span：tab 上还挂着关闭键「×」，textContent 会把 × 一起算进去，
+    // 断言/读屏都只该看到「结果 1」。
+    const b = el('button', 'result-tab' + (resultTab === idx ? ' on' : '') + (extra ? ' ' + extra : ''));
+    b.appendChild(el('span', 'tab-label', label));
     b.type = 'button';
     b.setAttribute('role', 'tab');
     b.setAttribute('aria-selected', resultTab === idx ? 'true' : 'false');
@@ -854,7 +866,29 @@ function renderResultTabs(data) {
       renderResultTabs(data);
       renderResultPane(data);
     });
+    if (closeFor !== undefined) {
+      // 按钮里不能再放 button，用一个 span 当关闭键（点它不切 tab）
+      const x = el('span', 'tab-x', '×');
+      // 读屏时不要把「×」读进 tab 名字里（名字还是「结果 1」）
+      x.setAttribute('aria-hidden', 'true');
+      x.title = '关掉这个结果（只影响当前视图，数据没删）';
+      x.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeResultTab(data, closeFor);
+      });
+      b.appendChild(x);
+    }
     tabs.appendChild(b);
+  };
+
+  // closeResultTab 把某个结果从当前视图里摘掉；关的是当前 tab 就回到「信息」。
+  const closeResultTab = (data, origIdx) => {
+    const before = resultTabModels(data);
+    const cur = before[resultTab];
+    hiddenResults.add(origIdx);
+    if (cur && cur.kind === 'res' && cur.idx === origIdx) resultTab = 0;
+    renderResultTabs(data);
+    renderResultPane(data);
   };
 
   addTab('信息', 0, data.error ? 'has-err' : '', '往返时间、每条语句的耗时与报错');
@@ -865,7 +899,8 @@ function renderResultTabs(data) {
     const r = models[i].r;
     const stmt = (stmts[models[i].idx] || '').trim();
     addTab('结果 ' + n, i, '',
-      (r.tag || r.command || '') + (stmt ? ' · ' + stmt.split('\n')[0].slice(0, 80) : ''));
+      (r.tag || r.command || '') + (stmt ? ' · ' + stmt.split('\n')[0].slice(0, 80) : ''),
+      models.length > 2 ? models[i].idx : undefined);
   }
 
   const sum = [];
@@ -4377,15 +4412,30 @@ function fmtWhen(ms) {
   return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
+// histQuery 是历史弹窗的过滤词（打开弹窗时清空，输入时实时过滤）
+let histQuery = '';
+
 function openHistory() {
   const modal = document.getElementById('historyModal');
   const body = document.getElementById('historyBody');
   const hint = document.getElementById('historyHint');
-  const list = loadHistory();
+  const input = document.getElementById('histSearch');
+  if (input.value !== histQuery) input.value = histQuery;
+
+  const all = loadHistory();
+  const q = histQuery.trim().toLowerCase();
+  const list = q ? all.filter(x => x.sql.toLowerCase().includes(q)) : all;
+
   body.innerHTML = '';
-  hint.textContent = list.length ? `共 ${list.length} 条 · 本机保存` : '';
-  if (!list.length) {
+  const bits = [`共 ${all.length} 条`];
+  if (q) bits.push(`匹配 ${list.length} 条`);
+  bits.push('本机保存');
+  hint.textContent = all.length ? bits.join(' · ') : '';
+
+  if (!all.length) {
     body.appendChild(el('div', 'hist-empty', '还没有执行过 SQL。'));
+  } else if (!list.length) {
+    body.appendChild(el('div', 'hist-empty', `没有匹配「${histQuery.trim()}」的 SQL`));
   }
   for (const item of list) {
     const b = el('button', 'hist-item');
@@ -4398,6 +4448,17 @@ function openHistory() {
       editor.focus();
       closeHistory();
     });
+    // 单条删除：按 (sql, at) 定位（同一条 SQL 可能在不同时间出现过），
+    // 删完就地重画 —— 不用整份清空，也不用刷新页面。
+    const x = el('span', 'hist-x', '×');
+    x.title = '从历史里删掉这一条';
+    x.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const rest = loadHistory().filter(it => !(it.sql === item.sql && it.at === item.at));
+      try { localStorage.setItem(HISTORY_KEY, JSON.stringify(rest)); } catch (e) {}
+      openHistory();
+    });
+    b.appendChild(x);
     body.appendChild(b);
   }
   modal.classList.remove('hidden');
@@ -4407,7 +4468,30 @@ function closeHistory() {
   document.getElementById('historyModal').classList.add('hidden');
 }
 
-document.getElementById('btnHistory').addEventListener('click', openHistory);
+document.getElementById('btnHistory').addEventListener('click', () => {
+  histQuery = '';
+  document.getElementById('histSearch').value = '';
+  openHistory();
+});
+document.getElementById('histSearch').addEventListener('input', ev => {
+  histQuery = ev.target.value;
+  openHistory();
+  document.getElementById('histSearch').focus();
+});
+document.getElementById('histSearch').addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') {
+    ev.stopPropagation(); // 别把弹窗一起关了
+    histQuery = '';
+    ev.target.value = '';
+    openHistory();
+  }
+});
+document.getElementById('histSearchClear').addEventListener('click', () => {
+  histQuery = '';
+  document.getElementById('histSearch').value = '';
+  openHistory();
+  document.getElementById('histSearch').focus();
+});
 document.getElementById('btnHistoryClose').addEventListener('click', closeHistory);
 document.getElementById('btnHistoryCancel').addEventListener('click', closeHistory);
 document.getElementById('btnHistoryClear').addEventListener('click', () => {

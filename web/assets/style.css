@@ -999,6 +999,17 @@ body {
 }
 .result-tab:hover { color: var(--text); }
 .result-tab.on { color: var(--text); border-bottom-color: var(--accent); }
+/* tab 上的关闭键：平时淡、hover 才明显，避免一排 × 抢视觉 */
+.result-tab .tab-x {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 2px;
+  border-radius: 3px;
+  color: var(--text-3);
+  font-size: calc(13px * var(--fs));
+  line-height: 1;
+}
+.result-tab .tab-x:hover { background: var(--row-hover); color: var(--danger-text); }
 .result-tab.has-err { color: var(--danger-text); }
 .result-tabs-meta {
   margin-left: auto;
@@ -2876,6 +2887,29 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
    单独给一个更宽的尺寸（仍在 100vw-40px 之内，窄屏不会溢出）。 */
 .modal-card.hist { width: min(860px, calc(100vw - 40px)); }
 .history-body { padding: 10px 16px 16px; }
+/* 历史弹窗的过滤框：和侧栏搜索同一副长相，位置在弹窗头下方 */
+.hist-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.hist-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: calc(12px * var(--fs));
+}
+.hist-search input::placeholder { color: var(--text-3); }
+.hist-search input:focus { outline: none; border-color: var(--accent); }
+.hist-search .icon-btn { width: 22px; height: 22px; }
 .hist-item {
   display: grid;
   /* 时间列定宽 + SQL 列吃掉剩余宽度：多条记录的时间戳对齐成一列，扫起来是一条线 */
@@ -2896,6 +2930,27 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
   transition: background .12s, border-color .12s;
 }
 .hist-item:hover { background: var(--bg-3); border-color: var(--border-hover); }
+.hist-item { position: relative; padding-right: 32px; }
+/* 单条删除：平时不显形（一排 × 太吵），鼠标落在这一条上才浮出来 */
+.hist-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-3);
+  font-size: calc(13px * var(--fs));
+  line-height: 1;
+  /* 默认淡显（0.35）：完全不显形的话没人知道能单条删；hover 才完全不透明 */
+  opacity: .35;
+  transition: opacity .12s, background .12s, color .12s;
+}
+.hist-item:hover .hist-x, .hist-item:focus-visible .hist-x { opacity: 1; }
+.hist-x:hover { background: var(--row-hover); color: var(--danger-text); }
 .hist-when {
   flex: 0 0 auto;
   color: var(--text-3);

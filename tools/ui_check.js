@@ -183,7 +183,7 @@ class CDP {
       });
       const pane = document.getElementById('resultPane').firstElementChild || {};
       return {
-        labels: tabs.map(t => t.textContent.trim()),
+        labels: tabs.map(t => (t.querySelector('.tab-label') || t).textContent.trim()),
         active: (document.querySelector('.result-tab.on') || {}).textContent || '',
         outerScrolls: res.scrollHeight > res.clientHeight + 1,
         innerScrollers: inner.length,
@@ -1239,6 +1239,58 @@ class CDP {
       `行高 ${Math.round(cell.h)}px`);
     check('点开单元格能看全文并关闭', cell.opened && cell.closed && cell.shown === cell.want,
       `${cell.meta}，渲染 ${cell.shown} 字符`);
+
+    // 结果 tab 的关闭键：关掉一个就少一个，编号顺延，只剩「信息」时也不报错
+    const closable = await cdp.eval(`(() => {
+      renderResults({ results: [
+        { command: 'SELECT', tag: 'SELECT 1', rowCount: 1, columns: [{ name: 'a', type: 'int' }], rows: [[1]], tookNs: 1000 },
+        { command: 'SELECT', tag: 'SELECT 1', rowCount: 1, columns: [{ name: 'b', type: 'int' }], rows: [[2]], tookNs: 1000 },
+      ] }, 0);
+      const before = [...document.querySelectorAll('#resultTabs .tab-label')].map(e => e.textContent);
+      const hasX = document.querySelectorAll('#resultTabs .tab-x').length;
+      document.querySelector('#resultTabs .tab-x').click();
+      const after = [...document.querySelectorAll('#resultTabs .tab-label')].map(e => e.textContent);
+      // 再执行一次要能重新出现（hiddenResults 在新结果时清空）
+      renderResults({ results: [
+        { command: 'SELECT', tag: 'SELECT 1', rowCount: 1, columns: [{ name: 'a', type: 'int' }], rows: [[1]], tookNs: 1000 },
+        { command: 'SELECT', tag: 'SELECT 1', rowCount: 1, columns: [{ name: 'b', type: 'int' }], rows: [[2]], takes: 1, tookNs: 1000 },
+      ] }, 0);
+      const again = [...document.querySelectorAll('#resultTabs .tab-label')].map(e => e.textContent);
+      return { before, hasX, after, again };
+    })()`);
+    check('结果 tab 可关闭且编号顺延',
+      closable.hasX === 2 && closable.after.join('|') === '信息|结果 1' &&
+      closable.before.join('|') === '信息|结果 1|结果 2', `${closable.before.join('|')} → ${closable.after.join('|')}`);
+    check('重新执行后关掉的结果会回来',
+      closable.again.join('|') === '信息|结果 1|结果 2', closable.again.join('|'));
+
+    // 历史弹窗：搜索过滤 + 单条删除
+    const histBox = await cdp.eval(`(() => {
+      const k = 'godb.history';
+      const seed = [
+        { sql: 'SELECT * FROM t_hist_a', at: 1000 },
+        { sql: 'SELECT count(*) FROM t_hist_b', at: 2000 },
+      ];
+      localStorage.setItem(k, JSON.stringify(seed));
+      document.getElementById('btnHistory').click();
+      const total = document.querySelectorAll('#historyBody .hist-item').length;
+      const i = document.getElementById('histSearch');
+      i.value = 'hist_b';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      const filtered = document.querySelectorAll('#historyBody .hist-item').length;
+      const hint = document.getElementById('historyHint').textContent;
+      i.value = '';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelectorAll('#historyBody .hist-x')[0].click();
+      const left = JSON.parse(localStorage.getItem(k) || '[]').length;
+      document.getElementById('btnHistoryClose').click();
+      localStorage.removeItem(k);
+      return { total, filtered, hint, left };
+    })()`);
+    check('历史弹窗能按关键字过滤',
+      histBox.total === 2 && histBox.filtered === 1 && histBox.hint.includes('匹配 1 条'),
+      `${histBox.total} 条 → ${histBox.filtered} 条（${histBox.hint}）`);
+    check('历史弹窗能单条删除', histBox.left === 1, `删完剩 ${histBox.left} 条`);
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

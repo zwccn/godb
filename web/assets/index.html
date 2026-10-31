@@ -786,6 +786,12 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
       <span>SQL 历史</span>
       <button id="btnHistoryClose" class="icon-btn" title="关闭">×</button>
     </div>
+    <!-- 历史多了之后按关键字过滤：按 SQL 文本子串匹配（不区分大小写） -->
+    <div class="hist-search">
+      <input id="histSearch" type="text" placeholder="搜索历史 SQL…" spellcheck="false"
+             autocomplete="off" autocapitalize="off" autocorrect="off" aria-label="搜索历史 SQL">
+      <button id="histSearchClear" class="icon-btn" type="button" title="清空">×</button>
+    </div>
     <div id="historyBody" class="modal-body history-body"></div>
     <div class="modal-foot">
       <span id="historyHint" class="modal-hint"></span>

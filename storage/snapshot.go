@@ -39,6 +39,13 @@ type metaTable struct {
 	// 而从 meta 读不用把表整个加载进来。
 	Pages    int `json:"pages,omitempty"`
 	IdxPages int `json:"idx_pages,omitempty"`
+	// Seq 是自增列当前值（SERIAL / GENERATED AS IDENTITY）。
+	//
+	// 以前重启是扫一遍行取最大值来恢复，但「打开表不解码行」之后那条路走不通了
+	// （rows 全是 nil），扫一遍又会把整表重新拉进内存、把缓冲池预算架空。
+	// 存进 meta 之后：打开是 O(1)，也不碰行。旧数据没有这个字段时（=0）
+	// 退化成「按需 rowAt 扫一遍」，只是升级后的第一次打开慢一点。
+	Seq int64 `json:"seq,omitempty"`
 	// Idx 记「每个索引文件写的是哪一代」（索引身份 → 代次）。
 	//
 	// 索引不写 WAL，所以「索引和堆是不是一致」只能靠这个数字判断：
@@ -174,6 +181,9 @@ func (s *Store) loadSnapshot() error {
 		s.tableRows[key] = mt.Rows
 		if mt.Pages > 0 {
 			s.tablePages[key] = mt.Pages
+		}
+		if mt.Seq > 0 {
+			s.tableSeq[key] = mt.Seq
 		}
 		if mt.IdxPages > 0 {
 			s.tableIdxPages[key] = mt.IdxPages
@@ -361,8 +371,12 @@ func (s *Store) metaTablesLocked() map[string]metaTable {
 		if td := s.Data[key]; td != nil && s.loaded[key] {
 			rows = td.Live
 		}
+		seq := s.tableSeq[key]
+		if td := s.Data[key]; td != nil && s.loaded[key] {
+			seq = td.Seq
+		}
 		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key],
-			Pages: s.tablePages[key], IdxPages: s.tableIdxPages[key]}
+			Pages: s.tablePages[key], IdxPages: s.tableIdxPages[key], Seq: seq}
 	}
 	s.loadMu.RUnlock()
 	return tables

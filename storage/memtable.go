@@ -88,6 +88,11 @@ type TableData struct {
 	// 只读表不产生 .dat，少一堆空文件。
 	dir string
 	id  int64
+
+	// repairHook 在「解码时对齐了列结构」时被调用（参数是修补的单元格数）。
+	// 以前修补数是在加载时全量解码统计出来的；现在行按需解码，
+	// 只能在真正解到那一行时才发现，所以用回调往上抛给 Store.Repaired。
+	repairHook func(int)
 }
 
 func newTableData(name string) *TableData {
@@ -256,9 +261,12 @@ func (td *TableData) rowAt(slot int) (types.Row, bool) {
 	if !ok {
 		return nil, false
 	}
-	row, _, err := td.pages.decodeRowTuple(tuple, td.tbl)
+	row, rep, err := td.pages.decodeRowTuple(tuple, td.tbl)
 	if err != nil {
 		return nil, false
+	}
+	if rep > 0 && td.repairHook != nil {
+		td.repairHook(rep)
 	}
 	td.rows[slot] = row
 	return row, true
@@ -272,6 +280,16 @@ func (td *TableData) materializePage(page uint32) {
 	if td.pages == nil || td.tbl == nil {
 		return
 	}
+	cols := len(td.tbl.Columns)
+	// 整页共用一块 Value 缓冲：一页上百行各 make 一次 []types.Value 的话，
+	// 20 万行表扫一遍就是 20 万个小对象，GC 标记成本比解码本身还高。
+	// 槽位数是「这一页最多几行」的准确上限，按它开一次就够。
+	slots := td.pages.pageSlotCount(page)
+	if cols <= 0 || slots <= 0 {
+		return
+	}
+	slab := make([]types.Value, slots*cols)
+	n := 0
 	_ = td.pages.visitPage(page, func(slot int, tuple []byte) error {
 		if slot < 0 || slot >= len(td.rows) || td.rows[slot] != nil {
 			return nil
@@ -282,9 +300,18 @@ func (td *TableData) materializePage(page uint32) {
 		if slot < len(td.gone) && td.gone[slot] {
 			return nil
 		}
-		row, _, err := td.pages.decodeRowTuple(tuple, td.tbl)
+		if n >= slots {
+			return nil // 不会发生（槽位数就是上限），防御一下
+		}
+		// 三索引切片：把 cap 也夹到 cols，避免有人 append 到一行时串到邻居那行
+		dst := slab[n*cols : (n+1)*cols : (n+1)*cols]
+		n++
+		row, rep, err := td.pages.decodeRowTupleInto(dst, tuple, td.tbl)
 		if err != nil {
 			return nil
+		}
+		if rep > 0 && td.repairHook != nil {
+			td.repairHook(rep)
 		}
 		td.rows[slot] = row
 		return nil
@@ -337,6 +364,9 @@ func (td *TableData) SlotCount() int { return len(td.rows) }
 
 // RowAt 是对外的 rowAt（给 db / exec 层用）。
 func (td *TableData) RowAt(slot int) (types.Row, bool) { return td.rowAt(slot) }
+
+// SetRepairHook 设置「补齐列结构」的回调（参数是修复的单元格数）。
+func (td *TableData) SetRepairHook(fn func(int)) { td.repairHook = fn }
 
 // SetRow 是对外的 setRow（DDL 按下标重写行时用）。
 func (td *TableData) SetRow(slot int, row types.Row) { td.setRow(slot, row) }
@@ -1062,4 +1092,15 @@ func (td *TableData) PoolStats() (cap, resident, used, total int, prefetched, ev
 	}
 	s := td.pages.pool.stats()
 	return s.Cap, s.Resident, int(s.Used), int(s.Total), s.Prefetched, s.Evicts
+}
+
+// ReadDebug 返回读路径的两个计数：物化了多少页、又逐行取了多少次页。
+//
+// 用来守住「按页物化」这条优化：正常顺序扫描应该是「物化 ≈ 页数」，
+// 一旦「逐行取页 ≈ 行数」，说明顺序检测失效、退化成了每行一次取页。
+func (td *TableData) ReadDebug() (visit, get int64) {
+	if td.pages == nil {
+		return 0, 0
+	}
+	return td.pages.dbgVisit, td.pages.dbgGet
 }

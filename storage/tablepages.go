@@ -68,6 +68,11 @@ type tablePages struct {
 	raLast atomic.Uint32
 	raNext atomic.Uint32
 
+	// dbgVisit / dbgGet 是读路径的计数（诊断用）：按页物化应该让 dbgVisit ≈ 页数，
+	// dbgGet 只剩点查那几次；如果 dbgGet ≈ 行数，说明按页物化没生效、退化成逐行取页。
+	dbgVisit int64
+	dbgGet   int64
+
 	// decodes 统计「解码了多少次页」。这是写路径的核心成本指标：
 	// 按行写 → 行数 次；按页批量写 → 页数 次。测试用它守住回归。
 	decodes int64
@@ -458,6 +463,7 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 	if slot < 0 || slot >= len(tp.loc) || !tp.valid[slot] {
 		return nil, false
 	}
+	tp.dbgGet++
 	at := tp.loc[slot]
 	f, err := tp.fetch(at.page)
 	if err != nil {
@@ -483,11 +489,29 @@ func (tp *tablePages) get(slot int) ([]byte, bool) {
 	return out, true
 }
 
+// pageSlotCount 返回这一页的槽位数（= 这一页最多能装多少行）。
+// 按页物化时用它一次性开够 Value 缓冲，省掉「不知道多长就边解边长」。
+func (tp *tablePages) pageSlotCount(page uint32) int {
+	f, err := tp.fetch(page)
+	if err != nil {
+		return 0
+	}
+	defer tp.pool.unpin(f, false)
+	f.latch.RLock()
+	defer f.latch.RUnlock()
+	p, err := decodeOrInitPage(f.data, page)
+	if err != nil {
+		return 0
+	}
+	return len(p.slots)
+}
+
 // visitPage 解出某一页上的所有行：回调 (RID, 元组)。
 //
 // 元组是页缓冲里的切片，只在回调期间有效（调用方要么当场解码，要么自己拷走）。
 // 顺序扫描时上层用它一次物化整页的行，省掉「每行一次取页 + 拷元组」。
 func (tp *tablePages) visitPage(page uint32, fn func(slot int, tuple []byte) error) error {
+	tp.dbgVisit++
 	f, err := tp.fetch(page)
 	if err != nil {
 		return err
@@ -659,25 +683,35 @@ func (tp *tablePages) lobUsage() (live int64, refs int) {
 //
 // 这是「重启后内存槽位号 == 页里的 RID」的唯一保证：索引里存的是 RID，
 // 加载时把行搬了位置，索引就全错了。
+// loadRows 只建 RID 目录（loc / valid / byPage / 空闲图），**不解码行**。
+//
+// 以前这里把每行都解出来放进 rows[]，于是「缓冲池预算」在打开表的那一刻就被
+// 绕过了：行是 Go 对象，不占页框 —— 20 万行 3 列的表一打开就是约 40MB 堆，
+// 而池子里只有 64 页（512KB）。实测：64 页预算下打开 20 万行表，驻留行
+// 200000/200000，扫描耗时和「整表驻留」一模一样，换出根本没发生。
+//
+// 现在打开只留一个「长度 = 槽位数」的空数组（20 万 × 8B ≈ 1.6MB），行等
+// rowAt 真正要的时候再从页里换入；needRow 的判断沿用 valid[]（authoritative），
+// 所以 Recompute / hasRow / 行数统计都不受影响。
+//
+// 代价：解码时发现的「修补过的行」（ALTER 前的老行）不再在加载时统计，
+// 索引有效性改为只看 meta 里的代次 + 叶子链校验。ALTER 本来就会 MarkFullSync
+// 并做一次完整 checkpoint，这条依赖是成立的。
 func (tp *tablePages) loadRows(t *catalog.Table) ([]types.Row, int, error) {
-	var rows []types.Row
-	repaired := 0
+	maxSlot := -1
 	err := tp.loadAll(func(slot int, tuple []byte) error {
-		row, rep, err := tp.decodeRowTuple(tuple, t)
-		if err != nil {
-			return err
+		if slot > maxSlot {
+			maxSlot = slot
 		}
-		repaired += rep
-		for len(rows) <= slot {
-			rows = append(rows, nil)
-		}
-		rows[slot] = row
 		return nil
 	})
 	if err != nil {
-		return nil, repaired, err
+		return nil, 0, err
 	}
-	return rows, repaired, nil
+	if maxSlot < 0 {
+		return nil, 0, nil
+	}
+	return make([]types.Row, maxSlot+1), 0, nil
 }
 
 // shrink 把超出全局预算的页框还回去（checkpoint 之后调用：这时池里的页
@@ -1007,18 +1041,61 @@ func (tp *tablePages) encodeRowTuple(row types.Row) ([]byte, error) {
 	return buf, nil
 }
 
+// sameKind 报告「这个值已经是这一列的类型」，可以跳过 Cast。
+//
+// 只认「Kind 完全一致、且不需要做长度/精度校验」的情况：
+//   - 整数 / 浮点 / 布尔 / 时间：Kind 一样就没有任何转换可做；
+//   - 文本：Kind 一样且列没有长度限制（varchar(n) 还要数字符数，走 Cast 更省心）；
+//   - numeric / 数组 / interval 一律走 Cast —— 它们要做精度归整或文本解析，
+//     跳过省不了多少，还容易在「列定义改过」时给出不一致的值。
+func sameKind(v types.Value, t types.Type) bool {
+	switch t.Kind {
+	case types.KInt:
+		return v.K == types.KInt
+	case types.KFloat:
+		return v.K == types.KFloat
+	case types.KBool:
+		return v.K == types.KBool
+	case types.KTime:
+		return v.K == types.KTime
+	case types.KText:
+		return v.K == types.KText && t.Len == 0
+	}
+	return false
+}
+
 // decodeRowTuple 解码一行。
 //
 // 直接解进目标 types.Row，不像以前那样先攒一个 []types.Value 再拷一遍：
 // 换出之后每一行都要走这条路，20 万行扫描光这个中间切片就是 20 万次分配
 // （profile 里 mallocgc + GC 占掉四分之一时间）。
 func (tp *tablePages) decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row, int, error) {
+	row, rep, err := tp.decodeRowTupleInto(make(types.Row, len(t.Columns)), tuple, t)
+	return row, rep, err
+}
+
+// decodeRowTupleInto 把 tuple 解进 dst（dst 的长度决定列数，调用方负责分配）。
+//
+// 为什么要一个「写进调用方缓冲」的版本：顺序扫描按页物化时，一页上百行如果
+// 各自 make 一个 []types.Value，就是上百次小对象分配 —— 20 万行的表扫一遍
+// 20 万个小对象，GC 的标记成本比解码本身还高。物化时给整页开**一块** Value
+// 数组、逐行切片，分配次数就从「行数」降到「页数」。
+//
+// 所有权很干净：这块数组不回收也不复用，切片完就交给那些行；行被淘汰（换出）
+// 后整块自然变成垃圾，不需要引用计数。
+func (tp *tablePages) decodeRowTupleInto(dst types.Row, tuple []byte, t *catalog.Table) (types.Row, int, error) {
 	if len(tuple) < 4 {
 		return nil, 0, fmt.Errorf("行解码失败：行头越界")
 	}
 	n := int(binary.LittleEndian.Uint32(tuple))
 	cols := len(t.Columns)
-	row := make(types.Row, cols)
+	if len(dst) < cols {
+		dst = make(types.Row, cols) // 调用方给的缓冲太小：退化成自己分配
+	}
+	row := dst[:cols]
+	for i := range row {
+		row[i] = types.Null // 复用缓冲时必须先清空：上一轮的残值会串行
+	}
 	repaired := 0
 	if n != cols {
 		if n > cols {
@@ -1046,7 +1123,14 @@ func (tp *tablePages) decodeRowTuple(tuple []byte, t *catalog.Table) (types.Row,
 		if i >= cols {
 			continue // 列被删了：多出来的值丢掉（repaired 已经记过）
 		}
-		// 对齐当前表结构：列数变了、类型换了（ALTER TABLE）都在这里兜住
+		// 对齐当前表结构：列数变了、类型换了（ALTER TABLE）都在这里兜住。
+		// 但「没变」是绝大多数：页里的值本来就是按这一列的类型编码的，
+		// 再走一遍 Cast 纯属白费 —— Cast 里要按类型名做前缀比较、转文本、
+		// 数字解析，20 万行 × 3 列就是 60 万次（实测占扫描时间的一大半）。
+		if col := t.Columns[i]; sameKind(v, col.Type()) {
+			row[i] = v
+			continue
+		}
 		cv, err := types.Cast(v, t.Columns[i].Type())
 		if err != nil {
 			row[i] = types.Null

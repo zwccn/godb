@@ -45,6 +45,7 @@ type Store struct {
 	tableGen      map[string]int64 // 该表的数据文件已包含到哪个 WAL 代次
 	tableRows     map[string]int   // 该表文件里的行数（未加载时用它回答行数查询）
 	tablePages    map[string]int   // 该表数据文件占了多少页（pg_class.relpages）
+	tableSeq      map[string]int64 // 该表自增列的当前值（从 meta 读，不必扫行）
 	tableIdxPages map[string]int   // 该表所有索引加起来占了多少页
 	hasSnap       map[string]bool  // 是否已经有数据文件
 	dirty         map[string]bool  // 上一次 checkpoint 之后有没有改动
@@ -148,6 +149,7 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		tableGen:      map[string]int64{},
 		tableRows:     map[string]int{},
 		tablePages:    map[string]int{},
+		tableSeq:      map[string]int64{},
 		tableIdxPages: map[string]int{},
 		hasSnap:       map[string]bool{},
 		dirty:         map[string]bool{},
@@ -350,6 +352,7 @@ func (s *Store) ensureLoadedLocked(key string) {
 	}
 	// 页文件是唯一的数据来源：按 RID 把行放回槽位数组。
 	// 槽位号必须与页里记的一致 —— 索引里存的就是它。
+	td.SetRepairHook(func(n int) { s.Repaired.Add(int64(n)) })
 	if err := td.attachPages(s.Dir, t.ID, t, s.Budget, s.idxGen[key]); err != nil {
 		s.noteBrokenLocked(key, fmt.Errorf("表 %s 的数据文件打不开: %w", t.Name, err))
 		s.loaded[key] = true
@@ -386,17 +389,30 @@ func (s *Store) ensureLoadedLocked(key string) {
 		}
 		td.RebuildIndex(t)
 	}
-	// 自增序列也要恢复：页里只存行、不存计数器，所以取现有数据的最大值。
-	// 不恢复的话重启后 SERIAL 从 1 重新发号，会撞上已有主键。
+	// 自增序列也要恢复：页里只存行、不存计数器。不恢复的话重启后 SERIAL
+	// 从 1 重新发号，会撞上已有主键。
+	//
+	// 优先用 meta 里记的值：打开表已经不再解码行（rows 全是 nil），扫 rows
+	// 什么也扫不到；真要扫一遍等于把整表重新拉进内存，缓冲池预算就白设了。
 	if si := t.SerialIdx(); si >= 0 {
-		var max int64
-		for _, r := range rows {
-			if si < len(r) && r[si].K == types.KInt && r[si].I > max {
-				max = r[si].I
+		if v := s.tableSeq[key]; v > 0 {
+			td.Seq = v
+		} else {
+			// 旧数据没有 seq 字段：退回「逐槽 rowAt 取最大值」。
+			// 只发生在升级后的第一次打开，checkpoint 之后就记进 meta 了。
+			var max int64
+			for i := 0; i < td.SlotCount(); i++ {
+				r, ok := td.rowAt(i)
+				if !ok || si >= len(r) {
+					continue
+				}
+				if r[si].K == types.KInt && r[si].I > max {
+					max = r[si].I
+				}
 			}
-		}
-		if max > td.Seq {
-			td.Seq = max
+			if max > td.Seq {
+				td.Seq = max
+			}
 		}
 	}
 	s.tableRows[key] = td.Live

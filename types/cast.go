@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // hasPrefixFold 是不分配内存的前缀比较（strings.HasPrefix(strings.ToLower(...))
@@ -108,7 +109,10 @@ func Cast(v Value, t Type) (Value, error) {
 		}
 	case KText:
 		s := v.TextForm()
-		if t.Len > 0 && len([]rune(s)) > t.Len {
+		// 字符数用 utf8.RuneCountInString 数，不要 []rune(s)：
+		// 后者按字符数分配一个 rune 切片，varchar(n) 列每行每值都要分一次
+		// （换入的行必然过一次 Cast，20 万行就是几十万次无谓分配）。
+		if t.Len > 0 && utf8.RuneCountInString(s) > t.Len {
 			return Null, fmt.Errorf("value too long for type %s", t.String())
 		}
 		return Text(s), nil

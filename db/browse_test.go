@@ -32,7 +32,7 @@ func TestPageBrowse(t *testing.T) {
 	run(t, d, "s", `CHECKPOINT`)
 
 	// 1) 数据页地图：页数对得上，存活元组数等于行数
-	pm, err := d.Store.PageMap("br", "data", "", 0, 0)
+	pm, err := d.Store.PageMap("br", "data", "", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("page map: %v", err)
 	}
@@ -55,21 +55,21 @@ func TestPageBrowse(t *testing.T) {
 
 	// 2) 分页：limit 小的时候 Next 要指到下一页
 	if len(pm.Pages) > 2 {
-		first, err := d.Store.PageMap("br", "data", "", 0, 2)
+		first, err := d.Store.PageMap("br", "data", "", 0, 2, 0)
 		if err != nil {
 			t.Fatalf("page map limit: %v", err)
 		}
 		if len(first.Pages) != 2 || first.Next != 2 {
 			t.Fatalf("分页不对：%d 页，next=%d", len(first.Pages), first.Next)
 		}
-		tail, err := d.Store.PageMap("br", "data", "", first.Next, 2)
+		tail, err := d.Store.PageMap("br", "data", "", first.Next, 2, 0)
 		if err != nil || len(tail.Pages) == 0 || tail.Pages[0].No != 2 {
 			t.Fatalf("续扫不对：%+v (%v)", tail.Pages, err)
 		}
 	}
 
 	// 3) 索引页地图
-	im, err := d.Store.PageMap("br", "index", "idx_br_sku", 0, 0)
+	im, err := d.Store.PageMap("br", "index", "idx_br_sku", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("index map: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestPageBrowse(t *testing.T) {
 	if _, err := d.Store.PageDetail("br", "data", "", uint32(pm.Total)); err == nil {
 		t.Fatal("越界页号应该报错")
 	}
-	if _, err := d.Store.PageMap("br", "index", "不存在", 0, 0); err == nil {
+	if _, err := d.Store.PageMap("br", "index", "不存在", 0, 0, 0); err == nil {
 		t.Fatal("不存在的索引应该报错")
 	}
 }
@@ -173,10 +173,10 @@ func TestLocateRIDAndLOB(t *testing.T) {
 	run(t, d, "s", `CHECKPOINT`)
 
 	// 从索引叶子里拿一个 RID：这条链的起点就该是索引项
-	im, err := d.Store.PageMap("lr", "index", "lr_pkey", 0, 0)
+	im, err := d.Store.PageMap("lr", "index", "lr_pkey", 0, 0, 0)
 	if err != nil {
 		// 主键索引的名字随实现不同，退化到用表里第一行的 RID
-		pm, err2 := d.Store.PageMap("lr", "data", "", 0, 0)
+		pm, err2 := d.Store.PageMap("lr", "data", "", 0, 0, 0)
 		if err2 != nil || len(pm.Pages) == 0 {
 			t.Fatalf("连数据页地图都没有：%v / %v", err, err2)
 		}

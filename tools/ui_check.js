@@ -1868,6 +1868,56 @@ class CDP {
       `${histBox.total} 条 → ${histBox.filtered} 条（${histBox.hint}）`);
     check('历史弹窗能单条删除', histBox.left === 1, `删完剩 ${histBox.left} 条`);
 
+    /* 块级页地图：几十万页的表不能「一格一页」交给浏览器（20 万个 DOM 节点布局就卡死），
+       所以后端按 step 页聚合成块，点进去才是逐页。这里用 ?pmblock=64 把 big_demo
+       的 785 页压成 13 块来验证整条下钻链路 —— 真造一张二十万页的表跑不动测试。 */
+    await cdp.send('Page.navigate', { url: URL + '&pmblock=64' });
+    await sleep(2500);
+    await cdp.eval(`toggleMonitor(true)`);
+    await sleep(500);
+    await cdp.eval(`gotoMap('big_demo')`);
+    await sleep(1500);
+    const bv = await cdp.eval(`(() => ({
+      n: document.querySelectorAll('#pmGrid .pm-c').length,
+      note: (document.getElementById('mapNote') || {}).textContent || '',
+      crumb: (document.getElementById('mapCrumbs') || {}).textContent || '',
+      tip: (document.querySelector('#pmGrid .pm-c') || {}).title || '',
+      more: !document.getElementById('pmMore').classList.contains('hidden'),
+    }))()`);
+    check('页数超阈值时按块显示（一块 = step 页），并写明「单击一块看逐页」',
+      bv.n === Math.ceil(785 / 64) && /13 块（每块 64 页）/.test(bv.note)
+      && /每格 64 页/.test(bv.crumb) && /第 0–63 页/.test(bv.tip) && !bv.more,
+      `${bv.n} 块 · ${bv.note}`);
+
+    await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
+    await sleep(1200);
+    const bvi = await cdp.eval(`(() => ({
+      n: document.querySelectorAll('#pmGrid .pm-c').length,
+      first: (document.querySelector('#pmGrid .pm-c') || {}).dataset.no,
+      crumb: (document.getElementById('mapCrumbs') || {}).textContent || '',
+      note: (document.getElementById('mapNote') || {}).textContent || '',
+    }))()`);
+    check('点一块钻到逐页：只读这一块，面包屑多一级',
+      bvi.n === 64 && bvi.first === '0' && /第 0–63 页/.test(bvi.crumb) && /共 785 页/.test(bvi.note),
+      `${bvi.n} 格 · ${bvi.crumb}`);
+
+    // 退要一级一级退：块内 → 块视图 → 库视图
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(800);
+    const esc1 = await cdp.eval(`({
+      n: document.querySelectorAll('#pmGrid .pm-c').length,
+      crumb: (document.getElementById('mapCrumbs') || {}).textContent || '',
+    })`);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(800);
+    const esc2 = await cdp.eval(`({
+      tree: !document.getElementById('mapTree').classList.contains('hidden'),
+      level: mapLevel,
+    })`);
+    check('从块内按 Esc 一级一级退：块内 → 块视图 → 库视图',
+      esc1.n === 13 && /每格 64 页/.test(esc1.crumb) && esc2.tree && esc2.level === 'db',
+      `第一次 ${esc1.n} 块 · 第二次 level=${esc2.level}`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

@@ -2830,6 +2830,14 @@ const MAP_ZOOM_MAX = 20;
 let tvPan = { x: 0, y: 0 };       // 树图的平移量（屏幕像素，恒为负或 0）
 let pmMap = null;                // 当前文件的页地图快照
 let pmSel = { table: '', kind: 'data', index: '' };
+// pmWin：要哪一段。{0,0} = 自适应（小表逐页 / 大表按块）；limit>0 = 已钻进某一块。
+let pmWin = { from: 0, limit: 0 };
+// 调试用：?pmblock=N 强制按块返回（每格 N 页）。用来在小表上验证「块 → 页」下钻，
+// 不必真的造一张二十万页的表；正常打开时是 0，不生效。
+const PM_BLOCK_OVERRIDE = (() => {
+  const n = Number(new URLSearchParams(location.search).get('pmblock'));
+  return Number.isFinite(n) && n > 1 ? Math.floor(n) : 0;
+})();
 let pmOpen = -1;                 // 当前打开的页号
 let pmDetail = null;             // 当前页的详情（重渲染用）
 let pmLink = null;               // 「索引项 → 堆页 → 大字段」定位结果
@@ -3289,7 +3297,23 @@ function renderCrumbs() {
   t.addEventListener('click', backToDb);
   box.appendChild(t);
   box.appendChild(el('span', 'map-crumb-sep', '›'));
-  box.appendChild(el('span', 'map-crumb here', pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页'));
+  const kindText = pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页';
+  if (inBlock()) {
+    // 钻到块里了：中间多一级「数据页」，点它回块视图
+    const up = el('button', 'map-crumb', kindText);
+    up.type = 'button';
+    up.title = '回到块视图（Esc）';
+    up.addEventListener('click', backToBlocks);
+    box.appendChild(up);
+    box.appendChild(el('span', 'map-crumb-sep', '›'));
+    const last = pmMap && pmMap.pages && pmMap.pages.length
+      ? pmMap.pages[pmMap.pages.length - 1].no
+      : pmWin.from + pmWin.limit - 1;
+    box.appendChild(el('span', 'map-crumb here', `第 ${pmWin.from}–${last} 页`));
+    return;
+  }
+  const here = pmMap && pmMap.step > 1 ? `${kindText}（每格 ${pmMap.step} 页）` : kindText;
+  box.appendChild(el('span', 'map-crumb here', here));
 }
 
 // 右栏在库视图：没选中就是全库汇总，选中了就是那张表的详情。
@@ -3368,6 +3392,7 @@ function enterTable(table, kind, index) {
   mapLevel = 'table';
   mapSelTable = table;
   pmSel = { table, kind: kind || 'data', index: index || '' };
+  pmWin = { from: 0, limit: 0 };
   pmMap = null;
   pmOpen = -1; pmDetail = null; pmLink = null;
   resetMapZoom();
@@ -3379,6 +3404,7 @@ function enterTable(table, kind, index) {
 function backToDb() {
   if (mapLevel !== 'table') return;
   mapLevel = 'db';
+  pmWin = { from: 0, limit: 0 };
   pmOpen = -1; pmDetail = null; pmLink = null;
   resetMapZoom();
   renderMap();
@@ -3387,6 +3413,7 @@ function backToDb() {
 function selectTarget(table, kind, index) {
   if (pmSel.table === table && pmSel.kind === kind && (pmSel.index || '') === (index || '')) return;
   pmSel = { table, kind, index: index || '' };
+  pmWin = { from: 0, limit: 0 };
   pmMap = null;
   pmOpen = -1; pmDetail = null; pmLink = null;
   renderFileBar();
@@ -3462,29 +3489,47 @@ function pmMapMatches() {
     && (pmMap.index || '') === (pmSel.index || '');
 }
 
+// pmWin 决定「要哪一段」：from/limit 都是 0 表示自适应（小表逐页、大表按块），
+// limit>0 表示已经钻进了某一块，只要这 limit 页。
+function pmKey() {
+  return `${pmSel.table}|${pmSel.kind}|${pmSel.index || ''}|${pmWin.from}|${pmWin.limit}`;
+}
+
 async function loadPageMap(append) {
   const table = pmSel.table;
   if (!table) return;
-  const key = `${table}|${pmSel.kind}|${pmSel.index || ''}`;
+  const key = pmKey();
   if (!append) {
     const hit = pmCache.get(key);
     if (hit) { pmMap = hit; renderPageMap(); return; }
     pmMap = null;
-    if (monEls.mapNote) monEls.mapNote.textContent = '正在扫页头（只读目录，不进缓冲池）…';
+    if (monEls.mapNote) {
+      monEls.mapNote.textContent = pmWin.limit > 0
+        ? `正在读第 ${pmWin.from} 页起的 ${pmWin.limit} 页…`
+        : '正在扫页头（只读目录，不进缓冲池）…';
+    }
   }
-  const from = append && pmMap && pmMap.next ? pmMap.next : 0;
   const q = `table=${encodeURIComponent(table)}&kind=${pmSel.kind}`
-    + (pmSel.index ? `&index=${encodeURIComponent(pmSel.index)}` : '')
-    + `&from=${from}`;
+    + (pmSel.index ? `&index=${encodeURIComponent(pmSel.index)}` : '');
+  let url;
+  if (pmWin.limit > 0) {
+    const from = append && pmMap && pmMap.next ? pmMap.next : pmWin.from;
+    url = `/api/pages?${q}&from=${from}&limit=${pmWin.limit}`;
+  } else if (PM_BLOCK_OVERRIDE > 1) {
+    url = `/api/pages?${q}&step=${PM_BLOCK_OVERRIDE}`;
+  } else {
+    // step=auto：页数在上限内就逐页，超了后端自己切块 —— 前端不用先探一次总数
+    url = `/api/pages?${q}&step=auto`;
+  }
   let res;
   try {
-    res = await api('/api/pages?' + q);
+    res = await api(url);
   } catch (e) {
     if (monEls.pmGrid) monEls.pmGrid.innerHTML = '';
     if (monEls.mapNote) monEls.mapNote.textContent = `扫描失败：${e.message}`;
     return;
   }
-  if (key !== `${pmSel.table}|${pmSel.kind}|${pmSel.index || '' }`) return;  // 期间切走了
+  if (key !== pmKey()) return;  // 期间切走了
   if (append && pmMap) {
     pmMap.pages = (pmMap.pages || []).concat(res.pages || []);
     pmMap.next = res.next || 0;
@@ -3526,25 +3571,109 @@ function syncGridFit(box) {
 function updateGridFoot(shown) {
   if (!pmMap) return;
   const kindText = pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页';
+  const cost = ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
   if (monEls.mapNote) {
-    const more = shown < pmMap.total
-      ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）`
-      : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
-    monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
+    if (pmMap.step > 1) {
+      monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${fmtCount(pmMap.total)} 页`
+        + ` · ${shown} 块（每块 ${pmMap.step} 页）${cost} · 单击一块看逐页`;
+    } else if (pmWin.limit > 0) {
+      monEls.mapNote.textContent = `${pmSel.table} · ${kindText}`
+        + ` · 第 ${pmWin.from}–${pmWin.from + shown - 1} 页（共 ${fmtCount(pmMap.total)} 页）${cost}`;
+    } else {
+      const more = shown < pmMap.total
+        ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）`
+        : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
+      monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
+    }
   }
   if (monEls.pmMore) {
-    monEls.pmMore.classList.toggle('hidden', !pmMap.next);
+    // 「继续扫描」只在逐页视图里有意义：块视图一次给完，块内也已经只取了那一块
+    const showMore = !!pmMap.next && pmMap.step <= 1 && !(pmWin.limit > 0);
+    monEls.pmMore.classList.toggle('hidden', !showMore);
     monEls.pmMore.textContent = `继续扫描（已画 ${shown} / ${pmMap.total} 页）`;
   }
+}
+
+function renderPmLegend(blockMode) {
+  if (!monEls.pmLegend) return;
+  monEls.pmLegend.innerHTML = '';
+  let parts;
+  if (blockMode) {
+    parts = pmSel.kind === 'index'
+      ? [['hdr', '含头页'], ['leaf', '大部分是叶子'], ['inner', '大部分是内部节点'], ['idx-empty', '空块']]
+      : [['full', '大部分满'], ['mid', '中等'], ['sparse', '偏空'], ['empty', '整块空'], ['hole', '含洞页']];
+  } else {
+    parts = pmSel.kind === 'index'
+      ? [['hdr', '头页'], ['leaf', '叶子'], ['inner', '内部节点'], ['idx-empty', '空叶']]
+      : [['full', '接近满'], ['mid', '中等'], ['sparse', '稀疏'], ['empty', '整页空'], ['hole', '有洞']];
+  }
+  parts.push(['bad', '坏页']);
+  for (const [cls, label] of parts) {
+    const item = el('span', 'space-item');
+    const dot = el('span', 'pm-c ' + (cls === 'leaf' ? 'idx' : cls));
+    dot.style.cursor = 'default';
+    item.appendChild(dot);
+    item.appendChild(el('span', null, label));
+    monEls.pmLegend.appendChild(item);
+  }
+}
+
+// 块的颜色只看「这一块里有没有问题」，不看平均占用：一块 256 页里混着满页和空页，
+// 平均值会把「这里有一堆空页可以回收」这个信号抹平。
+function blockClass(b) {
+  if (b.bad) return 'bad';
+  if (b.holes) return 'hole';
+  if (b.fill >= 70) return 'full';
+  if (b.fill >= 30) return 'mid';
+  if (b.fill > 0) return 'sparse';
+  return 'empty';
+}
+
+function renderBlockMap() {
+  const box = monEls.pmGrid;
+  if (!box) return;
+  const blocks = pmMap.blocks || [];
+  box.title = `一格 ${pmMap.step} 页 · 滚轮缩放 · 按住拖动 · 单击进入这一块`;
+  const sig = `blk|${pmSel.table}|${pmSel.kind}|${pmSel.index || ''}|${blocks.length}|${pmMap.step}`;
+  if (sig === pmSig && box.childElementCount) {
+    applyGridSizing(box, blocks.length);
+    syncGridFit(box);
+    updateGridFoot(blocks.length);
+    return;
+  }
+  pmSig = sig;
+  pmBase.w = 0;
+  applyGridSizing(box, blocks.length);
+  box.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  for (const b of blocks) {
+    const c = el('div', `pm-c ${blockClass(b)}`);
+    c.dataset.from = String(b.from);
+    c.title = `第 ${b.from}–${b.to - 1} 页（${b.pages} 页）· 平均占用 ${b.fill}%`
+      + `\n空闲 ${fmtBytes(b.free)} · 存活 ${fmtCount(b.live)}`
+      + (b.holes ? `\n${b.holes} 页有洞（可回收 ${fmtBytes(b.holeBytes)}）` : '')
+      + (b.empty ? ` · ${b.empty} 页整页空` : '')
+      + (b.bad ? ` · ${b.bad} 页页头异常` : '')
+      + (b.head ? ' · 索引头页在这一块' : '')
+      + '\n单击进入这一块';
+    c.addEventListener('click', () => enterBlock(b));
+    frag.appendChild(c);
+  }
+  box.appendChild(frag);
+  renderPmLegend(true);
+  syncGridFit(box);
+  updateGridFoot(blocks.length);
+  renderCrumbs();   // 面包屑要显示「每格 256 页」，得等 step 回来才知道
 }
 
 function renderPageMap() {
   const box = monEls.pmGrid;
   if (!box || !pmMap) return;
+  if (pmMap.step > 1) return renderBlockMap();
   box.title = '滚轮缩放 · 按住拖动平移 · 滚动条也能翻页 · 单击看这一页';
   const pages = pmMap.pages || [];
   const count = pages.length || pmMap.total || 1;
-  const sig = `${pmSel.table}|${pmSel.kind}|${pmSel.index || ''}|${pages.length}|${pmMap.total}`;
+  const sig = `${pmSel.table}|${pmSel.kind}|${pmSel.index || ''}|${pmWin.from}|${pmWin.limit}|${pages.length}|${pmMap.total}`;
   // 缩放动画每帧都会走到这里。785 个格子重建一遍不光是白烧 CPU：
   // 清空那一刻滚动宽度塌成 0，浏览器会把 scrollLeft 夹回去，下一帧再设 —— 看着就是抖。
   if (sig === pmSig && box.childElementCount) {
@@ -3571,23 +3700,34 @@ function renderPageMap() {
   }
   box.appendChild(frag);
 
-  if (monEls.pmLegend) {
-    monEls.pmLegend.innerHTML = '';
-    const parts = pmSel.kind === 'index'
-      ? [['hdr', '头页'], ['leaf', '叶子'], ['inner', '内部节点'], ['idx-empty', '空叶']]
-      : [['full', '接近满'], ['mid', '中等'], ['sparse', '稀疏'], ['empty', '整页空'], ['hole', '有洞']];
-    parts.push(['bad', '坏页']);
-    for (const [cls, label] of parts) {
-      const item = el('span', 'space-item');
-      const dot = el('span', 'pm-c ' + (cls === 'leaf' ? 'idx' : cls));
-      dot.style.cursor = 'default';
-      item.appendChild(dot);
-      item.appendChild(el('span', null, label));
-      monEls.pmLegend.appendChild(item);
-    }
-  }
+  renderPmLegend(false);
   syncGridFit(box);
   updateGridFoot(pages.length);
+  renderCrumbs();
+}
+
+// enterBlock 钻进一块：只要这 b.Pages 页（256 页 = 2 MB，一次拿完）。
+function enterBlock(b) {
+  pmWin = { from: Number(b.from), limit: b.pages };
+  pmOpen = -1; pmDetail = null; pmLink = null;
+  resetMapZoom();
+  renderCrumbs();
+  railHint('这一块里点任意一格，看这一页的结构、文本和字节。');
+  loadPageMap(false);
+}
+
+// backToBlocks 回到块视图（块级数据在缓存里，不会重新扫）。
+function backToBlocks() {
+  pmWin = { from: 0, limit: 0 };
+  pmOpen = -1; pmDetail = null; pmLink = null;
+  resetMapZoom();
+  renderCrumbs();
+  renderMap();
+  loadPageMap(false);
+}
+
+function inBlock() {
+  return pmWin.limit > 0;
 }
 
 async function openPage(no) {
@@ -3882,6 +4022,7 @@ function gotoMap(table) {
   mapLevel = 'table';
   mapSelTable = table || '';
   pmSel = { table: table || '', kind: 'data', index: '' };
+  pmWin = { from: 0, limit: 0 };
   pmMap = null;
   pmOpen = -1; pmDetail = null; pmLink = null;
   setMonPage('map');
@@ -5487,7 +5628,9 @@ document.addEventListener('keydown', e => {
   // 空间地图里 Esc 先退一级（表视图 → 库视图），再按一次才关整个面板 ——
   // 一层一层退，别一下把面板关了让人从头点回来。
   if (e.key === 'Escape' && monOpen && monPageTab === 'map' && mapLevel === 'table') {
-    backToDb();
+    // 一级一级退：块内 → 块视图 → 库视图。一次跳到底会让人丢掉刚才看的位置。
+    if (inBlock()) backToBlocks();
+    else backToDb();
     return;
   }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);

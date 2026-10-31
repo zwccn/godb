@@ -25,8 +25,16 @@ import (
 // 另外这些接口都是「点开才算」的：一次 O(页数) 的顺序读（1450 页 ≈ 11 MB），
 // 不跟着监控轮询跑。
 
-// pageMapMaxPages 是单次扫描的页数上限：再大就分页取，避免一次把几百 MB 读进来。
+// pageMapMaxPages 是「一格一页」视图的页数上限：再大就改用块级视图，避免一次把几百 MB 读进来、
+// 也避免页面去画十万个格子（20 万页 = 20 万个 DOM 节点，布局就要卡死）。
 const pageMapMaxPages = 4096
+
+// pageMapMaxBlocks 是块级视图返回的块数上限。前端画 4096 个格子已经是舒适上限，
+// 超过就自动加大每块的页数，而不是让页面画更多格子。
+const pageMapMaxBlocks = 4096
+
+// blockStepBase 是块级视图的起始步长：256 页一块 = 2 MB 数据。
+const blockStepBase = 256
 
 // PageInfo 是页地图里的一格。
 type PageInfo struct {
@@ -42,6 +50,74 @@ type PageInfo struct {
 	Bad  bool   `json:"bad,omitempty"`
 }
 
+// PageBlock 是块级视图里的一格：step 页合成一格，只给统计量。
+// 为什么要这一层：一格一页在几千页时最好用，但几十万页时前端画不动、
+// 后端也没必要把 20 万条明细发给浏览器。块级先把「哪一段值得下钻」标出来，
+// 点进去才是逐页 —— 和库 → 表 → 页的下钻逻辑是同一条。
+type PageBlock struct {
+	From uint32 `json:"from"`
+	To   uint32 `json:"to"` // 不含
+	// Pages 是块内实际页数，末块会少一些。
+	Pages     int  `json:"pages"`
+	Live      int  `json:"live"`  // 块内存活元组 / 条目合计
+	Slots     int  `json:"slots"` // 槽位目录合计（占空间，算 Fill 时要带上）
+	Used      int  `json:"used"`  // 元组字节合计
+	Free      int  `json:"free"`  // 真实空闲合计
+	Fill      int  `json:"fill"`  // 平均占用百分比（含页头与槽位目录开销）
+	Holes     int  `json:"holes"` // 有洞的页数
+	HoleBytes int  `json:"holeBytes"`
+	Empty     int  `json:"empty"` // 整页空的页数
+	Bad       int  `json:"bad"`
+	Head      bool `json:"head,omitempty"` // 索引头页（第 0 页）落在这一块
+}
+
+func (b *PageBlock) add(pi PageInfo) {
+	b.Live += pi.Live
+	b.Slots += pi.Slots
+	b.Used += pi.Used
+	b.Free += pi.Free
+	if pi.Bad {
+		b.Bad++
+		return
+	}
+	if pi.Hole > 0 {
+		b.Holes++
+		b.HoleBytes += pi.Hole
+	}
+	if pi.Role == "header" {
+		b.Head = true
+	}
+	if pi.Slots == 0 && pi.Used == 0 {
+		b.Empty++
+	}
+}
+
+// finish 算平均占用。分母是「整块页容量」，分子除了元组还要加页头和槽位目录 ——
+// 只算元组的话，槽位目录占了一小半的页会被显示成很空。
+func (b *PageBlock) finish() {
+	if b.Pages <= 0 {
+		return
+	}
+	used := b.Used + b.Slots*slotEntrySize + b.Pages*pageHeaderSize
+	pct := used * 100 / (PageSize * b.Pages)
+	if pct > 100 {
+		pct = 100
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	b.Fill = pct
+}
+
+// blockStep 选每块装多少页：从 256 起翻倍，直到块数不超过 pageMapMaxBlocks。
+func blockStep(pages int) int {
+	step := blockStepBase
+	for step < pages && (pages+step-1)/step > pageMapMaxBlocks {
+		step *= 2
+	}
+	return step
+}
+
 // PageMap 是一次页扫描的结果（可能只是前一段，Next 非 0 表示还有）。
 type PageMap struct {
 	Table string     `json:"table"`
@@ -52,7 +128,10 @@ type PageMap struct {
 	Next  int        `json:"next"`
 	Bytes int64      `json:"bytes"` // 这次实际读了多少字节（给人看代价）
 	Pages []PageInfo `json:"pages"`
-	Note  string     `json:"note,omitempty"`
+	// Step > 1 表示这是块级视图（一格 Step 页），此时 Pages 为空、Blocks 有值。
+	Step   int         `json:"step,omitempty"`
+	Blocks []PageBlock `json:"blocks,omitempty"`
+	Note   string      `json:"note,omitempty"`
 }
 
 // PageDetail 是一页的完整内容：页头 + 槽位 + 元组/条目 + 原始字节 + 文本串。
@@ -221,11 +300,17 @@ func (s *Store) browseTarget(table, kind, index string) (browseTarget, error) {
 	return bt, nil
 }
 
-// PageMap 扫一段页，给出每页的占用情况。
+// PageMap 扫页地图。
 //
-// from/limit 是分页参数：limit 默认 1000、上限 pageMapMaxPages，返回的 Next 为 0
-// 表示已经到文件末尾。扫描是顺序读 + 只解页头与槽位目录，不解元组。
-func (s *Store) PageMap(table, kind, index string, from, limit int) (PageMap, error) {
+// step 决定「一格装几页」：<= 1 逐页；> 1 块级视图（一格 step 页，只给统计量，
+// 点进去才是逐页）；0 表示自适应 —— 页数不超过 pageMapMaxPages 就逐页
+//（小表里一页一格最好用），超了才切块级。
+//
+// from/limit 是逐页视图的分页参数：limit 默认 1000、上限 pageMapMaxPages，返回的 Next 为 0
+// 表示已经到文件末尾。块级视图一次给完（块数已被 blockStep 压到上限内），忽略 from/limit。
+//
+// 扫描是顺序读 + 只解页头与槽位目录，不解元组。
+func (s *Store) PageMap(table, kind, index string, from, limit, step int) (PageMap, error) {
 	bt, err := s.browseTarget(table, kind, index)
 	if err != nil {
 		return PageMap{}, err
@@ -254,6 +339,16 @@ func (s *Store) PageMap(table, kind, index string, from, limit int) (PageMap, er
 		pm.Note = "文件还是空的（还没有页落盘）"
 		return pm, nil
 	}
+	if step <= 1 {
+		if rf.pages <= pageMapMaxPages {
+			step = 0
+		} else {
+			step = blockStep(rf.pages)
+		}
+	}
+	if step > 1 {
+		return s.pageBlocks(rf, bt.kind, pm, step)
+	}
 	end := from + limit
 	if end > rf.pages {
 		end = rf.pages
@@ -281,6 +376,42 @@ func (s *Store) PageMap(table, kind, index string, from, limit int) (PageMap, er
 	pm.Pages = out
 	if end < rf.pages {
 		pm.Next = end
+	}
+	return pm, nil
+}
+
+// pageBlocks 把整份文件按 step 页聚合成块。读法和逐页视图完全一样（顺序读、只解页头），
+// 差别只在出口：这里是几百条统计，不是几十万条明细。
+func (s *Store) pageBlocks(rf *rawPageFile, kind string, pm PageMap, step int) (PageMap, error) {
+	pm.Step = step
+	pm.Blocks = make([]PageBlock, 0, (rf.pages+step-1)/step)
+	for bstart := 0; bstart < rf.pages; bstart += step {
+		bend := bstart + step
+		if bend > rf.pages {
+			bend = rf.pages
+		}
+		blk := PageBlock{From: uint32(bstart), To: uint32(bend), Pages: bend - bstart}
+		for start := bstart; start < bend; start += 256 {
+			n := bend - start
+			if n > 256 {
+				n = 256
+			}
+			chunk, got, err := rf.readChunk(uint32(start), n)
+			if err != nil {
+				return pm, err
+			}
+			pm.Bytes += int64(got)
+			for i := 0; i < n; i++ {
+				no := uint32(start + i)
+				if kind == "index" {
+					blk.add(parseIdxPageInfo(chunk[i], no))
+				} else {
+					blk.add(parseDataPageInfo(chunk[i], no))
+				}
+			}
+		}
+		blk.finish()
+		pm.Blocks = append(pm.Blocks, blk)
 	}
 	return pm, nil
 }

@@ -65,7 +65,12 @@ func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
 	}
 	from, _ := strconv.Atoi(q.Get("from"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	pm, err := s.currentDB(r).Store.PageMap(table, q.Get("kind"), q.Get("index"), from, limit)
+	// step=auto（或省略）表示自适应：小表逐页，大表按块返回；step=N 强制每格 N 页。
+	step := 0
+	if v := strings.TrimSpace(q.Get("step")); v != "" && v != "auto" {
+		step, _ = strconv.Atoi(v)
+	}
+	pm, err := s.currentDB(r).Store.PageMap(table, q.Get("kind"), q.Get("index"), from, limit, step)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return

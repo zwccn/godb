@@ -2100,6 +2100,35 @@ class CDP {
       && fx.labels[0] === '炫酷科技灰',
       `${fx.labels.join(' / ')} · 拦截 ${fx.blocked} / 编辑器 ${fx.editor} / Shift ${fx.shift}`);
 
+    /* 焦点环不能画在 outline 上：outline-offset 会在它和 border 之间留一道 1px 缝，
+       缝里露出页面底色 —— 放大 4 倍就是「两条蓝线夹一条黑缝」，用户就是瞄到它来报的。
+       现在改用 box-shadow 的环（紧贴 border，没有缝），transparent outline 只给
+       高对比度模式占位。 */
+    await cdp.eval(`document.getElementById('dbModal').classList.remove('hidden')`);
+    await sleep(200);
+    const ringBox = await cdp.eval(`(() => {
+      const r = document.getElementById('dbNewName').getBoundingClientRect();
+      return { x: Math.round(r.x + 40), y: Math.round(r.y + r.height / 2) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: ringBox.x, y: ringBox.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: ringBox.x, y: ringBox.y, button: 'left', clickCount: 1 });
+    await sleep(300);
+    const ring = await cdp.eval(`(() => {
+      const el = document.getElementById('dbNewName');
+      const cs = getComputedStyle(el);
+      return {
+        outline: cs.outlineColor,
+        width: cs.outlineWidth,
+        shadow: cs.boxShadow,
+        focused: el.matches(':focus-visible'),
+      };
+    })()`);
+    await cdp.eval(`document.getElementById('dbModal').classList.add('hidden')`);
+    check('聚焦输入框只有一圈光，没有 outline 留下的 1px 缝',
+      ring.focused && (ring.outline.includes('0, 0, 0, 0') || ring.outline === 'transparent')
+      && ring.shadow.includes('3px'),
+      `outline ${ring.width} ${ring.outline} · ${ring.shadow}`);
+
     await cdp.eval(`applyTheme('sky', false)`);
     await sleep(300);
     const fxSky = await cdp.eval(`(() => ({

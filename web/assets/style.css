@@ -4055,16 +4055,27 @@ html[data-theme="steel"] .mon-nav-tab.on {
   text-shadow: 0 0 12px var(--fx-glow-soft);
 }
 
-/* 键盘焦点：1px 亮边 + 4px 淡光，比默认 outline 在暗色上更容易看清 */
+/* 键盘焦点：亮边 + 淡光。
+   ★ 这里**不能用 outline 画焦点环**：outline-offset 会在它和 border 之间留一道 1px 缝，
+   缝里露出的是页面底色 —— 放大 4 倍就是「两条蓝线夹一条黑缝」，看着像脏点。
+   实测输入框（border 已经变 accent）最明显，用户就是瞄到这条缝来报的。
+   改成 box-shadow 的环：紧贴 border，没有缝。transparent outline 只做占位，
+   让 Windows 高对比度模式仍能把焦点染成系统色。 */
 html[data-theme="steel"] .btn:focus-visible,
 html[data-theme="steel"] .mon-nav-tab:focus-visible,
-html[data-theme="steel"] .mon-win button:focus-visible,
+html[data-theme="steel"] .mon-win button:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--accent-border), 0 0 0 4px var(--fx-glow-soft);
+}
+/* 输入框自己会变 border-color 表示焦点，再套 1px 环就成了「两层蓝贴在一起」，
+   所以这里只留那圈光 —— 用户说的是「光晕是没问题的」。 */
 html[data-theme="steel"] input:focus-visible,
 html[data-theme="steel"] select:focus-visible,
 html[data-theme="steel"] textarea:focus-visible {
-  outline: 1px solid var(--accent-border);
-  outline-offset: 1px;
-  box-shadow: 0 0 0 4px var(--fx-glow-soft);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--fx-glow-soft);
 }
 
 /* 光标：监控面板和空间地图的空白处用十字准星，格子也用它 ——

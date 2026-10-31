@@ -604,8 +604,10 @@ class CDP {
 
     // 页网格也能放大：格子变大、开始滚动（页特别多时格子会掉到 5px 下限）
     const gz0 = await cdp.eval(`(() => {
+      const g = document.getElementById('pmGrid');
       const c = document.querySelector('#pmGrid .pm-c').getBoundingClientRect();
-      return { cell: Math.round(c.width), zoom: document.getElementById('mapZoomVal').textContent };
+      return { cell: Math.round(c.width), zoom: document.getElementById('mapZoomVal').textContent,
+        sw: g.scrollWidth, cw: g.clientWidth, sh: g.scrollHeight, ch: g.clientHeight };
     })()`);
     await cdp.eval(`document.getElementById('mapZoomIn').click()`);
     await cdp.eval(`document.getElementById('mapZoomIn').click()`);
@@ -617,8 +619,10 @@ class CDP {
         g.scrollWidth > g.clientWidth + 2 };
     })()`);
     check('进表后缩放归零；页网格放大时格子变大并开始滚动',
-      /^1\.0×$/.test(gz0.zoom) && gz1.cell > gz0.cell && gz1.scrollable,
-      `进表 ${gz0.zoom} · 格子 ${gz0.cell} → ${gz1.cell}px · 可滚 ${gz1.scrollable}`);
+      /^1\.0×$/.test(gz0.zoom) && gz1.cell > gz0.cell && gz1.scrollable
+      && gz0.sw <= gz0.cw + 1 && gz0.sh <= gz0.ch + 1,
+      `进表 ${gz0.zoom} · 格子 ${gz0.cell} → ${gz1.cell}px · 可滚 ${gz1.scrollable}`
+      + ` · 1× 内容 ${gz0.sw}×${gz0.sh} / 视口 ${gz0.cw}×${gz0.ch}`);
     await cdp.eval(`document.getElementById('mapZoomReset').click()`);
     await sleep(400);
 

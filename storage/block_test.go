@@ -24,3 +24,30 @@ func TestBlockStep(t *testing.T) {
 		}
 	}
 }
+
+// 「这块值不值得整理一次」的判据必须和 tablepages.go 的 needsVacuum 同口径：
+// 洞超过容量 1/4 才算，且小表（< 8 页）不折腾。
+// 两处不一样就会出现「存储页说整库不用整理、空间地图说这块该整理」的矛盾。
+func TestPageBlockAdvice(t *testing.T) {
+	cases := []struct {
+		name  string
+		pages int
+		hole  int
+		want  string
+	}{
+		{"256 页、洞正好 1/4", 256, PageSize * 256 / 4, ""},
+		{"256 页、洞多 1 字节就超阈值", 256, PageSize*256/4 + 1, "vacuum"},
+		{"256 页、几乎全是洞", 256, PageSize * 250, "vacuum"},
+		{"4 页、全是洞也算了（小表不折腾）", 4, PageSize * 4, ""},
+		{"8 页、全是洞", 8, PageSize * 8, "vacuum"},
+		{"256 页、没有洞", 256, 0, ""},
+	}
+	for _, c := range cases {
+		b := PageBlock{Pages: c.pages, HoleBytes: c.hole}
+		b.finish()
+		if b.Advice != c.want {
+			t.Errorf("%s：advice=%q，期望 %q（洞 %d B / 容量 %d B）",
+				c.name, b.Advice, c.want, c.hole, c.pages*PageSize)
+		}
+	}
+}

@@ -69,6 +69,12 @@ type PageBlock struct {
 	Empty     int  `json:"empty"` // 整页空的页数
 	Bad       int  `json:"bad"`
 	Head      bool `json:"head,omitempty"` // 索引头页（第 0 页）落在这一块
+	// Advice 是「这块值不值得整理一次」：目前只有 "vacuum"（洞超过容量的 1/4）。
+	// 判据和 tablepages.go 的 needsVacuum 完全同口径 —— 两处用不同阈值的话，
+	// 会出现「存储页说整库不用整理、空间地图说这块该整理」的自相矛盾。
+	// 注意：洞是「删出来的、FSM 看不见的空隙」，而 VACUUM 是**整表**动作，
+	// 没法只整理一块；这块只是收益的大头。
+	Advice string `json:"advice,omitempty"`
 }
 
 func (b *PageBlock) add(pi PageInfo) {
@@ -107,6 +113,11 @@ func (b *PageBlock) finish() {
 		pct = 0
 	}
 	b.Fill = pct
+	// 值得整理一次的判据：洞超过这一块容量的 1/4。和 needsVacuum 一样按比例
+	//（绝对值对小库永远触发、对大库永远不触发），也一样的「小表不折腾」。
+	if b.Pages >= 8 && b.HoleBytes*vacuumThreshold > b.Pages*PageSize {
+		b.Advice = "vacuum"
+	}
 }
 
 // blockStep 选每块装多少页：从 256 起翻倍，直到块数不超过 pageMapMaxBlocks。
@@ -131,6 +142,9 @@ type PageMap struct {
 	// Step > 1 表示这是块级视图（一格 Step 页），此时 Pages 为空、Blocks 有值。
 	Step   int         `json:"step,omitempty"`
 	Blocks []PageBlock `json:"blocks,omitempty"`
+	// VacuumThreshold 是「洞超过容量的 1/N 才值得整理」里的 N：界面的文案要跟着它变，
+	// 别把 1/4 写死在前端（改了常量文案就会撒谎）。
+	VacuumThreshold int `json:"vacuumThreshold,omitempty"`
 	Note   string      `json:"note,omitempty"`
 }
 
@@ -384,6 +398,7 @@ func (s *Store) PageMap(table, kind, index string, from, limit, step int) (PageM
 // 差别只在出口：这里是几百条统计，不是几十万条明细。
 func (s *Store) pageBlocks(rf *rawPageFile, kind string, pm PageMap, step int) (PageMap, error) {
 	pm.Step = step
+	pm.VacuumThreshold = vacuumThreshold
 	pm.Blocks = make([]PageBlock, 0, (rf.pages+step-1)/step)
 	for bstart := 0; bstart < rf.pages; bstart += step {
 		bend := bstart + step

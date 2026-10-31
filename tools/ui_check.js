@@ -1964,6 +1964,49 @@ class CDP {
       esc1.n === 13 && /每格 64 页/.test(esc1.crumb) && esc2.tree && esc2.level === 'db',
       `第一次 ${esc1.n} 块 · 第二次 level=${esc2.level}`);
 
+    /* 块级「整块回收建议」：判据在后端（洞 > 容量 1/4，和 needsVacuum 同口径），
+       前端只负责说清「这块值得整理」和「VACUUM 是整表动作，只填不执行」。
+       这里不去造一张真能留洞的表 —— checkpoint 有时会把页紧凑重写，洞不稳定；
+       直接喂一块带 advice 的块数据，验证渲染、文案和按钮这条链路。 */
+    await cdp.send('Page.navigate', { url: URL + '&pmblock=64' });
+    await sleep(2500);
+    await cdp.eval(`toggleMonitor(true)`);
+    await sleep(500);
+    await cdp.eval(`gotoMap('big_demo')`);
+    await sleep(1500);
+    await cdp.eval(`(() => {
+      pmMap = { table: pmSel.table, kind: 'data', total: 1000, step: 256, vacuumThreshold: 4, blocks: [
+        { from: 0, to: 256, pages: 256, live: 100, slots: 300, used: 200000, free: 8000,
+          fill: 20, holes: 40, holeBytes: 900000, empty: 0, bad: 0, advice: 'vacuum' },
+        { from: 256, to: 512, pages: 256, live: 0, slots: 0, used: 0, free: 0,
+          fill: 0, holes: 0, holeBytes: 0, empty: 256, bad: 0 },
+      ] };
+      pmSig = '';
+      renderPageMap();
+    })()`);
+    await sleep(500);
+    const vacUi = await cdp.eval(`(() => {
+      const cells = [...document.querySelectorAll('#pmGrid .pm-c')];
+      return {
+        n: cells.length,
+        tip: cells[0] ? cells[0].title : '',
+        btn: !document.getElementById('pmVac').classList.contains('hidden'),
+        note: (document.getElementById('mapNote') || {}).textContent || '',
+      };
+    })()`);
+    check('块里洞超过容量的 1/4 时给「建议整理」，并亮出「填入 VACUUM」按钮',
+      vacUi.n === 2 && /建议整理/.test(vacUi.tip) && /1\/4/.test(vacUi.tip)
+        && vacUi.btn && /1 块待整理/.test(vacUi.note),
+      `2 块 · 按钮 ${vacUi.btn} · ${vacUi.note.slice(-24)}`);
+
+    await cdp.eval(`document.getElementById('pmVac').click()`);
+    await sleep(700);
+    const vacSql = await cdp.eval(`editor.value`);
+    const vacClosed = await cdp.eval(`!monOpen`);
+    check('点「填入 VACUUM」只把语句写进编辑器，不替你执行',
+      /VACUUM big_demo;/.test(vacSql) && vacClosed,
+      `编辑器尾部 ${JSON.stringify(vacSql.slice(-24))} · 面板已关 ${vacClosed}`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

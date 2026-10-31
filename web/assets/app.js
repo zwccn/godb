@@ -21,6 +21,23 @@ const editor = {
     }
     autoSize();
   },
+  // append 把一段 SQL 接到末尾（不覆盖正在写的内容）。走 replaceRange 而不是 setValue，
+  // 否则一次 Ctrl+Z 都回不去。
+  append(sql) {
+    if (cm) {
+      const line = cm.lineCount() - 1;
+      const tail = cm.getLine(line);
+      cm.replaceRange((tail.trim() ? '\n' : '') + sql, { line, ch: tail.length });
+      cm.setCursor({ line: cm.lineCount() - 1, ch: 0 });
+      cm.focus();
+      autoSize();
+      return;
+    }
+    const cur = editorEl.value;
+    editorEl.value = (cur.trim() ? cur.replace(/\s+$/, '') + '\n' : '') + sql;
+    autoSize();
+    editorEl.focus();
+  },
   focus() { if (cm) cm.focus(); else editorEl.focus(); },
   getBoundingClientRect() {
     return (cm ? cm.getWrapperElement() : editorEl).getBoundingClientRect();
@@ -1495,6 +1512,7 @@ const monEls = {
   pmGrid: document.getElementById('pmGrid'),
   pmLegend: document.getElementById('pmLegend'),
   pmSide: document.getElementById('pmSide'),
+  pmVac: document.getElementById('pmVac'),
   pmMore: document.getElementById('pmMore'),
   spaceBar: document.getElementById('spaceBar'),
   spaceLegend: document.getElementById('spaceLegend'),
@@ -2834,6 +2852,8 @@ let pmMap = null;                // 当前文件的页地图快照
 let pmSel = { table: '', kind: 'data', index: '' };
 // pmWin：要哪一段。{0,0} = 自适应（小表逐页 / 大表按块）；limit>0 = 已钻进某一块。
 let pmWin = { from: 0, limit: 0 };
+// 块视图里有几块建议 VACUUM、能收多少 —— 底部那句话和按钮显隐都读它。
+let pmVacStat = { count: 0, bytes: 0 };
 // 调试用：?pmblock=N 强制按块返回（每格 N 页）。用来在小表上验证「块 → 页」下钻，
 // 不必真的造一张二十万页的表；正常打开时是 0，不生效。
 const PM_BLOCK_OVERRIDE = (() => {
@@ -3493,6 +3513,13 @@ function pmMapMatches() {
     && (pmMap.index || '') === (pmSel.index || '');
 }
 
+// 表名拼进 SQL 前先判断要不要加引号：只有「小写字母/下划线开头、只含小写字母数字下划线」
+// 才能裸写，其余一律双引号（内部的双引号翻倍）。不然名字里带大写或中文就是语法错。
+function quoteIdent(name) {
+  const t = String(name || '');
+  return /^[a-z_][a-z0-9_]*$/.test(t) ? t : '"' + t.replace(/"/g, '""') + '"';
+}
+
 // pmWin 决定「要哪一段」：from/limit 都是 0 表示自适应（小表逐页、大表按块），
 // limit>0 表示已经钻进了某一块，只要这 limit 页。
 function pmKey() {
@@ -3578,8 +3605,9 @@ function updateGridFoot(shown) {
   const cost = ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
   if (monEls.mapNote) {
     if (pmMap.step > 1) {
+      const vac = pmVacStat.count ? ` · ${pmVacStat.count} 块待整理` : '';
       monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${fmtCount(pmMap.total)} 页`
-        + ` · ${shown} 块（每块 ${pmMap.step} 页）${cost} · 单击一块看逐页`;
+        + ` · ${shown} 块（每块 ${pmMap.step} 页）${cost}${vac} · 单击一块看逐页`;
     } else if (pmWin.limit > 0) {
       monEls.mapNote.textContent = `${pmSel.table} · ${kindText}`
         + ` · 第 ${pmWin.from}–${pmWin.from + shown - 1} 页（共 ${fmtCount(pmMap.total)} 页）${cost}`;
@@ -3588,6 +3616,14 @@ function updateGridFoot(shown) {
         ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）`
         : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
       monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
+    }
+  }
+  if (monEls.pmVac) {
+    const on = pmMap.step > 1 && pmVacStat.count > 0;
+    monEls.pmVac.classList.toggle('hidden', !on);
+    if (on) {
+      monEls.pmVac.title = `${pmVacStat.count} 块有大量空洞，合计 ${fmtBytes(pmVacStat.bytes)}。`
+        + `VACUUM 是整表动作（不会只整理一块），只把语句填进编辑器，不替你执行。`;
     }
   }
   if (monEls.pmMore) {
@@ -3650,7 +3686,12 @@ function renderBlockMap() {
   applyGridSizing(box, blocks.length);
   box.innerHTML = '';
   const frag = document.createDocumentFragment();
+  pmVacStat = { count: 0, bytes: 0 };
   for (const b of blocks) {
+    if (b.advice === 'vacuum') {
+      pmVacStat.count++;
+      pmVacStat.bytes += b.holeBytes || 0;
+    }
     const c = el('div', `pm-c ${blockClass(b)}`);
     c.dataset.from = String(b.from);
     c.title = `第 ${b.from}–${b.to - 1} 页（${b.pages} 页）· 平均占用 ${b.fill}%`
@@ -3659,6 +3700,9 @@ function renderBlockMap() {
       + (b.empty ? ` · ${b.empty} 页整页空` : '')
       + (b.bad ? ` · ${b.bad} 页页头异常` : '')
       + (b.head ? ' · 索引头页在这一块' : '')
+      + (b.advice === 'vacuum'
+        ? `\n建议整理：洞共 ${fmtBytes(b.holeBytes)}，超过这一块容量的 1/${pmMap.vacuumThreshold || 4}`
+        : '')
       + '\n单击进入这一块';
     c.addEventListener('click', () => enterBlock(b));
     frag.appendChild(c);
@@ -4097,6 +4141,15 @@ async function refreshMap() {
 if (monEls.mapBack) monEls.mapBack.addEventListener('click', backToDb);
 if (monEls.mapRefresh) monEls.mapRefresh.addEventListener('click', refreshMap);
 if (monEls.pmMore) monEls.pmMore.addEventListener('click', () => loadPageMap(true));
+if (monEls.pmVac) {
+  monEls.pmVac.addEventListener('click', () => {
+    if (!pmSel.table) return;
+    // 只填语句、不执行：VACUUM 是运维动作（会锁表、写脏页、fsync），该由人按下执行
+    editor.append(`VACUUM ${quoteIdent(pmSel.table)};`);
+    toggleMonitor(false);
+    toast('已填入编辑器，确认后再点执行（VACUUM 整理整张表，不重排 RID）', false, 6000);
+  });
+}
 if (monEls.mapGroup) {
   monEls.mapGroup.addEventListener('click', e => {
     const b = e.target.closest('button[data-group]');

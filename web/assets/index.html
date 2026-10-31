@@ -933,7 +933,10 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
 <!-- 模板子菜单：右键 →「插入 SQL 模板」飞出来的那一栏。
      单独一个元素而不是嵌在父菜单里 —— 它要能自己溢出到父菜单外面，
      塞在父元素里会被 overflow / 定位链条带着走。 -->
-<div id="ctxSub" class="ctx-menu ctx-sub hidden" role="menu" aria-label="SQL 模板"></div>
+<div id="ctxSub" class="ctx-menu ctx-sub hidden" role="menu" aria-label="SQL 模板分类"></div>
+<!-- 第三级：某个分类下的具体语句。分两层是为了让每个面板都短 ——
+     15 条摊平要 577px，分下去每层最多 5 行。 -->
+<div id="ctxSub2" class="ctx-menu ctx-sub hidden" role="menu" aria-label="SQL 模板"></div>
 
 <script src="/vendor/codemirror/lib/codemirror.js"></script>
 <script src="/vendor/codemirror/mode/sql.js"></script>

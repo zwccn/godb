@@ -4163,6 +4163,10 @@ html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }
 .ctx-sep { height: 1px; margin: 4px 6px; background: var(--border-soft); }
 
 /* 「插入 SQL 模板」那一项右边的小箭头：说明它还有下一层，不是又一个动作 */
+/* 带下级的项右边有两样东西（条数 + 箭头）：让 kbd 吃掉剩余空间，
+   箭头紧跟在它后面。两个都 auto 的话空白会被对半分，看着像三栏。 */
+.ctx-item.has-sub kbd { margin-left: auto; }
+.ctx-item.has-sub .ctx-arrow { margin-left: 8px; }
 .ctx-item .ctx-arrow {
   margin-left: auto;
   font-family: var(--mono);
@@ -4189,6 +4193,10 @@ html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }
   letter-spacing: .5px;
   color: var(--text-3);
 }
+/* 两级面板各自定宽：不定宽的话，切分类时面板宽度会跟着文字长短跳一下
+   （查询的提示文字最长、更新与删除最短），看着像菜单在抖。 */
+#ctxSub { width: 212px; min-width: 212px; }
+#ctxSub2 { width: 300px; min-width: 300px; }
 .ctx-sub .ctx-item { gap: 12px; padding: 4px 9px; }
 .ctx-sub .ctx-item kbd { font-size: calc(10px * var(--fs)); }
 /* 科技灰下给菜单一点光，和顶栏光带、焦点环是一套语言 */

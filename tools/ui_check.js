@@ -2206,9 +2206,10 @@ class CDP {
     const ctxClosed = await cdp.eval(`document.getElementById('ctxMenu').classList.contains('hidden')`);
     check('右键菜单按 Esc 就关，不连带关掉别的面板', ctxClosed, `隐藏 ${ctxClosed}`);
 
-    /* SQL 模板：右键 →「插入 SQL 模板」飞出 15 条骨架（建表 / 改表 / 查询 / 更新删除）。
-       验三件事 —— 位置（贴在主菜单右侧、不出屏）、占位符（表名自动填、同名的多选）、
-       以及选完就收菜单。模板本身的语法在 tools 里另有一次性脚本真跑过一遍。 */
+    /* SQL 模板是**三级**的：右键 → 分类（4 个）→ 具体语句。15 条摊平要 577px，
+       一屏菜单太长；分下去每层最多 5 行。
+       验：分类那一层短、贴主菜单右侧；hover 分类飞出语句；点一条就插进编辑器，
+       表名自动填、同名占位符一起选中、两层菜单都收起。 */
     await cdp.eval(`lastTableName = 'employees'; cm.setValue(''); openEditorMenu(320, 200)`);
     await sleep(300);
     await cdp.eval(`(() => {
@@ -2222,20 +2223,44 @@ class CDP {
       const m = document.getElementById('ctxMenu').getBoundingClientRect();
       return {
         open: !s.classList.contains('hidden'),
-        groups: [...s.querySelectorAll('.ctx-group')].map(g => g.textContent),
-        n: s.querySelectorAll('.ctx-item').length,
+        labels: [...s.querySelectorAll('.ctx-item')].map(b => b.firstChild.textContent),
+        counts: [...s.querySelectorAll('.ctx-item kbd')].map(k => k.textContent),
+        h: Math.round(r.height),
         right: r.left >= m.right,
         inView: r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
-        noScroll: s.scrollHeight <= s.clientHeight + 1,
       };
     })()`);
-    check('右键「插入 SQL 模板」飞出 15 条骨架，分四组、贴主菜单右侧、不用滚',
-      tplUi.open && tplUi.n === 15 && tplUi.groups.join('/') === '建表/修改表/查询/更新与删除'
-      && tplUi.right && tplUi.inView && tplUi.noScroll,
-      `${tplUi.n} 条 · ${tplUi.groups.join('/')} · 右侧 ${tplUi.right} · 不滚 ${tplUi.noScroll}`);
+    check('右键「插入 SQL 模板」只列 4 个分类（15 条不摊平），贴主菜单右侧且短',
+      tplUi.open && tplUi.labels.join('/') === '建表/修改表/查询/更新与删除'
+      && tplUi.counts.join('/') === '2 条/4 条/5 条/4 条'
+      && tplUi.right && tplUi.inView && tplUi.h < 220,
+      `${tplUi.labels.join('/')} · ${tplUi.counts.join('/')} · 高 ${tplUi.h}px`);
 
     await cdp.eval(`(() => {
-      const b = [...document.querySelectorAll('#ctxSub .ctx-item')].find(x => x.textContent.includes('分组统计'));
+      const b = [...document.getElementById('ctxSub').querySelectorAll('.ctx-item')]
+        .find(x => x.firstChild.textContent === '查询');
+      b.dispatchEvent(new MouseEvent('mouseenter'));
+    })()`);
+    await sleep(350);
+    const tplLv3 = await cdp.eval(`(() => {
+      const s = document.getElementById('ctxSub2');
+      const r = s.getBoundingClientRect();
+      const p = document.getElementById('ctxSub').getBoundingClientRect();
+      return {
+        open: !s.classList.contains('hidden'),
+        labels: [...s.querySelectorAll('.ctx-item')].map(b => b.firstChild.textContent),
+        right: r.left >= p.right,
+        inView: r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
+      };
+    })()`);
+    check('hover 分类飞出第三级语句（查询 → 5 条），贴分类面板右侧、不出屏',
+      tplLv3.open && tplLv3.labels.length === 5
+      && tplLv3.labels[0] === '单表查询' && tplLv3.labels[4] === '子查询 EXISTS'
+      && tplLv3.right && tplLv3.inView,
+      tplLv3.labels.join('/'));
+
+    await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('#ctxSub2 .ctx-item')].find(x => x.firstChild.textContent === '分组统计');
       b.click();
     })()`);
     await sleep(400);
@@ -2243,10 +2268,10 @@ class CDP {
       text: cm.getValue(),
       sels: cm.listSelections().length,
       selText: cm.listSelections().map(x => cm.getRange(x.anchor, x.head)),
-      closed: document.getElementById('ctxMenu').classList.contains('hidden')
-        && document.getElementById('ctxSub').classList.contains('hidden'),
+      closed: [document.getElementById('ctxMenu'), document.getElementById('ctxSub'), document.getElementById('ctxSub2')]
+        .every(m => m.classList.contains('hidden')),
     }))()`);
-    check('选一个模板：表名自动填、同名的占位符一起选中、菜单随即收起',
+    check('点一条语句：表名自动填、同名占位符一起选中、三层菜单一起收起',
       /FROM employees/.test(tplIns.text) && /GROUP BY 分组列/.test(tplIns.text)
       && tplIns.sels === 2 && tplIns.selText.every(t => t === '分组列') && tplIns.closed,
       `选中 ${tplIns.sels} 处 ${JSON.stringify(tplIns.selText)} · 收起 ${tplIns.closed}`);

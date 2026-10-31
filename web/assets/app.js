@@ -6218,48 +6218,71 @@ function insertTemplate(tpl) {
   syncRunLabel();
 }
 
-const ctxSub = document.getElementById('ctxSub');
+const ctxSub = document.getElementById('ctxSub');    // 第二级：分类
+const ctxSub2 = document.getElementById('ctxSub2');  // 第三级：某个分类下的语句
+
+/* placeFlyout 把一个飞出面板摆在 ref 右边；右边放不下翻到左边，上下再夹一次别出屏。
+   ref 传上一级面板的 rect —— 贴**面板**的边而不是贴某一项的边：项比面板窄
+   （面板有 4px padding），贴项的话会压住面板右边框，看起来像叠在一起。 */
+function placeFlyout(box, ref, anchorTop) {
+  box.style.left = '-9999px';
+  box.style.top = '0px';
+  box.classList.remove('hidden');
+  const r = box.getBoundingClientRect();
+  let left = ref.right + 2;
+  if (left + r.width > window.innerWidth - 8) left = ref.left - r.width - 2;
+  let top = anchorTop - 5;
+  if (top + r.height > window.innerHeight - 8) top = window.innerHeight - r.height - 8;
+  box.style.left = `${Math.max(8, left)}px`;
+  box.style.top = `${Math.max(8, top)}px`;
+}
 
 function closeTemplateMenu() {
   if (ctxSub) ctxSub.classList.add('hidden');
-  if (ctxMenu) {
-    for (const b of ctxMenu.querySelectorAll('.ctx-item.open')) b.classList.remove('open');
+  if (ctxSub2) ctxSub2.classList.add('hidden');
+  for (const box of [ctxMenu, ctxSub]) {
+    if (!box) continue;
+    for (const b of box.querySelectorAll('.ctx-item.open')) b.classList.remove('open');
   }
 }
 
-/* openTemplateMenu 把子菜单摆在「插入 SQL 模板」这一项的右边；
-   右边放不下就翻到左边（窄屏窗口常见），上下再夹一次别出屏。 */
+/* 第二级：只列分类（建表 / 修改表 / 查询 / 更新与删除）。
+   15 条摊平要 577px，一屏菜单太长了；分成两层之后每层最多 5 行。 */
 function openTemplateMenu(anchor) {
   if (!ctxSub) return;
   for (const b of ctxMenu.querySelectorAll('.ctx-item.open')) b.classList.remove('open');
   anchor.classList.add('open');
   ctxSub.innerHTML = '';
   for (const g of SQL_TEMPLATES) {
-    ctxSub.appendChild(el('div', 'ctx-group', g.group));
-    for (const it of g.items) {
-      const b = el('button', 'ctx-item', it.label);
-      b.type = 'button';
-      b.title = it.tip;
-      b.appendChild(el('kbd', null, it.hint));
-      b.addEventListener('click', () => { closeEditorMenu(); insertTemplate(it.text); });
-      ctxSub.appendChild(b);
-    }
+    const b = el('button', 'ctx-item has-sub', g.group);
+    b.type = 'button';
+    b.setAttribute('aria-haspopup', 'menu');
+    b.title = g.items.map(x => x.label).join('、');
+    b.appendChild(el('kbd', null, `${g.items.length} 条`));
+    b.appendChild(el('span', 'ctx-arrow', '›'));
+    // hover 就往下一层展开；只有 click 的话还得再点一下，只有 hover 的话触控板进不去
+    b.addEventListener('mouseenter', () => openTemplateGroup(g, b));
+    b.addEventListener('click', () => openTemplateGroup(g, b));
+    ctxSub.appendChild(b);
   }
-  // 先挪到屏幕外量尺寸再摆位，否则会在鼠标处闪一下再跳走
-  ctxSub.style.left = '-9999px';
-  ctxSub.style.top = '0px';
-  ctxSub.classList.remove('hidden');
-  const a = anchor.getBoundingClientRect();
-  const m = ctxMenu.getBoundingClientRect();
-  const r = ctxSub.getBoundingClientRect();
-  // 横向贴**菜单**的边，不是贴这一项的边：项比菜单窄（菜单有 4px padding），
-  // 贴项的话子菜单会压住菜单右边框，看起来像叠在一起。
-  let left = m.right + 2;
-  if (left + r.width > window.innerWidth - 8) left = m.left - r.width - 2;
-  let top = a.top - 5;
-  if (top + r.height > window.innerHeight - 8) top = window.innerHeight - r.height - 8;
-  ctxSub.style.left = `${Math.max(8, left)}px`;
-  ctxSub.style.top = `${Math.max(8, top)}px`;
+  placeFlyout(ctxSub, ctxMenu.getBoundingClientRect(), anchor.getBoundingClientRect().top);
+}
+
+/* 第三级：某个分类下的语句，点一条就插进编辑器。 */
+function openTemplateGroup(g, anchor) {
+  if (!ctxSub2) return;
+  for (const b of ctxSub.querySelectorAll('.ctx-item.open')) b.classList.remove('open');
+  anchor.classList.add('open');
+  ctxSub2.innerHTML = '';
+  for (const it of g.items) {
+    const b = el('button', 'ctx-item', it.label);
+    b.type = 'button';
+    b.title = it.tip;
+    b.appendChild(el('kbd', null, it.hint));
+    b.addEventListener('click', () => { closeEditorMenu(); insertTemplate(it.text); });
+    ctxSub2.appendChild(b);
+  }
+  placeFlyout(ctxSub2, ctxSub.getBoundingClientRect(), anchor.getBoundingClientRect().top);
 }
 
 function openEditorMenu(x, y) {
@@ -6334,8 +6357,9 @@ document.addEventListener('keydown', e => {
 }, true);
 document.addEventListener('pointerdown', e => {
   if (!ctxMenu || ctxMenu.classList.contains('hidden')) return;
-  // 子菜单是独立元素，点它不算「点到外面」
+  // 飞出面板是独立元素，点它们不算「点到外面」
   if (ctxSub && ctxSub.contains(e.target)) return;
+  if (ctxSub2 && ctxSub2.contains(e.target)) return;
   if (!ctxMenu.contains(e.target)) closeEditorMenu();
 }, true);
 
@@ -6346,6 +6370,13 @@ if (ctxMenu) {
     const it = e.target instanceof Element ? e.target.closest('.ctx-item') : null;
     if (it && !it.classList.contains('has-sub')) closeTemplateMenu();
   });
+  // 在分类面板里移到「非分类」的东西上（现在没有，留着防以后加项）就把第三级收掉
+  if (ctxSub) {
+    ctxSub.addEventListener('mouseover', e => {
+      const it = e.target instanceof Element ? e.target.closest('.ctx-item') : null;
+      if (it && !it.classList.contains('has-sub') && ctxSub2) ctxSub2.classList.add('hidden');
+    });
+  }
 }
 window.addEventListener('blur', closeEditorMenu);
 window.addEventListener('scroll', closeEditorMenu, true);

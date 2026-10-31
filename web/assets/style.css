@@ -3505,3 +3505,46 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .space-dseg.s-used { background: var(--accent); }
 .space-dseg.s-free { background: var(--ok); }
 .space-dseg.s-hole { background: var(--warn); }
+
+/* ---- 监控：页面级 Tab（概览 / 存储 / 诊断） ----
+   和诊断卡里那层小 Tab 区分开：这里是「看哪一类问题」，那里是「同一个问题的三种切面」。
+   样式上用下划线而不是药丸，避免两层 Tab 长得一样分不清。 */
+.mon-nav {
+  display: flex;
+  gap: 2px;
+  padding: 6px 16px 0;
+  border-bottom: 1px solid var(--border-soft);
+  flex: 0 0 auto;
+  overflow-x: auto;
+}
+.mon-nav-tab {
+  font: inherit;
+  font-size: calc(12.5px * var(--fs));
+  padding: 5px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mon-nav-tab:hover { color: var(--text); background: var(--row-hover); }
+.mon-nav-tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.mon-page { display: flex; flex-direction: column; gap: 12px; }
+.mon-page.hidden { display: none; }
+/* 卡片在页面容器里同样是「该多高就多高」（.mon-card 是 overflow:hidden，
+   flex 自动最小尺寸会退化成 0，压扁成一条线 —— 这个坑在 .mon-body 上踩过一次） */
+.mon-page > * { flex: 0 0 auto; }
+
+/* 「存储」页的 IO 卡整宽：单列会把说明文字拉成一行长句，两列刚好一行一对 */
+.mon-io.wide { display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; }
+.mon-io.wide .io-row { border-bottom: 1px solid var(--border-soft); }
+
+@media (max-width: 720px) {
+  .mon-io.wide { grid-template-columns: 1fr; }
+  .mon-nav { padding: 6px 10px 0; }
+}

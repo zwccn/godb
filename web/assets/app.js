@@ -1471,6 +1471,10 @@ const monEls = {
     sql: document.getElementById('monTabSqlN'),
     tx: document.getElementById('monTabTxN'),
   },
+  nav: document.getElementById('monNav'),
+  body: document.getElementById('monBody'),
+  ioSum: document.getElementById('monIOSum'),
+  spaceSub: document.getElementById('spaceSub'),
   spaceBar: document.getElementById('spaceBar'),
   spaceLegend: document.getElementById('spaceLegend'),
   spaceBody: document.getElementById('spaceBody'),
@@ -1509,7 +1513,7 @@ let monTab = '';
 let monTabAuto = true;
 
 // 顺序 = 页面上的顺序。锁明细放最后：它是「出事才看」的，平时先看慢SQL/慢事务。
-const MON_TABS = ['sql', 'tx', 'lock', 'space'];
+const MON_TABS = ['sql', 'tx', 'lock'];
 
 // 慢SQL/慢事务的排序口径。两个榜单后端都算好了（slowSql / slowSqlMax），
 // 切换时不发请求、不等下一轮轮询。
@@ -1558,6 +1562,41 @@ function toggleMonitor(force) {
   else setMonSettings(false);
 }
 
+/* ---- 页面级 Tab：概览 / 存储 / 诊断 ----
+   按「回答什么问题」分：概览看健康与走势，存储看磁盘，诊断看谁在捣乱。
+   诊断卡内部还有一层小 Tab（慢SQL/慢事务/锁），那是同一个问题的三种切面。 */
+const MON_PAGES = ['overview', 'storage', 'diag'];
+let monPageTab = 'overview';
+
+function setMonPage(name) {
+  if (MON_PAGES.indexOf(name) < 0) name = MON_PAGES[0];
+  monPageTab = name;
+  if (monEls.nav) {
+    for (const b of monEls.nav.querySelectorAll('.mon-nav-tab')) {
+      const on = b.dataset.page === name;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+  }
+  for (const p of monPanel.querySelectorAll('.mon-page')) {
+    p.classList.toggle('hidden', p.dataset.page !== name);
+  }
+  // 三个页面共用一个滚动容器，切页必须回到顶部，否则新页会停在上一页的偏移处
+  if (monEls.body) monEls.body.scrollTop = 0;
+  // 空间是「点开才算」的：要 stat 每张表，下钻还要逐页读，不跟着轮询跑。
+  if (name === 'storage' && !spaceData) loadSpace();
+}
+
+if (monEls.nav) {
+  monEls.nav.addEventListener('click', e => {
+    const b = e.target.closest('.mon-nav-tab');
+    if (b) setMonPage(b.dataset.page);
+  });
+}
+
+const btnGoStorage = document.getElementById('btnGoStorage');
+if (btnGoStorage) btnGoStorage.addEventListener('click', () => setMonPage('storage'));
+
 // 把诊断区切到某个 Tab。manual=true 表示用户点的，记下来不再自动改。
 function setMonTab(name, manual) {
   if (MON_TABS.indexOf(name) < 0) name = MON_TABS[0];
@@ -1573,8 +1612,6 @@ function setMonTab(name, manual) {
   }
   syncSortToggle();
   updateDiagSub();
-  // 空间是「点开才算」的：扫描要 stat 每张表的文件，没必要跟着每秒轮询跑。
-  if (name === 'space' && !spaceData) loadSpace();
 }
 
 function monCounts() {
@@ -1600,7 +1637,6 @@ function updateDiagSub() {
     lock: n.lock ? `${n.lock} 把锁 · 按持有时长降序 · 点行展开事务详情` : '当前没有表锁',
     sql: n.sql ? `跟踪 ${n.sql} 个结构 · 按${by} · 点行看明细` : '还没有执行记录',
     tx: n.tx ? `跟踪 ${n.tx} 个结构 · 按${byTx} · 点行看明细` : '还没有结束的事务',
-    space: spaceSubText(),
   };
   for (const k of MON_TABS) {
     const b = monEls.tabN[k];
@@ -1776,6 +1812,7 @@ function renderMonitor(m) {
   renderRates(m);
   renderProc(m);
   renderIO(m);
+  renderIOSummary(m);
   renderLocks(m);
   renderSlowSQL(m);
   renderSlowTx(m);
@@ -2162,6 +2199,17 @@ const CP_REASON_TEXT = {
   ddl: 'DDL 强制',
 };
 
+// 一行「标签 + 值 + 说明」：存储卡与概览里的存储摘要共用，
+// 两处口径必须一样，抄一份迟早会走偏。
+function ioRow(name, main, sub, tip, cls) {
+  const r = el('div', 'io-row' + (cls ? ' ' + cls : ''));
+  if (tip) r.title = tip;
+  r.appendChild(el('span', 'io-k', name));
+  r.appendChild(el('span', 'io-v', main));
+  if (sub) r.appendChild(el('span', 'io-sub', sub));
+  return r;
+}
+
 function renderIO(m) {
   const io = m.io || {};
   const f = io.fsync || {};
@@ -2169,15 +2217,7 @@ function renderIO(m) {
   const rt = io.rates || {};
   const box = monEls.io;
   box.innerHTML = '';
-
-  const row = (name, main, sub, tip, cls) => {
-    const r = el('div', 'io-row' + (cls ? ' ' + cls : ''));
-    if (tip) r.title = tip;
-    r.appendChild(el('span', 'io-k', name));
-    r.appendChild(el('span', 'io-v', main));
-    if (sub) r.appendChild(el('span', 'io-sub', sub));
-    return r;
-  };
+  const row = ioRow;
 
   // p95 超过 10ms 就算值得注意：这已经超过一次内存读的三个数量级
   const fsyncHot = (f.p95Ns || 0) >= 10e6;
@@ -2262,6 +2302,42 @@ function renderIO(m) {
     `${tables.length} 表 / ${fmtBytes(io.totalBytes)}`,
     (top || '还没有表') + (sp.lobBytes ? ` · 大字段 ${fmtBytes(sp.lobBytes)}` : ''),
     '各表页文件（tables/tXXXXXX.dat）的大小；行内超过 2KB 的文本另存进 .lob，单独算'));
+}
+
+// 概览页的存储摘要：只放三行 —— fsync（提交的实际等待）、缓冲池命中率、页密度。
+// 完整的那张卡在「存储」页；这里放摘要是因为「提交变慢」是最高频的排障入口，
+// 不该让人先切页才能看到 fsync。
+function renderIOSummary(m) {
+  const box = monEls.ioSum;
+  if (!box) return;
+  const io = m.io || {};
+  const f = io.fsync || {};
+  const pool = io.pool || {};
+  const sp = io.space || {};
+  const rt = io.rates || {};
+  box.innerHTML = '';
+
+  box.appendChild(ioRow('fsync',
+    f.runs ? `${fmtNs(f.p95Ns)} p95` : '—',
+    f.runs
+      ? `${fmtNs(f.p50Ns)} p50 · ${rt.fsyncPerSec || 0} 次/s 服务 ${rt.commitsPerSec || 0} 提交/s`
+      : '还没有写过盘',
+    'fsync 延迟就是提交实际等待；WAL / 快照 / 缓冲池的完整数字在「存储」页',
+    (f.p95Ns || 0) >= 10e6 ? 'bad' : ''));
+
+  const look = (pool.hits || 0) + (pool.misses || 0);
+  const hit = look > 0 ? `${((pool.hits / look) * 100).toFixed(1)}%` : '—';
+  box.appendChild(ioRow('缓冲池', hit,
+    look > 0 ? `${pool.resident || 0}/${pool.budget || 0} 页 · 脏页 ${pool.dirty || 0}` : '还没有页被读过',
+    '命中率高 = 页都在内存里；超预算说明 bufferPoolPages 该调大了',
+    look > 0 && pool.hits / look < 0.8 ? 'warn' : ''));
+
+  const fillOk = (sp.fillPages || 0) > 0;
+  box.appendChild(ioRow('页密度',
+    fillOk ? `${((sp.fill || 0) * 100).toFixed(0)}%` : '—',
+    fillOk ? `${sp.pages || 0} 页 · 逐表明细在「存储」页` : '表都还小（不足 8 页）或还没落盘',
+    '页密度 = 1 - 页里可复用空闲 / 页容量；掉下来通常是删了很多行还没整理',
+    fillOk && (sp.fill || 0) < 0.5 ? 'warn' : ''));
 }
 
 /* ---- 4. 锁明细 ---- */
@@ -2506,14 +2582,6 @@ function renderSlowTx(m) {
 let spaceData = null;   // { space, tables }
 let spaceOpenName = ''; // 当前展开的表名（点击同一行=收起）
 
-function spaceSubText() {
-  if (!spaceData) return '打开时扫描一次 · 点表名看页级构成';
-  const sp = spaceData.space || {};
-  const n = (spaceData.tables || []).length;
-  const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0) + (sp.walBytes || 0);
-  return `${n} 张表 · 合计 ${fmtBytes(total)} · 点表名看页级构成`;
-}
-
 async function loadSpace() {
   try {
     spaceData = await api('/api/space');
@@ -2576,9 +2644,16 @@ function renderSpace() {
     tr.appendChild(el('td', 'c-num', fmtBytes(t.lobBytes || 0)));
     tr.appendChild(el('td', 'c-num', fmtCount(t.rows || 0)));
     tr.appendChild(el('td', 'c-num', String(t.pages || 0)));
-    tr.appendChild(el('td', 'c-num', t.fillKnown ? `${((t.fill || 0) * 100).toFixed(0)}%` : '—'));
+    // 太小的表（<8 页）不显示密度：最后一页天然不满，1 页的表永远是 4% 这种数，
+    // 只会误导。和全库那个百分比的阈值保持一致。
+    const fillText = t.fillKnown && (t.pages || 0) >= 8
+      ? `${((t.fill || 0) * 100).toFixed(0)}%` : '—';
+    tr.appendChild(el('td', 'c-num', fillText));
     tr.addEventListener('click', () => toggleSpaceDetail(t.name));
     monEls.spaceBody.appendChild(tr);
+  }
+  if (monEls.spaceSub) {
+    monEls.spaceSub.textContent = `${tables.length} 张表 · 合计 ${fmtBytes(total)} · 点表名逐页看构成`;
   }
 }
 

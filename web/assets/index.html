@@ -204,111 +204,76 @@ try {
     </div>
   </div>
 
-  <div class="mon-body">
-    <!-- 1. 水位条：一排数字 + 健康灯。绿灯不用往下看。 -->
-    <div class="mon-water" id="monWater"></div>
+  <!-- 页面级 Tab：概览 / 存储 / 诊断。
+       原来「存储与 IO」在概览最下面、「空间」又混在诊断卡的 Tab 里，两处互不相干，
+       而「提交为什么慢」既要看 fsync 又要看落盘 —— 干脆按「回答什么问题」分页：
+       概览看健康、存储看磁盘、诊断看谁在捣乱。概览底部留一行存储摘要，排障时不用来回切。 -->
+  <div class="mon-nav" id="monNav" role="tablist" aria-label="监控视图">
+    <button type="button" class="mon-nav-tab on" data-page="overview" role="tab" aria-selected="true">概览</button>
+    <button type="button" class="mon-nav-tab" data-page="storage" role="tab" aria-selected="false">存储</button>
+    <button type="button" class="mon-nav-tab" data-page="diag" role="tab" aria-selected="false">诊断</button>
+  </div>
 
-    <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
-    <div class="mon-layers" id="monLayers"></div>
+  <div class="mon-body" id="monBody">
+    <div class="mon-page" data-page="overview">
+      <!-- 1. 水位条：一排数字 + 健康灯。绿灯不用往下看。 -->
+      <div class="mon-water" id="monWater"></div>
 
-    <!-- 3. 诊断：慢 SQL / 慢事务 / 锁明细 三合一，Tab 切换。
-         三块都是「有问题才有内容」的表格，平铺时没数据的三块会白占两屏。
-         锁明细 8 列必须独占整行宽，所以不做左右并排。
-         Tab 上带条数，空的不藏起来 —— 看不到的东西等于没监控。 -->
-    <section class="mon-card mon-diag">
-      <div class="mon-card-head">
-        <div class="mon-tabs" id="monTabs" role="tablist" aria-label="诊断视图">
-          <button class="mon-tab" type="button" role="tab" data-tab="sql" aria-selected="false">
-            慢 SQL<b class="mon-tab-n" id="monTabSqlN"></b>
-          </button>
-          <button class="mon-tab" type="button" role="tab" data-tab="tx" aria-selected="false">
-            慢事务<b class="mon-tab-n" id="monTabTxN"></b>
-          </button>
-          <button class="mon-tab" type="button" role="tab" data-tab="lock" aria-selected="false">
-            锁明细<b class="mon-tab-n" id="monTabLockN"></b>
-          </button>
-          <button class="mon-tab" type="button" role="tab" data-tab="space" aria-selected="false">
-            空间<b class="mon-tab-n" id="monTabSpaceN"></b>
-          </button>
-        </div>
-        <div class="mon-sort" id="monSort" role="group" aria-label="排序方式">
-          <button type="button" data-sort="total" class="on">按累计</button>
-          <button type="button" data-sort="max">按单次</button>
-        </div>
-        <span class="mon-sub" id="monDiagSub"></span>
-      </div>
+      <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
+      <div class="mon-layers" id="monLayers"></div>
 
-      <!-- 4a. 锁明细：谁持有、持多久、事务在忙还是闲着、谁在等 -->
-      <div class="mon-panel" data-panel="lock" id="monTabLock" role="tabpanel">
-        <div class="mon-lockwrap">
-          <table class="mon-locks">
-            <thead>
-              <tr>
-                <th class="c-table">表名</th>
-                <th class="c-mode">锁</th>
-                <th class="c-sess">持有者</th>
-                <th class="c-held">已持有时长</th>
-                <th class="c-state">事务状态</th>
-                <th class="c-sql">最后一条 SQL</th>
-                <th class="c-wait">等待者</th>
-                <th class="c-act">操作</th>
-              </tr>
-            </thead>
-            <tbody id="monLockBody"></tbody>
-          </table>
-        </div>
-        <div class="mon-ok hidden" id="monLockOk">当前没有表锁，所有会话都空闲</div>
-        <div class="mon-pager hidden" id="monLockPager"></div>
-      </div>
-
-      <!-- 4b. 慢 SQL：按「语句结构」聚合（参数换成 ? 后相同的算一条） -->
-      <div class="mon-panel hidden" data-panel="sql" id="monTabSql" role="tabpanel">
-        <div class="mon-tw">
-          <table class="mon-slow">
-            <thead>
-              <tr>
-                <th class="c-num">次数</th>
-                <th class="c-num">累计</th>
-                <th class="c-num">平均</th>
-                <th class="c-num">最大</th>
-                <th class="c-sql">SQL（参数显示为 ?，同结构算一条）</th>
-              </tr>
-            </thead>
-            <tbody id="monSlowSQL"></tbody>
-          </table>
-        </div>
-        <div class="mon-ok hidden" id="monSqlOk">还没有执行记录</div>
-        <div class="mon-pager hidden" id="monSqlPager"></div>
-      </div>
-
-      <!-- 4c. 慢事务：按「表集合 + 读写」聚合，只记已经结束的事务 -->
-      <div class="mon-panel hidden" data-panel="tx" id="monTabTx" role="tabpanel">
-        <div class="mon-tw">
-          <table class="mon-slow">
-            <thead>
-              <tr>
-                <th class="c-num">次数</th>
-                <th class="c-num">累计</th>
-                <th class="c-num">平均</th>
-                <th class="c-num">最长</th>
-                <th class="c-sql">表集合（读 / 写）</th>
-              </tr>
-            </thead>
-            <tbody id="monSlowTx"></tbody>
-          </table>
-        </div>
-        <div class="mon-ok hidden" id="monTxOk">还没有结束的事务（BEGIN … COMMIT 之后记一条）</div>
-        <div class="mon-pager hidden" id="monTxPager"></div>
-      </div>
-
-      <!-- 4d. 空间：四块占比 + 每张表占多少、有多满。点一行才去逐页算「洞」——
-           扫描是 8KB×页数 的读，不能跟着每秒轮询跑。 -->
-      <div class="mon-panel hidden" data-panel="space" id="monTabSpace" role="tabpanel">
-        <div class="space-top">
-          <div class="space-head">
-            <span class="space-title">全库占用（数据 / 索引 / 大字段 / WAL）</span>
-            <button class="space-rescan" id="spaceRescan" type="button">重新扫描</button>
+      <!-- 4. 吞吐走势：QPS / TPS / 连接数。
+           水位是瞬时快照，这里是走势 —— 「刚才那阵子忙成什么样、什么时候掉下去的」
+           只有曲线答得出来。和进程资源用同一个秒级节拍，横轴天然对齐。 -->
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>吞吐与连接</span>
+          <span class="mon-sub" id="monRateSub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
+          <!-- 时间窗口：只影响画图，采样节奏和聚合口径都不变 -->
+          <div class="mon-win" id="monWin" role="group" aria-label="时间窗口">
+            <button type="button" data-win="60">1 分钟</button>
+            <button type="button" data-win="300" class="on">5 分钟</button>
           </div>
+        </div>
+        <div class="mon-rate" id="monRate"></div>
+      </section>
+
+      <section class="mon-card">
+          <div class="mon-card-head">
+            <span>进程资源</span>
+            <span class="mon-sub" id="monProcSub">每秒采样 · 最近 5 分钟</span>
+          </div>
+          <div class="mon-proc" id="monProc"></div>
+      </section>
+      <!-- 存储摘要：排障时先看这一行（fsync 就是提交的实际等待），
+           要看 WAL / 快照 / 缓冲池与逐表空间，再切「存储」页。 -->
+      <section class="mon-card">
+        <div class="mon-card-head">
+          <span>存储</span>
+          <span class="mon-sub">摘要 · 明细在「存储」页</span>
+          <button class="space-rescan" id="btnGoStorage" type="button">看明细</button>
+        </div>
+        <div class="mon-io" id="monIOSum"></div>
+      </section>
+    </div>
+
+    <div class="mon-page hidden" data-page="storage">
+      <section class="mon-card">
+          <div class="mon-card-head">
+            <span>存储与 IO</span>
+            <span class="mon-sub">fsync = 提交实际等待</span>
+          </div>
+          <div class="mon-io wide" id="monIO"></div>
+      </section>
+      <!-- 空间：四块占比 + 每张表占多少、有多满。点一行才去逐页算「洞」——
+           扫描是 8KB×页数 的读，不能跟着每秒轮询跑，所以它跟着「存储」页按需加载。 -->
+      <section class="mon-card" id="monSpaceCard">
+        <div class="mon-card-head">
+          <span>空间</span>
+          <span class="mon-sub" id="spaceSub">按文件统计 · 点表名逐页看构成</span>
+          <button class="space-rescan" id="spaceRescan" type="button">重新扫描</button>
+        </div>
+        <div class="space-top">
           <div class="space-bar" id="spaceBar" aria-hidden="true"></div>
           <div class="space-legend" id="spaceLegend"></div>
         </div>
@@ -330,46 +295,99 @@ try {
         </div>
         <div class="space-detail hidden" id="spaceDetail"></div>
         <div class="mon-ok hidden" id="spaceOk">还没有表</div>
-      </div>
-    </section>
-
-
-    <!-- 4. 吞吐走势：QPS / TPS / 连接数。
-         水位是瞬时快照，这里是走势 —— 「刚才那阵子忙成什么样、什么时候掉下去的」
-         只有曲线答得出来。和进程资源用同一个秒级节拍，横轴天然对齐。 -->
-    <section class="mon-card">
-      <div class="mon-card-head">
-        <span>吞吐与连接</span>
-        <span class="mon-sub" id="monRateSub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
-        <!-- 时间窗口：只影响画图，采样节奏和聚合口径都不变 -->
-        <div class="mon-win" id="monWin" role="group" aria-label="时间窗口">
-          <button type="button" data-win="60">1 分钟</button>
-          <button type="button" data-win="300" class="on">5 分钟</button>
-        </div>
-      </div>
-      <div class="mon-rate" id="monRate"></div>
-    </section>
-
-    <!-- 5. 资源：进程自身 + 存储 IO。
-         全部由标准库采集（runtime/metrics + getrusage/GetProcessTimes），
-         不依赖任何系统命令行工具，三平台行为一致。 -->
-    <div class="mon-two">
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>进程资源</span>
-          <span class="mon-sub" id="monProcSub">每秒采样 · 最近 5 分钟</span>
-        </div>
-        <div class="mon-proc" id="monProc"></div>
-      </section>
-      <section class="mon-card">
-        <div class="mon-card-head">
-          <span>存储与 IO</span>
-          <span class="mon-sub">fsync = 提交实际等待</span>
-        </div>
-        <div class="mon-io" id="monIO"></div>
       </section>
     </div>
 
+    <div class="mon-page hidden" data-page="diag">
+      <!-- 诊断：慢 SQL / 慢事务 / 锁明细 三合一，Tab 切换。
+           这三块回答的是「谁在捣乱」，和「磁盘怎么用的」是两种问题，所以分页。
+           三块都是「有问题才有内容」的表格，平铺时没数据的三块会白占两屏。
+           锁明细 8 列必须独占整行宽，所以不做左右并排。
+           Tab 上带条数，空的不藏起来 —— 看不到的东西等于没监控。 -->
+      <section class="mon-card mon-diag">
+        <div class="mon-card-head">
+          <div class="mon-tabs" id="monTabs" role="tablist" aria-label="诊断视图">
+            <button class="mon-tab" type="button" role="tab" data-tab="sql" aria-selected="false">
+              慢 SQL<b class="mon-tab-n" id="monTabSqlN"></b>
+            </button>
+            <button class="mon-tab" type="button" role="tab" data-tab="tx" aria-selected="false">
+              慢事务<b class="mon-tab-n" id="monTabTxN"></b>
+            </button>
+            <button class="mon-tab" type="button" role="tab" data-tab="lock" aria-selected="false">
+              锁明细<b class="mon-tab-n" id="monTabLockN"></b>
+            </button>
+          </div>
+          <div class="mon-sort" id="monSort" role="group" aria-label="排序方式">
+            <button type="button" data-sort="total" class="on">按累计</button>
+            <button type="button" data-sort="max">按单次</button>
+          </div>
+          <span class="mon-sub" id="monDiagSub"></span>
+        </div>
+
+        <!-- 4a. 锁明细：谁持有、持多久、事务在忙还是闲着、谁在等 -->
+        <div class="mon-panel" data-panel="lock" id="monTabLock" role="tabpanel">
+          <div class="mon-lockwrap">
+            <table class="mon-locks">
+              <thead>
+                <tr>
+                  <th class="c-table">表名</th>
+                  <th class="c-mode">锁</th>
+                  <th class="c-sess">持有者</th>
+                  <th class="c-held">已持有时长</th>
+                  <th class="c-state">事务状态</th>
+                  <th class="c-sql">最后一条 SQL</th>
+                  <th class="c-wait">等待者</th>
+                  <th class="c-act">操作</th>
+                </tr>
+              </thead>
+              <tbody id="monLockBody"></tbody>
+            </table>
+          </div>
+          <div class="mon-ok hidden" id="monLockOk">当前没有表锁，所有会话都空闲</div>
+          <div class="mon-pager hidden" id="monLockPager"></div>
+        </div>
+
+        <!-- 4b. 慢 SQL：按「语句结构」聚合（参数换成 ? 后相同的算一条） -->
+        <div class="mon-panel hidden" data-panel="sql" id="monTabSql" role="tabpanel">
+          <div class="mon-tw">
+            <table class="mon-slow">
+              <thead>
+                <tr>
+                  <th class="c-num">次数</th>
+                  <th class="c-num">累计</th>
+                  <th class="c-num">平均</th>
+                  <th class="c-num">最大</th>
+                  <th class="c-sql">SQL（参数显示为 ?，同结构算一条）</th>
+                </tr>
+              </thead>
+              <tbody id="monSlowSQL"></tbody>
+            </table>
+          </div>
+          <div class="mon-ok hidden" id="monSqlOk">还没有执行记录</div>
+          <div class="mon-pager hidden" id="monSqlPager"></div>
+        </div>
+
+        <!-- 4c. 慢事务：按「表集合 + 读写」聚合，只记已经结束的事务 -->
+        <div class="mon-panel hidden" data-panel="tx" id="monTabTx" role="tabpanel">
+          <div class="mon-tw">
+            <table class="mon-slow">
+              <thead>
+                <tr>
+                  <th class="c-num">次数</th>
+                  <th class="c-num">累计</th>
+                  <th class="c-num">平均</th>
+                  <th class="c-num">最长</th>
+                  <th class="c-sql">表集合（读 / 写）</th>
+                </tr>
+              </thead>
+              <tbody id="monSlowTx"></tbody>
+            </table>
+          </div>
+          <div class="mon-ok hidden" id="monTxOk">还没有结束的事务（BEGIN … COMMIT 之后记一条）</div>
+          <div class="mon-pager hidden" id="monTxPager"></div>
+        </div>
+      </section>
+    </div>
   </div>
 </section>
 

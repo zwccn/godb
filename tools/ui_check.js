@@ -351,8 +351,35 @@ class CDP {
       fillRow.found && (/%|—/.test(fillRow.main)) && /VACUUM/.test(fillRow.tip),
       fillRow.found ? `${fillRow.main} · ${fillRow.sub}` : `缺行：${JSON.stringify(fillRow.keys)}`);
 
-    // 空间 Tab：四块占比条 + 明细表；点一行才去逐页扫「洞」
-    await cdp.eval(`document.querySelector('.mon-tab[data-tab="space"]').click()`);
+    // 页面级 Tab：概览 / 存储 / 诊断。诊断卡里的小 Tab 只留三类诊断。
+    const navUi = await cdp.eval(`(() => {
+      const nav = document.getElementById('monNav');
+      const tabs = nav ? [...nav.querySelectorAll('.mon-nav-tab')] : [];
+      return {
+        n: tabs.length,
+        labels: tabs.map(b => b.textContent.trim()),
+        on: (tabs.find(b => b.classList.contains('on')) || {}).dataset &&
+            tabs.find(b => b.classList.contains('on')).dataset.page,
+      };
+    })()`);
+    check('监控顶部有页面级 Tab（概览 / 存储 / 诊断），默认概览',
+      navUi.n === 3 && navUi.labels.join('/') === '概览/存储/诊断' && navUi.on === 'overview',
+      navUi.labels.join(' / ') + ' · 当前 ' + navUi.on);
+
+    // 概览页底部留一行存储摘要：fsync 是最高频的排障入口，不该逼人先切页
+    const sumUi = await cdp.eval(`(() => {
+      const box = document.getElementById('monIOSum');
+      return {
+        rows: box ? box.querySelectorAll('.io-row').length : -1,
+        keys: box ? [...box.querySelectorAll('.io-k')].map(e => e.textContent) : [],
+      };
+    })()`);
+    check('概览页有存储摘要（fsync / 缓冲池 / 页密度）',
+      sumUi.rows === 3 && sumUi.keys.join('/') === 'fsync/缓冲池/页密度',
+      sumUi.keys.join(' / '));
+
+    // 存储页：四块占比条 + 明细表；点一行才去逐页扫「洞」
+    await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="storage"]').click()`);
     await sleep(1400);
     const spUi = await cdp.eval(`(() => {
       const rows = document.querySelectorAll('#spaceBody tr');
@@ -360,13 +387,13 @@ class CDP {
         segs: document.querySelectorAll('#spaceBar .space-seg').length,
         legend: document.querySelectorAll('#spaceLegend .space-item').length,
         rows: rows.length,
-        sortHidden: document.getElementById('monSort').classList.contains('hidden'),
+        diagHidden: document.querySelector('.mon-page[data-page="diag"]').classList.contains('hidden'),
         sub: (document.getElementById('monDiagSub') || {}).textContent || '',
       };
     })()`);
-    check('空间 Tab：四块占比 + 四段图例 + 明细行、排序切换藏起',
-      spUi.segs === 4 && spUi.legend === 4 && spUi.rows > 0 && spUi.sortHidden,
-      `${spUi.segs} 段 / 图例 ${spUi.legend} / ${spUi.rows} 行 / 排序隐藏 ${spUi.sortHidden}`);
+    check('存储页：空间四块占比 + 四段图例 + 明细行（诊断页已隐藏）',
+      spUi.segs === 4 && spUi.legend === 4 && spUi.rows > 0 && spUi.diagHidden,
+      `${spUi.segs} 段 / 图例 ${spUi.legend} / ${spUi.rows} 行 / 诊断页隐藏 ${spUi.diagHidden}`);
 
     await cdp.eval(`document.querySelector('#spaceBody tr').click()`);
     await sleep(1400);
@@ -383,7 +410,17 @@ class CDP {
       spDet.open && spDet.segs === 3 && spDet.legend === 3 && /VACUUM/.test(spDet.text),
       `${spDet.segs} 段 / 图例 ${spDet.legend} / ${spDet.text.slice(0, 50)}`);
 
-    await cdp.eval(`document.querySelector('.mon-tab[data-tab="sql"]').click()`);
+    // 诊断页：空间已经移走，只剩慢SQL / 慢事务 / 锁明细
+    await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="diag"]').click()`);
+    await sleep(700);
+    const diagUi = await cdp.eval(`(() => {
+      const tabs = [...document.querySelectorAll('#monTabs .mon-tab')];
+      return { n: tabs.length, labels: tabs.map(b => b.dataset.tab).join(',') };
+    })()`);
+    check('诊断页只剩三类诊断（空间已移到「存储」页）',
+      diagUi.n === 3 && diagUi.labels === 'sql,tx,lock', `${diagUi.n} 个：${diagUi.labels}`);
+
+    await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="overview"]').click()`);
     await sleep(400);
     await cdp.eval(`document.querySelector('#monSlowSQL tr').click()`);
     await sleep(700);
@@ -408,24 +445,34 @@ class CDP {
     // 内容被裁掉且滚不出来（表现就是「下面显示不全、页面不能滚」）。
     await cdp.eval(`applyFontScale(165, true)`);
     await sleep(500);
-    const monFit = await cdp.eval(`(() => {
-      const b = document.querySelector('.mon-body');
-      const cards = [...document.querySelectorAll('#monPanel .mon-card')];
-      b.scrollTop = 999999;
-      const last = cards[cards.length - 1].getBoundingClientRect();
-      return {
-        n: cards.length,
-        crushed: cards.filter(c => c.getBoundingClientRect().height < 20).length,
-        scrollTop: Math.round(b.scrollTop),
-        max: Math.round(b.scrollHeight - b.clientHeight),
-        lastBottom: Math.round(last.bottom),
-        panelBottom: Math.round(document.getElementById('monPanel').getBoundingClientRect().bottom),
-      };
-    })()`);
-    check('165% 字号：监控面板能滚到底、卡片不被压扁',
-      monFit.crushed === 0 && monFit.scrollTop >= monFit.max - 2 &&
-        monFit.lastBottom <= monFit.panelBottom + 1,
-      `卡片 ${monFit.n} 张（压扁 ${monFit.crushed}）· 滚到 ${monFit.scrollTop}/${monFit.max}`);
+    // 三个页面各测一遍：隐藏页的卡片高度当然是 0，混在一起数会把「没显示」当成「被压扁」
+    const fits = [];
+    for (const page of ['overview', 'storage', 'diag']) {
+      await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="${page}"]').click()`);
+      await sleep(450);
+      const r = await cdp.eval(`(() => {
+        const b = document.getElementById('monBody');
+        const cards = [...document.querySelectorAll('.mon-page:not(.hidden) .mon-card')];
+        b.scrollTop = 999999;
+        const last = cards.length ? cards[cards.length - 1].getBoundingClientRect() : null;
+        return {
+          n: cards.length,
+          crushed: cards.filter(c => c.getBoundingClientRect().height < 20).length,
+          scrollTop: Math.round(b.scrollTop),
+          max: Math.round(b.scrollHeight - b.clientHeight),
+          lastBottom: last ? Math.round(last.bottom) : 0,
+          panelBottom: Math.round(document.getElementById('monPanel').getBoundingClientRect().bottom),
+        };
+      })()`);
+      fits.push(Object.assign({ page }, r));
+    }
+    const badPage = fits.find(f => f.n === 0 || f.crushed > 0 || f.scrollTop < f.max - 2 ||
+      f.lastBottom > f.panelBottom + 1);
+    check('165% 字号：三页都能滚到底、卡片不被压扁',
+      !badPage,
+      badPage ? `${badPage.page}: 卡片 ${badPage.n} 张（压扁 ${badPage.crushed}）· 滚到 ${badPage.scrollTop}/${badPage.max}`
+        : fits.map(f => `${f.page} ${f.n} 张`).join(' / '));
+    await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="overview"]').click()`);
     await cdp.eval(`applyFontScale(120, true)`);
     await sleep(300);
 
@@ -1230,6 +1277,7 @@ class CDP {
     // 数据是注入的（走 renderSlowSQL 同一条路径），不依赖库里真有多少条慢 SQL。
     const pg = await cdp.eval(`(() => {
       toggleMonitor(true);
+      setMonPage('diag');
       setMonTab('sql', true);
       const panel = document.getElementById('monTabSql');
       const pager = document.getElementById('monSqlPager');

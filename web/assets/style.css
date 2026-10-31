@@ -3673,6 +3673,7 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 
 .map-body { flex: 1 1 auto; min-height: 0; display: flex; }
 .map-canvas {
+  position: relative;   /* 缩放的浮层挂在这上面 */
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -3681,7 +3682,50 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   gap: 6px;
   padding: 10px 14px 10px;
 }
-.map-tree { position: relative; flex: 1 1 auto; min-height: 0; }
+.map-tree { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+/* 放大之后画布可以拖：不拖的话角落里的块永远看不到 */
+.map-tree.can-pan { cursor: grab; }
+.map-tree.can-pan.panning { cursor: grabbing; }
+
+.map-zoom {
+  position: absolute;
+  right: 22px;
+  bottom: 34px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .12);
+  z-index: 3;
+}
+.map-zoom button {
+  font: inherit;
+  font-size: calc(12px * var(--fs));
+  line-height: 1;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.map-zoom button:hover { background: var(--bg-2); color: var(--text); border-color: var(--border); }
+.map-zoom-v {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--text-2);
+  min-width: 38px;
+  text-align: center;
+}
+.map-zoom-reset { color: var(--text-3); border-left: 1px solid var(--border-soft) !important; border-radius: 0 5px 5px 0 !important; }
+@media (max-width: 720px) {
+  .map-zoom { right: 14px; bottom: 30px; }
+}
 .map-grid {
   flex: 1 1 auto;
   min-height: 0;
@@ -3713,7 +3757,10 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   border: 1px solid var(--border-soft);
   overflow: hidden;
   cursor: pointer;
-  padding: 3px 4px 0;
+  /* 这里不能有 padding：border-box 下 padding+border 压不下去，
+     一个小格会被撑到 10px 宽（4+1 两侧），和「面积 = 字节」直接矛盾 ——
+     实测 0.4% 的表画成 10px、比它 4 倍大的表也是 10px。标签改成绝对定位。 */
+  padding: 0;
   box-sizing: border-box;
 }
 /* 主导类别的淡色底：13% 不透明度，够看出「这块主要是索引」，又不影响读文字 */
@@ -3734,14 +3781,38 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .tv-cell.other { background: transparent; border-style: dashed; cursor: default; }
 .tv-cell.other:hover { background: transparent; }
 .tv-name {
-  display: block;
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 3px;
   font-size: calc(11.5px * var(--fs));
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tv-size { display: block; font-size: calc(10.5px * var(--fs)); color: var(--text-3); font-family: var(--mono); }
+.tv-size {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 20px;
+  font-size: calc(10.5px * var(--fs));
+  color: var(--text-3);
+  font-family: var(--mono);
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* 竖条上的名字竖着写：writing-mode 让拉丁字母顺时针转 90°，中文自上而下，
+   两边都是「顺着长边走」，比横排塞四个字可读得多。 */
+.tv-cell.vlabel .tv-name {
+  writing-mode: vertical-rl;
+  top: 5px;
+  left: 50%;
+  right: auto;
+  max-height: calc(100% - 10px);
+  transform: translateX(-50%);
+  text-overflow: clip;
+}
 .tv-parts { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; display: flex; }
 .tv-parts i { display: block; height: 100%; }
 .tv-parts .p-data { background: var(--accent); }

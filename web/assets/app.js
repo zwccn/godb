@@ -1487,6 +1487,11 @@ const monEls = {
   mapRail: document.getElementById('mapRail'),
   mapGrip: document.getElementById('mapGrip'),
   mapNote: document.getElementById('mapNote'),
+  mapZoom: document.getElementById('mapZoom'),
+  mapZoomVal: document.getElementById('mapZoomVal'),
+  mapZoomIn: document.getElementById('mapZoomIn'),
+  mapZoomOut: document.getElementById('mapZoomOut'),
+  mapZoomReset: document.getElementById('mapZoomReset'),
   pmGrid: document.getElementById('pmGrid'),
   pmLegend: document.getElementById('pmLegend'),
   pmSide: document.getElementById('pmSide'),
@@ -2818,6 +2823,9 @@ let mapLevel = 'db';             // db | table
 let mapGroup = 'table';          // 树图分组：table（一张表一块）| file（数据 / 每棵索引 / 大字段）
 let mapSelTable = '';            // L1 选中的表（右栏详情 + 面包屑）
 let mapRailW = Number(localStorage.getItem('godb.mapRailW')) || MAP_RAIL_DEFAULT;
+let mapZoom = 1;                  // 视图缩放：1 = 铺满画布；只放大「当前这块区域」，不换页
+const MAP_ZOOM_MAX = 20;
+let tvPan = { x: 0, y: 0 };       // 树图的平移量（屏幕像素，恒为负或 0）
 let pmMap = null;                // 当前文件的页地图快照
 let pmSel = { table: '', kind: 'data', index: '' };
 let pmOpen = -1;                 // 当前打开的页号
@@ -2966,8 +2974,83 @@ function renderTreemap() {
   }
   const W = box.clientWidth, H = box.clientHeight;
   if (W < 40 || H < 40) return;  // 页面还没显示出来（宽高为 0），切回来会重画
+  clampTreePan(W, H);
   const { list } = mergeSmall(items);
-  for (const c of squarify(list, 0, 0, W, H)) drawTreeCell(box, c);
+  // 缩放不用 CSS transform，而是在「W×k / H×k 的虚拟画布」上重新排版：
+  // 面积比例不变（还是正比于字节），但每个格子是实打实的屏幕像素 ——
+  // 文字不会被拉伸，放大后小格子够大了，名字自然就出来了。
+  const k = mapZoom;
+  for (const c of squarify(list, 0, 0, W * k, H * k)) drawTreeCell(box, c);
+  renderZoomHud();
+}
+
+// 平移量夹紧：虚拟画布比视口大多少，就最多能拖多少，不能把图拖出画面。
+function clampTreePan(W, H) {
+  const k = mapZoom;
+  if (k <= 1) {
+    tvPan.x = 0; tvPan.y = 0;
+    return;
+  }
+  tvPan.x = Math.min(0, Math.max(W - W * k, tvPan.x));
+  tvPan.y = Math.min(0, Math.max(H - H * k, tvPan.y));
+}
+
+// 拖动时只挪位置、不重排：每帧重建 20 个格子会闪。
+function applyTreePan() {
+  const box = monEls.mapTree;
+  if (!box) return;
+  for (const d of box.children) {
+    const bx = d.dataset.bx, by = d.dataset.by;
+    if (bx === undefined) continue;
+    d.style.left = `${Number(bx) + tvPan.x}px`;
+    d.style.top = `${Number(by) + tvPan.y}px`;
+  }
+}
+
+let tvRaf = 0;
+function scheduleTreemap() {
+  if (tvRaf) return;
+  tvRaf = requestAnimationFrame(() => {
+    tvRaf = 0;
+    renderTreemap();
+  });
+}
+
+// 以画布里的某个点为锚缩放：那个点在缩放前后停在原地（滚轮缩放的手感）。
+function setMapZoom(next, anchor) {
+  const box = monEls.mapTree;
+  if (!box) return;
+  const old = mapZoom;
+  const k = Math.max(1, Math.min(MAP_ZOOM_MAX, next));
+  if (Math.abs(k - old) < 1e-4) return;
+  if (mapLevel === 'db' && box.clientWidth > 40) {
+    const r = box.getBoundingClientRect();
+    const ax = anchor ? anchor.x - r.left : box.clientWidth / 2;
+    const ay = anchor ? anchor.y - r.top : box.clientHeight / 2;
+    tvPan.x = ax - (ax - tvPan.x) * (k / old);
+    tvPan.y = ay - (ay - tvPan.y) * (k / old);
+  }
+  mapZoom = k;
+  if (mapLevel === 'table') renderPageMap();
+  else scheduleTreemap();
+  renderZoomHud();
+}
+
+function resetMapZoom() {
+  mapZoom = 1;
+  tvPan.x = 0;
+  tvPan.y = 0;
+  renderZoomHud();
+}
+
+function renderZoomHud() {
+  const hud = monEls.mapZoom;
+  if (!hud) return;
+  hud.classList.toggle('hidden', monPageTab !== 'map');
+  if (monEls.mapZoomVal) {
+    monEls.mapZoomVal.textContent = mapZoom < 9.95 ? mapZoom.toFixed(1) + '×' : Math.round(mapZoom) + '×';
+  }
+  if (monEls.mapTree) monEls.mapTree.classList.toggle('can-pan', mapLevel === 'db' && mapZoom > 1);
 }
 
 function drawTreeCell(box, c) {
@@ -2975,13 +3058,19 @@ function drawTreeCell(box, c) {
   const w = Math.max(2, c.w - 1), h = Math.max(2, c.h - 1);
   const on = mapLevel === 'db' && mapSelTable && it.table === mapSelTable;
   const d = el('div', 'tv-cell' + (it.kind === 'other' ? ' other' : '') + (on ? ' on' : ''));
-  d.style.left = `${c.x}px`;
-  d.style.top = `${c.y}px`;
+  d.dataset.bx = String(c.x);
+  d.dataset.by = String(c.y);
+  d.style.left = `${c.x + tvPan.x}px`;
+  d.style.top = `${c.y + tvPan.y}px`;
   d.style.width = `${w}px`;
   d.style.height = `${h}px`;
   d.title = treeTip(it);
+  // 细高的条（宽 54、高几千）横着排只能塞下四个字，名字得竖着写 ——
+  // 这正是「数据多时某些块太小」最难受的形态，放大之后要靠它才读得出来。
+  const vlabel = h >= 120 && w < 92;
+  if (vlabel) d.classList.add('vlabel');
   if (w >= 54 && h >= 22) d.appendChild(el('span', 'tv-name', it.name));
-  if (w >= 54 && h >= 40) d.appendChild(el('span', 'tv-size', fmtBytes(it.value)));
+  if (!vlabel && w >= 54 && h >= 40) d.appendChild(el('span', 'tv-size', fmtBytes(it.value)));
   const p = it.parts || {};
   const segs = [['data', p.data], ['index', p.index], ['lob', p.lob], ['wal', p.wal]].filter(x => x[1] > 0);
   if (segs.length) {
@@ -3143,6 +3232,7 @@ function enterTable(table, kind, index) {
   pmSel = { table, kind: kind || 'data', index: index || '' };
   pmMap = null;
   pmOpen = -1; pmDetail = null; pmLink = null;
+  resetMapZoom();
   renderMap();
   railHint('点左边任意一格，看这一页的结构、文本和字节。');
   loadPageMap(false);
@@ -3152,6 +3242,7 @@ function backToDb() {
   if (mapLevel !== 'table') return;
   mapLevel = 'db';
   pmOpen = -1; pmDetail = null; pmLink = null;
+  resetMapZoom();
   renderMap();
 }
 
@@ -3192,6 +3283,14 @@ function fitCell(box, count) {
   let cell = Math.floor(Math.sqrt((W * H) / Math.max(1, count)) - gap);
   // 上限给到 72：页少的表就该画成大方块，卡在 30 会让一张 1 页的表缩在左上角像坏了。
   cell = Math.max(5, Math.min(72, cell));
+  // 放大：格子直接乘倍数，超过画布就滚动 —— 页数太多（格子掉到 5px 下限）时靠这个看清
+  if (mapZoom > 1) {
+    const z = Math.min(96, Math.max(5, Math.round(cell * mapZoom)));
+    box.style.setProperty('--pm-cell', `${z}px`);
+    box.style.setProperty('--pm-gap', `${gap}px`);
+    box.classList.remove('center');
+    return;
+  }
   // 再按「行数×行高」验一遍：flex 换行会有取整误差，差 1px 就冒出滚动条，
   // 而滚动条一出现又压缩可用宽度 —— 干脆缩到放得下为止。
   for (; cell > 5; cell--) {
@@ -3549,6 +3648,7 @@ function renderMap() {
   monEls.mapFiles.classList.toggle('hidden', !l2 || !pmSel.table);
   monEls.mapTree.classList.toggle('hidden', l2);
   monEls.pmGrid.classList.toggle('hidden', !l2);
+  renderZoomHud();
   renderCrumbs();
 
   if (!l2) {
@@ -3615,6 +3715,7 @@ function gotoMap(table) {
 
 async function refreshMap() {
   pmCache.clear();
+  resetMapZoom();
   await loadSpace();
   if (mapLevel === 'table') await loadPageMap(false);
   else renderMap();
@@ -3631,6 +3732,7 @@ if (monEls.mapGroup) {
     for (const x of monEls.mapGroup.querySelectorAll('button')) {
       x.classList.toggle('on', x.dataset.group === mapGroup);
     }
+    resetMapZoom();     // 换了分组就是另一张图，缩放没有意义
     renderTreemap();
     renderMapLegend();
   });
@@ -3648,6 +3750,64 @@ if (monEls.mapJump) {
     }
     if (monEls.pmGrid && monEls.pmGrid.querySelector(`.pm-c[data-no="${n}"]`)) openPage(n);
     else if (monEls.mapNote) monEls.mapNote.textContent = `第 ${n} 页还没画出来（点「继续扫描」）`;
+  });
+}
+
+/* ---- 缩放交互：滚轮（以光标为锚）+ 拖动平移 + 按钮 ---- */
+
+let treeSuppressClick = false;
+if (monEls.mapTree) {
+  monEls.mapTree.addEventListener('wheel', e => {
+    if (monPageTab !== 'map' || mapLevel !== 'db') return;
+    e.preventDefault();
+    setMapZoom(mapZoom * Math.exp(-e.deltaY * 0.0018), { x: e.clientX, y: e.clientY });
+  }, { passive: false });
+
+  let drag = null;
+  monEls.mapTree.addEventListener('pointerdown', e => {
+    if (mapLevel !== 'db' || mapZoom <= 1 || e.button !== 0) return;
+    drag = { sx: e.clientX, sy: e.clientY, px: tvPan.x, py: tvPan.y, moved: false };
+    try { monEls.mapTree.setPointerCapture(e.pointerId); } catch (_) { /* 老浏览器 */ }
+  });
+  monEls.mapTree.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+    drag.moved = true;
+    monEls.mapTree.classList.add('panning');
+    tvPan.x = drag.px + dx;
+    tvPan.y = drag.py + dy;
+    clampTreePan(monEls.mapTree.clientWidth, monEls.mapTree.clientHeight);
+    applyTreePan();
+  });
+  const endDrag = () => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null;
+    monEls.mapTree.classList.remove('panning');
+    if (!moved) return;
+    // 拖完浏览器还会补一个 click：别让它顺手把这块选中、或者当成双击进表
+    treeSuppressClick = true;
+    setTimeout(() => { treeSuppressClick = false; }, 0);
+  };
+  monEls.mapTree.addEventListener('pointerup', endDrag);
+  monEls.mapTree.addEventListener('pointercancel', endDrag);
+  // 捕获阶段拦：格子自己的 click 在冒泡阶段
+  monEls.mapTree.addEventListener('click', e => {
+    if (treeSuppressClick) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  }, true);
+}
+
+if (monEls.mapZoomIn) monEls.mapZoomIn.addEventListener('click', () => setMapZoom(mapZoom * 1.5, null));
+if (monEls.mapZoomOut) monEls.mapZoomOut.addEventListener('click', () => setMapZoom(mapZoom / 1.5, null));
+if (monEls.mapZoomReset) {
+  monEls.mapZoomReset.addEventListener('click', () => {
+    resetMapZoom();
+    if (mapLevel === 'table') renderPageMap();
+    else renderTreemap();
   });
 }
 

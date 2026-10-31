@@ -330,6 +330,14 @@ try {
             <span class="map-note" id="mapNote"></span>
             <button class="space-rescan hidden" id="pmMore" type="button">继续扫描</button>
           </div>
+          <!-- 缩放：只放大「当前这块区域」，面积比例和版面都不变，不会跳到别的层级。
+               放大后小格子够大了，名字会自动长回来。 -->
+          <div class="map-zoom hidden" id="mapZoom" role="group" aria-label="缩放">
+            <button type="button" id="mapZoomOut" title="缩小（滚轮也行）">−</button>
+            <span class="map-zoom-v" id="mapZoomVal">1.0×</span>
+            <button type="button" id="mapZoomIn" title="放大（滚轮也行）">+</button>
+            <button type="button" class="map-zoom-reset" id="mapZoomReset" title="回到 1:1（铺满画布）">1:1</button>
+          </div>
         </div>
         <div class="map-rail" id="mapRail">
           <div class="map-grip" id="mapGrip" title="拖动调整宽度"></div>

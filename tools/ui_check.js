@@ -485,6 +485,61 @@ class CDP {
     await cdp.eval(`document.querySelector('#mapGroup button[data-group="table"]').click()`);
     await sleep(500);
 
+    // 缩放：只放大「当前这块区域」—— 块数和面积比例都不变，变的是格子大小。
+    // 这条是为了「数据多的时候某些块太小」：放大后小格子够大，名字会回来。
+    const z0 = await cdp.eval(`(() => {
+      const c = [...document.querySelectorAll('#mapTree .tv-cell')];
+      return { n: c.length, big: c.length ? Math.round(Math.max(...c.map(x => x.getBoundingClientRect().width))) : 0 };
+    })()`);
+    await cdp.eval(`document.getElementById('mapZoomIn').click()`);
+    await cdp.eval(`document.getElementById('mapZoomIn').click()`);
+    await cdp.eval(`document.getElementById('mapZoomIn').click()`);
+    await sleep(600);
+    const z1 = await cdp.eval(`(() => {
+      const c = [...document.querySelectorAll('#mapTree .tv-cell')];
+      const box = document.getElementById('mapTree');
+      return {
+        label: document.getElementById('mapZoomVal').textContent,
+        n: c.length,
+        big: c.length ? Math.round(Math.max(...c.map(x => x.getBoundingClientRect().width))) : 0,
+        canPan: box.classList.contains('can-pan'),
+      };
+    })()`);
+    check('缩放：块数不变、格子变大、进入可拖动状态',
+      z1.n === z0.n && z1.big >= z0.big * 2 && /×/.test(z1.label) && z1.canPan,
+      `${z0.big}px → ${z1.big}px（${z1.label}）· ${z1.n} 块`);
+
+    // 拖动平移：拖到边界之外要被夹住，不能把图拖出画面
+    const dragBase = await cdp.eval(`(() => {
+      const r = document.getElementById('mapTree').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+        left: Math.round(document.querySelector('#mapTree .tv-cell').getBoundingClientRect().left) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dragBase.x, y: dragBase.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: dragBase.x + 2000, y: dragBase.y + 2000, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dragBase.x + 2000, y: dragBase.y + 2000, button: 'left' });
+    await sleep(500);
+    const dragUi = await cdp.eval(`(() => {
+      const box = document.getElementById('mapTree').getBoundingClientRect();
+      const c = document.querySelector('#mapTree .tv-cell').getBoundingClientRect();
+      return { dx: Math.round(c.left - box.left), dy: Math.round(c.top - box.top) };
+    })()`);
+    check('放大后能拖动，拖到边界就夹住（不会把图拖出画面）',
+      dragUi.dx === 0 && dragUi.dy === 0,
+      `拖动后首块偏移 ${dragUi.dx},${dragUi.dy}（应为 0,0）`);
+
+    await cdp.eval(`document.getElementById('mapZoomReset').click()`);
+    await sleep(600);
+    const zReset = await cdp.eval(`(() => ({
+      label: document.getElementById('mapZoomVal').textContent,
+      left: Math.round(document.querySelector('#mapTree .tv-cell').getBoundingClientRect().left -
+        document.getElementById('mapTree').getBoundingClientRect().left),
+      canPan: document.getElementById('mapTree').classList.contains('can-pan'),
+    }))()`);
+    check('「1:1」复位：回到 1.0× 且位置归零',
+      /^1\.0×$/.test(zReset.label) && zReset.left === 0 && !zReset.canPan,
+      `${zReset.label} · 偏移 ${zReset.left}`);
+
     // 双击一块进表视图：页网格
     await cdp.eval(`(() => {
       const c = document.querySelector('#mapTree .tv-cell');
@@ -508,6 +563,26 @@ class CDP {
     check('双击树图块进表视图：页网格吃满画布（高 > 300），树图收起',
       gridUi.n > 0 && gridUi.h > 300 && gridUi.treeHidden && /数据页/.test(gridUi.crumbs) && gridUi.files.length >= 1,
       `${gridUi.n} 格 / 格 ${gridUi.cell}px / 画布 ${gridUi.w}×${gridUi.h} / ${gridUi.crumbs}`);
+
+    // 页网格也能放大：格子变大、开始滚动（页特别多时格子会掉到 5px 下限）
+    const gz0 = await cdp.eval(`(() => {
+      const c = document.querySelector('#pmGrid .pm-c').getBoundingClientRect();
+      return { cell: Math.round(c.width), zoom: document.getElementById('mapZoomVal').textContent };
+    })()`);
+    await cdp.eval(`document.getElementById('mapZoomIn').click()`);
+    await cdp.eval(`document.getElementById('mapZoomIn').click()`);
+    await sleep(600);
+    const gz1 = await cdp.eval(`(() => {
+      const g = document.getElementById('pmGrid');
+      const c = document.querySelector('#pmGrid .pm-c').getBoundingClientRect();
+      return { cell: Math.round(c.width), scrollable: g.scrollHeight > g.clientHeight + 2 ||
+        g.scrollWidth > g.clientWidth + 2 };
+    })()`);
+    check('进表后缩放归零；页网格放大时格子变大并开始滚动',
+      /^1\.0×$/.test(gz0.zoom) && gz1.cell > gz0.cell && gz1.scrollable,
+      `进表 ${gz0.zoom} · 格子 ${gz0.cell} → ${gz1.cell}px · 可滚 ${gz1.scrollable}`);
+    await cdp.eval(`document.getElementById('mapZoomReset').click()`);
+    await sleep(400);
 
     // 页检查器：点一格看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
     await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);

@@ -1475,11 +1475,21 @@ const monEls = {
   body: document.getElementById('monBody'),
   ioSum: document.getElementById('monIOSum'),
   spaceSub: document.getElementById('spaceSub'),
-  pmPick: document.getElementById('pmPick'),
+  mapBack: document.getElementById('mapBack'),
+  mapCrumbs: document.getElementById('mapCrumbs'),
+  mapGroup: document.getElementById('mapGroup'),
+  mapJump: document.getElementById('mapJump'),
+  mapRefresh: document.getElementById('mapRefresh'),
+  mapFiles: document.getElementById('mapFiles'),
+  mapBody: document.getElementById('mapBody'),
+  mapCanvas: document.getElementById('mapCanvas'),
+  mapTree: document.getElementById('mapTree'),
+  mapRail: document.getElementById('mapRail'),
+  mapGrip: document.getElementById('mapGrip'),
+  mapNote: document.getElementById('mapNote'),
   pmGrid: document.getElementById('pmGrid'),
   pmLegend: document.getElementById('pmLegend'),
   pmSide: document.getElementById('pmSide'),
-  pmSub: document.getElementById('pmSub'),
   pmMore: document.getElementById('pmMore'),
   spaceBar: document.getElementById('spaceBar'),
   spaceLegend: document.getElementById('spaceLegend'),
@@ -1568,10 +1578,11 @@ function toggleMonitor(force) {
   else setMonSettings(false);
 }
 
-/* ---- 页面级 Tab：概览 / 存储 / 诊断 ----
-   按「回答什么问题」分：概览看健康与走势，存储看磁盘，诊断看谁在捣乱。
+/* ---- 页面级 Tab：概览 / 存储 / 空间地图 / 诊断 ----
+   按「回答什么问题」分：概览看健康与走势，存储看数字（够不够、该不该整理），
+   空间地图看「东西在哪、长什么样」，诊断看谁在捣乱。
    诊断卡内部还有一层小 Tab（慢SQL/慢事务/锁），那是同一个问题的三种切面。 */
-const MON_PAGES = ['overview', 'storage', 'diag'];
+const MON_PAGES = ['overview', 'storage', 'map', 'diag'];
 let monPageTab = 'overview';
 
 function setMonPage(name) {
@@ -1587,10 +1598,19 @@ function setMonPage(name) {
   for (const p of monPanel.querySelectorAll('.mon-page')) {
     p.classList.toggle('hidden', p.dataset.page !== name);
   }
-  // 三个页面共用一个滚动容器，切页必须回到顶部，否则新页会停在上一页的偏移处
-  if (monEls.body) monEls.body.scrollTop = 0;
+  // 空间地图是「画布吃满剩余高度」的：这一页不整页滚，否则画布高度算不出来。
+  // 其余几页该多高就多高，靠 .mon-body 滚。
+  if (monEls.body) {
+    monEls.body.scrollTop = 0;
+    monEls.body.classList.toggle('map-mode', name === 'map');
+  }
   // 空间是「点开才算」的：要 stat 每张表，下钻还要逐页读，不跟着轮询跑。
   if (name === 'storage' && !spaceData) loadSpace();
+  if (name === 'map') {
+    applyRailWidth();
+    if (!spaceData) loadSpace();
+    else renderMap();
+  }
 }
 
 if (monEls.nav) {
@@ -2605,8 +2625,9 @@ async function loadSpace() {
     return;
   }
   renderSpace();
-  pmFillPick();
   updateDiagSub();
+  // 空间地图的数据源就是这个接口：树图的面积、按文件的块数全靠它，扫完要重铺
+  if (monPageTab === 'map') renderMap();
 }
 
 // 时间戳 → 「多久以前」。注意和文件后面的 fmtAgo(时长) 不是一回事：
@@ -2763,6 +2784,13 @@ function renderSpaceDetail(d) {
     note.textContent = '这一页数据很满，没什么可回收的。';
   }
   box.appendChild(note);
+
+  // 这一块只给「有几个洞、多少空闲」；要看洞长在哪一页，去空间地图
+  const go = el('button', 'space-rescan', '在空间地图里看这些页 ›');
+  go.type = 'button';
+  go.style.marginTop = '8px';
+  go.addEventListener('click', ev => { ev.stopPropagation(); gotoMap(d.table); });
+  box.appendChild(go);
 }
 
 if (document.getElementById('spaceRescan')) {
@@ -2776,77 +2804,450 @@ if (document.getElementById('spaceRescan')) {
   });
 }
 
-/* ---- 5.2 页地图 / 页检查器 ----
-   左边一张「每页一格」的地图，右边是选中页的内容：结构 / 文本 / 十六进制。
-   后端只读文件、不进缓冲池，所以这里可以放心点，不会把热页挤掉；
-   代价是看到的是「磁盘上的样子」—— 还没 checkpoint 的改动不在里面。 */
-let pmMap = null;   // { table, kind, index, total, pages, next, bytes }
+/* ---- 5.2 空间地图：库视图（矩形树图）→ 表视图（页网格）→ 页/行 ----
+   一个 Tab 两级画布，右边永远是「当前选中对象的详情」：
+   - 库视图：面积正比于字节的矩形树图，一格一个对象，点一格进表；
+   - 表视图：一格一页，铺满画布（20 万行的表 1450 页能一屏看完，卡片里铺不下）；
+   - 右栏：L1 是表详情 + 索引清单，L2 是页头 / 槽位 / 结构 / 文本 / 十六进制 / 关联。
+   后端只读文件、不进缓冲池，所以随便点都不会影响数据库；代价是看到的是磁盘上的样子。 */
+const MAP_RAIL_DEFAULT = 460;
+const MAP_RAIL_MIN = 360;
+const MAP_RAIL_MAX = 760;
+const MAP_MAX_CELLS = 20;        // 树图最多铺多少块，多出来的合并成「其它」
+let mapLevel = 'db';             // db | table
+let mapGroup = 'table';          // 树图分组：table（一张表一块）| file（数据 / 每棵索引 / 大字段）
+let mapSelTable = '';            // L1 选中的表（右栏详情 + 面包屑）
+let mapRailW = Number(localStorage.getItem('godb.mapRailW')) || MAP_RAIL_DEFAULT;
+let pmMap = null;                // 当前文件的页地图快照
 let pmSel = { table: '', kind: 'data', index: '' };
-let pmOpen = -1;    // 当前打开的页号
-let pmDetail = null; // 当前页的详情（重渲染用）
-let pmLink = null;   // 「索引项 → 堆页 → 大字段」定位结果
-let pmTab = 'struct'; // struct | text | hex
+let pmOpen = -1;                 // 当前打开的页号
+let pmDetail = null;             // 当前页的详情（重渲染用）
+let pmLink = null;               // 「索引项 → 堆页 → 大字段」定位结果
+let pmTab = 'struct';            // struct | text | hex
+const pmCache = new Map();       // 页地图按「表|类型|索引」缓存：切回来不重读（1450 页 ≈ 11 MB）
 
-function pmFillPick() {
-  const sel = monEls.pmPick;
-  if (!sel || !spaceData) return;
-  const tables = spaceData.tables || [];
-  const want = pmSel.table + '|' + pmSel.kind + '|' + pmSel.index;
-  sel.innerHTML = '';
-  for (const t of tables) {
-    const o = el('option', null, `数据页 · ${t.name}`);
-    o.value = `${t.name}|data|`;
-    sel.appendChild(o);
-    for (const ix of t.indexes || []) {
-      const oi = el('option', null, `索引 · ${t.name}.${ix.name}`);
-      oi.value = `${t.name}|index|${ix.name}`;
-      sel.appendChild(oi);
+/* ---- 5.2.1 矩形树图（squarified treemap） ---- */
+
+// squarify 把一组 {value} 铺进矩形，尽量让每块接近正方形 ——
+// 直接按比例切长条（slice-and-dice）会切出一堆细缝，名字根本放不下。
+function squarify(items, x, y, w, h) {
+  const out = [];
+  const total = items.reduce((a, b) => a + b.value, 0);
+  if (!total || w <= 0 || h <= 0) return out;
+  const scale = (w * h) / total;
+  let rest = items.map(it => Object.assign({}, it, { area: it.value * scale }));
+  let rx = x, ry = y, rw = w, rh = h;
+
+  const worst = (row, short) => {
+    const s = row.reduce((a, b) => a + b.area, 0);
+    let mx = 0, mn = Infinity;
+    for (const it of row) {
+      if (it.area > mx) mx = it.area;
+      if (it.area < mn) mn = it.area;
     }
+    const s2 = s * s, w2 = short * short;
+    return Math.max((w2 * mx) / s2, s2 / (w2 * mn));
+  };
+
+  while (rest.length) {
+    const short = Math.min(rw, rh);
+    let row = [rest[0]];
+    let best = worst(row, short);
+    let i = 1;
+    while (i < rest.length) {
+      const next = row.concat([rest[i]]);
+      const wr = worst(next, short);
+      if (wr > best) break;
+      row = next; best = wr; i++;
+    }
+    const sum = row.reduce((a, b) => a + b.area, 0);
+    if (rw >= rh) {
+      const colW = sum / rh;
+      let cy = ry;
+      for (const it of row) {
+        const ih = it.area / colW;
+        out.push({ item: it, x: rx, y: cy, w: colW, h: ih });
+        cy += ih;
+      }
+      rx += colW; rw -= colW;
+    } else {
+      const rowH = sum / rw;
+      let cx = rx;
+      for (const it of row) {
+        const iw = it.area / rowH;
+        out.push({ item: it, x: cx, y: ry, w: iw, h: rowH });
+        cx += iw;
+      }
+      ry += rowH; rh -= rowH;
+    }
+    rest = rest.slice(row.length);
   }
-  if (sel.options.length && ![...sel.options].some(o => o.value === want)) {
-    sel.selectedIndex = 0;
-  } else if (sel.options.length) {
-    sel.value = want;
-  }
-  pmReadPick();
+  return out;
 }
 
-function pmReadPick() {
-  const sel = monEls.pmPick;
-  if (!sel || !sel.value) return;
-  const [table, kind, index] = sel.value.split('|');
-  if (pmSel.table === table && pmSel.kind === kind && pmSel.index === index && pmMap) return;
-  pmSel = { table, kind, index };
-  pmOpen = -1;
+function mapTableOf(name) {
+  return ((spaceData && spaceData.tables) || []).find(t => t.name === name) || null;
+}
+
+// 树图的一块：value 是字节（面积就按它分），parts 是内部构成（底部那条色带）。
+function treemapItems() {
+  const tables = ((spaceData && spaceData.tables) || []).slice();
+  const out = [];
+  if (mapGroup === 'file') {
+    for (const t of tables) {
+      if (t.bytes > 0) {
+        out.push({ name: t.name, value: t.bytes, parts: { data: t.bytes }, kind: 'data',
+          table: t.name, target: { kind: 'data', index: '' } });
+      }
+      for (const ix of t.indexes || []) {
+        if (ix.bytes > 0) {
+          out.push({ name: `${t.name}.${ix.name}`, value: ix.bytes, parts: { index: ix.bytes },
+            kind: 'index', table: t.name, target: { kind: 'index', index: ix.name } });
+        }
+      }
+      if (t.lobBytes > 0) {
+        out.push({ name: `${t.name} · 大字段`, value: t.lobBytes, parts: { lob: t.lobBytes },
+          kind: 'lob', table: t.name, target: null });
+      }
+    }
+  } else {
+    for (const t of tables) {
+      const value = (t.bytes || 0) + (t.indexBytes || 0) + (t.lobBytes || 0);
+      if (value <= 0) continue;      // 还没落过盘的表在树图上没有位置，底栏会说明
+      out.push({ name: t.name, value, parts: { data: t.bytes, index: t.indexBytes, lob: t.lobBytes },
+        kind: 'table', table: t.name, target: { kind: 'data', index: '' } });
+    }
+  }
+  // WAL 也占地方，不给它一块的话「各块之和 ≠ 全库占用」，看的人会怀疑数字错了
+  const wal = (spaceData && spaceData.space && spaceData.space.walBytes) || 0;
+  if (wal > 0) {
+    out.push({ name: 'WAL', value: wal, parts: { wal }, kind: 'wal', table: '', target: null });
+  }
+  out.sort((a, b) => b.value - a.value);
+  return out;
+}
+
+// 块太多就合并最小的那些：硬画出来大家都只剩几个像素，标签全糊在一起。
+function mergeSmall(items) {
+  if (items.length <= MAP_MAX_CELLS) return { list: items, tail: [] };
+  const head = items.slice(0, MAP_MAX_CELLS - 1);
+  const tail = items.slice(MAP_MAX_CELLS - 1);
+  head.push({
+    name: `其它 ${tail.length} 块`,
+    value: tail.reduce((a, x) => a + x.value, 0),
+    parts: {}, kind: 'other', table: '', target: null, tail,
+  });
+  return { list: head, tail };
+}
+
+function treeTip(it) {
+  if (it.kind === 'other') {
+    return `其它 ${it.tail.length} 块：${it.tail.slice(0, 6).map(x => x.name).join('、')}`
+      + (it.tail.length > 6 ? ' …' : '');
+  }
+  if (it.kind === 'wal') return `WAL（预写日志）${fmtBytes(it.value)} · 顺序日志，没有「页」可以下钻`;
+  const p = it.parts || {};
+  const bits = [];
+  if (p.data) bits.push(`数据 ${fmtBytes(p.data)}`);
+  if (p.index) bits.push(`索引 ${fmtBytes(p.index)}`);
+  if (p.lob) bits.push(`大字段 ${fmtBytes(p.lob)}`);
+  return `${it.name} · ${fmtBytes(it.value)}` + (bits.length ? `（${bits.join(' / ')}）` : '')
+    + '\n单击看详情，双击进页地图';
+}
+
+function renderTreemap() {
+  const box = monEls.mapTree;
+  if (!box) return;
+  box.innerHTML = '';
+  const items = treemapItems();
+  if (!items.length) {
+    box.appendChild(el('div', 'map-empty', '还没有落过盘的表 —— 先 CHECKPOINT 一次，页才会写到磁盘上'));
+    return;
+  }
+  const W = box.clientWidth, H = box.clientHeight;
+  if (W < 40 || H < 40) return;  // 页面还没显示出来（宽高为 0），切回来会重画
+  const { list } = mergeSmall(items);
+  for (const c of squarify(list, 0, 0, W, H)) drawTreeCell(box, c);
+}
+
+function drawTreeCell(box, c) {
+  const it = c.item;
+  const w = Math.max(2, c.w - 1), h = Math.max(2, c.h - 1);
+  const on = mapLevel === 'db' && mapSelTable && it.table === mapSelTable;
+  const d = el('div', 'tv-cell' + (it.kind === 'other' ? ' other' : '') + (on ? ' on' : ''));
+  d.style.left = `${c.x}px`;
+  d.style.top = `${c.y}px`;
+  d.style.width = `${w}px`;
+  d.style.height = `${h}px`;
+  d.title = treeTip(it);
+  if (w >= 54 && h >= 22) d.appendChild(el('span', 'tv-name', it.name));
+  if (w >= 54 && h >= 40) d.appendChild(el('span', 'tv-size', fmtBytes(it.value)));
+  const p = it.parts || {};
+  const segs = [['data', p.data], ['index', p.index], ['lob', p.lob], ['wal', p.wal]].filter(x => x[1] > 0);
+  if (segs.length) {
+    // 主导类别决定整块淡色底：面积大的块一眼能看出「主要是索引」还是「主要是数据」
+    const top = segs.slice().sort((a, b) => b[1] - a[1])[0][0];
+    d.dataset.tint = top;
+  }
+  if (segs.length && h >= 8) {
+    const bar = el('div', 'tv-parts');
+    for (const [cls, v] of segs) {
+      const seg = el('i', 'p-' + cls);
+      seg.style.flex = String(v);
+      bar.appendChild(seg);
+    }
+    d.appendChild(bar);
+  }
+  if (it.kind === 'other') {
+    d.addEventListener('click', () => showOtherBlocks(it.tail));
+  } else if (it.kind === 'wal') {
+    d.addEventListener('click', () => showWalBlock());
+  } else {
+    d.addEventListener('click', () => {
+      mapSelTable = it.table;
+      renderTreemap();
+      renderRailDb();
+      renderCrumbs();
+    });
+    d.addEventListener('dblclick', () => enterTable(it.table, it.target && it.target.kind, it.target && it.target.index));
+  }
+  box.appendChild(d);
+}
+
+function showOtherBlocks(tail) {
+  const side = monEls.pmSide;
+  side.innerHTML = '';
+  side.appendChild(el('div', 'pm-head', `其它 ${tail.length} 块`));
+  side.appendChild(el('div', 'pm-hint',
+    '这些都很小，画成格子只剩几个像素、标签也放不下，所以合并了。'));
+  for (const it of tail) {
+    const row = el('div', 'pm-row');
+    row.appendChild(el('span', 'pm-val', `${it.name} · ${fmtBytes(it.value)}`));
+    side.appendChild(row);
+  }
+}
+
+function showWalBlock() {
+  const side = monEls.pmSide;
+  side.innerHTML = '';
+  const sp = (spaceData && spaceData.space) || {};
+  side.appendChild(el('div', 'pm-head', 'WAL（预写日志）'));
+  side.appendChild(el('div', 'pm-hint',
+    `现在 ${fmtBytes(sp.walBytes || 0)}。WAL 是顺序追加的日志，没有「页」和「槽位」可以下钻 ——`
+    + '它由 checkpoint 轮转回收，不是 VACUUM。'));
+}
+
+/* ---- 5.2.2 面包屑与右栏 ---- */
+
+function renderCrumbs() {
+  const box = monEls.mapCrumbs;
+  if (!box) return;
+  box.innerHTML = '';
+  const root = el('button', 'map-crumb' + (mapLevel === 'db' ? ' here' : ''), '库');
+  root.type = 'button';
+  if (mapLevel !== 'db') root.addEventListener('click', backToDb);
+  box.appendChild(root);
+
+  if (mapLevel === 'db') {
+    if (mapSelTable) {
+      box.appendChild(el('span', 'map-crumb-sep', '›'));
+      box.appendChild(el('span', 'map-crumb here', mapSelTable));
+    }
+    return;
+  }
+  box.appendChild(el('span', 'map-crumb-sep', '›'));
+  const t = el('button', 'map-crumb', pmSel.table);
+  t.type = 'button';
+  t.title = '回到库视图（Esc）';
+  t.addEventListener('click', backToDb);
+  box.appendChild(t);
+  box.appendChild(el('span', 'map-crumb-sep', '›'));
+  box.appendChild(el('span', 'map-crumb here', pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页'));
+}
+
+// 右栏在库视图：没选中就是全库汇总，选中了就是那张表的详情。
+function renderRailDb() {
+  const side = monEls.pmSide;
+  if (!side) return;
+  side.innerHTML = '';
+  if (mapSelTable && mapTableOf(mapSelTable)) {
+    drawTableCard(side, mapTableOf(mapSelTable));
+    return;
+  }
+  const sp = (spaceData && spaceData.space) || {};
+  const tables = (spaceData && spaceData.tables) || [];
+  side.appendChild(el('div', 'pm-head', '全库'));
+  const kv = el('div', 'pm-kv');
+  const add = (k, v) => {
+    kv.appendChild(el('span', null, k));
+    kv.appendChild(el('b', null, v));
+  };
+  add('数据', fmtBytes(sp.dataBytes || 0));
+  add('索引', fmtBytes(sp.indexBytes || 0));
+  add('大字段', fmtBytes(sp.lobBytes || 0));
+  add('WAL', fmtBytes(sp.walBytes || 0));
+  add('表数', `${tables.length}`);
+  add('页数', `${sp.pages || 0}`);
+  side.appendChild(kv);
+  side.appendChild(el('div', 'pm-hint',
+    '面积正比于字节 —— 一块大不代表行多，只代表它占盘多（索引经常比数据本身还大）。\n'
+    + '单击看这张表，双击直接进它的页地图；切「按文件」能把每棵索引单独铺出来。'));
+}
+
+function drawTableCard(side, t) {
+  side.appendChild(el('div', 'pm-head', t.name));
+  const kv = el('div', 'pm-kv');
+  const add = (k, v) => {
+    kv.appendChild(el('span', null, k));
+    kv.appendChild(el('b', null, v));
+  };
+  add('数据', `${fmtBytes(t.bytes || 0)} · ${t.pages || 0} 页`);
+  add('索引', `${fmtBytes(t.indexBytes || 0)} · ${(t.indexes || []).length} 棵`);
+  if (t.lobBytes) add('大字段', fmtBytes(t.lobBytes));
+  add('行数', fmtCount(t.rows || 0));
+  const fillOk = t.fillKnown && (t.pages || 0) >= 8;
+  add('页密度', fillOk ? `${((t.fill || 0) * 100).toFixed(0)}%` : `${t.pages || 0} 页太小，密度没意义`);
+  add('上次整理', fmtSince(t.vacuumAt));
+  side.appendChild(kv);
+
+  if ((t.indexes || []).length) {
+    side.appendChild(el('div', 'pm-hint', '索引（点一棵直接看它的页）：'));
+    for (const ix of t.indexes) {
+      const row = el('div', 'pm-row linkable');
+      row.appendChild(el('span', 'pm-val', `${ix.name} · ${fmtBytes(ix.bytes)} · ${ix.pages} 页`));
+      row.title = '点一下：打开这棵索引的页地图';
+      row.addEventListener('click', () => enterTable(t.name, 'index', ix.name));
+      side.appendChild(row);
+    }
+  }
+  const go = el('button', 'space-rescan', '打开页地图 ›');
+  go.type = 'button';
+  go.style.marginTop = '10px';
+  go.addEventListener('click', () => enterTable(t.name, 'data', ''));
+  side.appendChild(go);
+}
+
+/* ---- 5.2.3 表视图：页网格 ---- */
+
+function railHint(text) {
+  const side = monEls.pmSide;
+  if (!side) return;
+  side.innerHTML = '';
+  side.appendChild(el('div', 'pm-hint', text));
+}
+
+function enterTable(table, kind, index) {
+  if (!table) return;
+  mapLevel = 'table';
+  mapSelTable = table;
+  pmSel = { table, kind: kind || 'data', index: index || '' };
+  pmMap = null;
+  pmOpen = -1; pmDetail = null; pmLink = null;
+  renderMap();
+  railHint('点左边任意一格，看这一页的结构、文本和字节。');
   loadPageMap(false);
 }
 
+function backToDb() {
+  if (mapLevel !== 'table') return;
+  mapLevel = 'db';
+  pmOpen = -1; pmDetail = null; pmLink = null;
+  renderMap();
+}
+
+function selectTarget(table, kind, index) {
+  if (pmSel.table === table && pmSel.kind === kind && (pmSel.index || '') === (index || '')) return;
+  pmSel = { table, kind, index: index || '' };
+  pmMap = null;
+  pmOpen = -1; pmDetail = null; pmLink = null;
+  renderFileBar();
+  renderCrumbs();
+  railHint('点左边任意一格，看这一页的结构、文本和字节。');
+  return loadPageMap(false);
+}
+
+function renderFileBar() {
+  const box = monEls.mapFiles;
+  if (!box) return;
+  box.innerHTML = '';
+  const t = mapTableOf(pmSel.table);
+  const add = (label, kind, index, tip) => {
+    const on = pmSel.kind === kind && (pmSel.index || '') === (index || '');
+    const b = el('button', 'map-file' + (on ? ' on' : ''), label);
+    b.type = 'button';
+    if (tip) b.title = tip;
+    b.addEventListener('click', () => selectTarget(pmSel.table, kind, index));
+    box.appendChild(b);
+  };
+  add('数据页', 'data', '', `${t ? t.pages : 0} 页`);
+  for (const ix of (t && t.indexes) || []) add(ix.name, 'index', ix.name, `${ix.pages} 页 · ${fmtBytes(ix.bytes)}`);
+  if (!(t && (t.indexes || []).length)) box.appendChild(el('span', 'map-note', '这张表没有二级索引'));
+}
+
+// 格子大小随画布与页数自适应：目标是「尽量一屏铺完」，而不是固定 12px。
+function fitCell(box, count) {
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!W || !H) return;
+  const gap = count > 2500 ? 2 : (count > 800 ? 3 : 4);
+  let cell = Math.floor(Math.sqrt((W * H) / Math.max(1, count)) - gap);
+  // 上限给到 72：页少的表就该画成大方块，卡在 30 会让一张 1 页的表缩在左上角像坏了。
+  cell = Math.max(5, Math.min(72, cell));
+  // 再按「行数×行高」验一遍：flex 换行会有取整误差，差 1px 就冒出滚动条，
+  // 而滚动条一出现又压缩可用宽度 —— 干脆缩到放得下为止。
+  for (; cell > 5; cell--) {
+    const cols = Math.max(1, Math.floor((W + gap) / (cell + gap)));
+    const rows = Math.ceil(count / cols);
+    if (rows * (cell + gap) - gap <= H) break;
+  }
+  box.style.setProperty('--pm-cell', `${cell}px`);
+  box.style.setProperty('--pm-gap', `${gap}px`);
+  // 铺不满一半就居中，不然一两个格子孤零零贴在左上角
+  const used = count * (cell + gap) * (cell + gap);
+  box.classList.toggle('center', used < W * H * 0.5);
+}
+
+function pmMapMatches() {
+  return !!pmMap && pmMap.table === pmSel.table && pmMap.kind === pmSel.kind
+    && (pmMap.index || '') === (pmSel.index || '');
+}
+
 async function loadPageMap(append) {
-  if (!pmSel.table) return;
+  const table = pmSel.table;
+  if (!table) return;
+  const key = `${table}|${pmSel.kind}|${pmSel.index || ''}`;
+  if (!append) {
+    const hit = pmCache.get(key);
+    if (hit) { pmMap = hit; renderPageMap(); return; }
+    pmMap = null;
+    if (monEls.mapNote) monEls.mapNote.textContent = '正在扫页头（只读目录，不进缓冲池）…';
+  }
   const from = append && pmMap && pmMap.next ? pmMap.next : 0;
-  const q = `table=${encodeURIComponent(pmSel.table)}&kind=${pmSel.kind}`
+  const q = `table=${encodeURIComponent(table)}&kind=${pmSel.kind}`
     + (pmSel.index ? `&index=${encodeURIComponent(pmSel.index)}` : '')
     + `&from=${from}`;
   let res;
   try {
     res = await api('/api/pages?' + q);
   } catch (e) {
-    renderPageMapError(e.message);
+    if (monEls.pmGrid) monEls.pmGrid.innerHTML = '';
+    if (monEls.mapNote) monEls.mapNote.textContent = `扫描失败：${e.message}`;
     return;
   }
+  if (key !== `${pmSel.table}|${pmSel.kind}|${pmSel.index || '' }`) return;  // 期间切走了
   if (append && pmMap) {
-    pmMap.pages = pmMap.pages.concat(res.pages || []);
+    pmMap.pages = (pmMap.pages || []).concat(res.pages || []);
     pmMap.next = res.next || 0;
-    pmMap.bytes += res.bytes || 0;
+    pmMap.bytes = (pmMap.bytes || 0) + (res.bytes || 0);
   } else {
     pmMap = res;
   }
+  pmCache.set(key, pmMap);
   renderPageMap();
 }
 
 function renderPageMapError(msg) {
   if (monEls.pmGrid) monEls.pmGrid.innerHTML = '';
-  if (monEls.pmSub) monEls.pmSub.textContent = '扫描失败：' + msg;
+  if (monEls.mapNote) monEls.mapNote.textContent = `扫描失败：${msg}`;
 }
 
 // 一格 = 一页。颜色按「这一页有多满」分档；有洞的页优先标橙（那才是能整理的地方）。
@@ -2868,10 +3269,13 @@ function pmCellClass(p) {
 function renderPageMap() {
   const box = monEls.pmGrid;
   if (!box || !pmMap) return;
+  const pages = pmMap.pages || [];
+  fitCell(box, pages.length || pmMap.total || 1);
   box.innerHTML = '';
   const frag = document.createDocumentFragment();
-  for (const p of pmMap.pages || []) {
-    const c = el('div', 'pm-c ' + pmCellClass(p));
+  for (const p of pages) {
+    const c = el('div', `pm-c ${pmCellClass(p)}`);
+    c.dataset.no = String(p.no);
     if (p.no === pmOpen) c.classList.add('on');
     c.title = `第 ${p.no} 页 · ${p.live} 条`
       + (pmSel.kind === 'index' ? '' : ` · 已用 ${fmtBytes(p.used)} · 空闲 ${fmtBytes(p.free)}`)
@@ -2883,10 +3287,6 @@ function renderPageMap() {
   box.appendChild(frag);
 
   const kindText = pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页';
-  if (monEls.pmSub) {
-    monEls.pmSub.textContent = `${pmSel.table} · ${kindText} · ${pmMap.total} 页`
-      + (pmMap.note ? ` · ${pmMap.note}` : ` · 本次读了 ${fmtBytes(pmMap.bytes || 0)}`);
-  }
   if (monEls.pmLegend) {
     monEls.pmLegend.innerHTML = '';
     const parts = pmSel.kind === 'index'
@@ -2902,17 +3302,25 @@ function renderPageMap() {
       monEls.pmLegend.appendChild(item);
     }
   }
+  if (monEls.mapNote) {
+    const shown = pages.length;
+    const more = shown < pmMap.total ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）` : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
+    monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
+  }
   if (monEls.pmMore) {
     monEls.pmMore.classList.toggle('hidden', !pmMap.next);
-    monEls.pmMore.textContent = `继续扫描（已读 ${(pmMap.pages || []).length} / ${pmMap.total} 页）`;
+    monEls.pmMore.textContent = `继续扫描（已画 ${pages.length} / ${pmMap.total} 页）`;
   }
 }
 
 async function openPage(no) {
   pmOpen = no;
-  for (const c of monEls.pmGrid.querySelectorAll('.pm-c')) c.classList.remove('on');
-  const cells = monEls.pmGrid.querySelectorAll('.pm-c');
-  if (cells[no]) cells[no].classList.add('on');
+  for (const c of monEls.pmGrid.querySelectorAll('.pm-c.on')) c.classList.remove('on');
+  const cell = monEls.pmGrid.querySelector(`.pm-c[data-no="${no}"]`);
+  if (cell) {
+    cell.classList.add('on');
+    cell.scrollIntoView({ block: 'nearest' });
+  }
   const side = monEls.pmSide;
   side.innerHTML = '';
   side.appendChild(el('div', 'pm-hint', `正在读第 ${no} 页…`));
@@ -2933,14 +3341,14 @@ function renderPageDetail(d) {
   const side = monEls.pmSide;
   side.innerHTML = '';
   const head = el('div', 'pm-head',
-    `第 ${d.no} 页 · ${d.kind === 'index' ? '索引 ' + d.index : '数据页'}` + (d.crc === 'ok' ? '' : ` · ${d.crc === 'zero' ? '空页' : '页头异常'}`));
+    `第 ${d.no} 页 · ${d.kind === 'index' ? '索引 ' + d.index : '数据页'}`
+    + (d.crc === 'ok' ? '' : ` · ${d.crc === 'zero' ? '空页' : '页头异常'}`));
   side.appendChild(head);
 
   const kv = el('div', 'pm-kv');
   const addKV = (k, v) => {
     kv.appendChild(el('span', null, k));
-    const b = el('b', null, v);
-    kv.appendChild(b);
+    kv.appendChild(el('b', null, v));
   };
   if (d.indexHeader) {
     addKV('根页', `${d.indexHeader.root}`);
@@ -2986,23 +3394,14 @@ async function locateRID(rid) {
     d = await api(`/api/rid?table=${encodeURIComponent(table)}&rid=${rid}`);
   } catch (e) {
     pmLink = null;
-    if (monEls.pmSide) {
-      monEls.pmSide.appendChild(el('div', 'pm-hint', '定位失败：' + e.message));
-    }
+    if (monEls.pmSide) monEls.pmSide.appendChild(el('div', 'pm-hint', '定位失败：' + e.message));
     return;
   }
+  // 从索引视图点过来时，先切到「数据页」并等它扫完，再打开那一页 ——
+  // 否则页面还停在索引的网格上，高亮会落空。
+  // 注意：selectTarget 会清 pmLink（换目标就不该留着上一页的关联），所以它之后再放回来。
+  if (pmSel.kind !== 'data') await selectTarget(table, 'data', '');
   pmLink = d;
-  // 从索引视图点过来时，顺手把页地图切到「数据页」并打开那一页：
-  // 这样「索引项 → 物理页」是一次点击看到的，不用自己去翻。
-  if (pmSel.kind !== 'data') {
-    const sel = monEls.pmPick;
-    const want = `${table}|data|`;
-    if (sel && [...sel.options].some(o => o.value === want)) {
-      sel.value = want;
-      pmSel = { table, kind: 'data', index: '' };
-      await loadPageMap(false);
-    }
-  }
   if (pmOpen === d.page && pmDetail) renderPageDetail(pmDetail);
   else await openPage(d.page);
 }
@@ -3016,9 +3415,7 @@ function pmLinkBox(d) {
     `RID ${d.rid} → 堆页 ${d.page} 槽 ${d.slot}` + (d.live ? '' : '（空槽：这一行已被删）')));
   box.appendChild(head);
 
-  if ((d.cols || []).length) {
-    box.appendChild(el('div', 'pm-link-row', '列值：' + d.cols.join(' | ')));
-  }
+  if ((d.cols || []).length) box.appendChild(el('div', 'pm-link-row', '列值：' + d.cols.join(' | ')));
   const lobs = d.lobs || [];
   if (!lobs.length) {
     box.appendChild(el('div', 'pm-link-row', '这一行没有大字段'));
@@ -3129,15 +3526,173 @@ function pmHexView(d) {
   for (let i = 0; i < lines.length; i++) {
     const off = i * 16;
     const hl = runs.some(([a, b]) => off < b && off + 16 > a);
-    const ln = el('div', 'ln' + (hl ? ' hl' : ''), lines[i]);
-    frag.appendChild(ln);
+    frag.appendChild(el('div', 'ln' + (hl ? ' hl' : ''), lines[i]));
   }
   wrap.appendChild(frag);
   return wrap;
 }
 
-if (monEls.pmPick) monEls.pmPick.addEventListener('change', pmReadPick);
+/* ---- 5.2.4 空间地图的整体切换与控件 ---- */
+
+function applyRailWidth() {
+  if (!monEls.mapRail) return;
+  const w = Math.max(MAP_RAIL_MIN, Math.min(MAP_RAIL_MAX, mapRailW || MAP_RAIL_DEFAULT));
+  monEls.mapRail.style.width = `${w}px`;
+}
+
+function renderMap() {
+  if (!monEls.mapTree || monPageTab !== 'map') return;
+  const l2 = mapLevel === 'table';
+  monEls.mapBack.classList.toggle('hidden', !l2);
+  monEls.mapGroup.classList.toggle('hidden', l2);
+  monEls.mapJump.classList.toggle('hidden', !l2);
+  monEls.mapFiles.classList.toggle('hidden', !l2 || !pmSel.table);
+  monEls.mapTree.classList.toggle('hidden', l2);
+  monEls.pmGrid.classList.toggle('hidden', !l2);
+  renderCrumbs();
+
+  if (!l2) {
+    if (monEls.mapFiles) monEls.mapFiles.innerHTML = '';
+    if (monEls.pmMore) monEls.pmMore.classList.add('hidden');
+    renderTreemap();
+    renderRailDb();
+    renderMapLegend();
+    const sp = (spaceData && spaceData.space) || {};
+    const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0) + (sp.walBytes || 0);
+    const n = ((spaceData && spaceData.tables) || []).length;
+    const noSnap = ((spaceData && spaceData.tables) || []).filter(t => !(t.bytes > 0)).length;
+    if (monEls.mapNote) {
+      monEls.mapNote.textContent = `${n} 张表 · 合计 ${fmtBytes(total)}`
+        + (noSnap ? ` · ${noSnap} 张还没落过盘（不在图上）` : '')
+        + ' · 面积 = 字节';
+    }
+    return;
+  }
+
+  renderFileBar();
+  if (pmMapMatches()) {
+    renderPageMap();
+  } else {
+    monEls.pmGrid.innerHTML = '';
+    if (monEls.pmLegend) monEls.pmLegend.innerHTML = '';
+    if (monEls.pmMore) monEls.pmMore.classList.add('hidden');
+    if (monEls.mapNote) monEls.mapNote.textContent = '正在扫页头…';
+  }
+}
+
+function renderMapLegend() {
+  if (!monEls.pmLegend) return;
+  monEls.pmLegend.innerHTML = '';
+  const walOnly = mapGroup === 'file';
+  const parts = walOnly
+    ? [['s-data', '数据'], ['s-index', '索引'], ['s-lob', '大字段']]
+    : [['s-data', '数据'], ['s-index', '索引'], ['s-lob', '大字段']];
+  for (const [cls, label] of parts) {
+    const item = el('span', 'space-item');
+    item.appendChild(el('span', `space-dot ${cls}`));
+    item.appendChild(el('span', null, label));
+    monEls.pmLegend.appendChild(item);
+  }
+  const wal = el('span', 'space-item');
+  wal.appendChild(el('span', 'space-dot s-wal'));
+  wal.appendChild(el('span', null, 'WAL'));
+  monEls.pmLegend.appendChild(wal);
+}
+
+// 从「存储」页的空间表点过来：直接进那张表的页地图。
+function gotoMap(table) {
+  mapLevel = 'table';
+  mapSelTable = table || '';
+  pmSel = { table: table || '', kind: 'data', index: '' };
+  pmMap = null;
+  pmOpen = -1; pmDetail = null; pmLink = null;
+  setMonPage('map');
+  if (pmSel.table) {
+    railHint('点左边任意一格，看这一页的结构、文本和字节。');
+    loadPageMap(false);
+  }
+}
+
+async function refreshMap() {
+  pmCache.clear();
+  await loadSpace();
+  if (mapLevel === 'table') await loadPageMap(false);
+  else renderMap();
+}
+
+if (monEls.mapBack) monEls.mapBack.addEventListener('click', backToDb);
+if (monEls.mapRefresh) monEls.mapRefresh.addEventListener('click', refreshMap);
 if (monEls.pmMore) monEls.pmMore.addEventListener('click', () => loadPageMap(true));
+if (monEls.mapGroup) {
+  monEls.mapGroup.addEventListener('click', e => {
+    const b = e.target.closest('button[data-group]');
+    if (!b) return;
+    mapGroup = b.dataset.group;
+    for (const x of monEls.mapGroup.querySelectorAll('button')) {
+      x.classList.toggle('on', x.dataset.group === mapGroup);
+    }
+    renderTreemap();
+    renderMapLegend();
+  });
+}
+if (monEls.mapJump) {
+  monEls.mapJump.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const n = parseInt(e.target.value, 10);
+    if (!Number.isFinite(n) || n < 0) return;
+    e.target.value = '';
+    const total = (pmMap && pmMap.total) || 0;
+    if (total && n >= total) {
+      if (monEls.mapNote) monEls.mapNote.textContent = `这个文件只有 ${total} 页（0 ~ ${total - 1}）`;
+      return;
+    }
+    if (monEls.pmGrid && monEls.pmGrid.querySelector(`.pm-c[data-no="${n}"]`)) openPage(n);
+    else if (monEls.mapNote) monEls.mapNote.textContent = `第 ${n} 页还没画出来（点「继续扫描」）`;
+  });
+}
+
+// 右栏拖宽：认在 localStorage，重开面板还是这个宽度。
+(function initRailDrag() {
+  const grip = monEls.mapGrip, rail = monEls.mapRail, body = monEls.mapBody;
+  if (!grip || !rail || !body) return;
+  let startX = 0, startW = 0, dragging = false;
+  grip.addEventListener('pointerdown', e => {
+    dragging = true;
+    startX = e.clientX;
+    startW = rail.getBoundingClientRect().width;
+    grip.classList.add('drag');
+    grip.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  grip.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const limit = Math.max(MAP_RAIL_MIN, Math.min(MAP_RAIL_MAX, body.clientWidth - 320));
+    const w = Math.max(MAP_RAIL_MIN, Math.min(limit, startW - (e.clientX - startX)));
+    rail.style.width = `${w}px`;
+    mapRailW = w;
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    grip.classList.remove('drag');
+    try { localStorage.setItem('godb.mapRailW', String(Math.round(mapRailW))); } catch (_) { /* 隐私模式 */ }
+    if (mapLevel === 'table') renderPageMap();
+    else renderTreemap();
+  };
+  grip.addEventListener('pointerup', stop);
+  grip.addEventListener('pointercancel', stop);
+})();
+
+// 窗口尺寸变了要重铺：格子大小和树图面积都是按画布算的。
+let mapResizeTimer = 0;
+window.addEventListener('resize', () => {
+  if (monPageTab !== 'map') return;
+  clearTimeout(mapResizeTimer);
+  mapResizeTimer = setTimeout(() => {
+    if (mapLevel === 'table') renderPageMap();
+    else renderTreemap();
+  }, 150);
+});
 
 /* ---- 5.1 详情：点一行看「到底慢在哪」 ---- */
 
@@ -4440,6 +4995,12 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !cfOpen && !settingsModal.classList.contains('hidden')) closeSettings();
   // Esc 先收浮层，再关面板（一层一层退，别一下全关掉）
   if (e.key === 'Escape' && monSettingsOpen()) { setMonSettings(false); return; }
+  // 空间地图里 Esc 先退一级（表视图 → 库视图），再按一次才关整个面板 ——
+  // 一层一层退，别一下把面板关了让人从头点回来。
+  if (e.key === 'Escape' && monOpen && monPageTab === 'map' && mapLevel === 'table') {
+    backToDb();
+    return;
+  }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
 });
 

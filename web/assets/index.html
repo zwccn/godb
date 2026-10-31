@@ -211,6 +211,7 @@ try {
   <div class="mon-nav" id="monNav" role="tablist" aria-label="监控视图">
     <button type="button" class="mon-nav-tab on" data-page="overview" role="tab" aria-selected="true">概览</button>
     <button type="button" class="mon-nav-tab" data-page="storage" role="tab" aria-selected="false">存储</button>
+    <button type="button" class="mon-nav-tab" data-page="map" role="tab" aria-selected="false">空间地图</button>
     <button type="button" class="mon-nav-tab" data-page="diag" role="tab" aria-selected="false">诊断</button>
   </div>
 
@@ -299,26 +300,42 @@ try {
         <div class="mon-ok hidden" id="spaceOk">还没有表</div>
       </section>
 
-      <!-- 页地图：按页号铺格子，点一页看它里面到底写了什么（结构 / 文本 / 十六进制）。
-           只读、直接读文件、不进缓冲池 —— 一个诊断功能不该把热页挤掉；
-           代价是看到的是「磁盘上的样子」，还没落盘的脏页不在这里。 -->
-      <section class="mon-card" id="monPageMap">
-        <div class="mon-card-head">
-          <span>页地图</span>
-          <span class="mon-sub" id="pmSub">点开一张表开始</span>
-          <select id="pmPick" class="pm-pick" aria-label="选择要看哪个文件"></select>
-        </div>
-        <div class="pm-body">
-          <div class="pm-left">
-            <div class="pm-grid" id="pmGrid"></div>
-            <div class="pm-legend" id="pmLegend"></div>
-            <button class="space-rescan hidden" id="pmMore" type="button">继续扫描后面的页</button>
+    </div>
+
+    <!-- 空间地图：两级画布 —— 库视图是矩形树图（面积 = 字节），点一张表就换成页网格（一格一页）。
+         单独成页是为了「大视野」：一张 20 万行的表有 1450 页，当卡片铺不下（格子塞在 260px 高里
+         只能铺十几行），铺满画布才能一屏看完。
+         只读、直接读文件、不进缓冲池；看到的是磁盘上的样子，未落盘的改动不在这里。 -->
+    <div class="mon-page map hidden" data-page="map">
+      <div class="map-bar">
+        <button class="map-back hidden" id="mapBack" type="button" title="返回上一级（Esc）">‹</button>
+        <div class="map-crumbs" id="mapCrumbs"></div>
+        <div class="map-bar-right">
+          <div class="map-seg" id="mapGroup" role="group" aria-label="树图分组">
+            <button type="button" class="on" data-group="table">按表</button>
+            <button type="button" data-group="file">按文件</button>
           </div>
-          <div class="pm-side" id="pmSide">
-            <div class="pm-hint">点左边任意一格，看这一页的结构、文本和字节</div>
+          <input class="map-jump hidden" id="mapJump" type="text" inputmode="numeric"
+                 placeholder="跳到页" aria-label="跳到页号">
+          <button class="space-rescan" id="mapRefresh" type="button">重新扫描</button>
+        </div>
+      </div>
+      <div class="map-files hidden" id="mapFiles" role="group" aria-label="选择要看哪个文件"></div>
+      <div class="map-body" id="mapBody">
+        <div class="map-canvas" id="mapCanvas">
+          <div class="map-tree" id="mapTree"></div>
+          <div class="map-grid hidden" id="pmGrid"></div>
+          <div class="map-foot" id="mapFoot">
+            <div class="map-legend" id="pmLegend"></div>
+            <span class="map-note" id="mapNote"></span>
+            <button class="space-rescan hidden" id="pmMore" type="button">继续扫描</button>
           </div>
         </div>
-      </section>
+        <div class="map-rail" id="mapRail">
+          <div class="map-grip" id="mapGrip" title="拖动调整宽度"></div>
+          <div class="pm-side" id="pmSide"></div>
+        </div>
+      </div>
     </div>
 
     <div class="mon-page hidden" data-page="diag">

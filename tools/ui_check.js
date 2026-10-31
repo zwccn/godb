@@ -351,7 +351,7 @@ class CDP {
       fillRow.found && (/%|—/.test(fillRow.main)) && /VACUUM/.test(fillRow.tip),
       fillRow.found ? `${fillRow.main} · ${fillRow.sub}` : `缺行：${JSON.stringify(fillRow.keys)}`);
 
-    // 页面级 Tab：概览 / 存储 / 诊断。诊断卡里的小 Tab 只留三类诊断。
+    // 页面级 Tab：概览 / 存储 / 空间地图 / 诊断。诊断卡里的小 Tab 只留三类诊断。
     const navUi = await cdp.eval(`(() => {
       const nav = document.getElementById('monNav');
       const tabs = nav ? [...nav.querySelectorAll('.mon-nav-tab')] : [];
@@ -362,8 +362,8 @@ class CDP {
             tabs.find(b => b.classList.contains('on')).dataset.page,
       };
     })()`);
-    check('监控顶部有页面级 Tab（概览 / 存储 / 诊断），默认概览',
-      navUi.n === 3 && navUi.labels.join('/') === '概览/存储/诊断' && navUi.on === 'overview',
+    check('监控顶部有页面级 Tab（概览 / 存储 / 空间地图 / 诊断），默认概览',
+      navUi.n === 4 && navUi.labels.join('/') === '概览/存储/空间地图/诊断' && navUi.on === 'overview',
       navUi.labels.join(' / ') + ' · 当前 ' + navUi.on);
 
     // 概览页底部留一行存储摘要：fsync 是最高频的排障入口，不该逼人先切页
@@ -436,18 +436,80 @@ class CDP {
       spDet.open && spDet.segs === 3 && spDet.legend === 3 && /VACUUM/.test(spDet.text),
       `${spDet.segs} 段 / 图例 ${spDet.legend} / ${spDet.text.slice(0, 50)}`);
 
-    // 页地图：每页一格 → 点开看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
-    const pmState = await cdp.eval(`(() => {
-      const sel = document.getElementById('pmPick');
+    // 空间地图：库视图 = 矩形树图（面积 = 字节），双击进表视图 = 页网格。
+    // 这一页是「大视野」：画布吃满剩余高度，一张 785 页的表要能一屏铺完。
+    await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="map"]').click()`);
+    await sleep(1600);
+    const tvUi = await cdp.eval(`(() => {
+      const cells = [...document.querySelectorAll('#mapTree .tv-cell')];
+      const box = document.getElementById('mapTree').getBoundingClientRect();
+      const area = cells.reduce((a, c) => {
+        const r = c.getBoundingClientRect();
+        return a + r.width * r.height;
+      }, 0);
+      const rail = document.getElementById('mapRail').getBoundingClientRect();
+      const bodyMode = document.getElementById('monBody').classList.contains('map-mode');
       return {
-        opts: sel ? sel.options.length : 0,
-        cells: document.querySelectorAll('#pmGrid .pm-c').length,
-        sub: (document.getElementById('pmSub') || {}).textContent || '',
+        n: cells.length,
+        cover: box.width * box.height ? area / (box.width * box.height) : 0,
+        named: cells.filter(c => c.querySelector('.tv-name')).length,
+        tints: [...new Set(cells.map(c => c.dataset.tint).filter(Boolean))],
+        canvas: [Math.round(box.width), Math.round(box.height)],
+        railW: Math.round(rail.width),
+        railLeft: Math.round(rail.left),
+        canvasRight: Math.round(box.right),
+        legend: document.querySelectorAll('#pmLegend .space-item').length,
+        note: (document.getElementById('mapNote') || {}).textContent || '',
+        bodyMode,
       };
     })()`);
-    check('页地图：下拉里有数据页/索引，格子数量与页数一致',
-      pmState.opts > 0 && pmState.cells > 0, `${pmState.opts} 个文件 · ${pmState.cells} 格`);
+    check('空间地图：树图铺满画布（覆盖 > 75%）、块有名字和分类底色',
+      tvUi.n > 0 && tvUi.cover > 0.75 && tvUi.named > 0 && tvUi.tints.length > 0,
+      `${tvUi.n} 块 / 覆盖 ${(tvUi.cover * 100).toFixed(0)}% / 有名字 ${tvUi.named} / 底色 ${tvUi.tints.join(',')}`);
+    check('空间地图：画布占满剩余高度、右栏在画布右侧、图例四类且写了「面积 = 字节」',
+      tvUi.canvas[1] > 400 && tvUi.railW >= 360 && tvUi.railLeft >= tvUi.canvasRight - 1 &&
+        tvUi.legend === 4 && /面积 = 字节/.test(tvUi.note) && tvUi.bodyMode,
+      `画布 ${tvUi.canvas.join('×')} · 右栏 ${tvUi.railW}px · 图例 ${tvUi.legend} · ${tvUi.note}`);
 
+    // 「按文件」把每棵索引拆成独立块：块数一定变多
+    const beforeFile = tvUi.n;
+    await cdp.eval(`document.querySelector('#mapGroup button[data-group="file"]').click()`);
+    await sleep(700);
+    const fileUi = await cdp.eval(`(() => ({
+      n: document.querySelectorAll('#mapTree .tv-cell').length,
+      on: (document.querySelector('#mapGroup button.on') || {}).dataset.group,
+    }))()`);
+    check('空间地图「按文件」把索引和数据拆成独立块',
+      fileUi.on === 'file' && fileUi.n > beforeFile,
+      `按表 ${beforeFile} 块 → 按文件 ${fileUi.n} 块`);
+    await cdp.eval(`document.querySelector('#mapGroup button[data-group="table"]').click()`);
+    await sleep(500);
+
+    // 双击一块进表视图：页网格
+    await cdp.eval(`(() => {
+      const c = document.querySelector('#mapTree .tv-cell');
+      c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    })()`);
+    await sleep(1800);
+    const gridUi = await cdp.eval(`(() => {
+      const cells = [...document.querySelectorAll('#pmGrid .pm-c')];
+      const g = document.getElementById('pmGrid').getBoundingClientRect();
+      return {
+        n: cells.length,
+        cell: cells.length ? Math.round(cells[0].getBoundingClientRect().width) : 0,
+        h: Math.round(g.height),
+        w: Math.round(g.width),
+        crumbs: (document.getElementById('mapCrumbs') || {}).textContent || '',
+        files: [...document.querySelectorAll('#mapFiles .map-file')].map(b => b.textContent),
+        note: (document.getElementById('mapNote') || {}).textContent || '',
+        treeHidden: document.getElementById('mapTree').classList.contains('hidden'),
+      };
+    })()`);
+    check('双击树图块进表视图：页网格吃满画布（高 > 300），树图收起',
+      gridUi.n > 0 && gridUi.h > 300 && gridUi.treeHidden && /数据页/.test(gridUi.crumbs) && gridUi.files.length >= 1,
+      `${gridUi.n} 格 / 格 ${gridUi.cell}px / 画布 ${gridUi.w}×${gridUi.h} / ${gridUi.crumbs}`);
+
+    // 页检查器：点一格看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
     await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
     await sleep(1200);
     const pmStruct = await cdp.eval(`(() => {
@@ -475,6 +537,41 @@ class CDP {
       /RID \d+ → 堆页 \d+ 槽 \d+/.test(pmLink.text),
       pmLink.text.slice(0, 60) || '没有关联块');
 
+    // 整条链：索引叶子 → RID → 堆页（换文件、高亮、关联块三件事必须一起发生）
+    const hasIx = await cdp.eval(`(() => {
+      const t = (spaceData.tables || []).find(x => (x.indexes || []).length);
+      return t ? { table: t.name, ix: t.indexes[0].name } : null;
+    })()`);
+    if (hasIx) {
+      await cdp.eval(`enterTable(${JSON.stringify(hasIx.table)}, 'index', ${JSON.stringify(hasIx.ix)})`);
+      await sleep(1800);
+      const idxPage = await cdp.eval(`(() => {
+        const c = [...document.querySelectorAll('#pmGrid .pm-c')].find(x => x.classList.contains('idx'));
+        if (!c) return null;
+        c.click();
+        return c.dataset.no;
+      })()`);
+      await sleep(1200);
+      await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
+      await sleep(2400);
+      const chain = await cdp.eval(`(() => {
+        const txt = s => { const e = document.querySelector(s); return e ? e.textContent : ''; };
+        const on = document.querySelector('#mapFiles .map-file.on');
+        return {
+          file: on ? on.textContent : '',
+          crumbs: txt('#mapCrumbs'),
+          link: txt('#pmSide .pm-link'),
+          onCell: document.querySelectorAll('#pmGrid .pm-c.on').length,
+        };
+      })()`);
+      check('索引叶子点 RID：自动切到「数据页」、只高亮 1 格、关联块还在',
+        idxPage !== null && chain.file === '数据页' && /数据页/.test(chain.crumbs) &&
+          chain.onCell === 1 && /RID \d+ → 堆页 \d+ 槽 \d+/.test(chain.link),
+        `索引页 ${idxPage} → ${chain.file} · 高亮 ${chain.onCell} 格 · ${chain.link.slice(0, 40) || '关联块丢了'}`);
+    } else {
+      check('索引叶子点 RID：自动切到「数据页」、只高亮 1 格、关联块还在', true, '这个库里没有索引，跳过');
+    }
+
     // 文本视图：页里能认出业务文本（这个库的示例数据是中文）
     await cdp.eval(`[...document.querySelectorAll('#pmSide .pm-tab')].find(b => b.textContent === '文本').click()`);
     await sleep(400);
@@ -498,6 +595,34 @@ class CDP {
     })()`);
     check('十六进制视图渲染整页 512 行，并高亮文本片段',
       pmHex.n === 512 && pmHex.hl > 0, `${pmHex.n} 行 / 高亮 ${pmHex.hl} 行 / ${pmHex.first}`);
+
+    // 一层一层退：返回键 → 库视图；Esc 在表视图里只退一级
+    await cdp.eval(`document.getElementById('mapBack').click()`);
+    await sleep(800);
+    const backUi = await cdp.eval(`(() => ({
+      cells: document.querySelectorAll('#mapTree .tv-cell').length,
+      crumbs: (document.getElementById('mapCrumbs') || {}).textContent || '',
+      gridHidden: document.getElementById('pmGrid').classList.contains('hidden'),
+    }))()`);
+    check('点返回：回到库视图（树图重新铺开、页网格收起）',
+      backUi.cells > 0 && backUi.gridHidden && !/数据页/.test(backUi.crumbs),
+      `${backUi.cells} 块 / ${backUi.crumbs}`);
+
+    await cdp.eval(`(() => {
+      const c = document.querySelector('#mapTree .tv-cell');
+      c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    })()`);
+    await sleep(1500);
+    await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await sleep(600);
+    const escUi = await cdp.eval(`(() => ({
+      panelOpen: !document.getElementById('monPanel').classList.contains('hidden'),
+      gridHidden: document.getElementById('pmGrid').classList.contains('hidden'),
+      crumbs: (document.getElementById('mapCrumbs') || {}).textContent || '',
+    }))()`);
+    check('Esc 在表视图里只退一级，不会顺手关掉整个面板',
+      escUi.panelOpen && escUi.gridHidden && !/数据页/.test(escUi.crumbs),
+      `面板${escUi.panelOpen ? '还开着' : '被关了'} · ${escUi.crumbs}`);
 
     // 诊断页：空间已经移走，只剩慢SQL / 慢事务 / 锁明细
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="diag"]').click()`);
@@ -561,6 +686,26 @@ class CDP {
       !badPage,
       badPage ? `${badPage.page}: 卡片 ${badPage.n} 张（压扁 ${badPage.crushed}）· 滚到 ${badPage.scrollTop}/${badPage.max}`
         : fits.map(f => `${f.page} ${f.n} 张`).join(' / '));
+
+    // 空间地图不靠卡片高度，靠「画布吃满剩余高度」——单独量：画布不能塌、页面不能溢出。
+    await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="map"]').click()`);
+    await sleep(700);
+    const mapFit = await cdp.eval(`(() => {
+      const b = document.getElementById('monBody');
+      const t = document.getElementById('mapTree').getBoundingClientRect();
+      const foot = document.getElementById('mapFoot').getBoundingClientRect();
+      return {
+        treeH: Math.round(t.height),
+        footBottom: Math.round(foot.bottom),
+        panelBottom: Math.round(document.getElementById('monPanel').getBoundingClientRect().bottom),
+        overflow: Math.round(b.scrollHeight - b.clientHeight),
+        cells: document.querySelectorAll('#mapTree .tv-cell').length,
+      };
+    })()`);
+    check('165% 字号：空间地图的画布仍然吃满、不溢出面板',
+      mapFit.treeH >= 200 && mapFit.cells > 0 && mapFit.footBottom <= mapFit.panelBottom + 1 &&
+        mapFit.overflow <= 1,
+      `树图高 ${mapFit.treeH} · ${mapFit.cells} 块 · 溢出 ${mapFit.overflow}px`);
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="overview"]').click()`);
     await cdp.eval(`applyFontScale(120, true)`);
     await sleep(300);

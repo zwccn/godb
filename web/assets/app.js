@@ -1871,12 +1871,59 @@ function renderLayers(layers) {
 // 三层是瞬时的、告诉你现在哪里堵着；这里是走势、告诉你刚才忙成什么样。
 // 排障时最有用的组合是「等锁数一直不为 0 + QPS 掉到地板」——
 // 那不是没人来，是全被锁住了。
+// 吞吐/资源曲线的时间窗口（秒）。只影响「画多久」，采样节奏与 5 秒均值口径都不变。
+// 服务端最多留 5 分钟，所以不给 15 分钟这种画出来一半是空的选项。
+const MON_WIN_KEY = 'godb.monWin';
+let monWinSec = (() => {
+  const n = parseInt(localStorage.getItem(MON_WIN_KEY) || '', 10);
+  return n === 60 || n === 300 ? n : 300;
+})();
+
+// winSlice 按 atMs 截出窗口内的点；点太少（刚启动）就原样返回，别画出空图。
+function winSlice(pts) {
+  if (!pts || pts.length < 2) return pts || [];
+  const cut = Date.now() - monWinSec * 1000;
+  const out = pts.filter(pt => (pt.atMs || 0) >= cut);
+  return out.length >= 2 ? out : pts.slice(-2);
+}
+
+function winLabel() {
+  return monWinSec === 60 ? '1 分钟' : '5 分钟';
+}
+
+function syncWinHint() {
+  const a = document.getElementById('monRateSub');
+  if (a) a.textContent = `每秒采样 · 最近 ${winLabel()} · 当前值为 5 秒平均`;
+  const b = document.getElementById('monProcSub');
+  if (b) b.textContent = `每秒采样 · 最近 ${winLabel()}`;
+  const box = document.getElementById('monWin');
+  if (box) {
+    for (const btn of box.querySelectorAll('button')) {
+      const on = String(monWinSec) === btn.dataset.win;
+      btn.classList.toggle('on', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+  }
+}
+
+document.getElementById('monWin').addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-win]');
+  if (!btn) return;
+  const n = parseInt(btn.dataset.win, 10);
+  if (n === monWinSec) return;
+  monWinSec = n;
+  try { localStorage.setItem(MON_WIN_KEY, String(n)); } catch (e) {}
+  syncWinHint();
+  if (monData) renderMonitor(monData);
+});
+
 function renderRates(m) {
+  syncWinHint(); // 文案与按钮激活态跟着窗口走（每秒一次的几个 DOM 查询，可以忽略）
   const r = m.rates || {};
   const box = monEls.rates;
   if (!box) return;
   box.innerHTML = '';
-  const pts = r.series || [];
+  const pts = winSlice(r.series || []);
 
   const grid = el('div', 'proc-grid');
   grid.appendChild(statCell(
@@ -2030,7 +2077,7 @@ function renderProc(m) {
     'goroutine 数持续上涨要怀疑连接泄漏；GC 暂停 p95 是「查询莫名多花几十毫秒」的常见来源'));
   box.appendChild(grid);
 
-  const series = p.series || [];
+  const series = winSlice(p.series || []);
   if (series.length > 1) {
     box.appendChild(sparkline(series, p.numCpu));
   } else {

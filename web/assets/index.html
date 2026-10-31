@@ -306,7 +306,12 @@ try {
     <section class="mon-card">
       <div class="mon-card-head">
         <span>吞吐与连接</span>
-        <span class="mon-sub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
+        <span class="mon-sub" id="monRateSub">每秒采样 · 最近 5 分钟 · 当前值为 5 秒平均</span>
+        <!-- 时间窗口：只影响画图，采样节奏和聚合口径都不变 -->
+        <div class="mon-win" id="monWin" role="group" aria-label="时间窗口">
+          <button type="button" data-win="60">1 分钟</button>
+          <button type="button" data-win="300" class="on">5 分钟</button>
+        </div>
       </div>
       <div class="mon-rate" id="monRate"></div>
     </section>
@@ -318,7 +323,7 @@ try {
       <section class="mon-card">
         <div class="mon-card-head">
           <span>进程资源</span>
-          <span class="mon-sub">每秒采样 · 最近 5 分钟</span>
+          <span class="mon-sub" id="monProcSub">每秒采样 · 最近 5 分钟</span>
         </div>
         <div class="mon-proc" id="monProc"></div>
       </section>

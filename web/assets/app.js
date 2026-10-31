@@ -2631,12 +2631,14 @@ function renderSpace() {
   const tables = spaceData.tables || [];
   const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0) + (sp.walBytes || 0);
 
-  // 占比条：四块按字节比例分宽度；总和为 0 时留一条空槽
+  // 占比条：四块按字节比例分宽度；总和为 0 时留一条空槽。
+  // 顺序是「索引 → 数据 → 大字段 → WAL」：这个库里索引经常比数据还大
+  // （主键 + 每张二级索引各一份），先看索引才容易发现「六成空间是索引」这种事。
   monEls.spaceBar.innerHTML = '';
   monEls.spaceLegend.innerHTML = '';
   const parts = [
-    ['data', '数据', sp.dataBytes || 0],
     ['index', '索引', sp.indexBytes || 0],
+    ['data', '数据', sp.dataBytes || 0],
     ['lob', '大字段', sp.lobBytes || 0],
     ['wal', 'WAL', sp.walBytes || 0],
   ];

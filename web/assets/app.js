@@ -345,6 +345,13 @@ function initCodeMirror() {
   });
   cm.on('change', onEditorChange);
 
+  /* ---------- 编辑器里的两处标记：出错行、当前语句 ----------
+     都不常驻：行号默认隐藏（编辑器只有 4~6 行高，gutter 要吃 30px 宽度），
+     只在报错时露出来 —— 那时它才有用，因为后端报错文本带 (line N, column M)。 */
+  cm.on('change', () => { if (errLine >= 0) clearSqlError(); });
+  cm.on('change', scheduleStmt);
+  cm.on('cursorActivity', scheduleStmt);
+
   // 输入法：网页**没法**替用户切换操作系统的中英文状态（老 IE 的 ime-mode 早在
   // Chrome/Firefox 里被移除了），能做的只有这两件小事：
   //   1. inputmode=latin：手机上弹英文键盘，不用每次先切一下；
@@ -697,6 +704,12 @@ async function run(prefix) {
   const sel = editorSelection().trim();
   let sql = (sel || editor.value).trim();
   if (!sql) return;
+  // 只执行选区时，后端报的行号是「选区内的第几行」，要加上选区在编辑器里的起始行
+  let selBase = 0;
+  if (sel && cm) {
+    const r = cm.listSelections()[0];
+    if (r) selBase = Math.min(r.anchor.line, r.head.line);
+  }
   let skipped = [];
   if (prefix === 'explain') {
     const ex = withExplain(sql);
@@ -721,6 +734,9 @@ async function run(prefix) {
     const data = await api('/api/query', { sql });
     data.roundTripMs = performance.now() - t0;
     renderResults(data);
+    // 报错文本里带 (line N, column M) 就标到编辑器上；没带也不硬猜
+    if (data.error) markSqlError(data.error, selBase);
+    else clearSqlError();
     updateTx(data.tx);
     pushHistory(sql);
     if (skipped.length) {
@@ -738,6 +754,7 @@ async function run(prefix) {
     if (touchedDB) await loadDBs();
   } catch (e) {
     showPaneError({ message: String(e.message || e) });
+    markSqlError(e.message || e, selBase);
   } finally {
     busy = false;
     setRunning(false);
@@ -752,6 +769,107 @@ function setRunning(on) {
   // 只改文字节点：按钮里还有图标和快捷键，整体重写 innerHTML 会把它们冲掉
   if (label) label.textContent = on ? '执行中…' : '执行';
   btn.title = on ? '正在执行…' : '执行 SQL · Ctrl+Enter';
+}
+
+/* ---------- 编辑器标记 ---------- */
+
+let errLine = -1;        // 当前标着「出错」的行（-1 = 没有）
+let stmtMark = null;     // 当前语句的 markText 句柄
+let stmtTimer = 0;
+
+function setGutter(on) {
+  if (!cm) return;
+  if (cm.getOption('lineNumbers') !== on) cm.setOption('lineNumbers', on);
+}
+
+function clearSqlError() {
+  if (!cm || errLine < 0) return;
+  cm.removeLineClass(errLine, 'background', 'cm-errline');
+  cm.removeLineClass(errLine, 'gutter', 'cm-errline-gutter');
+  errLine = -1;
+  setGutter(false);
+}
+
+/* markSqlError 把「第几行第几列」标到编辑器上。
+   err 可以是后端的 error 对象（带结构化的 line/col），也可以是纯文本 ——
+   结构化的优先，正则只是兜底（别去解析人读的错误文案，那玩意随时会变）。
+   baseLine 是提交的 SQL 在编辑器里的起始行：只执行选区时，后端说的 line 1
+   其实是编辑器里的第 N 行，不减这个偏移会标错地方。 */
+function markSqlError(err, baseLine) {
+  if (!cm) return null;
+  let line = 0, col = 0;
+  if (err && typeof err === 'object' && Number(err.line) > 0) {
+    line = (baseLine || 0) + Number(err.line) - 1;
+    col = Math.max(0, Number(err.col || 1) - 1);
+  } else {
+    const m = /\(line (\d+), column (\d+)\)/.exec(String(err || ''));
+    if (!m) return null;
+    line = (baseLine || 0) + Number(m[1]) - 1;
+    col = Number(m[2]) - 1;
+  }
+  if (line < 0 || line >= cm.lineCount()) return null;
+  clearSqlError();
+  errLine = line;
+  cm.addLineClass(line, 'background', 'cm-errline');
+  cm.addLineClass(line, 'gutter', 'cm-errline-gutter');
+  setGutter(true);
+  const ch = Math.max(0, Math.min(col, cm.getLine(line).length));
+  cm.setCursor({ line, ch });
+  cm.scrollIntoView({ line, ch }, 140);
+  return { line: line + 1, col: ch + 1 };
+}
+
+/* stmtBounds 找光标所在那条语句的 [起, 止) 字符区间。
+   要跳过字符串和注释里的分号 —— 否则 `SELECT ';'` 会把语句从引号中间劈开。 */
+function stmtBounds(text, pos) {
+  let start = 0;
+  let end = text.length;
+  let inS = false, inD = false, inLineC = false, inBlockC = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const n = text[i + 1];
+    if (inLineC) { if (c === '\n') inLineC = false; continue; }
+    if (inBlockC) { if (c === '*' && n === '/') { inBlockC = false; i++; } continue; }
+    if (inS) {
+      if (c === "'") { if (n === "'") i++; else inS = false; }
+      continue;
+    }
+    if (inD) {
+      if (c === '"') { if (n === '"') i++; else inD = false; }
+      continue;
+    }
+    if (c === '-' && n === '-') { inLineC = true; i++; continue; }
+    if (c === '/' && n === '*') { inBlockC = true; i++; continue; }
+    if (c === "'") { inS = true; continue; }
+    if (c === '"') { inD = true; continue; }
+    if (c === ';') {
+      if (i < pos) start = i + 1;
+      else { end = i + 1; break; }
+    }
+  }
+  return [start, end];
+}
+
+function highlightStatement() {
+  if (!cm) return;
+  if (stmtMark) { stmtMark.clear(); stmtMark = null; }
+  const text = cm.getValue();
+  // 超长脚本不值得每次移动光标都扫一遍，收益也小
+  if (text.length > 200000) return;
+  const [a, b] = stmtBounds(text, cm.indexFromPos(cm.getCursor()));
+  if (b <= a) return;
+  // 掐掉首尾空白的边界（分号后面那个换行、缩进），高亮只贴文字，不贴一整行
+  let a2 = a, b2 = b;
+  while (a2 < b2 && /\s/.test(text[a2])) a2++;
+  while (b2 > a2 && /\s/.test(text[b2 - 1])) b2--;
+  if (b2 <= a2) return;
+  stmtMark = cm.markText(cm.posFromIndex(a2), cm.posFromIndex(b2), { className: 'cm-stmt' });
+}
+
+// 光标动一下就重算会很吵，80ms 防抖；markText 只触发 changes，不会把这条链再绕回来
+function scheduleStmt() {
+  clearTimeout(stmtTimer);
+  stmtTimer = setTimeout(highlightStatement, 80);
 }
 
 /* 美化 SQL：有选中就只美化选中那段，没选中整段。

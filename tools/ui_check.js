@@ -2183,6 +2183,44 @@ class CDP {
     check('有选区时只执行选区（改一句不用把整段删掉重写）',
       selRun === 'SELECT 1 AS a;', JSON.stringify(selRun));
 
+    /* 编辑器里的两处标记：当前语句（淡底）+ 出错行（红底 + 临时行号）。
+       行号默认藏着 —— 编辑器只有几行高，常驻 gutter 要吃掉 30px 宽度。 */
+    await cdp.eval(`cm.setValue(['SELECT 1 AS a;','SELECT 2 AS b;','SELECT 3 AS c;'].join(String.fromCharCode(10)))`);
+    await cdp.eval(`cm.setCursor({line:1,ch:4})`);
+    await sleep(300);
+    const stmt = await cdp.eval(`(() => {
+      const ms = cm.getAllMarks().filter(m => m.className === 'cm-stmt');
+      return { n: ms.length, text: ms.length ? cm.getRange(ms[0].find().from, ms[0].find().to) : '' };
+    })()`);
+    check('光标所在的那条语句有淡色底（多语句脚本里不迷路）',
+      stmt.n === 1 && stmt.text === 'SELECT 2 AS b;', JSON.stringify(stmt));
+
+    // 语法错：第 2 行第 8 列 → 红底 + 行号露出来 + 光标跳到出错位置
+    await cdp.eval(`cm.setValue(['SELECT 1;','SELECT FROM;','SELECT 3;'].join(String.fromCharCode(10)))`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(1600);
+    const errMark = await cdp.eval(`(() => ({
+      lines: document.querySelectorAll('.cm-errline').length,
+      gutter: cm.getOption('lineNumbers'),
+      cur: cm.getCursor(),
+    }))()`);
+    check('SQL 报错时标红出错那行，并临时露出行号',
+      errMark.lines === 1 && errMark.gutter === true
+      && errMark.cur.line === 1 && errMark.cur.ch === 7,
+      `红行 ${errMark.lines} · 行号 ${errMark.gutter} · 光标 ${errMark.cur.line}:${errMark.cur.ch}`);
+
+    // 执行成功 → 标记清掉、行号收回
+    await cdp.eval(`cm.setValue('SELECT 42 AS ok;')`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(1600);
+    const errGone = await cdp.eval(`(() => ({
+      lines: document.querySelectorAll('.cm-errline').length,
+      gutter: cm.getOption('lineNumbers'),
+    }))()`);
+    check('执行成功后出错标记与行号一起收回去',
+      errGone.lines === 0 && errGone.gutter === false,
+      `红行 ${errGone.lines} · 行号 ${errGone.gutter}`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

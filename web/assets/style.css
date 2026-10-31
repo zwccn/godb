@@ -3335,6 +3335,22 @@ body.editor-resizing * { cursor: ns-resize !important; }
 }
 .cm-s-godb .CodeMirror-matchingbracket { color: var(--ok-text); }
 
+/* 行号默认藏着（编辑器只有 4~6 行高，常驻的 gutter 要吃掉 30px 宽度）。
+   只在「SQL 报错」时临时露出来，这时行号才有用 —— 报错文本里带 (line N, column M)。
+   vendor 的 codemirror.css 给 gutter 配的是浅灰底，深色主题下会成一条白条，必须覆盖。 */
+.cm-s-godb .CodeMirror-gutters {
+  background: var(--code-bg);
+  border-right: 1px solid var(--border-soft);
+}
+.cm-s-godb .CodeMirror-linenumber { color: var(--text-3); }
+
+/* 出错那行：底色 + 左侧一条红杠（只靠底色在很暗的编辑器里不够显眼） */
+.cm-errline { background: var(--tint-danger); }
+.cm-errline-gutter { color: var(--danger-text) !important; }
+
+/* 光标所在的那条语句：淡底。多语句脚本里改一句时，先看清楚自己在改哪一块 */
+.cm-stmt { background: var(--tint-hover); }
+
 /* 补全弹层：跟控制台其它弹窗同一套配色，别跳出一个系统默认的白框 */
 .CodeMirror-hints {
   z-index: 90;

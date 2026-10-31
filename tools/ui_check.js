@@ -314,6 +314,24 @@ class CDP {
       monUi.isTable && monUi.rows > 0 && monUi.tableLayout === 'fixed' &&
       monUi.ellipsis === 'ellipsis' && monUi.nowrap === 'nowrap',
       `${monUi.rows} 行 / ${monUi.tableLayout} / ${monUi.ellipsis}`);
+
+    // 存储卡里的「索引」行：占用要能看出来，重建次数必须解释得清
+    const ixRow = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('#monIO .io-row')];
+      const hit = rows.find(r => ((r.querySelector('.io-k') || {}).textContent || '') === '索引');
+      if (!hit) {
+        return { found: false, keys: rows.map(r => (r.querySelector('.io-k') || {}).textContent) };
+      }
+      return {
+        found: true,
+        main: (hit.querySelector('.io-v') || {}).textContent || '',
+        sub: (hit.querySelector('.io-sub') || {}).textContent || '',
+        tip: hit.title || '',
+      };
+    })()`);
+    check('存储卡有「索引」行（占用 + 页数 + 重建次数，且带解释）',
+      ixRow.found && /页|索引/.test(ixRow.sub) && /WAL/.test(ixRow.tip),
+      ixRow.found ? `${ixRow.main} · ${ixRow.sub}` : `缺行：${JSON.stringify(ixRow.keys)}`);
     await cdp.eval(`document.querySelector('#monSlowSQL tr').click()`);
     await sleep(700);
     const detUi = await cdp.eval(`(() => {

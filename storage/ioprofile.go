@@ -163,6 +163,46 @@ func (s *Store) PoolStats() PoolProfile {
 	return p
 }
 
+// IndexProfile 是索引在磁盘上的占用（「存储与 IO」卡片用）。
+//
+// 为什么不并进 PoolProfile：池报的是内存页框（运行时计数），这里是磁盘文件
+// （一次 stat）。两者一起看才解释得清「索引占了多少地方、为什么重启后慢了一下」。
+//
+// Rebuilds 是一个不该涨的数值：索引不写 WAL，靠 meta.json 里的代次对齐；
+// 正常重启代次相等、叶子链校验通过 → 重建 0 次。真涨了说明索引文件与堆不同步
+// （代次对不上 / CRC 坏页 / 链断了），那一次启动就白重建了一整棵树。
+type IndexProfile struct {
+	Indexes  int   `json:"indexes"`  // catalog 里的索引定义数
+	Pages    int   `json:"pages"`    // 已落盘的索引页数
+	Bytes    int64 `json:"bytes"`    // 索引文件总字节
+	Rebuilds int64 `json:"rebuilds"` // 启动以来整棵重建的次数
+}
+
+// IndexStats 汇总索引文件大小与重建次数。
+//
+// 只 stat 不打开：未加载的表也要能报，而面板每秒调一次，不能为了个数字
+// 把索引页读进缓冲池。行数按 PageSize 折算，和文件真实布局一致。
+func (s *Store) IndexStats() IndexProfile {
+	p := IndexProfile{Rebuilds: s.idxRebuilds.Load()}
+	if s.Cat == nil {
+		return p
+	}
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
+	for _, t := range s.Cat.Tables {
+		for _, ix := range t.Indexes {
+			p.Indexes++
+			st, err := os.Stat(indexFilePath(s.Dir, t.ID, "ix:"+cleanName(ix.Name)))
+			if err != nil {
+				continue // 还没落过盘的索引（只有 WAL 里有）
+			}
+			p.Bytes += st.Size()
+			p.Pages += int(st.Size() / PageSize)
+		}
+	}
+	return p
+}
+
 // checkpoint 的触发原因。空串表示「还没落过盘」。
 const (
 	CPReasonCommits = "commits" // 攒够了提交次数

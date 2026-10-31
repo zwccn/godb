@@ -2213,6 +2213,18 @@ function renderIO(m) {
     '命中率高 = 页都在内存里，不用读盘。命中率低说明预算太小或访问太随机；出现「超预算」就该把缓冲池页数调大',
     poolLook > 0 && hitRate < 80 ? 'warn' : ''));
 
+  // 索引：不进缓冲池，大小只能靠 stat；「重建次数」是一个本该为 0 的数。
+  const ix = io.index || {};
+  const ixRebuilt = (ix.rebuilds || 0) > 0;
+  box.appendChild(row('索引',
+    ix.indexes ? `${ix.indexes} 个 · ${fmtBytes(ix.bytes || 0)}` : '还没有索引',
+    ix.indexes
+      ? `${ix.pages || 0} 页` + (ixRebuilt ? ` · 重建 ${ix.rebuilds} 次（索引与表不同步）` : ' · 重建 0 次')
+      : '建一个索引后这里会显示它的磁盘占用',
+    '索引不写 WAL，靠 meta.json 里的代次和堆对齐：正常重启代次相等、叶子链校验通过，重建 0 次；'
+      + '涨了说明索引文件过期或被判定损坏，那次启动白重建了一整棵树',
+    ixRebuilt ? 'warn' : ''));
+
   const tables = io.tables || [];
   const top = tables.slice(0, 3).map(t => `${t.name} ${fmtBytes(t.bytes)}`).join(' · ');
   box.appendChild(row('数据',

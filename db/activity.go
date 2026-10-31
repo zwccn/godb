@@ -464,6 +464,7 @@ type IOProfile struct {
 	Fsync      storage.FsyncProfile      `json:"fsync"`
 	Checkpoint storage.CheckpointProfile `json:"checkpoint"`
 	Pool       storage.PoolProfile        `json:"pool"`
+	Index      storage.IndexProfile       `json:"index"`
 	Tables     []storage.TableSize       `json:"tables"`
 	TotalBytes int64                     `json:"totalBytes"`
 	Rates      IORates                   `json:"rates"`
@@ -754,6 +755,7 @@ func (d *DB) Monitor(t TimeoutStatus) Monitor {
 		m.IO.Fsync = d.Store.FsyncProfile()
 		m.IO.Checkpoint = d.Store.CheckpointProfile()
 		m.IO.Pool = d.Store.PoolStats()
+		m.IO.Index = d.Store.IndexStats()
 		m.IO.Tables = d.Store.TableSizes()
 		var sum int64
 		for _, t := range m.IO.Tables {

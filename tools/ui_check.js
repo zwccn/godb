@@ -87,6 +87,37 @@ class CDP {
       console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`);
     };
 
+    /* 空间地图有几条断言要一张「几百页」的表。库里随时可能被清空（设置页就摆着
+       「清空当前库」），所以这里先确保 big_demo 在：没有就现造 5 万行 + 落盘，
+       已有就一步不动。以前这条链靠「库里正好有演示数据」，别人清一次库测试就红。
+       单引号用 String.fromCharCode(39) 拼 —— 这段代码本身在模板字符串里，
+       直接写 \' 会被吃掉一层，不如绕开转义。v 必须是文本：页检查器的「文本」视图
+       就是靠从字节里认出业务文本来断言的。 */
+    const seedTotal = await cdp.eval(`(async () => {
+      const q = sql => fetch('/api/query', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }),
+      }).then(r => r.json());
+      const head = await fetch('/api/pages?table=big_demo&kind=data&limit=1').then(r => r.json());
+      if (!head.error) return head.total;
+      const Q = String.fromCharCode(39);
+      await q('CREATE TABLE big_demo (id INTEGER PRIMARY KEY, v TEXT)');
+      for (let b = 0; b < 10; b++) {
+        const rows = [];
+        for (let i = b * 5000 + 1; i <= (b + 1) * 5000; i++) {
+          rows.push('(' + i + ',' + Q + 'user_' + i + Q + ')');
+        }
+        await q('INSERT INTO big_demo VALUES ' + rows.join(','));
+      }
+      await q('CREATE INDEX big_ix_v ON big_demo (v)');
+      await q('CHECKPOINT');
+      const h2 = await fetch('/api/pages?table=big_demo&kind=data&limit=1').then(r => r.json());
+      return h2.error ? 0 : h2.total;
+    })()`);
+    // 现造的表要重新拉一次空间数据，否则树图里没它（页面加载时的 spaceData 还是旧的）
+    await cdp.eval(`loadSpace()`);
+    await sleep(800);
+
     // 0) 执行按钮在工具栏左侧，而且点了真能执行
     const pos = await cdp.eval(`(() => {
       const b = document.getElementById('btnRun').getBoundingClientRect();
@@ -765,9 +796,13 @@ class CDP {
     /* 索引树能一路下钻：头页（root/高度）→ 根 → 内部节点 → 叶子。
        B+Tree 在磁盘上是一棵真的树，但页网格里它只是 212 个同色的方格 ——
        不能从根顺着指针走一遍，就永远只是在看一堆页。路径条同时解决「我在第几层」。 */
+    // 选索引最大的那张表：索引越大越可能已经长出内部节点（高度 ≥ 2），
+    // 才能覆盖「根 → 内部 → 叶子」三级；小表的根直接就是叶子，只能测两级。
+    // （原来写的是「第一张有索引的表」，库里多删两张表之后它就换人了，断言跟着挂。）
     const ixNav = await cdp.eval(`(() => {
-      const t = (spaceData.tables || []).find(x => (x.indexes || []).length);
-      return t ? { table: t.name, ix: t.indexes[0].name } : null;
+      const ts = (spaceData.tables || []).filter(x => (x.indexes || []).length)
+        .sort((a, b) => (b.indexBytes || 0) - (a.indexBytes || 0));
+      return ts.length ? { table: ts[0].name, ix: ts[0].indexes[0].name } : null;
     })()`);
     if (ixNav) {
       await cdp.eval(`enterTable(${JSON.stringify(ixNav.table)}, 'index', ${JSON.stringify(ixNav.ix)})`);
@@ -787,18 +822,24 @@ class CDP {
         inner: /内部节点/.test(document.getElementById('pmSide').textContent),
         links: document.querySelectorAll('#pmSide .pm-row.linkable').length,
       }))()`);
-      await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
-      await sleep(1000);
-      const idxLeaf = await cdp.eval(`(() => ({
-        path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
-        leaf: /叶子/.test(document.getElementById('pmSide').textContent),
-        rid: document.getElementById('pmSide').textContent.includes('RID '),
-      }))()`);
+      // 根是内部节点才再下一层；小表的根本身就是叶子
+      let idxLeaf = { path: idxRoot.path };
+      if (idxRoot.inner) {
+        await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
+        await sleep(1000);
+        idxLeaf = await cdp.eval(`(() => ({
+          path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
+          leaf: /叶子/.test(document.getElementById('pmSide').textContent),
+          rid: document.getElementById('pmSide').textContent.includes('RID '),
+        }))()`);
+      }
+      const deepOk = idxRoot.inner
+        ? (/^头页 0›内部 \d+›叶子 \d+$/.test(idxLeaf.path) && idxLeaf.leaf && idxLeaf.rid)
+        : /^头页 0›叶子 \d+$/.test(idxRoot.path);
       check('索引树能从根一路下钻到叶子，路径条标出层级',
         idxHead.path === '头页 0' && idxHead.rootLink === 1
-        && /^头页 0›内部 \d+$/.test(idxRoot.path) && idxRoot.inner && idxRoot.links > 1
-        && /^头页 0›内部 \d+›叶子 \d+$/.test(idxLeaf.path) && idxLeaf.leaf && idxLeaf.rid,
-        `${idxHead.path} → ${idxRoot.path} → ${idxLeaf.path}`);
+        && /^头页 0›(内部|叶子) \d+$/.test(idxRoot.path) && deepOk,
+        `${idxHead.path} → ${idxRoot.path}` + (idxRoot.inner ? ` → ${idxLeaf.path}` : '（根即叶子）'));
       await cdp.eval(`document.querySelector('#pmSide .pm-path-i').click()`);
       await sleep(900);
       const idxBack = await cdp.eval(
@@ -1930,10 +1971,11 @@ class CDP {
       tip: (document.querySelector('#pmGrid .pm-c') || {}).title || '',
       more: !document.getElementById('pmMore').classList.contains('hidden'),
     }))()`);
+    const wantBlk = Math.ceil(seedTotal / 64);
     check('页数超阈值时按块显示（一块 = step 页），并写明「单击一块看逐页」',
-      bv.n === Math.ceil(785 / 64) && /13 块（每块 64 页）/.test(bv.note)
+      bv.n === wantBlk && bv.note.includes(`${wantBlk} 块（每块 64 页）`)
       && /每格 64 页/.test(bv.crumb) && /第 0–63 页/.test(bv.tip) && !bv.more,
-      `${bv.n} 块 · ${bv.note}`);
+      `${bv.n} 块（共 ${seedTotal} 页）· ${bv.note}`);
 
     await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
     await sleep(1200);
@@ -1944,7 +1986,8 @@ class CDP {
       note: (document.getElementById('mapNote') || {}).textContent || '',
     }))()`);
     check('点一块钻到逐页：只读这一块，面包屑多一级',
-      bvi.n === 64 && bvi.first === '0' && /第 0–63 页/.test(bvi.crumb) && /共 785 页/.test(bvi.note),
+      bvi.n === Math.min(64, seedTotal) && bvi.first === '0'
+      && /第 0–63 页/.test(bvi.crumb) && bvi.note.includes(`共 ${seedTotal} 页`),
       `${bvi.n} 格 · ${bvi.crumb}`);
 
     // 退要一级一级退：块内 → 块视图 → 库视图
@@ -1961,7 +2004,7 @@ class CDP {
       level: mapLevel,
     })`);
     check('从块内按 Esc 一级一级退：块内 → 块视图 → 库视图',
-      esc1.n === 13 && /每格 64 页/.test(esc1.crumb) && esc2.tree && esc2.level === 'db',
+      esc1.n === wantBlk && /每格 64 页/.test(esc1.crumb) && esc2.tree && esc2.level === 'db',
       `第一次 ${esc1.n} 块 · 第二次 level=${esc2.level}`);
 
     /* 块级「整块回收建议」：判据在后端（洞 > 容量 1/4，和 needsVacuum 同口径），
@@ -2006,6 +2049,29 @@ class CDP {
     check('点「填入 VACUUM」只把语句写进编辑器，不替你执行',
       /VACUUM big_demo;/.test(vacSql) && vacClosed,
       `编辑器尾部 ${JSON.stringify(vacSql.slice(-24))} · 面板已关 ${vacClosed}`);
+
+    /* 顶栏「首页」：任何时候一键回编辑器。监控打开时选中态要给到「监控」，
+       点首页之后换回「首页」—— 不然顶栏三个入口看起来永远都是平的，不知道自己在哪。 */
+    await cdp.eval(`toggleMonitor(true)`);
+    await sleep(500);
+    const navBefore = await cdp.eval(`(() => ({
+      home: document.getElementById('btnHome').classList.contains('on'),
+      mon: document.getElementById('btnMonitor').classList.contains('on'),
+      open: !document.getElementById('monPanel').classList.contains('hidden'),
+    }))()`);
+    await cdp.eval(`document.getElementById('btnHome').click()`);
+    await sleep(500);
+    const navAfter = await cdp.eval(`(() => ({
+      home: document.getElementById('btnHome').classList.contains('on'),
+      mon: document.getElementById('btnMonitor').classList.contains('on'),
+      open: !document.getElementById('monPanel').classList.contains('hidden'),
+      order: [...document.querySelectorAll('.top-actions .btn')].map(b => b.id),
+    }))()`);
+    check('顶栏有「首页」：监控打开时点它回编辑器，选中态跟着换',
+      navBefore.open && !navBefore.home && navBefore.mon
+      && !navAfter.open && navAfter.home && !navAfter.mon
+      && navAfter.order[0] === 'btnHome',
+      `监控 ${navBefore.open} → 编辑器 ${!navAfter.open} · 顶栏 ${navAfter.order.join('/')}`);
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

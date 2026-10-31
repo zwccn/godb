@@ -471,6 +471,9 @@ body {
 .btn:active { transform: translateY(0.5px); }
 .btn-ghost { background: transparent; color: var(--text-2); }
 .btn-ghost:hover { color: var(--text); }
+/* 顶栏导航的「当前在哪」（首页 / 监控）：和页面级 Tab 用同一个选中底色，
+   不另造一套 —— 顶栏上的两个入口本来就是在切换视图。 */
+.btn-ghost.on { background: var(--hint-active-bg); color: var(--text); }
 .btn-sm { padding: 4px 10px; font-size: calc(12px * var(--fs)); }
 .btn-primary {
   background: var(--accent-strong);

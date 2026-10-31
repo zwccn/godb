@@ -1593,12 +1593,22 @@ if (monEls.sort) {
   });
 }
 
+// 顶栏两个入口反映「当前在哪」：在编辑器亮「首页」，看监控亮「监控」。
+// 和页面级 Tab 用的是同一个选中底色，不另造一套视觉语言。
+function syncTopNav() {
+  const home = document.getElementById('btnHome');
+  const mon = document.getElementById('btnMonitor');
+  if (home) home.classList.toggle('on', !monOpen);
+  if (mon) mon.classList.toggle('on', monOpen);
+}
+
 function toggleMonitor(force) {
   monOpen = force === undefined ? !monOpen : force;
   monPanel.classList.toggle('hidden', !monOpen);
   document.body.classList.toggle('mon-open', monOpen);
   if (monOpen) pollMonitor();
   else setMonSettings(false);
+  syncTopNav();
 }
 
 /* ---- 页面级 Tab：概览 / 诊断 / 存储 / 空间地图 ----
@@ -4888,6 +4898,16 @@ document.getElementById('sbSearchClear').addEventListener('click', () => {
 
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
 document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
+document.getElementById('btnHome').addEventListener('click', () => {
+  // 「首页」= 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
+  // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
+  toggleMonitor(false);
+  if (!settingsModal.classList.contains('hidden')) {
+    closeSettings();
+    return;
+  }
+  editor.focus();
+});
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
 document.getElementById('btnMonRefresh').addEventListener('click', () => {
   if (monPaused) setMonPaused(false); // 手动刷新 = 隐含继续

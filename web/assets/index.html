@@ -62,6 +62,9 @@ try {
          事务药丸默认隐藏：空闲是常态，顶栏圆点绿色已经说明了；
          只有进入事务 / 事务中止时才露出来（那时它有持锁数和未提交行数）。 -->
     <span id="txPill" class="pill pill-idle hidden">空闲</span>
+    <!-- 首页 = 回到编辑器：监控面板和设置弹窗都收掉。顶栏三个入口里，
+         它在编辑器时是「当前」，进了监控就换成「监控」亮 —— 和页面级 Tab 同一套选中语言。 -->
+    <button id="btnHome" class="btn btn-ghost on" title="回到编辑器（关掉监控 / 设置）">首页</button>
     <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
     <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务">
       <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span>

@@ -436,6 +436,58 @@ class CDP {
       spDet.open && spDet.segs === 3 && spDet.legend === 3 && /VACUUM/.test(spDet.text),
       `${spDet.segs} 段 / 图例 ${spDet.legend} / ${spDet.text.slice(0, 50)}`);
 
+    // 页地图：每页一格 → 点开看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
+    const pmState = await cdp.eval(`(() => {
+      const sel = document.getElementById('pmPick');
+      return {
+        opts: sel ? sel.options.length : 0,
+        cells: document.querySelectorAll('#pmGrid .pm-c').length,
+        sub: (document.getElementById('pmSub') || {}).textContent || '',
+      };
+    })()`);
+    check('页地图：下拉里有数据页/索引，格子数量与页数一致',
+      pmState.opts > 0 && pmState.cells > 0, `${pmState.opts} 个文件 · ${pmState.cells} 格`);
+
+    await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
+    await sleep(1200);
+    const pmStruct = await cdp.eval(`(() => {
+      const side = document.getElementById('pmSide');
+      const rows = [...side.querySelectorAll('.pm-row')].map(r => r.textContent);
+      return {
+        head: (side.querySelector('.pm-head') || {}).textContent || '',
+        rows: rows.length,
+        sample: rows.slice(0, 2).join(' / '),
+        tabs: [...side.querySelectorAll('.pm-tab')].map(b => b.textContent).join(','),
+      };
+    })()`);
+    check('点一格能看到页结构与元组（含 RID）',
+      pmStruct.rows > 0 && /结构,文本,十六进制/.test(pmStruct.tabs) && /第 \d+ 页/.test(pmStruct.head),
+      `${pmStruct.head} · ${pmStruct.rows} 条 · ${pmStruct.sample.slice(0, 40)}`);
+
+    // 文本视图：页里能认出业务文本（这个库的示例数据是中文）
+    await cdp.eval(`[...document.querySelectorAll('#pmSide .pm-tab')].find(b => b.textContent === '文本').click()`);
+    await sleep(400);
+    const pmText = await cdp.eval(`(() => ({
+      n: document.querySelectorAll('#pmSide .pm-text').length,
+      first: (document.querySelector('#pmSide .pm-text .s') || {}).textContent || '',
+    }))()`);
+    check('页检查器有「文本」视图（从字节里认出业务文本）',
+      pmText.n > 0, `${pmText.n} 段 · 首段「${pmText.first.slice(0, 12)}」`);
+
+    // 十六进制视图：整页 8KB = 512 行，命中文本的行要高亮
+    await cdp.eval(`[...document.querySelectorAll('#pmSide .pm-tab')].find(b => b.textContent === '十六进制').click()`);
+    await sleep(500);
+    const pmHex = await cdp.eval(`(() => {
+      const lines = document.querySelectorAll('#pmSide .pm-hex .ln');
+      return {
+        n: lines.length,
+        hl: document.querySelectorAll('#pmSide .pm-hex .ln.hl').length,
+        first: lines.length ? lines[0].textContent.slice(0, 24) : '',
+      };
+    })()`);
+    check('十六进制视图渲染整页 512 行，并高亮文本片段',
+      pmHex.n === 512 && pmHex.hl > 0, `${pmHex.n} 行 / 高亮 ${pmHex.hl} 行 / ${pmHex.first}`);
+
     // 诊断页：空间已经移走，只剩慢SQL / 慢事务 / 锁明细
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="diag"]').click()`);
     await sleep(700);

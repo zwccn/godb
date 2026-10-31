@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"strconv"
+
 	"godb/config"
 	"godb/db"
 	"godb/storage"
@@ -48,6 +50,48 @@ func (s *Server) handleSpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, det)
+}
+
+// handlePages 返回一张表（或一棵索引）的页地图：每页一行摘要，按 from/limit 分页。
+//
+// 只解页头和槽位目录、不解元组；直接读文件、不进缓冲池 —— 一次 1450 页 ≈ 11 MB，
+// 所以是「点开才算」的接口，不跟着监控轮询。
+func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	table := strings.TrimSpace(q.Get("table"))
+	if table == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 table 参数"})
+		return
+	}
+	from, _ := strconv.Atoi(q.Get("from"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	pm, err := s.currentDB(r).Store.PageMap(table, q.Get("kind"), q.Get("index"), from, limit)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, pm)
+}
+
+// handlePage 返回单页的完整内容：页头 + 槽位 + 元组/索引条目 + 原始字节 + 文本串。
+func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	table := strings.TrimSpace(q.Get("table"))
+	if table == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 table 参数"})
+		return
+	}
+	no, err := strconv.Atoi(q.Get("no"))
+	if err != nil || no < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no 参数必须是页号（>=0）"})
+		return
+	}
+	d, err := s.currentDB(r).Store.PageDetail(table, q.Get("kind"), q.Get("index"), uint32(no))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
 }
 
 // handleMonitorKill 取消一个会话当前的活。

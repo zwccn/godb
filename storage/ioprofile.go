@@ -121,6 +121,15 @@ type TableSize struct {
 	// 密度只说「现在有多空」，配上时间才是「该不该现在整理」。
 	VacuumAt  int64 `json:"vacuumAt"`
 	RewriteAt int64 `json:"rewriteAt"`
+	// Indexes 是这张表的每棵索引（名字 + 占用），页地图的下拉要靠它列文件。
+	Indexes []IndexInfo `json:"indexes,omitempty"`
+}
+
+// IndexInfo 是单棵索引的占用（逐表明细用）。
+type IndexInfo struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+	Pages int    `json:"pages"`
 }
 
 // PoolProfile 是缓冲池的汇总（全库所有表加在一起）。
@@ -295,6 +304,9 @@ func (s *Store) TableSizes() []TableSize {
 			if st, err := os.Stat(indexFilePath(s.Dir, t.ID, "ix:"+cleanName(ix.Name))); err == nil {
 				ts.IndexBytes += st.Size()
 				ts.IndexPages += int(st.Size() / PageSize)
+				ts.Indexes = append(ts.Indexes, IndexInfo{
+					Name: ix.Name, Bytes: st.Size(), Pages: int(st.Size() / PageSize),
+				})
 			}
 		}
 		loadedNow := false
@@ -349,13 +361,13 @@ const minFillPages = 8
 // 而四者的回收方式完全不同 —— 堆页靠 VACUUM、索引靠重建、大字段只能 VACUUM FULL、
 // WAL 靠 checkpoint 轮转。混成一个「占用 120MB」看不出该做什么。
 type SpaceProfile struct {
-	DataBytes  int64   `json:"dataBytes"`
-	IndexBytes int64   `json:"indexBytes"`
-	LobBytes   int64   `json:"lobBytes"`
-	WalBytes   int64   `json:"walBytes"`
-	Pages      int     `json:"pages"`
-	IndexPages int     `json:"indexPages"`
-	FreeBytes  int64   `json:"freeBytes"` // 已知表里可复用的空闲字节
+	DataBytes  int64 `json:"dataBytes"`
+	IndexBytes int64 `json:"indexBytes"`
+	LobBytes   int64 `json:"lobBytes"`
+	WalBytes   int64 `json:"walBytes"`
+	Pages      int   `json:"pages"`
+	IndexPages int   `json:"indexPages"`
+	FreeBytes  int64 `json:"freeBytes"` // 已知表里可复用的空闲字节
 	// FillPages 是「算得出密度的那些表的页数」：刚升级、还没落过盘的表没记空闲，
 	// 把它们按 0 空闲算进分母会把全库密度虚报高。
 	FillPages int     `json:"fillPages"`

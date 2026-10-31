@@ -298,6 +298,27 @@ try {
         <div class="space-detail hidden" id="spaceDetail"></div>
         <div class="mon-ok hidden" id="spaceOk">还没有表</div>
       </section>
+
+      <!-- 页地图：按页号铺格子，点一页看它里面到底写了什么（结构 / 文本 / 十六进制）。
+           只读、直接读文件、不进缓冲池 —— 一个诊断功能不该把热页挤掉；
+           代价是看到的是「磁盘上的样子」，还没落盘的脏页不在这里。 -->
+      <section class="mon-card" id="monPageMap">
+        <div class="mon-card-head">
+          <span>页地图</span>
+          <span class="mon-sub" id="pmSub">点开一张表开始</span>
+          <select id="pmPick" class="pm-pick" aria-label="选择要看哪个文件"></select>
+        </div>
+        <div class="pm-body">
+          <div class="pm-left">
+            <div class="pm-grid" id="pmGrid"></div>
+            <div class="pm-legend" id="pmLegend"></div>
+            <button class="space-rescan hidden" id="pmMore" type="button">继续扫描后面的页</button>
+          </div>
+          <div class="pm-side" id="pmSide">
+            <div class="pm-hint">点左边任意一格，看这一页的结构、文本和字节</div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <div class="mon-page hidden" data-page="diag">

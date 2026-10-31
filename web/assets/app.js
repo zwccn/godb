@@ -1475,6 +1475,12 @@ const monEls = {
   body: document.getElementById('monBody'),
   ioSum: document.getElementById('monIOSum'),
   spaceSub: document.getElementById('spaceSub'),
+  pmPick: document.getElementById('pmPick'),
+  pmGrid: document.getElementById('pmGrid'),
+  pmLegend: document.getElementById('pmLegend'),
+  pmSide: document.getElementById('pmSide'),
+  pmSub: document.getElementById('pmSub'),
+  pmMore: document.getElementById('pmMore'),
   spaceBar: document.getElementById('spaceBar'),
   spaceLegend: document.getElementById('spaceLegend'),
   spaceBody: document.getElementById('spaceBody'),
@@ -2599,6 +2605,7 @@ async function loadSpace() {
     return;
   }
   renderSpace();
+  pmFillPick();
   updateDiagSub();
 }
 
@@ -2768,6 +2775,293 @@ if (document.getElementById('spaceRescan')) {
     loadSpace();
   });
 }
+
+/* ---- 5.2 页地图 / 页检查器 ----
+   左边一张「每页一格」的地图，右边是选中页的内容：结构 / 文本 / 十六进制。
+   后端只读文件、不进缓冲池，所以这里可以放心点，不会把热页挤掉；
+   代价是看到的是「磁盘上的样子」—— 还没 checkpoint 的改动不在里面。 */
+let pmMap = null;   // { table, kind, index, total, pages, next, bytes }
+let pmSel = { table: '', kind: 'data', index: '' };
+let pmOpen = -1;    // 当前打开的页号
+let pmTab = 'struct'; // struct | text | hex
+
+function pmFillPick() {
+  const sel = monEls.pmPick;
+  if (!sel || !spaceData) return;
+  const tables = spaceData.tables || [];
+  const want = pmSel.table + '|' + pmSel.kind + '|' + pmSel.index;
+  sel.innerHTML = '';
+  for (const t of tables) {
+    const o = el('option', null, `数据页 · ${t.name}`);
+    o.value = `${t.name}|data|`;
+    sel.appendChild(o);
+    for (const ix of t.indexes || []) {
+      const oi = el('option', null, `索引 · ${t.name}.${ix.name}`);
+      oi.value = `${t.name}|index|${ix.name}`;
+      sel.appendChild(oi);
+    }
+  }
+  if (sel.options.length && ![...sel.options].some(o => o.value === want)) {
+    sel.selectedIndex = 0;
+  } else if (sel.options.length) {
+    sel.value = want;
+  }
+  pmReadPick();
+}
+
+function pmReadPick() {
+  const sel = monEls.pmPick;
+  if (!sel || !sel.value) return;
+  const [table, kind, index] = sel.value.split('|');
+  if (pmSel.table === table && pmSel.kind === kind && pmSel.index === index && pmMap) return;
+  pmSel = { table, kind, index };
+  pmOpen = -1;
+  loadPageMap(false);
+}
+
+async function loadPageMap(append) {
+  if (!pmSel.table) return;
+  const from = append && pmMap && pmMap.next ? pmMap.next : 0;
+  const q = `table=${encodeURIComponent(pmSel.table)}&kind=${pmSel.kind}`
+    + (pmSel.index ? `&index=${encodeURIComponent(pmSel.index)}` : '')
+    + `&from=${from}`;
+  let res;
+  try {
+    res = await api('/api/pages?' + q);
+  } catch (e) {
+    renderPageMapError(e.message);
+    return;
+  }
+  if (append && pmMap) {
+    pmMap.pages = pmMap.pages.concat(res.pages || []);
+    pmMap.next = res.next || 0;
+    pmMap.bytes += res.bytes || 0;
+  } else {
+    pmMap = res;
+  }
+  renderPageMap();
+}
+
+function renderPageMapError(msg) {
+  if (monEls.pmGrid) monEls.pmGrid.innerHTML = '';
+  if (monEls.pmSub) monEls.pmSub.textContent = '扫描失败：' + msg;
+}
+
+// 一格 = 一页。颜色按「这一页有多满」分档；有洞的页优先标橙（那才是能整理的地方）。
+function pmCellClass(p) {
+  if (p.bad) return 'bad';
+  if (pmSel.kind === 'index') {
+    if (p.role === 'header') return 'hdr';
+    if (p.role === 'inner') return 'inner';
+    return p.live > 0 ? 'idx' : 'idx-empty';
+  }
+  if (p.hole > 0) return 'hole';
+  if (!p.used) return 'empty';
+  const ratio = p.used / 8192;
+  if (ratio >= 0.75) return 'full';
+  if (ratio >= 0.35) return 'mid';
+  return 'sparse';
+}
+
+function renderPageMap() {
+  const box = monEls.pmGrid;
+  if (!box || !pmMap) return;
+  box.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  for (const p of pmMap.pages || []) {
+    const c = el('div', 'pm-c ' + pmCellClass(p));
+    if (p.no === pmOpen) c.classList.add('on');
+    c.title = `第 ${p.no} 页 · ${p.live} 条`
+      + (pmSel.kind === 'index' ? '' : ` · 已用 ${fmtBytes(p.used)} · 空闲 ${fmtBytes(p.free)}`)
+      + (p.hole ? ` · 洞 ${fmtBytes(p.hole)}` : '')
+      + (p.bad ? ' · 页头损坏' : '');
+    c.addEventListener('click', () => openPage(p.no));
+    frag.appendChild(c);
+  }
+  box.appendChild(frag);
+
+  const kindText = pmSel.kind === 'index' ? `索引 ${pmSel.index}` : '数据页';
+  if (monEls.pmSub) {
+    monEls.pmSub.textContent = `${pmSel.table} · ${kindText} · ${pmMap.total} 页`
+      + (pmMap.note ? ` · ${pmMap.note}` : ` · 本次读了 ${fmtBytes(pmMap.bytes || 0)}`);
+  }
+  if (monEls.pmLegend) {
+    monEls.pmLegend.innerHTML = '';
+    const parts = pmSel.kind === 'index'
+      ? [['hdr', '头页'], ['leaf', '叶子'], ['inner', '内部节点'], ['idx-empty', '空叶']]
+      : [['full', '接近满'], ['mid', '中等'], ['sparse', '稀疏'], ['empty', '整页空'], ['hole', '有洞']];
+    parts.push(['bad', '坏页']);
+    for (const [cls, label] of parts) {
+      const item = el('span', 'space-item');
+      const dot = el('span', 'pm-c ' + (cls === 'leaf' ? 'idx' : cls));
+      dot.style.cursor = 'default';
+      item.appendChild(dot);
+      item.appendChild(el('span', null, label));
+      monEls.pmLegend.appendChild(item);
+    }
+  }
+  if (monEls.pmMore) {
+    monEls.pmMore.classList.toggle('hidden', !pmMap.next);
+    monEls.pmMore.textContent = `继续扫描（已读 ${(pmMap.pages || []).length} / ${pmMap.total} 页）`;
+  }
+}
+
+async function openPage(no) {
+  pmOpen = no;
+  for (const c of monEls.pmGrid.querySelectorAll('.pm-c')) c.classList.remove('on');
+  const cells = monEls.pmGrid.querySelectorAll('.pm-c');
+  if (cells[no]) cells[no].classList.add('on');
+  const side = monEls.pmSide;
+  side.innerHTML = '';
+  side.appendChild(el('div', 'pm-hint', `正在读第 ${no} 页…`));
+  const q = `table=${encodeURIComponent(pmSel.table)}&kind=${pmSel.kind}`
+    + (pmSel.index ? `&index=${encodeURIComponent(pmSel.index)}` : '') + `&no=${no}`;
+  try {
+    const d = await api('/api/page?' + q);
+    if (pmOpen !== no) return;
+    renderPageDetail(d);
+  } catch (e) {
+    side.innerHTML = '';
+    side.appendChild(el('div', 'pm-hint', '读取失败：' + e.message));
+  }
+}
+
+function renderPageDetail(d) {
+  const side = monEls.pmSide;
+  side.innerHTML = '';
+  const head = el('div', 'pm-head',
+    `第 ${d.no} 页 · ${d.kind === 'index' ? '索引 ' + d.index : '数据页'}` + (d.crc === 'ok' ? '' : ` · ${d.crc === 'zero' ? '空页' : '页头异常'}`));
+  side.appendChild(head);
+
+  const kv = el('div', 'pm-kv');
+  const addKV = (k, v) => {
+    kv.appendChild(el('span', null, k));
+    const b = el('b', null, v);
+    kv.appendChild(b);
+  };
+  if (d.indexHeader) {
+    addKV('根页', `${d.indexHeader.root}`);
+    addKV('高度', `${d.indexHeader.height}`);
+    addKV('条目', `${fmtCount(d.indexHeader.count)}`);
+    addKV('代次', `${d.indexHeader.gen}`);
+    if (d.indexHeader.ident) addKV('身份', d.indexHeader.ident);
+  } else if (d.data) {
+    addKV('槽位', `${d.data.slots}`);
+    addKV('空闲', `${d.data.freeHi - d.data.freeLo} B`);
+    addKV('LSN', `0x${(d.data.lsn >>> 0).toString(16)}`);
+  } else if (d.indexPage) {
+    addKV('类型', d.indexPage.leaf ? '叶子' : '内部节点');
+    addKV('条目', `${d.indexPage.count}`);
+    addKV('左右页', `${d.indexPage.prev} / ${d.indexPage.next}`);
+  }
+  side.appendChild(kv);
+
+  const tabs = el('div', 'pm-tabs');
+  for (const [k, label] of [['struct', '结构'], ['text', '文本'], ['hex', '十六进制']]) {
+    const b = el('button', 'pm-tab' + (pmTab === k ? ' on' : ''), label);
+    b.type = 'button';
+    b.addEventListener('click', () => { pmTab = k; renderPageDetail(d); });
+    tabs.appendChild(b);
+  }
+  side.appendChild(tabs);
+
+  const body = el('div', 'pm-tabbody');
+  if (pmTab === 'struct') body.appendChild(pmStructView(d));
+  else if (pmTab === 'text') body.appendChild(pmTextView(d));
+  else body.appendChild(pmHexView(d));
+  side.appendChild(body);
+}
+
+function pmStructView(d) {
+  const box = el('div', null);
+  if (d.indexHeader) {
+    const h = d.indexHeader;
+    for (const [k, v] of [['格式版本', h.version], ['根页', h.root], ['高度', h.height],
+      ['条目总数', fmtCount(h.count)], ['代次', h.gen], ['身份', h.ident || '—']]) {
+      const row = el('div', 'pm-row');
+      row.appendChild(el('span', 'pm-no', ''));
+      row.appendChild(el('span', 'pm-val', `${k}：${v}`));
+      box.appendChild(row);
+    }
+    return box;
+  }
+  if (d.data) {
+    for (const e of d.data.entries || []) {
+      const row = el('div', 'pm-row' + (e.live ? '' : ' dead'));
+      row.appendChild(el('span', 'pm-no', `#${e.no}`));
+      const val = el('span', 'pm-val',
+        (e.live ? `RID ${e.gid} · ${e.len} B · ` : '空槽 · ')
+        + ((e.cols || []).join(' | ') || (e.note || '')));
+      row.appendChild(val);
+      if (e.live) row.title = `偏移 ${e.off} · 长度 ${e.len} · RID ${e.gid}`;
+      box.appendChild(row);
+    }
+  } else if (d.indexPage) {
+    for (const e of d.indexPage.entries || []) {
+      const row = el('div', 'pm-row');
+      row.appendChild(el('span', 'pm-no', `#${e.i}`));
+      const label = e.vals && e.vals.length ? e.vals.join(' | ') : e.key;
+      row.appendChild(el('span', 'pm-val',
+        label + ` → ${d.indexPage.leaf ? 'RID ' + e.val : '子页 ' + e.val}`));
+      row.title = `键 ${e.len} 字节`;
+      box.appendChild(row);
+    }
+  }
+  if (!box.children.length) box.appendChild(el('div', 'pm-hint', '这一页里没有条目'));
+  return box;
+}
+
+function pmTextView(d) {
+  const box = el('div', null);
+  const runs = d.texts || [];
+  if (!runs.length) box.appendChild(el('div', 'pm-hint', '这一页里没找到看起来像文本的片段'));
+  for (const t of runs) {
+    const row = el('div', 'pm-text');
+    row.appendChild(el('span', 'off', '0x' + t.off.toString(16).padStart(4, '0')));
+    row.appendChild(el('span', 's', t.text));
+    box.appendChild(row);
+  }
+  return box;
+}
+
+// 十六进制：一页 8KB = 512 行，整页渲染（一行 16 字节），命中文本片段的行高亮。
+function pmHexView(d) {
+  const wrap = el('div', 'pm-hex');
+  let bytes;
+  try {
+    const bin = atob(d.raw || '');
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch (e) {
+    wrap.textContent = '原始字节解析失败：' + e.message;
+    return wrap;
+  }
+  const runs = (d.texts || []).map(t => [t.off, t.off + t.len]);
+  const hex = '0123456789abcdef';
+  const lines = [];
+  for (let off = 0; off < bytes.length; off += 16) {
+    let hx = '';
+    let ascii = '';
+    for (let i = 0; i < 16; i++) {
+      const b = bytes[off + i];
+      hx += b === undefined ? '   ' : hex[b >> 4] + hex[b & 15] + ' ';
+      ascii += b === undefined ? ' ' : (b >= 32 && b < 127 ? String.fromCharCode(b) : '·');
+    }
+    lines.push(`${off.toString(16).padStart(4, '0')}  ${hx} |${ascii}|`);
+  }
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < lines.length; i++) {
+    const off = i * 16;
+    const hl = runs.some(([a, b]) => off < b && off + 16 > a);
+    const ln = el('div', 'ln' + (hl ? ' hl' : ''), lines[i]);
+    frag.appendChild(ln);
+  }
+  wrap.appendChild(frag);
+  return wrap;
+}
+
+if (monEls.pmPick) monEls.pmPick.addEventListener('change', pmReadPick);
+if (monEls.pmMore) monEls.pmMore.addEventListener('click', () => loadPageMap(true));
 
 /* ---- 5.1 详情：点一行看「到底慢在哪」 ---- */
 

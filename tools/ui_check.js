@@ -163,23 +163,24 @@ class CDP {
         runBtn.shadow === 'none' && runBtn.sameAsPeer,
       `图标 ${runBtn.icoW}px / kbd ${runBtn.kbds} 个 / 阴影 ${runBtn.shadow} / 与知道了同色 ${runBtn.sameAsPeer}`);
 
-    // 执行中：图标让位给转圈，结束后再换回来（按钮结构不能被整体重写）
+    // 执行中：文字变「停止」、图标从播放三角换成方块，而且**不能禁用**
+    //（禁用 + 转圈的意思是「只能等」，但这里其实能中断）
     await cdp.eval(`setRunning(true)`);
     const running = await cdp.eval(`(() => {
       const b = document.getElementById('btnRun');
       const ico = b.querySelector('.run-ico svg');
+      const stop = b.querySelector('.run-stop');
       return { label: document.getElementById('btnRunText').textContent,
-               spin: !!b.querySelector('.run-spin') &&
-                     b.querySelector('.run-spin').getBoundingClientRect().width > 0,
+               stopW: stop ? Math.round(stop.getBoundingClientRect().width) : 0,
                icoW: ico ? Math.round(ico.getBoundingClientRect().width) : 0,
                disabled: b.disabled };
     })()`);
     await cdp.eval(`setRunning(false)`);
     const back = await cdp.eval(`document.getElementById('btnRunText').textContent`);
-    check('执行中：文字变「执行中…」、图标换成转圈',
-      running.label === '执行中…' && running.spin && running.icoW === 0 &&
-        running.disabled && back === '执行',
-      `${running.label} / 图标宽 ${running.icoW} → ${back}`);
+    check('执行中：文字变「停止」、图标换成方块、按钮仍可点',
+      running.label === '停止' && running.stopW > 0 && running.icoW === 0 &&
+        !running.disabled && back === '执行',
+      `${running.label} / 方块 ${running.stopW}px / 三角 ${running.icoW}px / 禁用 ${running.disabled} → ${back}`);
 
     // 0.1b) 美化 SQL：子句换行 + 关键字大写，字符串里的内容一个字都不能动
     await cdp.eval(`cm.setValue("select id,name from t where a='it''s' and b=1 order by id")`);
@@ -2220,6 +2221,56 @@ class CDP {
     check('执行成功后红行清掉，行号常驻不动',
       errGone.lines === 0 && errGone.gutter === true,
       `红行 ${errGone.lines} · 行号 ${errGone.gutter}`);
+
+    /* 执行中可以停：连点两次同一颗按钮（第一次开跑、第二次停止）。
+       不用真造慢查询 —— abort 是前端立刻生效的，这里验的是按钮态和面板文案。 */
+    await cdp.eval(`cm.setValue('SELECT 1 AS a;')`);
+    await sleep(150);
+    await cdp.eval(`(() => { const b = document.getElementById('btnRun'); b.click(); b.click(); })()`);
+    await sleep(900);
+    const stopUi = await cdp.eval(`(() => ({
+      label: document.getElementById('btnRunText').textContent,
+      running: document.getElementById('btnRun').classList.contains('is-running'),
+      text: document.getElementById('results').textContent.slice(0, 60),
+    }))()`);
+    check('执行中点同一颗按钮就是「停止」：界面立刻放行，并说明语句会跑完',
+      stopUi.label === '执行' && !stopUi.running && stopUi.text.includes('已停止'),
+      `${stopUi.label} · ${stopUi.text.replace(/\s+/g, ' ').slice(0, 30)}`);
+
+    // 有选区时按钮写「执行选中」
+    await cdp.eval(`(() => { const d = cm.getDoc(); d.setSelection({line:0,ch:0},{line:0,ch:6}); })()`);
+    await sleep(250);
+    const selBtn = await cdp.eval(`document.getElementById('btnRunText').textContent`);
+    await cdp.eval(`cm.setCursor({line:0,ch:0})`);
+    await sleep(250);
+    const allBtn = await cdp.eval(`document.getElementById('btnRunText').textContent`);
+    check('有选区时按钮写「执行选中」，没选区回到「执行」',
+      selBtn === '执行选中' && allBtn === '执行', `${selBtn} → ${allBtn}`);
+
+    // 表树右键：插入 SELECT 只插不跑
+    const insSel = await cdp.eval(`(() => {
+      cm.setValue('');
+      lastSubmittedSQL = null;
+      const items = tableMenuItems({ name: 'big_demo' });
+      const it = items.find(x => x.label === '插入 SELECT');
+      if (!it) return { has: false };
+      it.run();
+      return { has: true, text: editor.value, ran: lastSubmittedSQL };
+    })()`);
+    check('表树右键「插入 SELECT」：插到光标处但不执行',
+      insSel.has && /SELECT \* FROM big_demo/.test(insSel.text || '') && insSel.ran === null,
+      JSON.stringify((insSel.text || '').slice(0, 40)));
+
+    // 大结果集提示：表格只画当前页，但数据是全量进来的
+    await cdp.eval(`cm.setValue('SELECT * FROM big_demo LIMIT 3000')`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(2500);
+    const bigWarn = await cdp.eval(`(() => {
+      const w = document.querySelector('#results .grid-warn');
+      return { has: !!w, text: w ? w.textContent.slice(0, 40) : '' };
+    })()`);
+    check('结果超过 2000 行时提示「数据已全量载入，表格只画当前页」',
+      bigWarn.has && /3,?000 行/.test(bigWarn.text), bigWarn.text || '没有提示');
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

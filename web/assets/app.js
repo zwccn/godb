@@ -145,6 +145,8 @@ let txActive = false;
 // 顶栏圆点要同时反映「系统健康」和「事务状态」，两边都会更新它，
 // 所以把最近一次的事务状态记下来，谁先到都能拼出正确的提示文字。
 let lastTx = { active: false, aborted: false, changes: 0 };
+let stopRequested = false;   // 用户点了「停止」：AbortError 不当错误报
+let runAbort = null;         // 当前这次执行的 AbortController
 // 展开了字段的表名。表树默认只显示到表级（和 Navicat 一样），
 // 展开状态自己记着，否则每次刷新/轮询都会把用户展开的字段收回去。
 const expandedTables = new Set();
@@ -351,6 +353,7 @@ function initCodeMirror() {
   cm.on('change', () => { if (errLine >= 0) clearSqlError(); });
   cm.on('change', scheduleStmt);
   cm.on('cursorActivity', scheduleStmt);
+  cm.on('cursorActivity', syncRunLabel);
 
   // 输入法：网页**没法**替用户切换操作系统的中英文状态（老 IE 的 ime-mode 早在
   // Chrome/Firefox 里被移除了），能做的只有这两件小事：
@@ -434,12 +437,13 @@ window.addEventListener('resize', () => {
 
 /* ---------------- 请求 ---------------- */
 
-async function api(path, body) {
+async function api(path, body, signal) {
   const opts = { method: body === undefined ? 'GET' : 'POST', headers: {} };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
+  if (signal) opts.signal = signal;
   const res = await fetch(path, opts);
   const text = await res.text();
   try {
@@ -727,11 +731,13 @@ async function run(prefix) {
     sql = ex.sql;
   }
   busy = true;
+  stopRequested = false;
+  runAbort = new AbortController();
   setRunning(true);
   lastSubmittedSQL = sql;
   const t0 = performance.now();
   try {
-    const data = await api('/api/query', { sql });
+    const data = await api('/api/query', { sql }, runAbort.signal);
     data.roundTripMs = performance.now() - t0;
     renderResults(data);
     // 报错文本里带 (line N, column M) 就标到编辑器上；没带也不硬猜
@@ -753,10 +759,21 @@ async function run(prefix) {
       /^(create|drop)\s+database/i.test(sql);
     if (touchedDB) await loadDBs();
   } catch (e) {
+    if (stopRequested || e.name === 'AbortError') {
+      // 主动停的：别把 AbortError 当报错糊一脸，说清楚「已经请求取消、但语句会跑完」
+      showPaneError({
+        title: '已停止',
+        message: '已向服务端请求取消这条语句。正在执行的语句没法中途打断 —— 它会跑完，'
+          + '但结果不采用；如果它开了事务，结束后会自动回滚。',
+      });
+      return;
+    }
     showPaneError({ message: String(e.message || e) });
     markSqlError(e.message || e, selBase);
   } finally {
     busy = false;
+    stopRequested = false;
+    runAbort = null;
     setRunning(false);
   }
 }
@@ -764,11 +781,44 @@ async function run(prefix) {
 function setRunning(on) {
   const btn = document.getElementById('btnRun');
   const label = document.getElementById('btnRunText');
-  btn.disabled = on;
   btn.classList.toggle('is-running', on);
-  // 只改文字节点：按钮里还有图标和快捷键，整体重写 innerHTML 会把它们冲掉
-  if (label) label.textContent = on ? '执行中…' : '执行';
-  btn.title = on ? '正在执行…' : '执行 SQL · Ctrl+Enter';
+  // 执行中**不禁用**：这时候点它是「停止」。禁用 + 转圈的意思是「只能等」，但这里能停。
+  btn.disabled = false;
+  if (label) label.textContent = on ? '停止' : runLabel();
+  lastRunLabel = label ? label.textContent : '';
+  btn.title = on
+    ? '停止执行（已提交的语句会跑完，结果不采用）'
+    : '执行 SQL · Ctrl+Enter';
+}
+
+// 有选区时按钮写「执行选中」—— 只跑一段这件事必须在按下去之前就能看出来
+let lastRunLabel = '';
+function runLabel() {
+  return editorSelection().trim() ? '执行选中' : '执行';
+}
+function syncRunLabel() {
+  if (busy) return;
+  const t = runLabel();
+  if (t === lastRunLabel) return;
+  lastRunLabel = t;
+  const el2 = document.getElementById('btnRunText');
+  if (el2) el2.textContent = t;
+}
+
+// stopRun：先掐掉前端的等待（立刻能继续干活），再让服务端取消这次动作。
+// 顺序不能反：kill 接口本身可能要等一会儿，先 abort 才不会让界面卡在「执行中」。
+async function stopRun() {
+  if (!busy || stopRequested) return;
+  stopRequested = true;
+  const label = document.getElementById('btnRunText');
+  if (label) label.textContent = '正在停止…';
+  if (runAbort) runAbort.abort();
+  try {
+    const r = await api('/api/monitor/kill', { session: 'self' });
+    if (r && r.error) toast(r.error, true);
+  } catch (e) {
+    // 前端已经放行了，停止请求失败不该再把界面卡回去
+  }
 }
 
 /* ---------- 编辑器标记 ---------- */
@@ -1330,6 +1380,14 @@ function gridBlock(r, idx) {
   // 结果换了（重新执行、切库）之后列数可能变少，旧的下标就失效了
   if (st.sortCol >= cols.length) st.sortCol = -1;
   const order = sortOrder(r.rows, st);
+
+  // 大结果集：表格只画当前页（见下面的分页），但**数据是全量传到浏览器的** ——
+  // 几十万行时卡的是 JSON 解析和内存，不是 DOM。用户不知道为什么会卡，所以明说一句。
+  if (total > 2000) {
+    box.appendChild(el('div', 'grid-warn',
+      `这个结果集有 ${total.toLocaleString()} 行，已经全部载入浏览器（表格只画当前页）。`
+      + '只想看几行的话，在 SQL 里加 LIMIT 会快很多。'));
+  }
 
   const wrap = el('div', 'grid-wrap');
   const table = el('table', 'grid');
@@ -4930,7 +4988,10 @@ async function txAction(action) {
 
 /* ---------------- 事件绑定 ---------------- */
 
-document.getElementById('btnRun').addEventListener('click', () => run());
+document.getElementById('btnRun').addEventListener('click', () => {
+  if (busy) { stopRun(); return; }
+  run();
+});
 document.getElementById('btnClear').addEventListener('click', () => {
   editor.value = '';
   localStorage.removeItem('godb.sql');
@@ -6160,6 +6221,10 @@ function showCtxMenu(x, y, items) {
 function tableMenuItems(t) {
   return [
     { label: '打开表', hint: 'SELECT *', run: () => openTable(t.name) },
+    // 「打开表」是直接跑一条 SELECT；写复杂查询时更需要的是「把名字/骨架插到光标处」，
+    // 所以这里再给两个**不执行**的：插进去自己接着写。
+    { label: '插入 SELECT', hint: '不执行', run: () => insertSql(`SELECT * FROM ${qi(t.name)}\nWHERE `) },
+    { label: '插入表名', hint: t.name, run: () => insertSql(qi(t.name)) },
     { label: '设计表', hint: 'ALTER', run: () => openDesigner(t.name) },
     { sep: true },
     { label: '新建表…', run: () => openDesigner(null) },
@@ -6181,6 +6246,18 @@ function blankMenuItems() {
 }
 
 /* ---------------- 表级动作 ---------------- */
+
+// insertSql 把一段 SQL 插到光标处（有选区就替换选区），不执行
+function insertSql(text) {
+  if (cm) {
+    cm.replaceSelection(text);
+    cm.focus();
+  } else {
+    editor.append(text);
+  }
+  autoSize();
+  syncRunLabel();
+}
 
 function openTable(name) {
   editor.value = `SELECT * FROM ${qi(name)} LIMIT 100;`;
@@ -6934,6 +7011,11 @@ async function switchDB(name) {
   await loadDBs();
   await loadSchema();
   dbHint('已切换到 ' + name, 'ok');
+  // 切库不动编辑器（内容不该被吞掉），但必须提醒一句 —— 否则在 A 库写的
+  // `SELECT * FROM users` 会在 B 库里跑出另一张表，甚至报「表不存在」。
+  if (editor.value.trim()) {
+    toast('已切到库 ' + name + '：编辑器里的 SQL 保留了，注意它可能是按原来的库写的', false, 6000);
+  }
   const ed = document.getElementById('editor');
   if (ed) ed.placeholder = `-- 当前库：${name}，Ctrl+Enter 执行\nSELECT * FROM …`;
 }

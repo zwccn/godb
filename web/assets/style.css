@@ -512,18 +512,17 @@ body {
   gap: 5px;
 }
 .btn-run .run-ico { display: inline-flex; align-items: center; color: var(--accent); }
-.btn-run .run-spin { display: none; }
+/* 执行中：图标换成一个方块（可点 = 停止），不再是「转圈 + 按钮禁用」——
+   转圈的意思是「等着吧」，而这里其实能中断。 */
+.btn-run .run-stop { display: none; }
 .btn-run.is-running .run-ico { display: none; }
-.btn-run.is-running .run-spin {
+.btn-run.is-running .run-stop {
   display: inline-block;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1.5px solid var(--accent);
-  border-top-color: transparent;
-  animation: run-spin .7s linear infinite;
+  width: 8px;
+  height: 8px;
+  border-radius: 1.5px;
+  background: var(--accent);
 }
-@keyframes run-spin { to { transform: rotate(360deg); } }
 .btn-run:disabled { opacity: .62; cursor: progress; }
 
 .icon-btn {
@@ -4150,4 +4149,16 @@ html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }
 /* 科技灰下给菜单一点光，和顶栏光带、焦点环是一套语言 */
 html[data-theme="steel"] .ctx-menu {
   box-shadow: 0 12px 32px var(--shadow-color), 0 0 0 1px var(--fx-glow-soft);
+}
+
+/* 大结果集提示：表格只画当前页，但数据是全量进来的 —— 得让人知道卡在哪 */
+.grid-warn {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.5;
 }

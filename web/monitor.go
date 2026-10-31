@@ -143,6 +143,17 @@ func (s *Server) handleMonitorKill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少会话 ID"})
 		return
 	}
+	// "self" = 当前浏览器自己的会话。会话 id 存在 HttpOnly 的 godb_sid 里，
+	// 前端本来就看不到，也不该为了「停止」按钮把它暴露出去 —— 这里读 cookie 换算。
+	if id == "self" {
+		if c, err := r.Cookie("godb_sid"); err == nil {
+			id = c.Value
+		}
+		if id == "" || id == "self" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "还没有会话可以停止"})
+			return
+		}
+	}
 	// 注意：Kill 会回滚事务，但在本机管理界面里这是合法操作，不做额外鉴权
 	// （配置写入那种「能改就永久生效」的操作才限本机）。
 	if err := s.currentDB(r).KillSession(id); err != nil {

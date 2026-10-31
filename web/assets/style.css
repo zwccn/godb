@@ -1127,6 +1127,40 @@ body {
   color: var(--text);
 }
 .welcome p { margin: 0 0 6px; color: var(--text-2); font-size: calc(12.5px * var(--fs)); }
+
+/* 欢迎页的「试试这些」：以前示例只藏在帮助弹窗里，第一次打开面对空白只能瞎写。
+   点击只填编辑器、不自动执行（在别人的库上误跑一条 UPDATE 就麻烦了）。 */
+.welcome-quick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-soft);
+}
+.quick-label {
+  flex: 0 0 100%;
+  color: var(--text-3);
+  font-size: calc(11.5px * var(--fs));
+  margin-bottom: 2px;
+}
+.quick-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-family: var(--sans);
+  font-size: calc(12px * var(--fs));
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.quick-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft-bg);
+}
 .welcome code {
   font-family: var(--mono);
   font-size: calc(11.5px * var(--fs));

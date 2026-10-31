@@ -4419,6 +4419,20 @@ function loadHistory() {
   }
 }
 
+// 欢迎页的快捷示例：点一下把 EXAMPLES 里的 SQL 填进编辑器（不自动执行，
+// 免得在别人的库上误跑一条 UPDATE）。
+document.addEventListener('click', ev => {
+  const chip = ev.target.closest('.quick-chip');
+  if (!chip) return;
+  const sql = EXAMPLES[chip.dataset.ex];
+  if (!sql) return;
+  editor.value = sql;
+  autoSize();
+  editor.focus();
+  // 光标放到末尾，接着就能按执行
+  try { if (cm) cm.setCursor({ line: cm.lineCount() - 1, ch: 0 }); } catch (e) {}
+});
+
 function pushHistory(sql) {
   const text = String(sql || '').trim();
   if (!text) return;

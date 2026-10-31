@@ -332,6 +332,24 @@ class CDP {
     check('存储卡有「索引」行（占用 + 页数 + 重建次数，且带解释）',
       ixRow.found && /页|索引/.test(ixRow.sub) && /WAL/.test(ixRow.tip),
       ixRow.found ? `${ixRow.main} · ${ixRow.sub}` : `缺行：${JSON.stringify(ixRow.keys)}`);
+
+    // 页密度：百分比 + 页数，解释里必须说清「洞不算空闲」
+    const fillRow = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('#monIO .io-row')];
+      const hit = rows.find(r => ((r.querySelector('.io-k') || {}).textContent || '') === '页密度');
+      if (!hit) {
+        return { found: false, keys: rows.map(r => (r.querySelector('.io-k') || {}).textContent) };
+      }
+      return {
+        found: true,
+        main: (hit.querySelector('.io-v') || {}).textContent || '',
+        sub: (hit.querySelector('.io-sub') || {}).textContent || '',
+        tip: hit.title || '',
+      };
+    })()`);
+    check('存储卡有「页密度」行（百分比或「—」+ 说明洞不算空闲）',
+      fillRow.found && (/%|—/.test(fillRow.main)) && /VACUUM/.test(fillRow.tip),
+      fillRow.found ? `${fillRow.main} · ${fillRow.sub}` : `缺行：${JSON.stringify(fillRow.keys)}`);
     await cdp.eval(`document.querySelector('#monSlowSQL tr').click()`);
     await sleep(700);
     const detUi = await cdp.eval(`(() => {

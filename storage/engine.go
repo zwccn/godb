@@ -47,6 +47,7 @@ type Store struct {
 	tablePages    map[string]int   // 该表数据文件占了多少页（pg_class.relpages）
 	tableSeq      map[string]int64 // 该表自增列的当前值（从 meta 读，不必扫行）
 	tableIdxPages map[string]int   // 该表所有索引加起来占了多少页
+	tableFree     map[string]int64 // 该表页文件里还能用的字节（meta 里读，未加载时用）
 	hasSnap       map[string]bool  // 是否已经有数据文件
 	dirty         map[string]bool  // 上一次 checkpoint 之后有没有改动
 	loaded        map[string]bool  // 行是否已经在内存里
@@ -151,6 +152,7 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		tablePages:    map[string]int{},
 		tableSeq:      map[string]int64{},
 		tableIdxPages: map[string]int{},
+		tableFree:     map[string]int64{},
 		hasSnap:       map[string]bool{},
 		dirty:         map[string]bool{},
 		dirtyRows:     map[string]int64{},
@@ -461,6 +463,7 @@ func (s *Store) DropTable(name string) {
 	delete(s.tableRows, key)
 	delete(s.tablePages, key)
 	delete(s.tableIdxPages, key)
+	delete(s.tableFree, key)
 	delete(s.hasSnap, key)
 	delete(s.dirty, key)
 }
@@ -494,6 +497,10 @@ func (s *Store) RenameTable(oldName, newName string) {
 	if v, ok := s.tableRows[oldKey]; ok {
 		s.tableRows[newKey] = v
 		delete(s.tableRows, oldKey)
+	}
+	if v, ok := s.tableFree[oldKey]; ok {
+		s.tableFree[newKey] = v
+		delete(s.tableFree, oldKey)
 	}
 	move(s.hasSnap)
 	if s.dirty[oldKey] {
@@ -572,8 +579,12 @@ func (s *Store) RowCount(name string) int {
 	return s.tableRows[key]
 }
 
-// PageCount 返回「上次落盘时」这张表的数据页数和索引页数（pg_class.relpages 用）。
+// PageCount 返回这张表当前占了多少个数据页、多少个索引页（pg_class.relpages 用）。
 // 和 RowCount 一样：没加载的表也能回答，不需要把表拉进内存。
+//
+// 优先按**文件大小**算，而不是读 meta 里记的 pages：那个数只在「这张表被写过」
+// 的那一轮 checkpoint 更新，之后表一直干净的话永远不刷新（VACUUM FULL 换过文件
+// 尤其明显 —— 页数从 1450 掉到 157，meta 里还留着旧的）。
 func (s *Store) PageCount(name string) (data, idx int) {
 	key := cleanName(name)
 	s.loadMu.RLock()
@@ -581,6 +592,19 @@ func (s *Store) PageCount(name string) (data, idx int) {
 	if s.loaded[key] {
 		if td := s.Data[key]; td != nil && td.pages != nil {
 			return int(td.pages.pageCount()), td.IndexPages()
+		}
+	}
+	if s.Cat != nil {
+		if t, ok := s.Cat.Get(name); ok {
+			if st, err := os.Stat(tablePagePath(s.Dir, t.ID)); err == nil {
+				data = int(st.Size() / PageSize)
+			}
+			for _, ix := range t.Indexes {
+				if st, err := os.Stat(indexFilePath(s.Dir, t.ID, "ix:"+cleanName(ix.Name))); err == nil {
+					idx += int(st.Size() / PageSize)
+				}
+			}
+			return data, idx
 		}
 	}
 	return s.tablePages[key], s.tableIdxPages[key]

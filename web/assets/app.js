@@ -2213,6 +2213,27 @@ function renderIO(m) {
     '命中率高 = 页都在内存里，不用读盘。命中率低说明预算太小或访问太随机；出现「超预算」就该把缓冲池页数调大',
     poolLook > 0 && hitRate < 80 ? 'warn' : ''));
 
+  // 页密度：页里真放着行数据的比例 —— 掉下来基本就是「删了不少、还没 VACUUM」。
+  const sp = io.space || {};
+  const tableList = io.tables || [];
+  const fillOk = (sp.fillPages || 0) > 0;
+  const sparse = tableList
+    .filter(t => t.fillKnown && (t.pages || 0) >= 8)
+    .sort((a, b) => (a.fill || 0) - (b.fill || 0))[0];
+  const sparseLow = !!sparse && (sparse.fill || 0) < 0.6;
+  box.appendChild(row('页密度',
+    fillOk ? `${((sp.fill || 0) * 100).toFixed(0)}% · ${sp.pages} 页` : '—',
+    !fillOk
+      ? '还没有表落过盘（或刚升级还没记录空闲字节）'
+      : (sparseLow
+        ? `最稀疏：${sparse.name} ${((sparse.fill || 0) * 100).toFixed(0)}%` +
+          `（${Math.round(sparse.rows / Math.max(1, sparse.pages))} 行/页）`
+        : '各表都还算紧凑'),
+    '页密度 = 1 - 页里空闲字节 / 页容量。掉下来通常是删了很多行还没整理：'
+      + 'VACUUM 收页内的洞，VACUUM FULL 才能真的把页数降下来（整份重写，期间占着表锁）。'
+      + '注意「洞」不算空闲，所以刚删完还没 VACUUM 时这个数不会降，要配合「行/页」看',
+    fillOk && (sp.fill || 0) < 0.5 ? 'warn' : ''));
+
   // 索引：不进缓冲池，大小只能靠 stat；「重建次数」是一个本该为 0 的数。
   const ix = io.index || {};
   const ixRebuilt = (ix.rebuilds || 0) > 0;
@@ -2225,12 +2246,12 @@ function renderIO(m) {
       + '涨了说明索引文件过期或被判定损坏，那次启动白重建了一整棵树',
     ixRebuilt ? 'warn' : ''));
 
-  const tables = io.tables || [];
+  const tables = tableList;
   const top = tables.slice(0, 3).map(t => `${t.name} ${fmtBytes(t.bytes)}`).join(' · ');
   box.appendChild(row('数据',
     `${tables.length} 表 / ${fmtBytes(io.totalBytes)}`,
-    top || '还没有表',
-    '各表页文件（tables/tXXXXXX.dat）的大小'));
+    (top || '还没有表') + (sp.lobBytes ? ` · 大字段 ${fmtBytes(sp.lobBytes)}` : ''),
+    '各表页文件（tables/tXXXXXX.dat）的大小；行内超过 2KB 的文本另存进 .lob，单独算'));
 }
 
 /* ---- 4. 锁明细 ---- */

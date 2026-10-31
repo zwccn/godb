@@ -271,6 +271,14 @@ func (s *Store) FullVacuum(t *catalog.Table) (RewriteReport, error) {
 	s.tableGen[key] = gen
 	if td := s.Data[key]; td != nil {
 		s.tableRows[key] = td.Live
+		// 页数/空闲必须跟着换，否则 meta 里留着重写前的页数：重启后
+		// pg_class.relpages 和页密度都报旧值，而这张表刚刚才被写干净、
+		// 下一轮 checkpoint 又不会碰它（没有脏页），错的值会一直留着。
+		if td.pages != nil {
+			s.tablePages[key] = int(td.pages.pageCount())
+			s.tableFree[key] = td.pages.freeBytes()
+		}
+		s.tableIdxPages[key] = td.IndexPages()
 	}
 	s.loadMu.Unlock()
 	if err := s.writeMeta(gen, s.metaTablesLocked()); err != nil {

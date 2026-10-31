@@ -39,6 +39,11 @@ type metaTable struct {
 	// 而从 meta 读不用把表整个加载进来。
 	Pages    int `json:"pages,omitempty"`
 	IdxPages int `json:"idx_pages,omitempty"`
+	// Free 是「页文件里还能用的字节」（上次落盘时的估算，误差每页 <64 字节）。
+	//
+	// 页密度 = 1 - Free/(Pages×8KB)。它必须进 meta，因为未加载的表算不出空闲图；
+	// 而监控每秒轮询一次，不能为了一个百分比把整张表的页都读一遍。
+	Free int64 `json:"free_bytes,omitempty"`
 	// Seq 是自增列当前值（SERIAL / GENERATED AS IDENTITY）。
 	//
 	// 以前重启是扫一遍行取最大值来恢复，但「打开表不解码行」之后那条路走不通了
@@ -187,6 +192,9 @@ func (s *Store) loadSnapshot() error {
 		}
 		if mt.IdxPages > 0 {
 			s.tableIdxPages[key] = mt.IdxPages
+		}
+		if mt.Free > 0 {
+			s.tableFree[key] = mt.Free
 		}
 		if len(mt.Idx) > 0 {
 			s.idxGen[key] = mt.Idx
@@ -340,6 +348,9 @@ func (s *Store) checkpointBodyLocked(reason string) error {
 				s.tablePages[key] = int(td.pages.pageCount())
 			}
 			s.tableIdxPages[key] = td.IndexPages()
+			if td.pages != nil {
+				s.tableFree[key] = td.pages.freeBytes()
+			}
 		}
 	}
 	s.cleanupOrphanFiles()
@@ -375,7 +386,11 @@ func (s *Store) metaTablesLocked() map[string]metaTable {
 		if td := s.Data[key]; td != nil && s.loaded[key] {
 			seq = td.Seq
 		}
-		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key],
+		free := s.tableFree[key]
+		if td := s.Data[key]; td != nil && s.loaded[key] && td.pages != nil {
+			free = td.pages.freeBytes()
+		}
+		tables[key] = metaTable{ID: t.ID, Rows: rows, Idx: s.idxGen[key], Free: free,
 			Pages: s.tablePages[key], IdxPages: s.tableIdxPages[key], Seq: seq}
 	}
 	s.loadMu.RUnlock()

@@ -465,6 +465,7 @@ type IOProfile struct {
 	Checkpoint storage.CheckpointProfile `json:"checkpoint"`
 	Pool       storage.PoolProfile        `json:"pool"`
 	Index      storage.IndexProfile       `json:"index"`
+	Space      storage.SpaceProfile       `json:"space"`
 	Tables     []storage.TableSize       `json:"tables"`
 	TotalBytes int64                     `json:"totalBytes"`
 	Rates      IORates                   `json:"rates"`
@@ -757,6 +758,7 @@ func (d *DB) Monitor(t TimeoutStatus) Monitor {
 		m.IO.Pool = d.Store.PoolStats()
 		m.IO.Index = d.Store.IndexStats()
 		m.IO.Tables = d.Store.TableSizes()
+		m.IO.Space = storage.SumSpace(m.IO.Tables, d.Store.WalBytes())
 		var sum int64
 		for _, t := range m.IO.Tables {
 			sum += t.Bytes

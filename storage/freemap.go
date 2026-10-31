@@ -143,6 +143,25 @@ func (m *freeMap) find(need int) (uint32, bool) {
 	return noPage, false
 }
 
+// freeBytes 汇总图里「还能用」的字节数（按档位估算）。
+//
+// 每页误差不到 64 字节（档位是 floor(free/64)），对「这张表有多满」这个问题
+// 完全够用 —— 1450 页的表最坏也就差 90KB。整页空的页按一页算。
+func (m *freeMap) freeBytes() int64 {
+	var sum int64
+	for _, c := range m.cls {
+		switch c {
+		case fsmNoClass:
+			// 不在图里：要么还没写过，要么已经被回收，不计
+		case fsmEmpty:
+			sum += PageSize
+		default:
+			sum += int64(c) * fsmBucketBytes
+		}
+	}
+	return sum
+}
+
 // stats 返回图里的页数与每档页数（测试与诊断用）。
 func (m *freeMap) stats() (pages int, perBucket [fsmBuckets]int) {
 	for p, c := range m.cls {

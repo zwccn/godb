@@ -100,10 +100,23 @@ type CheckpointProfile struct {
 }
 
 // TableSize 是一张表在磁盘上的占用。
+//
+// 三个文件分开报，因为它们是三种性质不同的空间：堆页可以靠 VACUUM 整理回收、
+// 索引页只能靠重建回收、大字段只有 VACUUM FULL 才回收。合成一个数字就看不见
+// 「该整理哪一块」了。
 type TableSize struct {
-	Name  string `json:"name"`
-	Bytes int64  `json:"bytes"`
-	Rows  int    `json:"rows"`
+	Name       string  `json:"name"`
+	Bytes      int64   `json:"bytes"`      // 堆页文件 t<ID>.dat
+	IndexBytes int64   `json:"indexBytes"` // 该表所有索引文件合计
+	LobBytes   int64   `json:"lobBytes"`   // 大字段文件 t<ID>.lob
+	Rows       int     `json:"rows"`       // 存活行数
+	Pages      int     `json:"pages"`
+	IndexPages int     `json:"indexPages"`
+	FreeBytes  int64   `json:"freeBytes"` // 页里还能用的字节（按 64B 档位估算）
+	Fill       float64 `json:"fill"`      // 页密度 = 1 - FreeBytes/(Pages×8KB)，0~1
+	// FillKnown 为 false 表示「空闲字节还没记录过」（表一直没被加载/落盘过），
+	// 这时 Fill 没有意义，前端应该显示「—」而不是 100%。
+	FillKnown bool `json:"fillKnown"`
 }
 
 // PoolProfile 是缓冲池的汇总（全库所有表加在一起）。
@@ -269,16 +282,118 @@ func (s *Store) TableSizes() []TableSize {
 		if st, err := os.Stat(tablePagePath(s.Dir, t.ID)); err == nil {
 			ts.Bytes = st.Size()
 		}
+		if st, err := os.Stat(lobPathOf(tablePagePath(s.Dir, t.ID))); err == nil {
+			ts.LobBytes = st.Size()
+		}
+		// 索引文件按「该表的所有索引定义」去 stat：DROP 过的索引文件已经不在了，
+		// 这样也不会把孤儿文件算进来。
+		for _, ix := range t.Indexes {
+			if st, err := os.Stat(indexFilePath(s.Dir, t.ID, "ix:"+cleanName(ix.Name))); err == nil {
+				ts.IndexBytes += st.Size()
+				ts.IndexPages += int(st.Size() / PageSize)
+			}
+		}
+		loadedNow := false
 		if td := s.Data[key]; td != nil && s.loaded[key] {
+			loadedNow = true
 			ts.Rows = td.Live
+			if td.pages != nil {
+				ts.Pages = int(td.pages.pageCount())
+				ts.FreeBytes = td.pages.freeBytes()
+			}
 		} else {
 			ts.Rows = s.tableRows[key]
+			ts.FreeBytes = s.tableFree[key]
+		}
+		// 未加载的表按文件大小算页数：meta 里的 pages 只在「这张表被写过」的那轮
+		// 落盘更新，一直干净的表会永远报旧值（VACUUM FULL 换过文件尤其明显）。
+		if !loadedNow && ts.Bytes > 0 {
+			ts.Pages = int(ts.Bytes / PageSize)
+		}
+		// 空闲字节从哪来：加载过的表实时算，没加载的只能信 meta 里上次记的值。
+		// meta 里没有（=0）说明这张表还没被这一版落过盘，密度算不出来 —— 不能当成
+		// 「一点空闲都没有」，否则一张从没打开过的表会报 100% 满。
+		ts.FillKnown = (loadedNow && ts.Pages > 0) || (!loadedNow && s.tableFree[key] > 0)
+		if ts.FillKnown && ts.Pages > 0 {
+			capacity := float64(ts.Pages) * PageSize
+			ts.Fill = 1 - float64(ts.FreeBytes)/capacity
+			// 空闲字节是估算值，理论上不会超过容量；夹一下免得浮点抖动报出 -0.1%
+			if ts.Fill < 0 {
+				ts.Fill = 0
+			}
+			if ts.Fill > 1 {
+				ts.Fill = 1
+			}
 		}
 		out = append(out, ts)
 	}
 	s.loadMu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Bytes > out[j].Bytes })
 	return out
+}
+
+// minFillPages 是「参与全库页密度统计」的最小页数：小表的最后一页天然不满，
+// 算进去只会让百分比看起来比实际稀疏。前端挑「最稀疏的表」用同一档阈值。
+const minFillPages = 8
+
+// SpaceProfile 是全库的空间构成（「数据 / 索引 / 大字段 / WAL」各占多少）。
+//
+// 这是给「空间监控」用的地基：每一块都能往下钻到表级（见 TableSizes），
+// 而四者的回收方式完全不同 —— 堆页靠 VACUUM、索引靠重建、大字段只能 VACUUM FULL、
+// WAL 靠 checkpoint 轮转。混成一个「占用 120MB」看不出该做什么。
+type SpaceProfile struct {
+	DataBytes  int64   `json:"dataBytes"`
+	IndexBytes int64   `json:"indexBytes"`
+	LobBytes   int64   `json:"lobBytes"`
+	WalBytes   int64   `json:"walBytes"`
+	Pages      int     `json:"pages"`
+	IndexPages int     `json:"indexPages"`
+	FreeBytes  int64   `json:"freeBytes"` // 已知表里可复用的空闲字节
+	// FillPages 是「算得出密度的那些表的页数」：刚升级、还没落过盘的表没记空闲，
+	// 把它们按 0 空闲算进分母会把全库密度虚报高。
+	FillPages int     `json:"fillPages"`
+	Fill      float64 `json:"fill"` // 全库页密度：1 - Σfree/(Σpages×8KB)
+}
+
+// Space 汇总全库空间构成（会重新 stat 一遍表文件）。
+func (s *Store) Space() SpaceProfile { return SumSpace(s.TableSizes(), s.WalBytes()) }
+
+// WalBytes 是当前 WAL 文件大小（纯内存模式返回 0）。
+func (s *Store) WalBytes() int64 {
+	if s.wal == nil {
+		return 0
+	}
+	return s.wal.LiveBytes()
+}
+
+// SumSpace 把逐表明细加成全局构成。已经在手上有 TableSizes 的调用方用它，
+// 免得为了一个汇总再 stat 一遍所有文件。
+func SumSpace(tables []TableSize, walBytes int64) SpaceProfile {
+	var p SpaceProfile
+	for _, t := range tables {
+		p.DataBytes += t.Bytes
+		p.IndexBytes += t.IndexBytes
+		p.LobBytes += t.LobBytes
+		p.Pages += t.Pages
+		p.IndexPages += t.IndexPages
+		// 太小的表不参与全库密度：每张表的最后一页本来就装不满，页数只有一两页时
+		// 这一页的「半空」会把整个百分比拖下去（4 行 1 页 = 12% 密度，但那是正常的）。
+		if t.FillKnown && t.Pages >= minFillPages {
+			p.FreeBytes += t.FreeBytes
+			p.FillPages += t.Pages
+		}
+	}
+	p.WalBytes = walBytes
+	if p.FillPages > 0 {
+		p.Fill = 1 - float64(p.FreeBytes)/(float64(p.FillPages)*PageSize)
+		if p.Fill < 0 {
+			p.Fill = 0
+		}
+		if p.Fill > 1 {
+			p.Fill = 1
+		}
+	}
+	return p
 }
 
 // TotalCommits 返回进程启动以来的累计提交数，给面板算每秒提交数。

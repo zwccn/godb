@@ -572,6 +572,10 @@ func (tp *tablePages) removeFromPageIndex(rid int, at rowLoc) {
 	}
 }
 
+// freeBytes 是「页文件里还能用的字节」（按空闲空间图的档位估算，见 freeMap.freeBytes）。
+// 监控算填充率用：1 - freeBytes/(页数×8KB)。
+func (tp *tablePages) freeBytes() int64 { return tp.fm.freeBytes() }
+
 // findPage 找一页能放下 size 字节的元组；都放不下就返回新页号（isNew）。
 func (tp *tablePages) findPage(size int) (uint32, bool, error) {
 	// 空闲空间图按**真实空闲字节**分档（洞不算：洞要靠 VACUUM 整理出来），

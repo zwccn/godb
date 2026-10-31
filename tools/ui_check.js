@@ -584,15 +584,15 @@ class CDP {
     await cdp.eval(`document.getElementById('mapZoomReset').click()`);
     await sleep(400);
 
-    // 页网格里的手势：Ctrl+滚轮缩放、按住拖动平移（用户报过「缩放没生效」，
-    // 其实是在表视图里滚轮——那里普通滚轮要留给滚动，缩放走 Ctrl/⌘ + 滚轮）。
+    // 页网格里的手势：**普通滚轮就是缩放**（用户报过「第二层级的小方格无法缩放」——
+    // 当时把网格的滚轮留给了滚动，而网格在 1× 时正好铺满、根本没得滚，看着就像没反应）。
     const gbox = await cdp.eval(`(() => {
       const r = document.getElementById('pmGrid').getBoundingClientRect();
       return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120, modifiers: 2 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120 });
     await sleep(300);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120, modifiers: 2 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120 });
     await sleep(600);
     const gImg = await cdp.eval(`(() => {
       const g = document.getElementById('pmGrid');
@@ -609,7 +609,7 @@ class CDP {
       return { st: Math.round(g.scrollTop),
         rail: (document.querySelector('#pmSide .pm-head') || { textContent: '' }).textContent };
     })()`);
-    check('页网格：Ctrl+滚轮放大、按住拖动平移（拖动不会误开某一页）',
+    check('页网格：滚轮直接放大、按住拖动平移（拖动不会误开某一页）',
       /×/.test(gImg.zoom) && gImg.cell > 0 && gImg.canPan && gPan.st > gImg.st && gPan.rail === '',
       `${gImg.zoom} · 格子 ${gImg.cell}px · 滚动 ${gImg.st} → ${gPan.st} · 右栏「${gPan.rail || '空'}」`);
     await cdp.eval(`document.getElementById('mapZoomReset').click()`);

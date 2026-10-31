@@ -3369,7 +3369,7 @@ function pmCellClass(p) {
 function renderPageMap() {
   const box = monEls.pmGrid;
   if (!box || !pmMap) return;
-  box.title = 'Ctrl/⌘ + 滚轮缩放 · 按住拖动平移 · 单击看这一页';
+  box.title = '滚轮缩放 · 按住拖动平移 · 滚动条也能翻页 · 单击看这一页';
   const pages = pmMap.pages || [];
   fitCell(box, pages.length || pmMap.total || 1);
   box.innerHTML = '';
@@ -3808,28 +3808,31 @@ if (monEls.mapTree) {
   }, true);
 }
 
-// 页网格：Ctrl/⌘ + 滚轮缩放（普通滚轮留给滚动），按住拖动平移 ——
-// 几百上千页时靠拖动比拖滚动条舒服，也避免「在表视图里滚轮没反应」的困惑。
-function zoomGridBy(factor) {
+// 页网格：滚轮就是缩放（和树图一致），按住拖动平移，滚动条也照样能翻 ——
+// 一度把滚轮留给「滚动列表」，但网格在 1× 时正好铺满、根本没有可滚的内容，
+// 滚起来毫无反应，看着就像「缩放没实现」。
+function zoomGridAt(factor, clientX, clientY) {
   const g = monEls.pmGrid;
   if (!g) return;
+  const r = g.getBoundingClientRect();
+  // 光标在视口里的位置 → 它对应内容里的比例；缩放后把这个比例放回同一像素位置
+  const ax = clientX === undefined ? g.clientWidth / 2 : clientX - r.left;
+  const ay = clientY === undefined ? g.clientHeight / 2 : clientY - r.top;
+  const fx = (g.scrollLeft + ax) / Math.max(1, g.scrollWidth);
+  const fy = (g.scrollTop + ay) / Math.max(1, g.scrollHeight);
   const old = mapZoom;
-  const fx = (g.scrollLeft + g.clientWidth / 2) / Math.max(1, g.scrollWidth);
-  const fy = (g.scrollTop + g.clientHeight / 2) / Math.max(1, g.scrollHeight);
-  setMapZoom(old * factor, null);   // 内部会重排网格（同步）
+  setMapZoom(old * factor, null);   // 内部会同步重排网格
   if (Math.abs(mapZoom - old) < 1e-4) return;
-  // 缩放后把视口挪回原来的比例位置，别让人失去方向
-  g.scrollLeft = fx * g.scrollWidth - g.clientWidth / 2;
-  g.scrollTop = fy * g.scrollHeight - g.clientHeight / 2;
+  g.scrollLeft = fx * g.scrollWidth - ax;
+  g.scrollTop = fy * g.scrollHeight - ay;
 }
 
 let gridSuppressClick = false;
 if (monEls.pmGrid) {
   monEls.pmGrid.addEventListener('wheel', e => {
     if (monPageTab !== 'map' || mapLevel !== 'table') return;
-    if (!(e.ctrlKey || e.metaKey)) return;   // 普通滚轮 = 滚这张表
-    e.preventDefault();
-    zoomGridBy(Math.exp(-e.deltaY * 0.0025));
+    e.preventDefault();   // 这一格一页的网格里没有「滚轮滚动」，翻页靠拖动或滚动条
+    zoomGridAt(Math.exp(-e.deltaY * 0.0018), e.clientX, e.clientY);
   }, { passive: false });
 
   let gdrag = null;

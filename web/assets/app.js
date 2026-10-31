@@ -2966,6 +2966,7 @@ function treeTip(it) {
 function renderTreemap() {
   const box = monEls.mapTree;
   if (!box) return;
+  box.title = '滚轮缩放 · 放大后按住拖动平移 · 双击进页地图';
   box.innerHTML = '';
   const items = treemapItems();
   if (!items.length) {
@@ -3368,6 +3369,7 @@ function pmCellClass(p) {
 function renderPageMap() {
   const box = monEls.pmGrid;
   if (!box || !pmMap) return;
+  box.title = 'Ctrl/⌘ + 滚轮缩放 · 按住拖动平移 · 单击看这一页';
   const pages = pmMap.pages || [];
   fitCell(box, pages.length || pmMap.total || 1);
   box.innerHTML = '';
@@ -3405,6 +3407,11 @@ function renderPageMap() {
     const shown = pages.length;
     const more = shown < pmMap.total ? ` · 已画 ${shown} 页（${fmtBytes(pmMap.bytes || 0)}）` : ` · 读了 ${fmtBytes(pmMap.bytes || 0)}`;
     monEls.mapNote.textContent = `${pmSel.table} · ${kindText} · 共 ${pmMap.total} 页${more}`;
+  }
+  if (box.scrollWidth > box.clientWidth + 1 || box.scrollHeight > box.clientHeight + 1) {
+    box.classList.add('can-pan');
+  } else {
+    box.classList.remove('can-pan');
   }
   if (monEls.pmMore) {
     monEls.pmMore.classList.toggle('hidden', !pmMap.next);
@@ -3664,7 +3671,7 @@ function renderMap() {
     if (monEls.mapNote) {
       monEls.mapNote.textContent = `${n} 张表 · 合计 ${fmtBytes(total)}`
         + (noSnap ? ` · ${noSnap} 张还没落过盘（不在图上）` : '')
-        + ' · 面积 = 字节';
+        + ' · 面积 = 字节 · 滚轮缩放 · 拖动平移';
     }
     return;
   }
@@ -3795,6 +3802,67 @@ if (monEls.mapTree) {
   // 捕获阶段拦：格子自己的 click 在冒泡阶段
   monEls.mapTree.addEventListener('click', e => {
     if (treeSuppressClick) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  }, true);
+}
+
+// 页网格：Ctrl/⌘ + 滚轮缩放（普通滚轮留给滚动），按住拖动平移 ——
+// 几百上千页时靠拖动比拖滚动条舒服，也避免「在表视图里滚轮没反应」的困惑。
+function zoomGridBy(factor) {
+  const g = monEls.pmGrid;
+  if (!g) return;
+  const old = mapZoom;
+  const fx = (g.scrollLeft + g.clientWidth / 2) / Math.max(1, g.scrollWidth);
+  const fy = (g.scrollTop + g.clientHeight / 2) / Math.max(1, g.scrollHeight);
+  setMapZoom(old * factor, null);   // 内部会重排网格（同步）
+  if (Math.abs(mapZoom - old) < 1e-4) return;
+  // 缩放后把视口挪回原来的比例位置，别让人失去方向
+  g.scrollLeft = fx * g.scrollWidth - g.clientWidth / 2;
+  g.scrollTop = fy * g.scrollHeight - g.clientHeight / 2;
+}
+
+let gridSuppressClick = false;
+if (monEls.pmGrid) {
+  monEls.pmGrid.addEventListener('wheel', e => {
+    if (monPageTab !== 'map' || mapLevel !== 'table') return;
+    if (!(e.ctrlKey || e.metaKey)) return;   // 普通滚轮 = 滚这张表
+    e.preventDefault();
+    zoomGridBy(Math.exp(-e.deltaY * 0.0025));
+  }, { passive: false });
+
+  let gdrag = null;
+  monEls.pmGrid.addEventListener('pointerdown', e => {
+    if (mapLevel !== 'table' || e.button !== 0) return;
+    gdrag = {
+      sx: e.clientX, sy: e.clientY,
+      sl: monEls.pmGrid.scrollLeft, st: monEls.pmGrid.scrollTop, moved: false,
+    };
+  });
+  monEls.pmGrid.addEventListener('pointermove', e => {
+    if (!gdrag) return;
+    const dx = e.clientX - gdrag.sx, dy = e.clientY - gdrag.sy;
+    if (!gdrag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+    gdrag.moved = true;
+    monEls.pmGrid.classList.add('panning');
+    monEls.pmGrid.scrollLeft = gdrag.sl - dx;
+    monEls.pmGrid.scrollTop = gdrag.st - dy;
+  });
+  const endGridDrag = () => {
+    if (!gdrag) return;
+    const moved = gdrag.moved;
+    gdrag = null;
+    monEls.pmGrid.classList.remove('panning');
+    if (!moved) return;
+    // 拖完会补一个 click：别让它顺手把某一页打开
+    gridSuppressClick = true;
+    setTimeout(() => { gridSuppressClick = false; }, 0);
+  };
+  monEls.pmGrid.addEventListener('pointerup', endGridDrag);
+  monEls.pmGrid.addEventListener('pointercancel', endGridDrag);
+  monEls.pmGrid.addEventListener('click', e => {
+    if (gridSuppressClick) {
       e.stopPropagation();
       e.preventDefault();
     }

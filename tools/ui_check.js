@@ -584,6 +584,37 @@ class CDP {
     await cdp.eval(`document.getElementById('mapZoomReset').click()`);
     await sleep(400);
 
+    // 页网格里的手势：Ctrl+滚轮缩放、按住拖动平移（用户报过「缩放没生效」，
+    // 其实是在表视图里滚轮——那里普通滚轮要留给滚动，缩放走 Ctrl/⌘ + 滚轮）。
+    const gbox = await cdp.eval(`(() => {
+      const r = document.getElementById('pmGrid').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120, modifiers: 2 });
+    await sleep(300);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: gbox.x, y: gbox.y, deltaX: 0, deltaY: -120, modifiers: 2 });
+    await sleep(600);
+    const gImg = await cdp.eval(`(() => {
+      const g = document.getElementById('pmGrid');
+      const c = document.querySelector('#pmGrid .pm-c').getBoundingClientRect();
+      return { zoom: document.getElementById('mapZoomVal').textContent, cell: Math.round(c.width),
+        st: Math.round(g.scrollTop), canPan: g.classList.contains('can-pan') };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: gbox.x, y: gbox.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gbox.x, y: gbox.y - 120, button: 'left', buttons: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: gbox.x, y: gbox.y - 120, button: 'left' });
+    await sleep(500);
+    const gPan = await cdp.eval(`(() => {
+      const g = document.getElementById('pmGrid');
+      return { st: Math.round(g.scrollTop),
+        rail: (document.querySelector('#pmSide .pm-head') || { textContent: '' }).textContent };
+    })()`);
+    check('页网格：Ctrl+滚轮放大、按住拖动平移（拖动不会误开某一页）',
+      /×/.test(gImg.zoom) && gImg.cell > 0 && gImg.canPan && gPan.st > gImg.st && gPan.rail === '',
+      `${gImg.zoom} · 格子 ${gImg.cell}px · 滚动 ${gImg.st} → ${gPan.st} · 右栏「${gPan.rail || '空'}」`);
+    await cdp.eval(`document.getElementById('mapZoomReset').click()`);
+    await sleep(400);
+
     // 页检查器：点一格看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
     await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
     await sleep(1200);

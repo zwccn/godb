@@ -3737,6 +3737,9 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 }
 /* 页少的表铺不满画布：居中，别把一两个格子孤零零丢在左上角 */
 .map-grid.center { align-content: center; justify-content: center; }
+/* 内容超出画布时按住就能拖（抓手光标），大表里比拖滚动条舒服 */
+.map-grid.can-pan { cursor: grab; }
+.map-grid.panning { cursor: grabbing; user-select: none; }
 .map-foot {
   flex: 0 0 auto;
   display: flex;

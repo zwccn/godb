@@ -69,10 +69,26 @@ type schemaResp struct {
 	ClockGranNs int64          `json:"clockGranNs"`
 }
 
+// noStoreAssets 给前端资源加 no-store。
+//
+// 这是个把 web/assets 用 go:embed 打进二进制的单页应用：改前端必须重新编译 + 重启，
+// 而浏览器缓存住旧的 app.js 会表现成「改了没生效」，排查起来极费时间（本地服务，
+// 几十 KB 的东西重复下载没有代价，不值得省）。
+func noStoreAssets(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/" || strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".js") ||
+			strings.HasSuffix(p, ".css") {
+			w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // Routes 注册所有路由。
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(Assets())))
+	mux.Handle("/", noStoreAssets(http.FileServer(http.FS(Assets()))))
 	mux.HandleFunc("/api/query", s.handleQuery)
 	mux.HandleFunc("/api/schema", s.handleSchema)
 	mux.HandleFunc("/api/tx", s.handleTx)

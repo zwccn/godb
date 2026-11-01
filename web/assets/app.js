@@ -1313,12 +1313,12 @@ function probePhaseBar(r) {
   // 剩下的是「整理输出」：渲染 EXPLAIN 文本、建统计树 —— 探测自身的开销。
   const tailNs = Math.max(0, execAll - planNs - runNs);
   const segs = [
-    { cls: 'load', label: '装载表', ns: ph.loadNs || 0 },
-    { cls: 'lock', label: '等锁', ns: ph.lockNs || 0 },
-    { cls: 'plan', label: '规划', ns: planNs },
-    { cls: 'exec', label: '执行', ns: runNs },
-    { cls: 'explain', label: '整理输出', ns: tailNs },
-    { cls: 'end', label: '收尾', ns: ph.endNs || 0 },
+    { cls: 'ph-load', label: '装载表', ns: ph.loadNs || 0 },
+    { cls: 'ph-lock', label: '等锁', ns: ph.lockNs || 0 },
+    { cls: 'ph-plan', label: '规划', ns: planNs },
+    { cls: 'ph-exec', label: '执行', ns: runNs },
+    { cls: 'ph-explain', label: '整理输出', ns: tailNs },
+    { cls: 'ph-end', label: '收尾', ns: ph.endNs || 0 },
   ].filter(s => s.ns > 0);
   const total = segs.reduce((a, s) => a + s.ns, 0);
   if (!total) return null;
@@ -1340,7 +1340,7 @@ function probePhaseBar(r) {
     const item = el('span', 'probe-phase-item');
     item.appendChild(el('span', 'probe-phase-dot ' + s.cls));
     let text = s.label + ' ' + fmtDur(s.ns);
-    if (s.cls === 'load' && ph.loadPages > 0) {
+    if (s.cls === 'ph-load' && ph.loadPages > 0) {
       text += '（读页 ' + fmtDur(ph.loadIoNs || 0) + ' / ' + fmtCount(ph.loadPages) + ' 页）';
     }
     item.appendChild(el('span', null, text));

@@ -1289,15 +1289,19 @@ body {
   background: var(--bg-3);
 }
 .probe-phase-bar i { display: block; height: 100%; }
-.probe-phase-bar i.load { background: var(--warn); }
-.probe-phase-bar i.lock { background: var(--danger); }
-/* 规划用「暗一档的蓝」：它和执行是同一件事（这条语句的耗时），但性质不同 ——
-   规划发生在第一个算子之前，改 SQL 结构才影响它；执行才受数据量、索引影响。 */
-.probe-phase-bar i.plan { background: var(--accent); opacity: .5; }
-.probe-phase-bar i.exec { background: var(--accent); }
+/* 阶段类名统一带 ph- 前缀。原因：`.plan` 是 EXPLAIN 文本块的类（display:none），
+   叫 `.plan` 的图例圆点会被它连坐 —— 点不显示、条子上那一段也消失，而且
+   还会继承 padding / background: code-bg。血泪教训。 */
+.probe-phase-bar i.ph-load { background: var(--warn); }
+.probe-phase-bar i.ph-lock { background: var(--danger); }
+/* 规划用「浅一档的蓝」（--accent-soft-text）：它和执行是同一件事（这条语句的耗时），
+   但性质不同 —— 规划发生在第一个算子之前，改 SQL 结构才影响它；执行才受数据量、索引影响。
+   以前用 accent + opacity:.5，7px 的图例圆点淡到几乎看不见，还不如直接用实色的浅蓝。 */
+.probe-phase-bar i.ph-plan { background: var(--accent-soft-text); }
+.probe-phase-bar i.ph-exec { background: var(--accent); }
 /* 整理输出（渲染 EXPLAIN 文本 + 建统计树）是探测自身的开销 */
-.probe-phase-bar i.explain { background: var(--text-3); }
-.probe-phase-bar i.end { background: var(--text-2); }
+.probe-phase-bar i.ph-explain { background: var(--text-3); }
+.probe-phase-bar i.ph-end { background: var(--text-2); }
 
 .probe-phase-legend {
   display: flex;
@@ -1310,12 +1314,12 @@ body {
 }
 .probe-phase-item { display: flex; align-items: center; gap: 6px; }
 .probe-phase-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
-.probe-phase-dot.load { background: var(--warn); }
-.probe-phase-dot.lock { background: var(--danger); }
-.probe-phase-dot.plan { background: var(--accent); opacity: .5; }
-.probe-phase-dot.exec { background: var(--accent); }
-.probe-phase-dot.explain { background: var(--text-3); }
-.probe-phase-dot.end { background: var(--text-2); }
+.probe-phase-dot.ph-load { background: var(--warn); }
+.probe-phase-dot.ph-lock { background: var(--danger); }
+.probe-phase-dot.ph-plan { background: var(--accent-soft-text); }
+.probe-phase-dot.ph-exec { background: var(--accent); }
+.probe-phase-dot.ph-explain { background: var(--text-3); }
+.probe-phase-dot.ph-end { background: var(--text-2); }
 
 .probe-phase-hint {
   margin-top: 7px;

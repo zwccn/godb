@@ -2695,6 +2695,18 @@ class CDP {
       !!phase && !/装载表/.test(phase.text),
       phase ? phase.text.slice(0, 50) : '');
 
+    // 每个图例圆点都必须真的显示出来。曾经因为阶段类名叫 `.plan`，撞上 EXPLAIN
+    // 文本块的 `.plan { display: none }` —— 圆点整个消失、条子上那一段也一起没了，
+    // 而 DOM 里查得到、颜色也对，只有 getBoundingClientRect 是 0。
+    const dots = await cdp.eval(`[...document.querySelectorAll('.probe-phase-item')].map(it => {
+      const d = it.querySelector('.probe-phase-dot');
+      const r = d ? d.getBoundingClientRect() : { width: 0 };
+      return { label: it.textContent.trim().slice(0, 4), w: Math.round(r.width) };
+    })`);
+    check('时间去向每个图例都有可见圆点（类名不能撞 .plan）',
+      dots.length >= 3 && dots.every(d => d.w > 0),
+      dots.map(d => d.label + ':' + d.w + 'px').join(' '));
+
     // 规划占大头时给一句解释。用「轻查询」来复现：扫 100 行、执行几十微秒，
     // 规划那一两百微秒就成了大头（聚合那种 ms 级查询反而看不到这句）。
     await cdp.eval(`cm.setValue('SELECT * FROM big_demo LIMIT 100')`);

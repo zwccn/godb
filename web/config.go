@@ -10,6 +10,7 @@ import (
 
 	"godb/config"
 	"godb/db"
+	"godb/hrtime"
 	"godb/netsrv"
 	"godb/storage"
 )
@@ -55,23 +56,27 @@ type runtimeView struct {
 }
 
 type configResp struct {
-	Path        string              `json:"path"`
-	Storage     config.Storage      `json:"storage"`
-	Network     config.Network      `json:"network"`
-	Auth        authView            `json:"auth"`
-	Performance config.Performance  `json:"performance"`
-	Timeouts    config.Timeouts     `json:"timeouts"`
-	Runtime     runtimeView         `json:"runtime"`
-	Warnings    []string            `json:"warnings"`
+	Path        string             `json:"path"`
+	Storage     config.Storage     `json:"storage"`
+	Network     config.Network     `json:"network"`
+	Auth        authView           `json:"auth"`
+	Performance config.Performance `json:"performance"`
+	Timeouts    config.Timeouts    `json:"timeouts"`
+	Runtime     runtimeView        `json:"runtime"`
+	Warnings    []string           `json:"warnings"`
+	// Timer 是计时源的实际状态：开关写着「开」不代表真的在用 TSC ——
+	// 平台不支持、CPU 没有恒定 TSC、标定还没跑完，都是「开但没生效」。
+	// 设置页要如实显示，否则用户以为开了就变准了。
+	Timer hrtime.Status `json:"timer"`
 }
 
 // configReq 是保存请求。密码单独用明文传入（不回显），
 // ClearPassword 用来显式清掉已有密码。
 type configReq struct {
-	Storage     config.Storage      `json:"storage"`
-	Network     config.Network      `json:"network"`
-	Performance config.Performance  `json:"performance"`
-	Timeouts    config.Timeouts     `json:"timeouts"`
+	Storage     config.Storage     `json:"storage"`
+	Network     config.Network     `json:"network"`
+	Performance config.Performance `json:"performance"`
+	Timeouts    config.Timeouts    `json:"timeouts"`
 	Auth        struct {
 		RequirePassword bool   `json:"requirePassword"`
 		User            string `json:"user"`
@@ -184,6 +189,8 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 计时源是热配置：立刻按新开关切换（标定在后台跑，不阻塞这个请求）。
+	hrtime.SetEnabled(saved.Performance.HighResTimerOn())
 	s.DB.Store.SetCheckpointPolicy(toPolicy(saved.Storage))
 	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent, saved.Performance.MaxQueued, 0)
 	s.DB.SetTimeouts(db.TimeoutStatus{
@@ -199,9 +206,9 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) configView(r *http.Request) configResp {
 	c := s.Config.Get()
 	resp := configResp{
-		Path:    s.Config.Path(),
-		Storage: c.Storage,
-		Network: c.Network,
+		Path:        s.Config.Path(),
+		Storage:     c.Storage,
+		Network:     c.Network,
 		Performance: c.Performance,
 		Timeouts:    c.Timeouts,
 		Auth: authView{
@@ -217,6 +224,7 @@ func (s *Server) configView(r *http.Request) configResp {
 	if s.Net != nil {
 		st = s.Net.State()
 	}
+	resp.Timer = hrtime.StatusOf()
 	resp.Runtime = runtimeView{
 		HTTPAddr:  st.HTTPAddr,
 		PGAddr:    st.PGAddr,

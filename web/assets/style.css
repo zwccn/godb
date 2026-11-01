@@ -2760,6 +2760,18 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   line-height: 1.5;
 }
 
+/* 「当前实际状态」：开关写着开 ≠ 真的生效（标定要 1.5 秒，平台也可能不支持） */
+.set-note {
+  margin: -2px 0 10px 142px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+}
+
 .set-stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

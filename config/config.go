@@ -97,7 +97,26 @@ type Performance struct {
 	// WaitTimeoutMs 已废弃（v2 起由 Timeouts.QueueWaitSec 承担）。
 	// 保留字段只为读得懂 v1 的配置文件，Normalize 会把它搬走后清零。
 	WaitTimeoutMs int `json:"waitTimeoutMs,omitempty"`
+
+	// HighResTimer 用 CPU 的 TSC（时间戳计数器）计时，默认开。
+	//
+	// 为什么需要它：Windows 的 time.Now 走 QPC，在虚拟机里可能只有几百微秒的
+	// 步进 —— 几十微秒的操作会读成 0，探测里「每一步花了多少」就成了一排 0。
+	// TSC 的刻度是 0.5ns 级。
+	//
+	// 用指针是为了区分「配置文件里没这个字段」（= 开）和「明确关掉」。
+	// 平台不支持、CPU 没有恒定 TSC、标定失败时一律自动降级回 time.Now，
+	// 所以默认开着是安全的 —— 挂了也是慢一点，不是错。
+	HighResTimer *bool `json:"highResTimer,omitempty"`
 }
+
+// HighResTimerOn 报告是否启用高精度计时（没配过 = 开）。
+func (p Performance) HighResTimerOn() bool {
+	return p.HighResTimer == nil || *p.HighResTimer
+}
+
+// Bool 返回 v 的指针，给「可选布尔」字段用。
+func Bool(v bool) *bool { return &v }
 
 // Timeouts 是监控面板底部的四个超时保护。
 //
@@ -152,6 +171,7 @@ func Default() Config {
 		Performance: Performance{
 			MaxConcurrent: 32,
 			MaxQueued:     256,
+			HighResTimer:  Bool(true),
 		},
 		Timeouts: Timeouts{
 			// 四个超时出厂全部「不限」：它们都是「主动回滚别人事务」或
@@ -325,6 +345,11 @@ func (c *Config) Normalize() {
 		c.Version = Version
 	}
 	c.Auth.User = strings.TrimSpace(c.Auth.User)
+	// 老配置文件里没有这个字段（nil）：补成「开」。不能补成 false ——
+	// 那会让升级后的用户悄悄丢掉高精度计时，还以为是新功能坏了。
+	if c.Performance.HighResTimer == nil {
+		c.Performance.HighResTimer = Bool(true)
+	}
 }
 
 // StorageWarnings 返回「能跑但可能不是你想要的」提示。

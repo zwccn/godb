@@ -18,6 +18,7 @@ import (
 
 	"godb/config"
 	"godb/db"
+	"godb/hrtime"
 	"godb/lock"
 	"godb/netsrv"
 	"godb/storage"
@@ -76,6 +77,12 @@ func main() {
 		os.Exit(1)
 	}
 	conf := cfg.Get()
+
+	// 高精度计时：能上 TSC 就上（频率标定放在后台，不拖慢启动），
+	// 平台不支持 / CPU 没有恒定 TSC / 标定失败都会自动退回 time.Now。
+	// 开关在设置 → 性能，默认开。
+	hrtime.Init(conf.Performance.HighResTimerOn())
+	log.Printf("计时源: %s", hrtime.StatusOf().Describe())
 
 	// 启动门：HTTP 先起，未就绪时回启动页；OpenManager 完成后换上真路由。
 	gate := web.NewBootGate()

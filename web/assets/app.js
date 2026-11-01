@@ -6113,7 +6113,7 @@ function renderSecPane(box, d, rt) {
 
 /* ---- 性能：并发、内存、落盘 ---- */
 function renderPerfPane(box, d, rt) {
-  box.appendChild(el('div', 'set-lead', '三个旋钮都影响吞吐和内存，改完立即生效（缓冲池除外）。'));
+  box.appendChild(el('div', 'set-lead', '并发 / 内存 / 落盘 / 计时：改完立即生效（缓冲池除外）。'));
 
   box.appendChild(el('div', 'set-sec', '并发'));
   const pf = d.performance || {};
@@ -6122,6 +6122,15 @@ function renderPerfPane(box, d, rt) {
   box.appendChild(el('div', 'set-hint',
     '同时执行 SQL 的上限（0 = 不限），超出的排队；排队超过上限快速失败（SQLSTATE 53300）。' +
     '排队超时在「监控」面板的超时开关里设。'));
+
+  box.appendChild(el('div', 'set-sec', '计时'));
+  box.appendChild(setRow('高精度计时（TSC）', checkInput('setHighRes', pf.highResTimer !== false)));
+  box.appendChild(el('div', 'set-hint',
+    '用 CPU 的时间戳计数器计时，刻度约 0.5ns；关掉就用系统时钟。'
+    + '平台不支持、CPU 没有恒定 TSC、或标定失败时会自动退回系统时钟 —— 只是变粗，不会出错。'));
+  // 开关写着「开」不代表真的在用：标定要 1.5 秒，平台也可能不支持。
+  // 所以把「此刻实际用的是哪个时钟」如实写出来。
+  box.appendChild(el('div', 'set-note', '当前：' + timerLine(d.timer)));
 
   box.appendChild(el('div', 'set-sec', '内存'));
   box.appendChild(setRow('缓冲池页数', numInput('setPoolPages', d.storage.bufferPoolPages, 0, 1048576), '页'));
@@ -6135,6 +6144,18 @@ function renderPerfPane(box, d, rt) {
   box.appendChild(setRow('WAL 超过', numInput('setCpWALMB', d.storage.checkpointWalMB, 0, 65536), 'MB'));
   box.appendChild(el('div', 'set-hint',
     '三条任一满足就落盘（刷脏页 + 轮转 WAL），填 0 关闭该条。提交时的 fsync 始终同步执行。'));
+}
+
+// timerLine 把后端返回的计时状态说成一句人话。
+function timerLine(tm) {
+  if (!tm) return '未知';
+  const gran = tm.granNs > 0 ? fmtDur(tm.granNs) : '—';
+  if (tm.active) {
+    return 'TSC 已启用 · ' + (tm.freqHz / 1e9).toFixed(2) + ' GHz · 刻度 ' + gran;
+  }
+  if (!tm.enabled) return '系统时钟（已关闭高精度计时）· 刻度 ' + gran;
+  if (!tm.supported) return '系统时钟 · ' + (tm.reason || '此平台不需要 TSC') + ' · 刻度 ' + gran;
+  return '系统时钟 · ' + (tm.reason || '未启用') + ' · 刻度 ' + gran;
 }
 
 /* ---- 外观：浏览器本地偏好 ---- */
@@ -6413,6 +6434,7 @@ async function saveSettings() {
     performance: {
       maxConcurrent: val('setPerfMaxConc'),
       maxQueued: val('setPerfMaxQueued'),
+      highResTimer: document.getElementById('setHighRes').checked,
     },
     // 超时开关不在这页改（在「监控」面板），但后端是按整体替换的，
     // 不原样带回去就会把用户已开的超时清成 0。
@@ -6437,7 +6459,13 @@ async function saveSettings() {
     if (moved) {
       toast('已保存，控制台换到了 ' + afterAddr + '，请用新地址打开页面', false, 9000);
     } else {
-      toast('设置已保存并生效');
+      // 高精度计时是「先标定再启用」，1.5 秒内还在用系统时钟 —— 别让人以为没生效
+      const tm = res.timer || {};
+      if (tm.enabled && !tm.active) {
+        toast('设置已保存；高精度计时正在标定，约 2 秒后生效');
+      } else {
+        toast('设置已保存并生效');
+      }
     }
     // 端口/库名相关的东西会变，表结构跟着刷新一次
     loadSchema();

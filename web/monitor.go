@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"godb/hrtime"
 	"net/http"
 	"strings"
 
@@ -24,7 +25,7 @@ import (
 func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	d := s.currentDB(r)
 	snap := d.Monitor(d.Timeouts())
-	snap.ClockGranNs = d.ClockGranNs
+	snap.ClockGranNs = int64(hrtime.Granularity())
 	writeJSON(w, http.StatusOK, snap)
 }
 

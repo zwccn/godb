@@ -42,20 +42,20 @@ type Store struct {
 	txSeq atomic.Int64
 
 	// 分表快照的状态。key 一律是 cleanName(表名)。
-	tableGen      map[string]int64 // 该表的数据文件已包含到哪个 WAL 代次
-	tableRows     map[string]int   // 该表文件里的行数（未加载时用它回答行数查询）
-	tablePages    map[string]int   // 该表数据文件占了多少页（pg_class.relpages）
-	tableSeq      map[string]int64 // 该表自增列的当前值（从 meta 读，不必扫行）
-	tableIdxPages map[string]int   // 该表所有索引加起来占了多少页
-	tableFree     map[string]int64 // 该表页文件里还能用的字节（meta 里读，未加载时用）
+	tableGen      map[string]int64       // 该表的数据文件已包含到哪个 WAL 代次
+	tableRows     map[string]int         // 该表文件里的行数（未加载时用它回答行数查询）
+	tablePages    map[string]int         // 该表数据文件占了多少页（pg_class.relpages）
+	tableSeq      map[string]int64       // 该表自增列的当前值（从 meta 读，不必扫行）
+	tableIdxPages map[string]int         // 该表所有索引加起来占了多少页
+	tableFree     map[string]int64       // 该表页文件里还能用的字节（meta 里读，未加载时用）
 	tableVac      map[string]vacuumTimes // 上次整理 / 上次整份重写的时刻
 
-	hasSnap       map[string]bool  // 是否已经有数据文件
-	dirty         map[string]bool  // 上一次 checkpoint 之后有没有改动
-	loaded        map[string]bool  // 行是否已经在内存里
-	metaGen       int64
-	snapBytes     int64
-	loadMu        sync.RWMutex
+	hasSnap   map[string]bool // 是否已经有数据文件
+	dirty     map[string]bool // 上一次 checkpoint 之后有没有改动
+	loaded    map[string]bool // 行是否已经在内存里
+	metaGen   int64
+	snapBytes int64
+	loadMu    sync.RWMutex
 	// loadErr 记录读取表文件时的错误（不为 nil 时启动日志会提示）。
 	loadErr error
 	// broken 记录「表定义在、数据却读不出来」的表（数据文件丢失 / 页损坏）。
@@ -425,6 +425,24 @@ func (s *Store) ensureLoadedLocked(key string) {
 }
 
 // LoadTables 预加载一批表（语句执行前调用，避免在持 schema 锁时做磁盘 IO）。
+// NeedsLoad 报告 names 里有没有「还没进内存」的表。
+//
+// 调用方用它决定「要不要给装载计时」：表已经在内存时，LoadTables 是空操作，
+// 计出来的是十几纳秒——但如果这段时间里 goroutine 被挪到另一个核，
+// TSC 的跨核偏移会让这个空操作显示成几百微秒，看着像「装载花了 800µs」。
+func (s *Store) NeedsLoad(names []string) bool {
+	for _, n := range names {
+		key := cleanName(n)
+		s.loadMu.RLock()
+		need := !s.loaded[key] && s.Data[key] != nil
+		s.loadMu.RUnlock()
+		if need {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) LoadTables(names []string) {
 	for _, n := range names {
 		key := cleanName(n)

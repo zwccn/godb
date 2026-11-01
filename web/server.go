@@ -310,7 +310,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	resp := queryResp{
 		Results:     results,
 		ElapsedNs:   hrtime.Since(start),
-		ClockGranNs: d.ClockGranNs,
+		ClockGranNs: int64(hrtime.Granularity()),
 		Tx:          d.TxState(sess),
 		Statements:  len(results),
 	}

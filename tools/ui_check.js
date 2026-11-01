@@ -1885,6 +1885,18 @@ class CDP {
     const pool0 = await cdp.eval(`(() => { const n = document.getElementById('setPoolPages'); return n ? n.value : null; })()`);
     check('设置页有「缓冲池页数」字段', pool0 !== null && pool0 !== '', String(pool0));
     await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'perf').click()`);
+    await sleep(200);
+    // 高精度计时：开关默认开；状态行必须说清「此刻实际用的是哪个时钟」——
+    // 开关写着开 ≠ 真的生效（标定要 1.5 秒，平台也可能不支持）。
+    const timer = await cdp.eval(`(() => {
+      const cb = document.getElementById('setHighRes');
+      const notes = [...document.querySelectorAll('.set-note')].map(n => n.textContent.trim());
+      return { has: !!cb, checked: cb ? cb.checked : null, note: notes.join(' | ') };
+    })()`);
+    check('设置→性能有「高精度计时（TSC）」开关，默认开',
+      timer.has && timer.checked === true, JSON.stringify({ has: timer.has, checked: timer.checked }));
+    check('计时状态如实显示（哪种时钟 + 当前刻度）',
+      /^当前：/.test(timer.note) && /刻度/.test(timer.note), timer.note);
     await cdp.eval(`document.getElementById('setPoolPages').value = '512'`);
     await cdp.eval(`document.getElementById('setPoolPages').dispatchEvent(new Event('input', { bubbles: true }))`);
     await cdp.eval(`document.getElementById('btnSettingsSave').click()`);

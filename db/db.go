@@ -217,7 +217,8 @@ type DB struct {
 	Locks  *lock.Manager
 	Iso    txn.Isolation
 
-	// ClockGranNs 是本机时钟步进（纳秒），用于前端判断“耗时小于时钟精度”。
+	// ClockGranNs 是**启动时**测得的时钟步进（纳秒）。
+	// 运行期可能变（设置里开/关高精度计时），要实时值请调 hrtime.Granularity()。
 	ClockGranNs int64
 
 	// SlowThreshold 大于 0 时，整批语句耗时超过它就调用 SlowLog。
@@ -730,13 +731,19 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 		for n := range intents {
 			names = append(names, n)
 		}
-		io0, pages0, _ := storage.IOSnapshot()
-		t0 := hrtime.Now()
-		d.Store.LoadTables(names)
-		ph.LoadNs = hrtime.Since(t0)
-		io1, pages1, _ := storage.IOSnapshot()
-		ph.LoadIONs = io1 - io0
-		ph.LoadPages = pages1 - pages0
+		// 只有真的要装载才计时：表已经在内存时 LoadTables 是空操作，
+		// 而空操作一旦跨核（TSC 各核有偏移）会被量成几百微秒的假装载。
+		if d.Store.NeedsLoad(names) {
+			io0, pages0, _ := storage.IOSnapshot()
+			t0 := hrtime.Now()
+			d.Store.LoadTables(names)
+			ph.LoadNs = hrtime.Since(t0)
+			io1, pages1, _ := storage.IOSnapshot()
+			ph.LoadIONs = io1 - io0
+			ph.LoadPages = pages1 - pages0
+		} else {
+			d.Store.LoadTables(names)
+		}
 	}
 
 	// 1) 先拿表锁（可能长时间等待，此时不持 schema 锁，避免 DDL 被连带阻塞）

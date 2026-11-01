@@ -1123,6 +1123,14 @@ body {
   border: 1px solid var(--border-soft);
   border-radius: 6px;
 }
+/* 算子行死守原缩进（pre 保留空格），说明行允许折行 —— 它常常七八十个字符，
+   不折就把整个计划块撑出一条横向滚动条，而横着滚的时候什么结构都看不出来。 */
+.info-plan .plan-op { white-space: pre; }
+.info-plan .plan-note {
+  white-space: pre-wrap;
+  padding-right: 12px;
+  color: var(--text-3);
+}
 
 .welcome { max-width: 720px; }
 /* 窄屏：tab 栏本来就要横向滚，右侧摘要（往返 ms）在信息栏里也有，直接收起来 */
@@ -1372,6 +1380,14 @@ body {
   line-height: 1.7;
 }
 .probe-list { padding: 6px 6px 8px; }
+/* 一行读法提示：执行顺序不是从上往下。常驻一行（它决定怎么读下面那张表），
+   更细的两条（×N 轮、独占与累计）收在右上角「?」里。 */
+.probe-order {
+  padding: 2px 10px 2px;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+  line-height: 1.6;
+}
 .probe-row {
   display: flex;
   align-items: center;
@@ -1388,9 +1404,16 @@ body {
 }
 .probe-row.is-worst:hover { background: var(--warn-bg-hover); }
 
+/* 名字 + 说明竖排的一个容器：名字一行，说明在下面吃满宽度。
+   横排时两者互相挤，谁都被截断在最关键的地方（见 app.js 里 probeRow 的注释）。 */
+.probe-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
 .probe-name {
-  flex: 0 1 auto;
-  max-width: 44%;
   color: var(--text);
   font-family: var(--mono);
   font-size: calc(12px * var(--fs));
@@ -1399,14 +1422,14 @@ body {
   text-overflow: ellipsis;
 }
 .probe-row.is-worst .probe-name { color: var(--warn-text); }
+/* 决策说明是长句（「选索引连接：内表 … 有完整匹配索引；驱动 299 行 …」），
+   以前在名字右边只剩一小截、被省略成「选索引连接：内表 big_demo 的 bi…」，
+   截掉的正是原因本身。现在它独占一行，长了自己折。 */
 .probe-detail {
-  flex: 1 1 auto;
-  min-width: 0;
   color: var(--text-3);
   font-size: calc(11px * var(--fs));
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .probe-row.is-worst .probe-detail { color: var(--warn-text); opacity: .75; }
 
@@ -1506,8 +1529,6 @@ body {
   .probe-sql { display: none; }
   .probe-row { gap: 8px; }
   .probe-name {
-    flex: 1 1 auto;
-    max-width: none;
     white-space: normal;   /* 长名字换行，不省略 */
     line-height: 1.5;
   }

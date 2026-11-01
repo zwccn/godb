@@ -1293,7 +1293,21 @@ function planFold(lines) {
   const wrap = el('div', 'info-plan');
   const btn = el('button', 'plan-btn', '计划');
   btn.title = '这条语句执行时用的计划，不用重跑。要看每一步花了多少时间，点工具栏的「执行探测」';
-  const pre = el('pre', 'plan', lines.join('\n'));
+  const pre = el('pre', 'plan');
+  for (const raw of lines) {
+    // 服务端把决策说明接在算子名同一行后面（renderPlan 里 label += "  | " + …）。
+    // 最长的那条七十多个字符：整行铺进 <pre> 会把算子名推到看不见的地方，还逼
+    // 出一条横向滚动条 —— 而那半句恰恰是「为什么走这个索引」。拆成两行：算子名
+    // 保留原缩进单占一行，说明淡色、多缩进一级，长句可以自己折行。
+    // 只改展示：服务端返回的文本一个字没动，探测卡的「原始文本」仍是原样。
+    const cut = raw.indexOf('  | ');
+    if (cut < 0) {
+      pre.appendChild(el('div', 'plan-op', raw));
+      continue;
+    }
+    pre.appendChild(el('div', 'plan-op', raw.slice(0, cut)));
+    pre.appendChild(el('div', 'plan-note', /^\s*/.exec(raw)[0] + '  ' + raw.slice(cut + 4)));
+  }
   btn.addEventListener('click', () => {
     pre.classList.toggle('show');
     btn.classList.toggle('on');
@@ -1501,8 +1515,12 @@ function probeCard(r, idx, stmts) {
   let worst = nodes[0];
   for (const it of nodes) if (it.n.selfNs > worst.n.selfNs) worst = it;
 
+  // 顺序有讲究：「真的跑了一遍」必须排第一 —— 它决定用户要不要用这个功能
+  // （慢查询会真的再跑一次）。轮次和时间口径是读表细节，排在后面。
   const notes = [
     '真的跑了一遍，结果丢弃 —— 所以慢查询也要等它跑完。',
+    '带 ×N 轮的算子会被执行 N 次：嵌套循环的外表每来一行，内表就重来一遍。',
+    '行里显示的是独占时间（自己那份，已扣掉子节点）。鼠标停在算子上看含子节点的累计 —— 上面几行数字大，是因为它们把下面全部的活都算进去了。',
     '总耗时含探测开销（每吐一行读一次时钟），比正常执行略高。',
   ];
   if (roughClock) {
@@ -1522,6 +1540,11 @@ function probeCard(r, idx, stmts) {
     card.appendChild(el('div', 'probe-empty',
       '整条查询短于本机时钟步进（' + gran + '），看不出哪个算子更贵 —— 点右上角 ? 看说明。'));
   }
+
+  // 怎么读这张表：执行顺序不是从上往下。这句话直接决定读法，所以常驻一行；
+  // 更细的两条（×N 轮、独占与累计）放在右上角的「?」里。
+  card.appendChild(el('div', 'probe-order',
+    '执行从最内层开始，同一层的左分支跑完才轮到右分支；最上面那行最后出结果。'));
 
   const list = el('div', 'probe-list');
   for (const it of nodes) {
@@ -1554,18 +1577,21 @@ function probeRow(n, depth, total, worst) {
 
   const name = el('span', 'probe-name', n.name);
   name.title = n.name + (total > 0 ? '\n累计（含子节点）' + fmtTook(n.totalNs) : '');
-  row.appendChild(name);
 
+  // 名字和说明竖着排。横向抢同一行时谁都不够宽：名字被截在 "on big…"，
+  // 说明被截在「选索引连接：内表 big_demo 的 bi…」—— 两处都正好截在
+  // 最该看的地方。竖排之后名字独占一行，说明在下面吃满整行宽度。
   // detail 的第一条当副标题。扫描算子那条「已扫描 N 行」不在这儿重复 ——
   // 右边的计数标签已经写了「读取 N 行」，同一件事说两遍只会把行挤满。
+  const main = el('div', 'probe-main');
+  main.appendChild(name);
   const detail = (n.detail || []).find(t => !/^已扫描/.test(t));
   if (detail) {
     const d = el('span', 'probe-detail', detail);
     d.title = n.detail.join('\n');
-    row.appendChild(d);
-  } else {
-    row.appendChild(el('span', 'probe-detail'));
+    main.appendChild(d);
   }
+  row.appendChild(main);
 
   const tags = el('span', 'probe-tags');
   if (n.scanned) {

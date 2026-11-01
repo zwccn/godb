@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="steel">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · godb 控制台</title>
+<!-- 登录页刻意做成**独立单文件**：不引 style.css / app.js。
+     因为未登录时静态资源本来就不该给，而且这张页面要能在「app.js 挂了」的情况下
+     照样能登录进去改配置。样式只留这一屏用得到的。 -->
+<style>
+  :root {
+    --bg: #17171f;
+    --panel: #1e1e2e;
+    --border: #313244;
+    --text: #ced2e2;
+    --text-2: #a6adc8;
+    --text-3: #8a8fa3;
+    --accent: #89b4fa;
+    --danger: #f0616d;
+    --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    /* 和主控制台同一套「科技灰」气质：极淡的网格 + 顶边一条光带 */
+    background-image:
+      linear-gradient(rgba(122, 172, 232, .045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(122, 172, 232, .045) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+  .card {
+    position: relative;
+    width: min(360px, calc(100vw - 40px));
+    padding: 26px 26px 22px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .45);
+  }
+  .card::after {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(96, 168, 248, .6), transparent);
+  }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: .3px;
+  }
+  .sub { margin: 0 0 18px; color: var(--text-3); font-size: 12px; }
+  label { display: block; margin-bottom: 12px; }
+  label span { display: block; margin-bottom: 5px; color: var(--text-2); font-size: 12px; }
+  input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: #14141b;
+    color: var(--text);
+    font: inherit;
+    font-family: var(--mono);
+    outline: none;
+  }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(76, 158, 240, .16); }
+  button {
+    width: 100%;
+    margin-top: 4px;
+    padding: 9px 12px;
+    border: none;
+    border-radius: 7px;
+    background: var(--accent);
+    color: #10131a;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .6; cursor: default; }
+  .err {
+    margin: 12px 0 0;
+    padding: 7px 10px;
+    border: 1px solid rgba(240, 97, 109, .45);
+    border-radius: 6px;
+    background: rgba(240, 97, 109, .1);
+    color: var(--danger);
+    font-size: 12px;
+  }
+  .hint { margin: 16px 0 0; color: var(--text-3); font-size: 11.5px; }
+  code { font-family: var(--mono); color: var(--text-2); }
+</style>
+</head>
+<body>
+<form class="card" id="f" autocomplete="on">
+  <h1>godb 控制台</h1>
+  <p class="sub">从其它计算机访问需要先登录</p>
+
+  <label>
+    <span>用户名</span>
+    <input id="user" name="user" autocomplete="username" placeholder="留空则用配置里的用户名">
+  </label>
+  <label>
+    <span>密码</span>
+    <input id="pw" name="password" type="password" autocomplete="current-password" required>
+  </label>
+
+  <button id="btn" type="submit">登录</button>
+  <div id="err" class="err" hidden></div>
+
+  <p class="hint">
+    在本机用 <code>127.0.0.1</code> 打开控制台不需要登录。密码忘了就关掉服务，
+    删掉 <code>config.json</code> 里的 <code>passwordHash</code> 三个字段（或整个
+    <code>auth</code> 段）再启动。
+  </p>
+</form>
+<script>
+  var f = document.getElementById('f');
+  var err = document.getElementById('err');
+  var btn = document.getElementById('btn');
+  var pw = document.getElementById('pw');
+
+  pw.focus();
+
+  function showErr(msg) {
+    err.textContent = msg;
+    err.hidden = false;
+  }
+
+  f.addEventListener('submit', function (e) {
+    e.preventDefault();
+    err.hidden = true;
+    btn.disabled = true;
+    btn.textContent = '登录中…';
+    fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user: document.getElementById('user').value.trim(),
+        password: pw.value,
+      }),
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        return { ok: r.ok, status: r.status, data: d };
+      });
+    }).then(function (res) {
+      if (res.ok) {
+        // 登录成功：直接回控制台。用 replace 避免按返回又回到登录页。
+        location.replace('/');
+        return;
+      }
+      showErr(res.data && res.data.error ? res.data.error : '登录失败（HTTP ' + res.status + '）');
+      btn.disabled = false;
+      btn.textContent = '登录';
+      pw.select();
+    }).catch(function (e2) {
+      showErr('连不上服务：' + (e2 && e2.message ? e2.message : e2));
+      btn.disabled = false;
+      btn.textContent = '登录';
+    });
+  });
+</script>
+</body>
+</html>

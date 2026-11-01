@@ -5687,18 +5687,56 @@ function renderSecPane(box, d, rt) {
   box.appendChild(el('div', 'set-lead', '这里的开关决定「谁能连进来」，改完立即生效。'));
 
   box.appendChild(setRow('必须密码', checkInput('setRequirePw', d.auth.requirePassword),
-    '连接 PG 时必须输入密码'));
+    'PG 连接与远程控制台都用它'));
   box.appendChild(setRow('控制台远程', checkInput('setHTTPRemote', d.network.httpRemote),
-    '允许其它计算机访问网页控制台'));
+    '允许其它计算机访问网页控制台（需要上面的密码）'));
   box.appendChild(setRow('PG 远程', checkInput('setPGRemote', d.network.pgRemote),
     '允许其它计算机连接 PG 端口'));
   box.appendChild(el('div', 'set-hint',
     '当前监听：控制台 ' + (rt.httpAddr || '—') + '，PG ' + (rt.pgAddr || '未启用') +
     '。关掉远程时只绑定 127.0.0.1。'));
 
+  /* 远程 = 把「执行任意 SQL」放到局域网上：
+     - 没密码时后端直接拒绝保存（Validate 里那条），这里先给个提示，别等人点了保存才知道；
+     - 本机访问永远不用登录，所以这个密码只对「别的机器」生效。 */
+  const remoteBox = box.querySelector('#setHTTPRemote');
+  const remoteHint = el('div', 'set-warn');
+  const syncRemoteHint = () => {
+    // 这一页只认「服务器上已有密码，且这次没勾清除」；在「连接」页刚敲进输入框、
+    // 还没保存的密码这里看不到，所以提示里让用户先保存再回来开远程。
+    const hasPw = d.auth.hasPassword && !setClearPw;
+    const pendingClear = setClearPw;
+    if (!remoteBox.checked) {
+      remoteHint.classList.add('hidden');
+      return;
+    }
+    remoteHint.classList.remove('hidden');
+    if (pendingClear || !hasPw) {
+      remoteHint.textContent = '要开远程，先在「连接」页设置控制台密码 —— 否则局域网里任何人都能执行任意 SQL。'
+        + '（没有密码时保存会被拒绝。）';
+    } else {
+      remoteHint.textContent = '远程访问需要登录：用「连接」页的用户名 + 密码登录。'
+        + '本机（127.0.0.1）打开仍然免登录。';
+    }
+  };
+  remoteBox.addEventListener('change', syncRemoteHint);
+  box.appendChild(remoteHint);
+  syncRemoteHint();
+
   box.appendChild(el('div', 'set-warn',
-    '网页控制台本身不登录：能访问控制台的人可以执行任意 SQL。配置的修改只接受本机请求，' +
-    '所以远程只能查看。PG 协议是明文传输（没有 TLS），跨公网请自行套隧道。'));
+    '网页控制台从远程访问时必须登录（本机免登录）；PG 协议是明文传输（没有 TLS），' +
+    '跨公网请自行套隧道。配置的修改只接受本机请求，远程登录后也只能查数据、改不了设置。'));
+
+  // 远程登录进来的人需要一个出口，否则只能清 cookie
+  if (rt.canEdit === false) {
+    const out = el('button', 'btn btn-sm', '退出登录');
+    out.type = 'button';
+    out.addEventListener('click', async () => {
+      try { await fetch('/api/logout', { method: 'POST' }); } catch (e) { /* 跳走就行 */ }
+      location.replace('/login');
+    });
+    box.appendChild(setRow('登录状态', out, '当前从远程访问，已登录'));
+  }
 }
 
 /* ---- 性能：并发、内存、落盘 ---- */

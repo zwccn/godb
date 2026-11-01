@@ -175,7 +175,7 @@ func main() {
 	mgr.SetDBs(dbs)
 	srv.WithConfig(cfg, mgr)
 	// 换上真正的控制台路由：同一个端口，启动页原地切换到正式界面。
-	gate.SetReady(srv.Routes())
+	gate.SetReady(srv.Handler())
 	if err := mgr.StartPG(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)

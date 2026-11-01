@@ -1628,6 +1628,33 @@ class CDP {
     check('设置页默认停在「连接」，一屏只显示一组',
       setTabs.active === '连接' && setTabs.panes.join() === 'conn', setTabs.active + ' / ' + setTabs.panes.join());
 
+    /* 远程控制台必须先设密码：后端在 config.Validate 里硬拦，前端在安全页先提示。
+       两处一起验 —— 只验前端的话，绕过页面直接 POST 照样能开门。 */
+    const secUi = await cdp.eval(`(() => {
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'sec').click();
+      const txt = document.querySelector('.set-pane[data-pane="sec"]').textContent;
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'conn').click();
+      return { login: /远程访问时必须登录/.test(txt), pw: /密码/.test(txt) };
+    })()`);
+    check('安全页写明「远程访问必须登录、本机免登录」', secUi.login && secUi.pw,
+      `提到登录 ${secUi.login}`);
+
+    const secGuard = await cdp.eval(`(async () => {
+      const cur = await fetch('/api/config').then(r => r.json());
+      const body = {
+        storage: cur.storage, performance: cur.performance, timeouts: cur.timeouts,
+        network: Object.assign({}, cur.network, { httpRemote: true }),
+        auth: { requirePassword: false, user: cur.auth.user },
+      };
+      const r = await fetch('/api/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      return { code: r.status, error: d.error || '' };
+    })()`);
+    check('后端拒绝「没密码就开远程」（错误里点名要密码）',
+      secGuard.code === 400 && /密码/.test(secGuard.error), `${secGuard.code} ${secGuard.error}`);
+
     // 切组不重新渲染：在「连接」里改了一半再去看「性能」，回来还得在
     const keep = await cdp.eval(`(() => {
       document.getElementById('setAuthUser').value = 'keepme';

@@ -40,7 +40,15 @@ func TestSavePersistsAndReloads(t *testing.T) {
 	c := st.Get()
 	c.Storage.CheckpointCommits = 7
 	c.Network.HTTPPort = 9091
+	// 开远程必须同时设密码（Validate 强制），否则这条用例自己就是非法配置
 	c.Network.HTTPRemote = true
+	h, err := HashPassword("pw-for-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Auth.RequirePassword = true
+	c.Auth.User = "godb"
+	c.Auth.PasswordHash = h
 	saved, err := st.Save(c)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
@@ -173,5 +181,22 @@ func TestHTTPAddr(t *testing.T) {
 	n.PGEnabled = false
 	if got := n.PGAddr(); got != "" {
 		t.Fatalf("未启用时 PGAddr 应为空，得到 %s", got)
+	}
+}
+
+// 远程控制台必须先设密码：这是唯一能让「局域网里谁能执行 SQL」有边界的地方。
+func TestHTTPRemoteNeedsPassword(t *testing.T) {
+	c := Default()
+	c.Network.HTTPRemote = true
+	if err := c.Validate(); err == nil {
+		t.Fatal("开了远程又没设密码，应该拒绝")
+	} else if !strings.Contains(err.Error(), "密码") {
+		t.Fatalf("错误信息没提到密码：%v", err)
+	}
+
+	// 本机访问（不开远程）则完全不用密码
+	c2 := Default()
+	if err := c2.Validate(); err != nil {
+		t.Fatalf("默认配置应该合法：%v", err)
 	}
 }

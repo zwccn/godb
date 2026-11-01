@@ -235,6 +235,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// 远程控制台 = 把「执行任意 SQL」的能力放到局域网上。没有密码就等于没锁门，
+	// 而以前的文案是「控制台本身不登录」，很多人会以为设了 PG 密码就都安全了。
+	// 这条不允许绕过：要么本机用，要么先设密码。
+	if c.Network.HTTPRemote && !c.Auth.RequirePassword {
+		return fmt.Errorf("开启「控制台远程」前必须先设置控制台密码（否则局域网里任何人都能执行任意 SQL）")
+	}
+
 	c.Auth.User = strings.TrimSpace(c.Auth.User)
 	if c.Auth.RequirePassword {
 		if c.Auth.User == "" {

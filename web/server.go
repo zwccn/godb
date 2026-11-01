@@ -105,7 +105,21 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/monitor/timeouts", s.handleMonitorTimeouts)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/dbs", s.handleDBs)
+
+	// 登录相关：本机访问根本走不到这里（withAuth 直接放行），远程才用得上。
+	mux.HandleFunc("/login", s.handleLogin)
+	mux.HandleFunc("/logout", s.handleLogout)
+	mux.HandleFunc("/api/login", s.handleAPILogin)
+	mux.HandleFunc("/api/logout", s.handleLogout)
 	return mux
+}
+
+// Handler 是真正挂到监听上的入口：路由外面套一层登录检查。
+//
+// 单独留一个 Routes() 是给测试用的 —— 那些用例关心的是接口行为，
+// 不想每条都去伪造 cookie；登录本身在 login_test.go 里单独测。
+func (s *Server) Handler() http.Handler {
+	return s.withAuth(s.Routes())
 }
 
 func newID() string {

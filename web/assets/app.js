@@ -234,6 +234,14 @@ function el(tag, cls, text) {
 // 本机时钟步进（纳秒），由服务端启动时探测；小于它的耗时只能显示成 "<步进"。
 let clockGranNs = 0;
 
+// CLOCK_ROUGH_NS 是「时钟粗到会把一次操作读成 0」的门槛（1 µs）。
+//
+// 为什么需要这个门槛：本机时钟步进可能只有 1 ns（TSC），也可能 219 µs（QPC）。
+// 只有后者才会出现「整条查询不到一个刻度」的情况；1 ns 的刻度下再说
+// 「这条查询短于时钟步进」就是胡话 —— 没有任何查询能短于一纳秒。
+// 所以凡是「测不出来」这类解释，都只在 clockGranNs 达到这个门槛时才出现。
+const CLOCK_ROUGH_NS = 1000;
+
 // 把纳秒格式化成好读的时长
 function fmtDur(ns) {
   if (ns === undefined || ns === null) return '';
@@ -253,7 +261,7 @@ function fmtDur(ns) {
 // 服务端耗时：测量值小于时钟步进时，说明这台机器的时钟分辨不出，显示上界
 function fmtTook(ns) {
   if (ns === undefined || ns === null) return '';
-  if (clockGranNs > 0 && ns < clockGranNs) return '<' + fmtDur(clockGranNs);
+  if (clockGranNs >= CLOCK_ROUGH_NS && ns < clockGranNs) return '<' + fmtDur(clockGranNs);
   return fmtDur(ns);
 }
 
@@ -1394,7 +1402,16 @@ function probeCard(r, idx, stmts) {
     (n.children || []).forEach(c => walk(c, depth + 1));
   })(tree, 0);
 
-  const total = tree.totalNs || 0;
+  // 根节点的 totalNs 偶尔会采成 0（探测开头那一瞬正好跨了计时源切换，
+  // 或者整棵树的耗时被一次读数合并掉了）。别急着下「测不出来」的结论：
+  // 先拿子节点里最大的那个当分母 —— 柱子有正确的比例，也不必蹦出一句
+  // 「整条查询短于 1 ns」这种人话里不会有的说法。
+  let total = tree.totalNs || 0;
+  if (total <= 0) {
+    for (const it of nodes) if ((it.n.totalNs || 0) > total) total = it.n.totalNs;
+  }
+  // 只有「粗到会吞掉一次操作」的时钟才需要解释测不出来（见 CLOCK_ROUGH_NS）。
+  const roughClock = clockGranNs >= CLOCK_ROUGH_NS;
   let worst = nodes[0];
   for (const it of nodes) if (it.n.selfNs > worst.n.selfNs) worst = it;
 
@@ -1402,18 +1419,20 @@ function probeCard(r, idx, stmts) {
     '真的跑了一遍，结果丢弃 —— 所以慢查询也要等它跑完。',
     '总耗时含探测开销（每吐一行读一次时钟），比正常执行略高。',
   ];
-  if (clockGranNs > 0) {
+  if (roughClock) {
     notes.push('本机时钟步进 ' + fmtDur(clockGranNs) + '，比它短的会显示成 <'
       + fmtDur(clockGranNs) + '，那是测不出来，不是零成本。');
   }
-  if (total <= 0) {
+  if (total <= 0 && roughClock) {
     notes.push('整条查询短于本机时钟步进，探测分辨不出哪个算子更贵。'
       + '想定位热点，换一条接近真实数据量的查询再探测。');
   }
   for (const n of notes) helpBox.appendChild(el('div', null, n));
 
-  if (total <= 0) {
-    const gran = clockGranNs > 0 ? fmtDur(clockGranNs) : '一步进';
+  // 时钟够细的时候（TSC：刻度 1 ns）根本不会出现「测不出来」，
+  // 这条提示也就不该出现 —— 出现过一次「短于本机时钟步进（1 ns）」，纯属噪音。
+  if (total <= 0 && roughClock) {
+    const gran = fmtDur(clockGranNs);
     card.appendChild(el('div', 'probe-empty',
       '整条查询短于本机时钟步进（' + gran + '），看不出哪个算子更贵 —— 点右上角 ? 看说明。'));
   }
@@ -1559,7 +1578,7 @@ function resultCard(r, idx) {
   const metaEl = el('span', 'result-meta', metaBits.join(' · '));
   if (r.tookNs !== undefined) {
     let tip = `服务端执行 ${r.tookNs} ns（含等待锁，不含 SQL 解析）`;
-    if (clockGranNs > 0) tip += `；本机时钟步进 ${fmtDur(clockGranNs)}`;
+    if (clockGranNs >= CLOCK_ROUGH_NS) tip += `；本机时钟步进 ${fmtDur(clockGranNs)}`;
     metaEl.title = tip;
   }
   head.appendChild(metaEl);
@@ -2343,7 +2362,9 @@ function fmtMs(ms) {
 // 纳秒（后端样本）→ 毫秒文案；小于时钟步进的显示成 "<0.20ms"，不然一片 0.00 很吓人。
 function fmtNs(ns) {
   if (!ns || ns <= 0) return '—';
-  if (clockGranNs > 0 && ns < clockGranNs) return '<' + (clockGranNs / 1e6).toFixed(2) + 'ms';
+  if (clockGranNs >= CLOCK_ROUGH_NS && ns < clockGranNs) {
+    return '<' + (clockGranNs / 1e6).toFixed(2) + 'ms';
+  }
   return fmtMs(ns / 1e6);
 }
 

@@ -2632,6 +2632,20 @@ class CDP {
       /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
       `${probe.worst} · ${probe.verdict.slice(0, 40)}`);
 
+    /* 「测不出来」的解释只该在时钟真的粗时出现。
+       TSC 生效后步进是 1 ns，再说「整条查询短于本机时钟步进（1 ns）」就是胡话 ——
+       不存在短于一纳秒的查询。这里同时盯住 `<1 ns` 这种时间文案。 */
+    const granTxt = await cdp.eval(`(() => {
+      const c = document.querySelector('.probe-card');
+      const txt = c ? c.textContent : '';
+      return { gran: clockGranNs,
+               empty: !!(c && c.querySelector('.probe-empty')),
+               bad: /短于本机时钟步进|<\\s*\\d+\\s*ns/.test(txt) };
+    })()`);
+    check('时钟够细（TSC 1 ns）时不出现「短于时钟步进 / <1 ns」',
+      granTxt.gran >= 1000 || (!granTxt.empty && !granTxt.bad),
+      `步进 ${granTxt.gran} ns · 空提示 ${granTxt.empty} · 命中 ${granTxt.bad}`);
+
     /* 时间去向：服务端 19ms、每一步却 0.5ms 的悬案，靠这条分段对上账。
        这里跑的是热查询（big_demo 前面已经查过），所以只该有「执行」一段 ——
        装载表那段只在服务启动后第一次碰这张表时出现。 */

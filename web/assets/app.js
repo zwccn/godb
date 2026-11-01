@@ -1256,6 +1256,9 @@ function infoPanel(data) {
     head.appendChild(sqlEl);
     item.appendChild(head);
     item.appendChild(el('div', 'info-status', infoStatus(r)));
+    // 计划放这儿而不是结果表头：它是「这次执行留下了什么」，和上面的状态同类。
+    // 表头上那三个位置留给「对结果做点什么」（导出），两种用途别混在一起。
+    if (r.plan && r.plan.length && r.command !== 'EXPLAIN') item.appendChild(planFold(r.plan));
     box.appendChild(item);
   });
 
@@ -1280,6 +1283,24 @@ function infoPanel(data) {
     box.appendChild(err);
   }
   return box;
+}
+
+// planFold 把一条语句的计划折成「按钮 + pre」，默认收起。
+// 默认收起是因为一条计划动不动十来行，铺开会把信息栏后面的语句全推下去。
+// 按钮上只写「计划」：它和工具栏的「执行计划」（重新发一次 EXPLAIN）不是一回事，
+// 这里展开的是**这次执行已经拿到**的文本，不重跑；每步耗时只在「执行探测」里有。
+function planFold(lines) {
+  const wrap = el('div', 'info-plan');
+  const btn = el('button', 'plan-btn', '计划');
+  btn.title = '这条语句执行时用的计划，不用重跑。要看每一步花了多少时间，点工具栏的「执行探测」';
+  const pre = el('pre', 'plan', lines.join('\n'));
+  btn.addEventListener('click', () => {
+    pre.classList.toggle('show');
+    btn.classList.toggle('on');
+  });
+  wrap.appendChild(btn);
+  wrap.appendChild(pre);
+  return wrap;
 }
 
 /* ---------------- 执行探测 ----------------
@@ -1619,7 +1640,7 @@ function infoStatus(r) {  const bits = [];
   return 'OK' + (bits.length ? ' · ' + bits.join(' · ') : '');
 }
 
-// 结果 tab 的内容：头（命令 / 行数 / 导出 / 执行计划）+ 表体 + 分页条
+// 结果 tab 的内容：头（命令 / 行数 / 导出）+ 表体 + 分页条
 // cmdLabel 把 PG 的命令标签压成「动词」。
 //
 // 标签原文带行数（SELECT 5 / INSERT 0 5 / UPDATE 3），右边 meta 又写着
@@ -1658,21 +1679,7 @@ function resultCard(r, idx) {
     downloadText('query-' + stamp() + '.json', jsonOf(r), 'application/json');
   }));
   head.appendChild(acts);
-
-  if (r.plan && r.plan.length && r.command !== 'EXPLAIN') {
-    const btn = el('button', 'plan-btn', '执行计划');
-    const pre = el('pre', 'plan', r.plan.join('\n'));
-    btn.addEventListener('click', () => {
-      pre.classList.toggle('show');
-      btn.classList.toggle('on');
-    });
-    head.appendChild(btn);
-    card.appendChild(head);
-    card.appendChild(pre);
-  } else {
-    card.appendChild(head);
-  }
-
+  card.appendChild(head);
   card.appendChild(gridBlock(r, idx));
   return card;
 }

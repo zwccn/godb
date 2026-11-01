@@ -1111,18 +1111,29 @@ body {
   font-size: calc(11.5px * var(--fs));
 }
 
+/* 信息栏里的计划：复用结果卡那套「按钮 + pre」，但 .plan 原本是给结果卡写的
+   （贴边、占卡片 40% 高、只有下边框）。挪进文本列表后得改成四边留白 + 圆角，
+   高度上限也从百分比换成固定像素：信息栏是纵向列表，百分比会跟着内容重算，
+   一条长计划能把后面所有语句推到屏幕外。 */
+.info-plan { padding-left: 26px; margin-top: 7px; }
+.info-plan .plan {
+  max-height: 300px;
+  margin-top: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+
 .welcome { max-width: 720px; }
 /* 窄屏：tab 栏本来就要横向滚，右侧摘要（往返 ms）在信息栏里也有，直接收起来 */
 @media (max-width: 720px) {
   .result-tabs-meta { display: none; }
-  .result-head .plan-btn { white-space: nowrap; }
-  /* 结果卡头部在 390px 下：徽标 + 「8 行 · 5.15 ms」+ CSV/JSON/执行计划 排不下，
+  /* 结果卡头部在 390px 下：徽标 + 「8 行 · 5.15 ms」+ CSV/JSON 也可能排不下，
      原来会被挤成「8 行 ·」换行再「5.15 ms」。改成允许换行、摘要不折行、
      按钮整体落到第二行右对齐。 */
   .result-head { flex-wrap: wrap; row-gap: 5px; }
   /* spacer 撑满整行 = 强制造一个换行点：第一行只剩「徽标 + 摘要」，
-     第二行是 CSV / JSON / 执行计划 三个按钮整体靠右，不会出现某个按钮
-     单独掉到第三行左边。 */
+     第二行是 CSV / JSON 两个按钮整体靠右，不会出现某个按钮单独掉到第三行左边。 */
   body .result-head .spacer { flex: 0 0 100%; height: 0; }
   .result-meta { white-space: nowrap; }
   .result-actions { margin-left: auto; }

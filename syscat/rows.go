@@ -143,6 +143,18 @@ func RelationOID(cat *catalog.Catalog, name string) (int32, bool) {
 	if cat == nil {
 		return 0, false
 	}
+	// 快速路径：用户表的 OID 就是 userTableOIDBase + 它在 catalog.Tables 里的下标
+	// （和 buildMeta 同一套规则）。规划阶段每条语句都要为「拿一个整数」调一次这里，
+	// 而 buildMeta 会把所有表、所有列重新算一遍（类型名转小写、查 OID、算 typlen），
+	// 实测一条简单语句因此多花 60 µs —— 占整条语句的一半。
+	want := strings.TrimSpace(name)
+	for i, t := range cat.Tables {
+		// EqualFold 而不是 ToLower：后者每次比较都分配一个新字符串，
+		// 而这条路径每条语句都会走。
+		if strings.EqualFold(t.Name, want) {
+			return int32(userTableOIDBase + i), true
+		}
+	}
 	m := buildMeta(Source{Cat: cat})
 	tm, ok := m.byName[strings.ToLower(strings.TrimSpace(name))]
 	if !ok {

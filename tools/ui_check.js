@@ -2718,8 +2718,29 @@ class CDP {
       const h = [...document.querySelectorAll('.probe-phase-hint')].map(x => x.textContent).join(' ');
       return { items, has: /规划/.test(h), txt: h.slice(0, 90) };
     })()`);
-    check('规划占大头时解释一句「时间花在规划上」',
-      planHint.has, planHint.items.join(' · ') || '没有分段');
+    // 那句解释的规则是：规划占执行阶段（规划+执行+整理）≥40% 且 ≥20µs 才出现。
+    // 这条断言量「出现与否和占比是否一致」——规划修好之后（README「规划为什么贵」）
+    // 轻查询的规划只有十几 µs，占比不到 40%，所以现在这里是「不该出现」。
+    // 哪天规划又慢回去，它照样能抓住「占了大头却没解释」的情况。
+    const share = await cdp.eval(`(() => {
+      const num = label => {
+        const it = [...document.querySelectorAll('.probe-phase-item')]
+          .find(x => x.textContent.trim().startsWith(label));
+        if (!it) return 0;
+        const m = it.textContent.match(/([\\d.]+)\\s*(ns|µs|ms|s)/);
+        if (!m) return 0;
+        const k = { ns: 1, 'µs': 1e3, ms: 1e6, s: 1e9 }[m[2]] || 1;
+        return parseFloat(m[1]) * k;
+      };
+      const plan = num('规划'), run = num('执行'), tail = num('整理输出');
+      const all = plan + run + tail;
+      return { plan: Math.round(plan), all: Math.round(all), ratio: all > 0 ? plan / all : 0 };
+    })()`);
+    const hintOK = share.ratio >= 0.45 ? planHint.has
+      : (share.ratio <= 0.35 ? !planHint.has : true);
+    check('「规划占大头」的解释与占比一致（≥40% 才出现）',
+      hintOK,
+      `规划 ${share.plan} / 执行阶段 ${share.all}（${Math.round(share.ratio * 100)}%）· 提示 ${planHint.has}`);
 
     /* 探测说明默认收起：那几句每次执行都一样，常驻会把卡片撑高三行。
        点右上角的「?」才展开，再点收起。 */

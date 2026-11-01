@@ -361,6 +361,35 @@ Limit (limit=5)                  5 行              —      —
 `Result.Phases` 里的基础四段（`loadNs` / `loadIoNs` / `loadPages` / `lockNs` / `execNs` /
 `endNs`）由 db 层在 `execOneInner` 里打点；`PlanNs` 由 `exec.execSelect` 单独计。
 
+### 规划为什么贵（2026-11 已修）
+
+上面那条「规划 240 µs、执行 31 µs」的实测让规划成了靶子。用 `pprof` 一查，
+**`BuildSelect` 的 86% 不在挑索引、也不在编译表达式**，而是在这一条链上：
+
+```
+BuildSelect → buildFrom → tableSchema → syscat.RelationOID → syscat.buildMeta
+```
+
+`tableSchema` 只是想知道「这张表在 pg_class 里的 OID」（前端网格可编辑要用），
+而 `RelationOID` 为此重建了整个系统目录快照：遍历所有表、所有列，每列做一次
+`Type.String()` → `ToLower` → `OIDByName` → `TypeLenByName`。一条 3 列表的简单
+查询，光这一项就 ~100 µs。
+
+修法只有十几行：用户表的 OID 本来就等于 `userTableOIDBase + 它在 catalog 里的下标`
+（`buildMeta` 用的就是这条规则），所以先扫一遍表名比对，命中就直接返回，不必建 meta。
+`db/relationoid_test.go` 保证它和 `pg_class` 的输出永远一致（含删表后下标前移的情况）。
+
+| 场景（`EXPLAIN`，只规划） | 改前 | 改后 |
+|---|---|---|
+| 单表 `WHERE … LIMIT` | 115 µs | **15 µs** |
+| JOIN + 聚合 + 排序 | 227 µs | **26 µs** |
+| 探测卡里的「规划」段（5 万行表） | 240 µs | **8–11 µs** |
+
+`db/plan_bench_test.go` 是这条路径的回归基准，数字一旦回去就是有人又往这里加了东西。
+
+顺带一个观察：修完之后，「整理输出」（渲染 `EXPLAIN` 文本 + 建统计树）在探测卡里
+反而比规划还贵一点（20–40 µs）。那是探测专属开销，普通查询不付。
+
 六段的颜色是专门挑的马卡龙 / 糖果色（橙 / 草莓粉 / 薰衣草 / 糖果蓝 / 薄荷 / 银灰），
 不跟皮肤走语义色：`warn` 那种深黄、`danger` 那种深红挤在一条 6px 的条子上既闷又难分。
 **相邻两段的色相至少差 40°**，浅色主题（sky / taro / mint）里换成同色相压深一档的版本

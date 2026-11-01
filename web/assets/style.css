@@ -1284,12 +1284,36 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 探测说明：默认收起，点同排的「?」才展开。
+   这几句每次执行都一样，常驻会把卡片撑高三行、把算子表往下推。 */
 .probe-note {
   padding: 8px 12px;
   border-bottom: 1px dashed var(--border-soft);
   color: var(--text-3);
   font-size: calc(11.5px * var(--fs));
   line-height: 1.7;
+}
+.probe-note > div + div { margin-top: 4px; }
+
+.probe-help {
+  flex: 0 0 auto;
+  width: calc(19px * var(--fs));
+  height: calc(19px * var(--fs));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--sans);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1;
+  cursor: pointer;
+}
+.probe-help:hover { color: var(--text); border-color: var(--border-hover); }
+.probe-help.on {
+  color: var(--accent-soft-text);
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
 }
 
 /* 服务端耗时的时间去向（装载 / 等锁 / 执行 / 收尾）。

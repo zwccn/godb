@@ -1365,8 +1365,24 @@ function probeCard(r, idx, stmts) {
     txtBtn.classList.toggle('on');
   });
   head.appendChild(txtBtn);
+
+  // 说明收进「?」：这几句每次执行都一样，常驻会把卡片撑高三行。
+  // 展开时仍然在卡片内部（不是浮层）—— 浮层在窄屏上容易盖住结果。
+  const helpBtn = el('button', 'probe-help', '?');
+  helpBtn.type = 'button';
+  helpBtn.title = '探测说明：它做了什么、数字怎么读';
+  helpBtn.setAttribute('aria-expanded', 'false');
+  const helpBox = el('div', 'probe-note hidden');
+  helpBtn.addEventListener('click', () => {
+    const nowHidden = helpBox.classList.toggle('hidden');
+    helpBtn.classList.toggle('on', !nowHidden);
+    helpBtn.setAttribute('aria-expanded', String(!nowHidden));
+  });
+  head.appendChild(helpBtn);
+
   card.appendChild(head);
   card.appendChild(pre);
+  card.appendChild(helpBox);
 
   // 时间去向排在算子树之前：先回答「服务端那 19ms 在哪」，
   // 再看「每一步怎么花的」。顺序反了，读者会先被一排 0 搞糊涂。
@@ -1392,12 +1408,16 @@ function probeCard(r, idx, stmts) {
     notes.push('本机时钟步进 ' + fmtDur(clockGranNs) + '，比它短的会显示成 <'
       + fmtDur(clockGranNs) + '，那是测不出来，不是零成本。');
   }
-  card.appendChild(el('div', 'probe-note', notes.join(' ')));
+  if (total <= 0) {
+    notes.push('整条查询短于本机时钟步进，探测分辨不出哪个算子更贵。'
+      + '想定位热点，换一条接近真实数据量的查询再探测。');
+  }
+  for (const n of notes) helpBox.appendChild(el('div', null, n));
 
   if (total <= 0) {
+    const gran = clockGranNs > 0 ? fmtDur(clockGranNs) : '一步进';
     card.appendChild(el('div', 'probe-empty',
-      '整条查询短于本机时钟步进，探测分辨不出哪个算子更贵。想定位热点，'
-      + '换一条接近真实数据量的查询再探测。'));
+      '整条查询短于本机时钟步进（' + gran + '），看不出哪个算子更贵 —— 点右上角 ? 看说明。'));
   }
 
   const list = el('div', 'probe-list');

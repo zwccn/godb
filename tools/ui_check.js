@@ -2582,6 +2582,29 @@ class CDP {
       !!phase && !/装载表/.test(phase.text),
       phase ? phase.text.slice(0, 50) : '');
 
+    /* 探测说明默认收起：那几句每次执行都一样，常驻会把卡片撑高三行。
+       点右上角的「?」才展开，再点收起。 */
+    const helpOff = await cdp.eval(`(() => {
+      const box = document.querySelector('.probe-card .probe-note');
+      const btn = document.querySelector('.probe-card .probe-help');
+      return { has: !!box && !!btn, visible: box ? !box.classList.contains('hidden') : null };
+    })()`);
+    check('探测说明默认收起，不占结果区空间',
+      helpOff.has && helpOff.visible === false, JSON.stringify(helpOff));
+    await cdp.eval(`document.querySelector('.probe-card .probe-help').click()`);
+    await sleep(150);
+    const helpOn = await cdp.eval(`(() => {
+      const box = document.querySelector('.probe-card .probe-note');
+      return { visible: !box.classList.contains('hidden'), text: box.textContent.slice(0, 40) };
+    })()`);
+    check('点「?」展开说明，里面有「真的跑了一遍」',
+      helpOn.visible === true && helpOn.text.indexOf('真的跑了一遍') >= 0,
+      helpOn.text);
+    await cdp.eval(`document.querySelector('.probe-card .probe-help').click()`);
+    await sleep(150);
+    check('再点一次收起',
+      await cdp.eval(`document.querySelector('.probe-card .probe-note').classList.contains('hidden')`));
+
     // 原始文本仍在（有人就是习惯看树形文本）：点一下能展开
     await cdp.eval(`[...document.querySelectorAll('.probe-card .plan-btn')][0].click()`);
     await sleep(200);

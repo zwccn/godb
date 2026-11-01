@@ -145,18 +145,17 @@ func TestPlanTreeScanAndLoops(t *testing.T) {
 	}
 }
 
-// 普通 EXPLAIN 不执行，树里的数字必须全是 0 —— 否则前端会当成真实耗时去画柱状图。
+// 普通 EXPLAIN 只规划、不执行，没有运行统计可报。
+//
+// 这里要的是「没有树」，而不是「一棵全是 0 的树」：后者会被前端当成真实数据，
+// 画出一排 0 ns 的算子行 —— 用户看到「服务端 197 µs，但每一步都是 0 ns」，
+// 只会以为是计时坏了（真的发生过一次）。树不带，前端就没得误读。
 func TestPlanTreeWithoutAnalyzeHasNoStats(t *testing.T) {
 	d := setupProbeTable(t)
 	s := "s"
 	res := run(t, d, s, `EXPLAIN SELECT * FROM big WHERE v > 59985`)
-	tree := res[0].PlanTree
-	if tree == nil {
-		t.Fatal("普通 EXPLAIN 也应带树（只有形状，没有数字）")
+	if res[0].PlanTree != nil {
+		t.Fatalf("普通 EXPLAIN 不该带统计树：根节点 %s rows=%d",
+			res[0].PlanTree.Name, res[0].PlanTree.Rows)
 	}
-	walkTree(tree, func(n *exec.PlanNode) {
-		if n.TotalNs != 0 || n.SelfNs != 0 || n.Rows != 0 {
-			t.Fatalf("普通 EXPLAIN 不该有运行统计：%s rows=%d total=%d", n.Name, n.Rows, n.TotalNs)
-		}
-	})
 }

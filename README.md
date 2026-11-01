@@ -280,6 +280,10 @@ SELECT * FROM emp    →  employees（表在前），后面才是 E 开头的关
 
 - `SELECT` / `WITH` / `VALUES` → 前面加 `EXPLAIN`；
 - 已经是 `EXPLAIN ...` 的 → 原样保留（不会变成 `EXPLAIN EXPLAIN`）；
+- **但「执行探测」例外**：它会把已有的 `EXPLAIN` / `EXPLAIN ANALYZE` 统一改写成
+  `EXPLAIN ANALYZE`。否则发出去的是「只规划、不执行」的普通 `EXPLAIN`，
+  查询根本没跑，探测卡上每一步的行数和耗时都会是 0 —— 配上「服务端 197 µs」
+  就成了自相矛盾的画面；
 - `BEGIN` / `UPDATE` / `CREATE` 这些 → **跳过**，并在结果上方提示跳了哪几条。
 
 一条能解释的都没有时，直接给出「无法生成执行计划」的说明，不发请求。
@@ -289,6 +293,9 @@ SELECT * FROM emp    →  employees（表在前），后面才是 E 开头的关
 
 「执行计划」回答「打算怎么做」，「执行探测」（`EXPLAIN ANALYZE`）回答「时间到底花在哪」。
 点下去会**真跑一遍**（结果丢掉），再把结果摊成一张账：
+
+> 统计树只由 `EXPLAIN ANALYZE` 产生。普通 `EXPLAIN` 只规划不执行，服务端**不返回**
+> 那棵树（而不是返回一棵全是 0 的）—— 免得前端照着画出一排 `0 ns`。
 
 ```
 Limit (limit=5)                  5 行              —      —

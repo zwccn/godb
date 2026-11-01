@@ -729,7 +729,17 @@ function withExplain(raw, prefix) {
   for (const part of splitStatements(raw)) {
     const kw = leadingKeyword(part);
     if (!kw) continue;
-    if (kw === 'explain') { keep.push(part + ';'); continue; }
+    if (kw === 'explain') {
+      // 编辑器里已经写着 EXPLAIN：点「执行计划」就原样用；
+      // 但「执行探测」必须把它升级成 ANALYZE —— 否则发出去的是「只规划不执行」的
+      // 普通 EXPLAIN，后端根本不会跑查询，探测卡上每一步的行数和耗时都是 0。
+      if (/analyze/i.test(head)) {
+        keep.push(part.replace(/^\s*explain\s+(analyze\s+)?(verbose\s+)?/i, head) + ';');
+      } else {
+        keep.push(part + ';');
+      }
+      continue;
+    }
     if (kw === 'select' || kw === 'with' || kw === 'values') {
       keep.push(head + part + ';');
       continue;
@@ -1396,11 +1406,28 @@ function probeCard(r, idx, stmts) {
   if (phBar) card.appendChild(phBar);
 
   const tree = r.planTree;
+  // 后端只在真执行（EXPLAIN ANALYZE）时才给统计树。没有树 = 这次只做了规划，
+  // 一个数都采不到 —— 与其画一排 0 ns 让人以为计时坏了，不如直说。
+  if (!tree || !tree.name) {
+    card.appendChild(el('div', 'probe-empty',
+      '这次没有拿到算子统计：语句只做了规划、没有真正执行（通常是发成了普通 EXPLAIN）。'
+      + '点「执行探测」重跑一次即可。'));
+    return card;
+  }
   const nodes = [];
   (function walk(n, depth) {
     nodes.push({ n: n, depth: depth });
     (n.children || []).forEach(c => walk(c, depth + 1));
   })(tree, 0);
+
+  // 有树但一个数都没有：同一件事的另一种表现（老后端会返回一棵全 0 的树）。
+  // 「服务端 197 µs，每一步却 0 ns」这种自相矛盾的画面就是这么来的。
+  if (!nodes.some(it => (it.n.rows || 0) > 0 || (it.n.totalNs || 0) > 0)) {
+    card.appendChild(el('div', 'probe-empty',
+      '这次每一步的行数和耗时都是 0，说明查询没有真正被执行（发成了普通 EXPLAIN？）。'
+      + '点「执行探测」重跑一次即可。'));
+    return card;
+  }
 
   // 根节点的 totalNs 偶尔会采成 0（探测开头那一瞬正好跨了计时源切换，
   // 或者整棵树的耗时被一次读数合并掉了）。别急着下「测不出来」的结论：

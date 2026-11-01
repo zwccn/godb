@@ -2632,6 +2632,34 @@ class CDP {
       /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
       `${probe.worst} · ${probe.verdict.slice(0, 40)}`);
 
+    /* 编辑器里已经写着 EXPLAIN 时，「执行探测」必须升级成 ANALYZE。
+       否则发出去的是「只规划、不执行」的普通 EXPLAIN —— 探测卡上每一步的行数和耗时
+       都是 0，配上「服务端 197 µs」就成了自相矛盾的画面（真的发生过）。 */
+    const up = await cdp.eval(`(() => {
+      const a = withExplain('EXPLAIN SELECT 1', 'EXPLAIN ANALYZE ');
+      const b = withExplain('EXPLAIN ANALYZE SELECT 2', 'EXPLAIN ANALYZE ');
+      const c = withExplain('EXPLAIN SELECT 3', 'EXPLAIN ');
+      return { a: a.sql, b: b.sql, c: c.sql };
+    })()`);
+    check('执行探测把已有的 EXPLAIN（含 ANALYZE）统一升级成 EXPLAIN ANALYZE',
+      up.a === 'EXPLAIN ANALYZE SELECT 1;' &&
+        up.b === 'EXPLAIN ANALYZE SELECT 2;' &&
+        up.c === 'EXPLAIN SELECT 3;',
+      JSON.stringify(up));
+
+    // 普通 EXPLAIN 不执行：后端不该给统计树，否则前端会照着画一排 0 ns
+    const rawPlan = await cdp.eval(`(async () => {
+      const res = await fetch('/api/query', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: 'EXPLAIN SELECT 1' }),
+      });
+      const d = await res.json();
+      const r0 = (d.results || [])[0] || {};
+      return { tree: r0.planTree || null, lines: (r0.plan || []).length };
+    })()`);
+    check('普通 EXPLAIN 只给文本、不给统计树',
+      rawPlan.tree === null && rawPlan.lines > 0, JSON.stringify(rawPlan));
+
     /* 「测不出来」的解释只该在时钟真的粗时出现。
        TSC 生效后步进是 1 ns，再说「整条查询短于本机时钟步进（1 ns）」就是胡话 ——
        不存在短于一纳秒的查询。这里同时盯住 `<1 ns` 这种时间文案。 */

@@ -195,8 +195,10 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 			// 真跑一遍：结果丢掉，只留每个算子的行数与耗时
 			planText, tree, err = ExplainAnalyze(plan, e.Store)
 		} else {
+			// 普通 EXPLAIN 只规划、不执行，算子的行数与耗时必然是 0。
+			// 与其返回一棵「全是 0」的树让前端画出一排 0 ns（比不画更误导），
+			// 不如不给 —— 前端拿不到树，就知道这次没有任何运行统计可看。
 			planText = ExplainPlan(plan)
-			tree = ExplainTree(plan)
 		}
 		if err != nil {
 			return nil, err

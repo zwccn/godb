@@ -34,12 +34,37 @@ type Result struct {
 	// PlanTree 是 Plan 的结构化版本（每个算子的行数/轮次/独占耗时）。
 	// 只有 EXPLAIN 结果才带；「探测执行」用它画「哪一步最贵」。
 	PlanTree *PlanNode `json:"planTree,omitempty"`
-	Message  string          `json:"message,omitempty"`
+	// Phases 是 TookNs 的去向（装载 / 等锁 / 执行 / 收尾）。由 db 层填。
+	// 光有总算时会出一桩悬案：EXPLAIN ANALYZE 里每一步都不到 1ms，
+	// 服务端却说花了 19ms —— 那 19ms 在算子树之外，必须单独报出来。
+	Phases  *Phases `json:"phases,omitempty"`
+	Message string  `json:"message,omitempty"`
 	// TookNs 是这条语句的耗时（纳秒，含等待锁，不含 SQL 解析），由 db 层填充。
 	TookNs int64 `json:"tookNs"`
 	// Scanned 是这条语句从表/索引里读出来的行数（含被 WHERE 过滤掉的），
 	// 同样由 db 层从事务计数器取走。慢 SQL 面板靠它回答「扫了多少行」。
 	Scanned int64 `json:"scanned,omitempty"`
+}
+
+// Phases 把一条语句的耗时拆成四段，加起来约等于 TookNs。
+//
+// 为什么值得拆：最容易被误判成「磁盘慢」的那一段，其实是**首次访问一张表**时
+// 把页文件装进内存 —— 那时候还没有任何算子开始执行。不单独报出来，界面上就成了
+// 「服务端 19ms、每一步 0.5ms」，看的人只能猜。
+type Phases struct {
+	// LoadNs 是「按需装载表」的耗时：表不在内存时把页文件读进缓冲池。
+	// 只有这条语句第一次碰这张表才有值。
+	LoadNs int64 `json:"loadNs,omitempty"`
+	// LoadIONs / LoadPages 是装载里真正读盘的那部分（见 storage/iostat.go）。
+	// 剩下的 LoadNs-LoadIONs 是装载自己的开销：建页框、扫页内元组、打开索引。
+	LoadIONs  int64 `json:"loadIoNs,omitempty"`
+	LoadPages int64 `json:"loadPages,omitempty"`
+	// LockNs 是等表锁的时间（并发时才有；20ms 轮询，可能整块 20ms）。
+	LockNs int64 `json:"lockNs,omitempty"`
+	// ExecNs 是算子执行的时间 —— 也就是「探测」那棵树覆盖的范围。
+	ExecNs int64 `json:"execNs,omitempty"`
+	// EndNs 是收尾：自动提交（含 WAL 落盘）、语句级回滚。
+	EndNs int64 `json:"endNs,omitempty"`
 }
 
 // Engine 执行 DDL/DML/DQL。DDL 会直接落盘（本库限制：DDL 不能在显式事务中执行）。
@@ -168,7 +193,7 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 		var tree *PlanNode
 		if mode == explainAnalyze {
 			// 真跑一遍：结果丢掉，只留每个算子的行数与耗时
-			planText, tree, err = ExplainAnalyze(plan)
+			planText, tree, err = ExplainAnalyze(plan, e.Store)
 		} else {
 			planText = ExplainPlan(plan)
 			tree = ExplainTree(plan)

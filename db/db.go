@@ -719,16 +719,30 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	}
 	// 按需加载：把这条语句要碰的表先读进内存。
 	// 必须放在拿 SchemaMu 之前 —— 加载是磁盘 IO，不能持着锁做。
+	//
+	// 这一段要单独计时：它是「服务端 19ms、探测每一步却 0.5ms」的答案。
+	// 表不在内存时，这里会把整个页文件读进缓冲池 —— 还没轮到任何算子执行，
+	// 所以算子树里一分钱都不会显示。再拆一层「读盘占多少」，是因为剩下那部分
+	// 是装载自己的开销（建页框、扫元组、打开索引），和磁盘无关。
+	var ph exec.Phases
 	if len(intents) > 0 {
 		names := make([]string, 0, len(intents))
 		for n := range intents {
 			names = append(names, n)
 		}
+		io0, pages0, _ := storage.IOSnapshot()
+		t0 := hrtime.Now()
 		d.Store.LoadTables(names)
+		ph.LoadNs = hrtime.Since(t0)
+		io1, pages1, _ := storage.IOSnapshot()
+		ph.LoadIONs = io1 - io0
+		ph.LoadPages = pages1 - pages0
 	}
 
 	// 1) 先拿表锁（可能长时间等待，此时不持 schema 锁，避免 DDL 被连带阻塞）
+	t0 := hrtime.Now()
 	stmt, err := sess.BeginStatement(intents)
+	ph.LockNs = hrtime.Since(t0)
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +753,9 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	// 都会跳过 Unlock，SchemaMu 被永久占住 —— 之后所有语句、甚至 Close 都会
 	// 卡死，整个库看起来像挂了。panic 由 Exec 的 recover 兜住并转成错误，
 	// 但锁不能再靠调用顺序保证。
+	t0 = hrtime.Now()
 	res, execErr := d.execLocked(stmt, st)
+	ph.ExecNs = hrtime.Since(t0)
 	// 扫描量：从事务计数器取走（取走即清零，所以显式事务里多条语句各算各的）。
 	// 放在 End 之前 —— 自动提交会在 End 里把 tx 置空。
 	if res != nil {
@@ -753,7 +769,9 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	}
 
 	// 3) 收尾：语句级回滚 + 自动提交
+	t0 = hrtime.Now()
 	endErr := stmt.End(execErr)
+	ph.EndNs = hrtime.Since(t0)
 	// 事务计数（pg_stat_database 的 xact_commit / xact_rollback）
 	if execErr != nil {
 		syscat.NoteXact(false)
@@ -762,6 +780,11 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	}
 	if endErr != nil {
 		return nil, endErr
+	}
+	if res != nil {
+		// 分段交给前端：它按「装载 / 等锁 / 执行 / 收尾」画一条时间去向，
+		// 让「服务端 19ms」和「探测每一步 0.5ms」在同一张卡上对上账。
+		res.Phases = &ph
 	}
 	return res, nil
 }

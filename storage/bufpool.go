@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // 页文件 + 缓冲池。
@@ -363,10 +364,14 @@ func (bp *bufPool) fetchLocked(id uint32, force bool) (*bufFrame, uint32, error)
 	}
 	bp.misses++
 
+	// 真读盘这一段单独记账（见 iostat.go）：它既不属于任何算子，也不是 CPU，
+	// 却是「服务端 19ms、每一步 0.5ms」的主要来源。
+	t0 := time.Now()
 	data, err := bp.pf.readPage(id)
 	if err != nil {
 		return nil, noPage, err
 	}
+	noteReadPage(t0, 1, PageSize)
 	// 校验一次（魔数 + CRC）：换入路径按槽位直取元组，不会再去 decode 整页
 	if err := bp.verifyPage(data); err != nil {
 		return nil, noPage, err
@@ -574,10 +579,12 @@ func (bp *bufPool) prefetch(ids []uint32) int {
 	}
 
 	// I/O 放在锁外：批量 pread 可能几十微秒，不值得攥着池锁做
+	t0 := time.Now()
 	datas, err := bp.pf.readPages(need)
 	if err != nil {
 		return 0
 	}
+	noteReadPage(t0, len(need), len(need)*PageSize)
 
 	var evicted []uint32
 	added := 0

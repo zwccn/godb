@@ -1487,9 +1487,20 @@ function probeCard(r, idx, stmts) {
       + '点「执行探测」重跑一次即可。'));
     return card;
   }
+  // 渲染顺序按树（前序），序号按**执行顺序**编（后序：子先父后，同级左先右）。
+  // 两个顺序本来就不是一回事：列表要让人看出层级，编号要回答「谁先跑」。
+  // 按显示顺序 1..N 编号会直接把 Project 说成第一步，正好反了。
+  // 编号只反映各算子 Open() 的先后（实证见 exec/join.go 里先 left 后 right），
+  // 带 ×N 轮的节点会被执行多次，一个数字表达不了，那种情况看旁边的标签。
+  const seqOf = new Map();
+  (function number(n) {
+    (n.children || []).forEach(number);
+    seqOf.set(n, seqOf.size + 1);
+  })(tree);
+
   const nodes = [];
   (function walk(n, depth) {
-    nodes.push({ n: n, depth: depth });
+    nodes.push({ n: n, depth: depth, seq: seqOf.get(n) });
     (n.children || []).forEach(c => walk(c, depth + 1));
   })(tree, 0);
 
@@ -1544,11 +1555,12 @@ function probeCard(r, idx, stmts) {
   // 怎么读这张表：执行顺序不是从上往下。这句话直接决定读法，所以常驻一行；
   // 更细的两条（×N 轮、独占与累计）放在右上角的「?」里。
   card.appendChild(el('div', 'probe-order',
-    '执行从最内层开始，同一层的左分支跑完才轮到右分支；最上面那行最后出结果。'));
+    '执行从最内层开始，同一层的左分支跑完才轮到右分支；最上面那行最后出结果。'
+    + '左边的数字就是执行顺序，1 最先跑。'));
 
   const list = el('div', 'probe-list');
   for (const it of nodes) {
-    list.appendChild(probeRow(it.n, it.depth, total, total > 0 ? worst.n : null));
+    list.appendChild(probeRow(it.n, it.depth, it.seq, total, total > 0 ? worst.n : null));
   }
   card.appendChild(list);
 
@@ -1571,9 +1583,12 @@ function probeCard(r, idx, stmts) {
 
 // 一行 = 一个算子。缩进表示树里的层级，但**不做折叠**：
 // 一棵执行计划通常不到 10 行，折叠省不了多少地方，却要多一次点击。
-function probeRow(n, depth, total, worst) {
+function probeRow(n, depth, seq, total, worst) {
   const row = el('div', 'probe-row' + (n === worst ? ' is-worst' : ''));
-  row.style.paddingLeft = (8 + depth * 16) + 'px';
+  // 序号是执行顺序（后序算出来的），固定在最左边不随层级移动 —— 一列扫下来
+  // 就是真实的先后：同级的两个 Seq Scan 谁是 1 谁是 2，一眼能看出来。
+  // 缩进因此从整行挪到内容上（下面的 paddingLeft），否则序号会跟着一起右移。
+  row.appendChild(el('span', 'probe-seq', String(seq)));
 
   const name = el('span', 'probe-name', n.name);
   name.title = n.name + (total > 0 ? '\n累计（含子节点）' + fmtTook(n.totalNs) : '');
@@ -1584,6 +1599,7 @@ function probeRow(n, depth, total, worst) {
   // detail 的第一条当副标题。扫描算子那条「已扫描 N 行」不在这儿重复 ——
   // 右边的计数标签已经写了「读取 N 行」，同一件事说两遍只会把行挤满。
   const main = el('div', 'probe-main');
+  main.style.paddingLeft = (depth * 16) + 'px'; // 缩进只作用在内容上，序号列保持对齐
   main.appendChild(name);
   const detail = (n.detail || []).find(t => !/^已扫描/.test(t));
   if (detail) {

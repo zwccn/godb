@@ -1404,6 +1404,15 @@ body {
 }
 .probe-row.is-worst:hover { background: var(--warn-bg-hover); }
 
+/* 执行序号列：固定在最左，不随层级缩进移动，扫一列就是真实先后。
+   窄列 + 右对齐 + 弱色，让它像行号一样存在感低，但缺了就分不出同级谁先。 */
+.probe-seq {
+  flex: 0 0 16px;
+  text-align: right;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+}
 /* 名字 + 说明竖排的一个容器：名字一行，说明在下面吃满宽度。
    横排时两者互相挤，谁都被截断在最关键的地方（见 app.js 里 probeRow 的注释）。 */
 .probe-main {

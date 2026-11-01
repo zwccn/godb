@@ -2750,6 +2750,7 @@ class CDP {
       return {
         rows: rows.length,
         names: rows.map(r => (r.querySelector('.probe-name') || {}).textContent || ''),
+        seqs: rows.map(r => Number((r.querySelector('.probe-seq') || {}).textContent)),
         chips: rows.filter(r => r.querySelector('.probe-chip')).length,
         worst: worst ? (worst.querySelector('.probe-name') || {}).textContent : '',
         verdict: (document.querySelector('.probe-verdict-text') || {}).textContent || '',
@@ -2768,6 +2769,14 @@ class CDP {
     check('最贵的一步被标出来，并有一句结论',
       /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
       `${probe.worst} · ${probe.verdict.slice(0, 40)}`);
+    /* 左边那列数字是**执行顺序**（后序：子先父后、同级左先右），不是行号。
+       按显示顺序编号会把 Project/Limit 说成第一步，正好反了 —— 这条同时钉住
+       「1..N 不重不漏」和「根节点排最后」，只改样式不改语义的话它不会红。 */
+    const seqs = probe.seqs;
+    const asc = seqs.slice().sort((a, b) => a - b);
+    check('每行左边是执行序号：1..N 不重不漏，根节点排最后',
+      seqs.length === probe.rows && asc.every((v, i) => v === i + 1) && seqs[0] === probe.rows,
+      seqs.join(', '));
 
     /* 编辑器里已经写着 EXPLAIN 时，「执行探测」必须升级成 ANALYZE。
        否则发出去的是「只规划、不执行」的普通 EXPLAIN —— 探测卡上每一步的行数和耗时

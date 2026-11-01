@@ -405,12 +405,24 @@ BuildSelect → buildFrom → tableSchema → syscat.RelationOID → syscat.buil
 - 能安全缓存的根本原因：快照里**没有任何与数据量有关的东西**。`relpages` / `reltuples`
   由 `pagesOf` / `rowsOf` 每次现取，所以「数据涨了快照就过期」这件事不存在。
 
-实测（`db/plan_bench_test.go` 的 `BenchmarkMetaPgClass` vs `…Cold`）：
-命中 377 µs、强制失效 488 µs —— 一份快照值 **111 µs**。
+`syscat.mk` 把「列名 → 值」摊成一行时，原来对每个字段调 `Table.ColumnIdx` ——
+它内部每次都 `strings.ToLower`（分配新串）。pg_class 一条查询就是 96 行 × 30 列 =
+2880 次无谓分配。改成直接查 `Table.ColIdxMap()`（小写列名 → 下标，只读视图），
+非小写 key 仍兜底走慢路径，不会丢列。
 
-**但要如实说**：这只占整条查询的 1/4。剩下的大头在 `Rows()` 本身 —— 它一次性把
-96 行全造出来（每行 30 个字段的 map + 一次按列名查找），`LIMIT 5` 完全没下推。
-要再往下砍（比如让虚拟表流式产行）得动 `Rows()` 那两千行，属于另一件事。
+实测（`db/plan_bench_test.go`）：
+
+| | 命中缓存 | 强制失效（缓存没命中） |
+|---|---|---|
+| 只加目录快照缓存 | 377 µs | 488 µs |
+| 再把 `mk` 改成直查列下标 | **319 µs** | 440 µs |
+
+一份目录快照值 ~110 µs，`mk` 去掉 `ToLower` 又省 ~58 µs（15%）。
+
+**如实说**：剩下 319 µs，大头在 `Rows()` 自己 —— 每行 30 个
+`map[string]types.Value` 字面量（2880 次 map 写入），以及 `virtualOp.Open()` 全量物化
+（`LIMIT 5` 根本不下推）。这两件都得动 40+ 处调用点、或把 `Rows` 改成流式产行，
+改动面和风险都高一个量级，当前不做。
 
 六段的颜色是专门挑的马卡龙 / 糖果色（橙 / 草莓粉 / 薰衣草 / 糖果蓝 / 薄荷 / 银灰），
 不跟皮肤走语义色：`warn` 那种深黄、`danger` 那种深红挤在一条 6px 的条子上既闷又难分。

@@ -104,6 +104,20 @@ func (t *Table) ColumnIdx(name string) (int, bool) {
 	return i, ok
 }
 
+// ColIdxMap 返回「小写列名 → 列下标」的只读视图。
+//
+// 给「把一堆字段摊成一行」的代码用（syscat 生成虚拟表的行）：那种地方一行要查
+// 几十次列下标，而 ColumnIdx 每次都会 strings.ToLower 一遍 —— 传进去的名字本来就是
+// 源码里的小写字面量，这次转换纯属浪费。pg_class 96 行 × 30 列 = 2880 次无谓分配。
+//
+// 调用方只能读：这个 map 和 Table 共享，写它等于改表结构。
+func (t *Table) ColIdxMap() map[string]int {
+	if t.colIdx == nil {
+		t.Rebuild()
+	}
+	return t.colIdx
+}
+
 // Col 按名字取列。
 func (t *Table) Col(name string) (*Column, int, bool) {
 	i, ok := t.ColumnIdx(name)

@@ -231,12 +231,22 @@ func (m *meta) get(name string) *tblMeta {
 }
 
 // mk 按列名填一行，未出现的列一律 NULL。
+// mk 把「列名 → 值」摊成一行，没给到的列留 NULL。
+//
+// 这里直接查「小写列名 → 下标」的 map，而不是 ColumnIdx：后者每次都会做一次
+// strings.ToLower（分配一个新串），而 pg_class 一条查询就要查 96 行 × 30 列 = 2880 次。
+// 万一有人往 vals 里写了非小写的 key，兜底走慢路径 —— 只是慢一点，不会丢列。
 func mk(def *catalog.Table, vals map[string]types.Value) types.Row {
 	r := make(types.Row, len(def.Columns))
 	for i := range r {
 		r[i] = types.Null
 	}
+	idx := def.ColIdxMap()
 	for k, v := range vals {
+		if i, ok := idx[k]; ok {
+			r[i] = v
+			continue
+		}
 		if i, ok := def.ColumnIdx(k); ok {
 			r[i] = v
 		}

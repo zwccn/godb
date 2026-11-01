@@ -195,20 +195,16 @@ func (t *Table) Validate() error {
 		return fmt.Errorf("table %q must have at least one column", t.Name)
 	}
 	seen := map[string]bool{}
-	pks := 0
 	for _, c := range t.Columns {
 		l := strings.ToLower(c.Name)
 		if seen[l] {
 			return fmt.Errorf("column %q specified more than once", c.Name)
 		}
 		seen[l] = true
-		if c.PrimaryKey {
-			pks++
-		}
 	}
 	// 允许多列带 PrimaryKey：那就是复合主键。
-	// 「一列写两次 PRIMARY KEY」这类错误在解析阶段就拦掉了。
-	_ = pks
+	// 「一列写两次 PRIMARY KEY」这类错误在解析阶段就拦掉了，所以这里不再数
+	// 「有几个主键」（原来数了又丢掉，看着像在拦什么）。
 	t.Rebuild()
 	return nil
 }

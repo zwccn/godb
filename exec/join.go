@@ -232,12 +232,14 @@ func (o *joinOp) buildOutput() error {
 	}
 
 	// 嵌套循环
+	// RIGHT JOIN：以右表为驱动，左边匹配不上就补一行 NULL。
+	// （左表里一行都没匹配上的，按语义就是不出现 —— 不需要额外记账。
+	//  这里以前留着一个 matchedRow 数组，算完从不读，看着像 FULL JOIN 的半成品。）
 	if o.typ == sql.JoinRight {
-		matchedRow := make([]bool, len(o.leftRows))
 		for _, rrow := range o.rightRows {
 			o.loop() // 每换一行驱动行，内层就整轮重扫一次
 			matched := false
-			for li, lrow := range o.leftRows {
+			for _, lrow := range o.leftRows {
 				row := combine(lrow, rrow)
 				ok, err := o.pass(row)
 				if err != nil {
@@ -245,7 +247,6 @@ func (o *joinOp) buildOutput() error {
 				}
 				if ok {
 					matched = true
-					matchedRow[li] = true
 					if err := o.push(row); err != nil {
 						return err
 					}
@@ -257,7 +258,6 @@ func (o *joinOp) buildOutput() error {
 				}
 			}
 		}
-		_ = matchedRow
 		return nil
 	}
 

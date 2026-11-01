@@ -75,13 +75,9 @@ func (p *Planner) tryCoverScan(bt *sql.BaseTable, where sql.Expr, orderBy []*sql
 			return nil, false
 		}
 	}
-	// 还要能从键还原：列类型都得是可解码的（OrderKey 支持的那些）
-	for ci := range keyOf {
-		if ci < len(t.Columns) {
-			// OrderKey 编码都能解，无需再拦
-			_ = ci
-		}
-	}
+	// 这里原本有一段「检查键里的列类型能不能解码」的空循环 —— 后来发现
+	// OrderKey 编出来的键全都解得回来，于是条件里只剩 `_ = ci`，什么也没检查。
+	// 留着比删掉更糟：读代码的人会以为这里还守着一条不变量。
 
 	sc := tableSchema(p.Cat, t, qual)
 	op := &coverScanOp{

@@ -56,12 +56,12 @@ func (e *Engine) CopyOutText(tx *storage.Tx, c *sql.Copy) ([]string, int64, erro
 	if !ok {
 		return nil, 0, fmt.Errorf("relation %q does not exist", c.Table)
 	}
+	// 只算「输出哪几列」的下标。这里以前还顺手拼了一个 names（列名）却从没用过：
+	// COPY ... HEADER 没实现，拼出来只是白做 —— 也让读代码的人以为「表头写了但没用」。
 	idx := make([]int, 0, len(t.Columns))
-	names := make([]string, 0, len(t.Columns))
 	if len(c.Cols) == 0 {
-		for i, col := range t.Columns {
+		for i := range t.Columns {
 			idx = append(idx, i)
-			names = append(names, col.Name)
 		}
 	} else {
 		for _, name := range c.Cols {
@@ -70,10 +70,8 @@ func (e *Engine) CopyOutText(tx *storage.Tx, c *sql.Copy) ([]string, int64, erro
 				return nil, 0, fmt.Errorf("column %q of relation %q does not exist", name, t.Name)
 			}
 			idx = append(idx, ci)
-			names = append(names, t.Columns[ci].Name)
 		}
 	}
-	_ = names
 
 	var out []string
 	var n int64

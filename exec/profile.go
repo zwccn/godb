@@ -28,6 +28,7 @@ type OpProfile struct {
 	io      ioStat
 	ioNs    int64
 	ioPages int64
+	ioBytes int64
 }
 
 // ioStat 是「读页阻塞」的计口。exec 不关心它怎么实现，只要能在任意时刻取快照 ——
@@ -42,6 +43,7 @@ type timer struct {
 	t0  hrtime.Stamp
 	io0 int64
 	pg0 int64
+	b0  int64
 }
 
 // profiler 是算子可选的统计能力。实现了它，EXPLAIN ANALYZE 才能看到行数与耗时。
@@ -58,7 +60,7 @@ type detailer interface {
 func (p *OpProfile) enableProfile(on bool) {
 	p.on = on
 	p.rows, p.loops, p.ns = 0, 0, 0
-	p.ioNs, p.ioPages = 0, 0
+	p.ioNs, p.ioPages, p.ioBytes = 0, 0, 0
 }
 
 func (p *OpProfile) profile() (int64, int64) { return p.rows, p.ns }
@@ -81,7 +83,7 @@ func (p *OpProfile) begin() timer {
 	}
 	t := timer{p: p, t0: hrtime.Now()}
 	if p.io != nil {
-		t.io0, t.pg0, _ = p.io.IOSnapshot()
+		t.io0, t.pg0, t.b0 = p.io.IOSnapshot()
 	}
 	return t
 }
@@ -96,9 +98,10 @@ func (t timer) done(ok bool) {
 		t.p.rows++
 	}
 	if t.p.io != nil {
-		ns, pages, _ := t.p.io.IOSnapshot()
+		ns, pages, bytes := t.p.io.IOSnapshot()
 		t.p.ioNs += ns - t.io0
 		t.p.ioPages += pages - t.pg0
+		t.p.ioBytes += bytes - t.b0
 	}
 }
 
@@ -179,8 +182,10 @@ type PlanNode struct {
 	// SelfIONs 是独占的那部分。默认配置下多半是 0：数据全在内存，根本没读盘。
 	IONs        int64 `json:"ioNs,omitempty"`
 	IOPages     int64 `json:"ioPages,omitempty"`
+	IOBytes     int64 `json:"ioBytes,omitempty"`
 	SelfIONs    int64 `json:"selfIoNs,omitempty"`
 	SelfIOPages int64 `json:"selfIoPages,omitempty"`
+	SelfIOBytes int64 `json:"selfIoBytes,omitempty"`
 
 	Children []*PlanNode `json:"children,omitempty"`
 }
@@ -211,7 +216,7 @@ func ExplainTree(op Operator) *PlanNode {
 				n.Loops = pl.profileLoops()
 			}
 			if ip, ok := o.(ioProfiler); ok {
-				n.IONs, n.IOPages = ip.profileIO()
+				n.IONs, n.IOPages, n.IOBytes = ip.profileIO()
 			}
 		}
 		if sr, ok := o.(scannedReporter); ok {
@@ -220,8 +225,7 @@ func ExplainTree(op Operator) *PlanNode {
 		if d, ok := o.(detailer); ok {
 			n.Detail = d.ExplainDetail()
 		}
-		var kidNs, kidIo int64
-		var kidPages int64
+		var kidNs, kidIo, kidPages, kidBytes int64
 		for _, k := range kids {
 			kn := walk(k)
 			if kn == nil {
@@ -230,6 +234,7 @@ func ExplainTree(op Operator) *PlanNode {
 			kidNs += kn.TotalNs
 			kidIo += kn.IONs
 			kidPages += kn.IOPages
+			kidBytes += kn.IOBytes
 			n.Children = append(n.Children, kn)
 		}
 		n.SelfIONs = n.IONs - kidIo
@@ -239,6 +244,10 @@ func ExplainTree(op Operator) *PlanNode {
 		n.SelfIOPages = n.IOPages - kidPages
 		if n.SelfIOPages < 0 {
 			n.SelfIOPages = 0
+		}
+		n.SelfIOBytes = n.IOBytes - kidBytes
+		if n.SelfIOBytes < 0 {
+			n.SelfIOBytes = 0
 		}
 		n.SelfNs = n.TotalNs - kidNs
 		if n.SelfNs < 0 {
@@ -258,12 +267,12 @@ type loopProfiler interface {
 
 func (p *OpProfile) profileLoops() int64 { return p.loops }
 
-// ioProfiler 是「等页文件等了多久」的口子。
+// ioProfiler 是「等页文件等了多久」的口子。字节数只对大字段有意义（不计页数）。
 type ioProfiler interface {
-	profileIO() (ns, pages int64)
+	profileIO() (ns, pages, bytes int64)
 }
 
-func (p *OpProfile) profileIO() (int64, int64) { return p.ioNs, p.ioPages }
+func (p *OpProfile) profileIO() (int64, int64, int64) { return p.ioNs, p.ioPages, p.ioBytes }
 
 func renderPlan(op Operator, withStats bool) []string {
 	var out []string

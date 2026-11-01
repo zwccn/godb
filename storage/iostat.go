@@ -46,3 +46,16 @@ func noteReadPage(start time.Time, pages int, bytes int) {
 	ioReadPages.Add(int64(pages))
 	ioReadBytes.Add(int64(bytes))
 }
+
+// noteReadBlob 记一次大字段读。
+//
+// 大字段不进页池（见 lob.go 开头的三条理由），所以它**不产生页数** ——
+// 只加耗时和字节数。要是不单独记，`SELECT` 一列几 MB 的 TEXT 会显示「I/O 0」，
+// 而它明明把时间花在了 pread 上。
+func noteReadBlob(start time.Time, bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	ioReadNs.Add(int64(time.Since(start)))
+	ioReadBytes.Add(int64(bytes))
+}

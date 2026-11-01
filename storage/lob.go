@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // LOB 文件：一张表一个 `tables/tXXXXXX.lob`，纯追加写的字节流。
@@ -172,8 +173,15 @@ func (l *lobFile) read(off int64, n int) ([]byte, error) {
 	}
 
 	buf := make([]byte, lobHdrSize+n)
-	if _, err := f.ReadAt(buf, off); err != nil {
-		return nil, fmt.Errorf("storage: 读大字段失败（off=%d len=%d）: %w", off, n, err)
+	// 这一次 pread 可能几毫秒（上 MB 的字段），它不属于任何「页」，
+	// 所以单独记（只加耗时与字节，不加页数）。
+	t0 := time.Now()
+	_, rerr := f.ReadAt(buf, off)
+	if rerr == nil {
+		noteReadBlob(t0, n)
+	}
+	if rerr != nil {
+		return nil, fmt.Errorf("storage: 读大字段失败（off=%d len=%d）: %w", off, n, rerr)
 	}
 	if string(buf[0:4]) != lobMagic {
 		return nil, fmt.Errorf("storage: 大字段头损坏（off=%d）", off)

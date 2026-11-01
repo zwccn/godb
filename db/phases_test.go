@@ -112,3 +112,48 @@ func TestPlanTreeExecIO(t *testing.T) {
 		t.Fatalf("根节点累计 %d 页 < 各节点独占之和 %d 页", tree.IOPages, selfPages)
 	}
 }
+
+// 大字段不走页池，所以它不产生「页数」，但时间一样要算。
+// 不然 `SELECT` 一列几 MB 的 TEXT 会显示 I/O 0，而它明明在 pread 上等了很久。
+func TestPlanTreeLobIO(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s := "s"
+	run(t, d, s, `CREATE TABLE doc (id INTEGER PRIMARY KEY, body TEXT)`)
+
+	// >2KB 才会走大字段文件
+	big := strings.Repeat("x", 200*1024)
+	run(t, d, s, fmt.Sprintf(`INSERT INTO doc VALUES (1,'%s')`, big))
+	run(t, d, s, `CHECKPOINT`)
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// 必须重开：插入后的行还在内存的槽位数组里，扫描根本不会去读大字段。
+	d2, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+
+	res := run(t, d2, "s2", `EXPLAIN ANALYZE SELECT body FROM doc`)
+	tree := res[0].PlanTree
+	if tree == nil {
+		t.Fatal("应带结构化计划树")
+	}
+
+	var ioBytes, ioPages int64
+	walkTree(tree, func(n *exec.PlanNode) {
+		ioBytes += n.SelfIOBytes
+		ioPages += n.SelfIOPages
+	})
+	if ioBytes < int64(len(big)) {
+		t.Fatalf("大字段读取没有入账：字节 %d，期望 ≥ %d", ioBytes, len(big))
+	}
+	if ioPages != 0 {
+		t.Fatalf("大字段不占页，不该记页数，实际 %d 页", ioPages)
+	}
+}

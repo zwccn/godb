@@ -8,8 +8,8 @@ import (
 	"godb/exec"
 )
 
-// setupProbeTable 造一张够大的表：本机时钟步进约 0.5ms，几十行的查询
-// 每算子的耗时会被读成 0，测不出「谁最贵」。
+// setupProbeTable 造一张够大的表：本机时钟步进约 0.2–0.6ms，几千行的查询
+// 每算子的耗时会被读成 0，测不出「谁最贵」—— 两万行才稳。
 func setupProbeTable(t *testing.T) *DB {
 	t.Helper()
 	d := newTestDB(t)
@@ -17,7 +17,7 @@ func setupProbeTable(t *testing.T) *DB {
 	run(t, d, s, `CREATE TABLE big (id int4 PRIMARY KEY, g int4, v int4)`)
 	var b strings.Builder
 	b.WriteString(`INSERT INTO big VALUES `)
-	for i := 1; i <= 3000; i++ {
+	for i := 1; i <= 20000; i++ {
 		if i > 1 {
 			b.WriteByte(',')
 		}
@@ -66,7 +66,7 @@ func TestPlanTreePerOperatorStats(t *testing.T) {
 
 	// 根节点有耗时；每个节点的独占时间不能超过总时间
 	if tree.TotalNs <= 0 {
-		t.Fatalf("根节点总耗时 = %d（3000 行聚合应当超过时钟步进）", tree.TotalNs)
+		t.Fatalf("根节点总耗时 = %d（两万行聚合应当超过时钟步进）", tree.TotalNs)
 	}
 	var sumSelf int64
 	for _, n := range nodes {
@@ -103,7 +103,7 @@ func TestPlanTreeScanAndLoops(t *testing.T) {
 	s := "s"
 
 	// 全表扫描 3000 行，过滤后只剩 5 行 —— scanned 必须大于 rows
-	res := run(t, d, s, `EXPLAIN ANALYZE SELECT * FROM big WHERE v > 8985`)
+	res := run(t, d, s, `EXPLAIN ANALYZE SELECT * FROM big WHERE v > 59985`)
 	var scan *exec.PlanNode
 	walkTree(res[0].PlanTree, func(n *exec.PlanNode) {
 		if n.Scanned > 0 {
@@ -113,8 +113,8 @@ func TestPlanTreeScanAndLoops(t *testing.T) {
 	if scan == nil {
 		t.Fatal("计划里应有节点报「从堆表读了多少行」")
 	}
-	if scan.Scanned != 3000 {
-		t.Fatalf("扫描节点读了 %d 行，期望 3000", scan.Scanned)
+	if scan.Scanned != 20000 {
+		t.Fatalf("扫描节点读了 %d 行，期望 20000", scan.Scanned)
 	}
 	// 过滤在 scan 之上：上层只剩 5 行，这才有「读了 3000 行只留 5 行」的可比性
 	var filtered bool
@@ -149,7 +149,7 @@ func TestPlanTreeScanAndLoops(t *testing.T) {
 func TestPlanTreeWithoutAnalyzeHasNoStats(t *testing.T) {
 	d := setupProbeTable(t)
 	s := "s"
-	res := run(t, d, s, `EXPLAIN SELECT * FROM big WHERE v > 8985`)
+	res := run(t, d, s, `EXPLAIN SELECT * FROM big WHERE v > 59985`)
 	tree := res[0].PlanTree
 	if tree == nil {
 		t.Fatal("普通 EXPLAIN 也应带树（只有形状，没有数字）")

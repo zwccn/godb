@@ -1435,6 +1435,8 @@ function probeRow(n, depth, total, worst) {
   if (n.selfIoNs > 0) {
     let txt = 'I/O ' + fmtDur(n.selfIoNs);
     if (n.selfIOPages > 0) txt += ' / ' + fmtCount(n.selfIOPages) + ' 页';
+    // 大字段不进页池，所以只有字节数、没有页数（见 storage/lob.go 开头）
+    else if (n.selfIOBytes > 0) txt += ' / ' + fmtBytes(n.selfIOBytes) + ' 大字段';
     const c = el('span', 'probe-chip io', txt);
     c.title = '这一步自己等页文件等了多久（不含子节点）';
     tags.appendChild(c);

@@ -105,6 +105,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/monitor/timeouts", s.handleMonitorTimeouts)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/dbs", s.handleDBs)
+	// 备份导出（恢复走 /api/query，不单开接口）
+	mux.HandleFunc("/api/backup", s.handleBackup)
 
 	// 登录相关：本机访问根本走不到这里（withAuth 直接放行），远程才用得上。
 	mux.HandleFunc("/login", s.handleLogin)

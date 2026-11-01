@@ -1691,6 +1691,39 @@ class CDP {
     check('后端拒绝「没密码就开远程」（错误里点名要密码）',
       secGuard.code === 400 && /密码/.test(secGuard.error), `${secGuard.code} ${secGuard.error}`);
 
+    /* 备份导出：接口要能直接下载一份 .sql，内容含建表/数据/序列对齐；
+       设置页「数据」组里要能看到两个按钮。恢复链路在 db 的 Go 测试里跑过
+       （导出→灌回空库→逐行比对），这里只验浏览器这一侧。 */
+    const bkApi = await cdp.eval(`(async () => {
+      const r = await fetch('/api/backup?name=godb');
+      const text = await r.text();
+      return {
+        code: r.status,
+        cd: r.headers.get('content-disposition') || '',
+        create: (text.match(/CREATE TABLE/g) || []).length,
+        ins: text.includes('INSERT INTO'),
+        setval: text.includes('setval('),
+        head: text.slice(0, 24),
+      };
+    })()`);
+    check('备份接口直接给一份可执行的 .sql（建表 / 数据 / 序列对齐）',
+      bkApi.code === 200 && /attachment; filename="godb-.*\.sql"/.test(bkApi.cd)
+      && bkApi.create >= 1 && bkApi.ins && bkApi.setval && /godb 备份/.test(bkApi.head),
+      `${bkApi.code} · ${bkApi.cd} · 建表 ${bkApi.create} 条`);
+
+    const bkUi = await cdp.eval(`(() => {
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'data').click();
+      const pane = document.querySelector('.set-pane[data-pane="data"]');
+      const btns = [...pane.querySelectorAll('button')].map(b => b.textContent.trim());
+      const hasFile = !!pane.querySelector('input[type=file]');
+      [...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'conn').click();
+      return { btns, hasFile };
+    })()`);
+    check('设置→数据里有「下载备份」「从备份恢复」，恢复是选文件不是粘贴框',
+      bkUi.btns.some(t => /下载备份/.test(t)) && bkUi.btns.some(t => /从备份恢复/.test(t))
+      && bkUi.hasFile,
+      bkUi.btns.join(' / '));
+
     // 切组不重新渲染：在「连接」里改了一半再去看「性能」，回来还得在
     const keep = await cdp.eval(`(() => {
       document.getElementById('setAuthUser').value = 'keepme';

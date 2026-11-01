@@ -5884,6 +5884,86 @@ function renderLookPane(box) {
 
 /* ---- 数据：危险操作 + 现状 ---- */
 function renderDataPane(box, d, rt) {
+  /* ---- 备份 / 恢复 ----
+     备份走服务端导出（/api/backup 直接下载 .sql）；恢复不新开接口 ——
+     「导入一份 SQL」本来就是这个库最擅长的事，直接把文件内容当 SQL 执行。
+     两个都比「清空当前库」低一档风险，所以单独一组，不和危险操作混在一起。 */
+  box.appendChild(el('div', 'set-sec', '备份与恢复'));
+
+  const bkActs = el('div', 'set-actions');
+  const bkBtn = el('button', 'btn btn-ghost btn-sm', '下载备份 (.sql)');
+  bkBtn.type = 'button';
+  bkBtn.title = '导出当前库的表结构、数据与索引';
+  bkBtn.addEventListener('click', () => {
+    const name = currentDBName() || 'godb';
+    location.href = '/api/backup?name=' + encodeURIComponent(name);
+  });
+  const rsBtn = el('button', 'btn btn-ghost btn-sm', '从备份恢复…');
+  rsBtn.type = 'button';
+  rsBtn.title = '选一个 .sql 文件，在当前库里执行';
+  rsBtn.addEventListener('click', () => restoreFile.click());
+  const restoreFile = document.createElement('input');
+  restoreFile.type = 'file';
+  restoreFile.accept = '.sql,text/plain';
+  restoreFile.className = 'hidden';
+  bkActs.appendChild(bkBtn);
+  bkActs.appendChild(rsBtn);
+  box.appendChild(setRow('数据', bkActs));
+  box.appendChild(restoreFile);
+  box.appendChild(el('div', 'set-hint',
+    '备份是整个库的 SQL 文本（表结构 + 数据 + 索引 + 自增序列对齐），可以直接当 SQL 执行，' +
+    '也可以只挑其中一张表恢复。恢复是**逐条执行**：遇到「表已存在」就会停下，' +
+    '所以恢复到空库最稳。'));
+
+  restoreFile.addEventListener('change', async () => {
+    const f = restoreFile.files && restoreFile.files[0];
+    restoreFile.value = '';   // 允许连续选同一个文件
+    if (!f) return;
+    let text = '';
+    try {
+      text = await f.text();
+    } catch (e) {
+      toast('读不了这个文件：' + (e && e.message ? e.message : e), true);
+      return;
+    }
+    if (!text.trim()) {
+      toast('这个文件是空的', true);
+      return;
+    }
+    const cur = currentDBName() || 'godb';
+    const ok = await confirmDanger({
+      title: '从备份恢复',
+      desc: `把「${f.name}」（${fmtBytes(f.size)}）当作 SQL 在「${cur}」里跑一遍。` +
+        '同名表已存在会报错并停下，建议恢复到空库。',
+      items: [],
+      word: cur,
+      okText: '执行导入',
+    });
+    if (!ok) return;
+
+    const hint = document.getElementById('settingsHint');
+    if (hint) hint.textContent = '正在导入…';
+    let r;
+    try {
+      r = await api('/api/query', { sql: text });
+    } catch (e) {
+      if (hint) hint.textContent = '';
+      toast('导入失败：' + (e && e.message ? e.message : e), true);
+      return;
+    }
+    const n = (r.results || []).length;
+    if (r.error) {
+      if (hint) hint.textContent = '导入中断：' + (r.error.message || r.error);
+      showPaneError(r.error);
+      toast('导入中断：' + (r.error.message || r.error), true, 8000);
+      await loadSchema();
+      return;
+    }
+    if (hint) hint.textContent = `导入完成：${n} 条语句`;
+    toast(`导入完成：执行了 ${n} 条语句`, false, 5000);
+    await loadSchema();
+  });
+
   const danger = el('div', 'set-danger');
   danger.appendChild(el('div', 'set-sec', '危险操作'));
   const acts = el('div', 'set-actions');

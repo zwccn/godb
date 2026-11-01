@@ -120,15 +120,15 @@ try {
                平时不占位（hidden），窄屏直接不显示 —— 那一行实在放不下第四样东西。 -->
           <span class="run-timer hidden" id="runTimer" aria-live="off"></span>
         </div>
-        <!-- 工具栏右端只留三件事：执行计划 / 执行探测 / 美化。
-             历史、清空收进右键菜单（低频）；美化留在外面，因为改完 SQL 顺手就要按，
-             藏在右键里反而多一步。 -->
+        <!-- 工具栏右端只留两件事：执行计划 / 执行探测。
+             历史、清空、美化都收进右键菜单。美化原先留在外面，理由是「改完 SQL
+             顺手就要按」；实际用下来它是三者里唯一低频的那个（SQL 写完就执行了，
+             真需要格式化的场合不多），占着工具栏最显眼的位置不划算。右键项上印着
+             Shift+Ctrl+F，帮助里也写了，入口没丢。 -->
         <div class="editor-actions">
           <button id="btnExplain" class="btn btn-ghost btn-sm" title="加 EXPLAIN 前缀执行">执行计划</button>
           <button id="btnProbe" class="btn btn-ghost btn-sm btn-probe"
                   title="执行探测：真跑一遍，报出每一步输出多少行、读了多少行、跑了几轮、花了多少时间">执行探测</button>
-          <button id="btnFormat" class="btn btn-ghost btn-sm"
-                  title="美化 SQL：子句换行、关键字大写、列表对齐（Ctrl+Shift+F）">美化</button>
         </div>
       </div>
       <textarea id="editor" spellcheck="false" inputmode="latin" autocapitalize="off"

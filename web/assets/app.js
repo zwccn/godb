@@ -5550,7 +5550,6 @@ function clearEditor() {
 
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
 document.getElementById('btnProbe').addEventListener('click', () => run('probe'));
-document.getElementById('btnFormat').addEventListener('click', () => formatSQL());
 // 搜索表名：图标按钮展开输入框，边打边过滤；Esc 收起并清空。
 document.getElementById('btnTableSearch').addEventListener('click', () => {
   const sidebar = document.querySelector('.sidebar');

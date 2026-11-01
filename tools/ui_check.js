@@ -2501,18 +2501,18 @@ class CDP {
       ctx.prevented && ctx.open && ctx.items.length === 8 && ctx.seps === 3 && ctx.inView,
       ctx.items.join(' · '));
 
-    // 工具栏右端：执行计划 / 执行探测 / 美化。历史、清空只在右键里。
+    // 工具栏右端只剩执行计划 / 执行探测。历史、清空、美化都在右键里。
     const toolbar = await cdp.eval(`({
       history: !!document.getElementById('btnHistory'),
       clear: !!document.getElementById('btnClear'),
+      format: !!document.getElementById('btnFormat'),
       probe: (document.getElementById('btnProbe') || {}).textContent,
-      format: (document.getElementById('btnFormat') || {}).textContent,
       actions: [...document.querySelectorAll('.editor-actions button')].map(b => b.textContent.trim()),
     })`);
-    check('工具栏右端是「执行计划 / 执行探测 / 美化」，历史与清空在右键里',
-      !toolbar.history && !toolbar.clear &&
-        toolbar.probe === '执行探测' && toolbar.format === '美化' &&
-        toolbar.actions.join('/') === '执行计划/执行探测/美化',
+    check('工具栏右端只留「执行计划 / 执行探测」，历史清空美化都收进右键',
+      !toolbar.history && !toolbar.clear && !toolbar.format &&
+        toolbar.probe === '执行探测' &&
+        toolbar.actions.join('/') === '执行计划/执行探测',
       toolbar.actions.join(' / '));
 
     // 右键里的「清空」要真的清空。以前工具栏那颗改的是隐藏的 textarea，
@@ -2539,7 +2539,7 @@ class CDP {
        没反应，要点第二次」。必须走真实事件流（pointerdown + contextmenu），
        直接调 openEditorMenu() 测不出来：那条路根本没产生滚动。 */
     await cdp.eval(`cm.setValue('select d.name, count(e.id) as n from departments d left join employees e on e.dept_id=d.id group by d.name order by n desc;')`);
-    await cdp.eval(`document.getElementById('btnFormat').click()`);
+    await cdp.eval(`formatSQL()`);
     await sleep(300);
     const ctxFirst = await cdp.eval(`(() => {
       const el = document.querySelector('.CodeMirror');

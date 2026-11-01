@@ -64,9 +64,17 @@ func TestCheckpointByWALSize(t *testing.T) {
 	}
 }
 
-func TestCheckpointByTime(t *testing.T) {
+// 后台定时器确实接着「按秒落盘」这条。
+//
+// 这是本文件里唯一必须等真实时间的用例（约 1 秒）：它验的是「ticker 被启动了」
+// 这件接线事实，绕不开。判定逻辑本身 —— 到点才写、空闲不写、阈值 0 时不动 ——
+// 在 storage/policy_test.go 里直接拨 cpLastNs 覆盖，一秒都不用等。
+//
+// 之所以这么拆：原来的两条用例靠「等 ticker」来验判定，于是空闲那条固定睡
+// 2.2 秒、到点那条最多等 6 秒；机器一忙还可能等超时，红得莫名其妙。
+func TestAutoCheckpointTickerWired(t *testing.T) {
 	if testing.Short() {
-		t.Skip("需要等 2 秒")
+		t.Skip("要等一次 ticker（约 1 秒）")
 	}
 	d := newTestDB(t)
 	d.Store.SetCheckpointPolicy(storage.CheckpointPolicy{Seconds: 1})
@@ -74,36 +82,14 @@ func TestCheckpointByTime(t *testing.T) {
 	run(t, d, "s", `INSERT INTO pt (v) VALUES (1)`)
 
 	base := d.Store.CheckpointStatsNow().Runs
-	deadline := time.Now().Add(6 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if d.Store.CheckpointStatsNow().Runs > base {
-			return // 成功
+			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("等了 6 秒也没按时间落盘（runs 还是 %d）", base)
-}
-
-// 没有改动时不应该空转写快照。
-func TestTimeCheckpointSkipsWhenIdle(t *testing.T) {
-	if testing.Short() {
-		t.Skip("需要等 2 秒")
-	}
-	d := newTestDB(t)
-	d.Store.SetCheckpointPolicy(storage.CheckpointPolicy{Seconds: 1})
-	run(t, d, "s", `CREATE TABLE pi (id SERIAL PRIMARY KEY, v INTEGER)`)
-	run(t, d, "s", `INSERT INTO pi (v) VALUES (1)`)
-	run(t, d, "s", `CHECKPOINT`) // 把计数清零
-
-	base := d.Store.CheckpointStatsNow().Runs
-	time.Sleep(2200 * time.Millisecond)
-	if got := d.Store.CheckpointStatsNow().Runs; got != base {
-		t.Fatalf("没有改动也应该不动（runs %d → %d）", base, got)
-	}
-	// 计数也不该被别人无端清零
-	if since := d.Store.CheckpointStatsNow().CommitsSince; since != 0 {
-		t.Fatalf("空闲时提交计数应为 0，实际 %d", since)
-	}
+	t.Fatalf("3 秒内后台 ticker 一次都没落盘（runs 还是 %d）——检查 Open 之后有没有调 StartAutoCheckpoint", base)
 }
 
 func TestCheckpointPolicyHotUpdate(t *testing.T) {

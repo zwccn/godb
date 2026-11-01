@@ -1233,6 +1233,15 @@ func (p *parser) parseAlter() (Statement, error) {
 	switch {
 	case p.acceptKw("add"):
 		p.acceptKw("column")
+		// ADD CONSTRAINT / ADD PRIMARY KEY / ADD UNIQUE … 是给已有表补约束，
+		// 引擎只支持在建表时声明。不认的话它会掉进 parseColumnDef，报出
+		// 「syntax error at or near "CONSTRAINT"」—— 那句话不说明「不支持」，
+		// 用户只会以为是自己写错了。这里明确说清楚。
+		if label := p.addConstraintLabel(); label != "" {
+			return nil, p.errAt(p.peek(),
+				"ALTER TABLE ... ADD %s is not supported: declare constraints in CREATE TABLE instead",
+				label)
+		}
 		col, err := p.parseColumnDef()
 		if err != nil {
 			return nil, err
@@ -1313,6 +1322,26 @@ func (p *parser) parseAlter() (Statement, error) {
 	}
 	st.Action = act
 	return st, nil
+}
+
+// addConstraintLabel 判断 ALTER TABLE ... ADD 后面跟的是不是「加约束」。
+// 是则返回给用户看的名字（PRIMARY KEY 而不是光秃秃的 PRIMARY），否则返回空。
+func (p *parser) addConstraintLabel() string {
+	switch {
+	case p.atKw("constraint"):
+		return "CONSTRAINT"
+	case p.atKw("primary"):
+		return "PRIMARY KEY"
+	case p.atKw("unique"):
+		return "UNIQUE"
+	case p.atKw("check"):
+		return "CHECK"
+	case p.atKw("foreign"):
+		return "FOREIGN KEY"
+	case p.atKw("index"):
+		return "INDEX"
+	}
+	return ""
 }
 
 func (p *parser) parseTruncate() (Statement, error) {

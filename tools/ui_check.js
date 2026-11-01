@@ -2533,6 +2533,34 @@ class CDP {
     const ctxClosed = await cdp.eval(`document.getElementById('ctxMenu').classList.contains('hidden')`);
     check('右键菜单按 Esc 就关，不连带关掉别的面板', ctxClosed, `隐藏 ${ctxClosed}`);
 
+    /* 右键这一下本身会让 CodeMirror 滚一次（mousedown 要把光标挪到点击处，
+       顺手 scrollIntoView），那个 scroll 事件是异步派发的、落在菜单画出来之后。
+       曾经没有闸门，菜单打开几毫秒就被自己关掉 —— 症状是「美化之后第一次右键
+       没反应，要点第二次」。必须走真实事件流（pointerdown + contextmenu），
+       直接调 openEditorMenu() 测不出来：那条路根本没产生滚动。 */
+    await cdp.eval(`cm.setValue('select d.name, count(e.id) as n from departments d left join employees e on e.dept_id=d.id group by d.name order by n desc;')`);
+    await cdp.eval(`document.getElementById('btnFormat').click()`);
+    await sleep(300);
+    const ctxFirst = await cdp.eval(`(() => {
+      const el = document.querySelector('.CodeMirror');
+      const r = el.getBoundingClientRect();
+      const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + 40);
+      const tgt = document.elementFromPoint(x, y) || el;
+      tgt.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2, buttons: 2, pointerType: 'mouse' }));
+      tgt.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2 }));
+      const m = document.getElementById('ctxMenu');
+      return { hidden: m.classList.contains('hidden'), items: m.querySelectorAll('.ctx-item').length };
+    })()`);
+    await sleep(260); // 跨过那次补偿滚动的异步派发
+    const ctxStill = await cdp.eval(`(() => {
+      const m = document.getElementById('ctxMenu');
+      const r = m.getBoundingClientRect();
+      return { hidden: m.classList.contains('hidden'), w: Math.round(r.width), h: Math.round(r.height) };
+    })()`);
+    check('美化之后第一次右键，菜单不会被自己触发的那次滚动关掉',
+      ctxFirst.hidden === false && ctxStill.hidden === false && ctxStill.w > 0,
+      `打开后立即 ${JSON.stringify(ctxFirst)} · 260ms 后 ${JSON.stringify(ctxStill)}`);
+
     /* SQL 模板是**三级**的：右键 → 分类（4 个）→ 具体语句。15 条摊平要 577px，
        一屏菜单太长；分下去每层最多 5 行。
        验：分类那一层短、贴主菜单右侧；hover 分类飞出语句；点一条就插进编辑器，

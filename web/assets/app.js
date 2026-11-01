@@ -6583,6 +6583,10 @@ document.addEventListener('keydown', e => {
    **Shift + 右键** 永远放行：调试时要「检查元素」，这个逃生口是故意留的。 */
 const ctxMenu = document.getElementById('ctxMenu');
 
+// 菜单最近一次打开的时刻。见下面 window 的 scroll 监听 —— 右键这一下
+// 自己会让编辑器滚一次，那道闸门靠这个时间戳区分「点击自己滚的」和「用户滚的」。
+let ctxOpenedAt = 0;
+
 // 编辑器的当前选区（没有 CodeMirror 时退回 textarea 的 selectionStart/End）
 function editorSelection() {
   if (cm) return cm.getSelection();
@@ -6925,6 +6929,7 @@ function openEditorMenu(x, y) {
   const top = Math.min(y, window.innerHeight - r.height - 8);
   ctxMenu.style.left = `${Math.max(8, left)}px`;
   ctxMenu.style.top = `${Math.max(8, top)}px`;
+  ctxOpenedAt = performance.now();
 }
 
 document.addEventListener('contextmenu', e => {
@@ -6986,7 +6991,17 @@ if (ctxMenu) {
   }
 }
 window.addEventListener('blur', closeEditorMenu);
-window.addEventListener('scroll', closeEditorMenu, true);
+
+/* 滚动就关菜单 —— 菜单是按屏幕坐标摆的，内容一滚它就不对着原来那行了。
+   但**右键这一下本身会滚**：CodeMirror 的 mousedown 要把光标挪到点击处，
+   顺手做一次 scrollIntoView；文档刚美化过（行数、行高都变了）时尤其明显。
+   那个 scroll 事件是异步派发的，落在菜单画出来之后 —— 不加闸门的话，菜单
+   打开几毫秒就被自己关掉，表现成「第一次右键没反应，要点第二次」。
+   200ms 足够覆盖这次补偿；这段时间里用户真去滚轮的概率可以忽略。 */
+window.addEventListener('scroll', () => {
+  if (performance.now() - ctxOpenedAt < 200) return;
+  closeEditorMenu();
+}, true);
 
 /* ---------------- 窄屏：表结构抽屉 ---------------- */
 

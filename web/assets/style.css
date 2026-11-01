@@ -677,36 +677,6 @@ body {
 }
 .editor-actions { display: flex; gap: 7px; position: relative; }
 
-/* 窄屏的「更多」：宽屏不出现（四个按钮都摆得下） */
-.more-btn { display: none; }
-.more-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 30;
-  min-width: 132px;
-  padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-2);
-  box-shadow: 0 10px 28px var(--shadow-color);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.more-menu button {
-  text-align: left;
-  padding: 7px 10px;
-  border: none;
-  border-radius: 6px;
-  background: none;
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: calc(12.5px * var(--fs));
-  cursor: pointer;
-}
-.more-menu button:hover { background: var(--row-hover); }
-
 /* 监控「暂停刷新」按下去要有明确状态，否则看不出来是不是还在跳 */
 #btnMonPause.on {
   color: var(--accent);
@@ -1742,9 +1712,8 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   /* 编辑器工具栏同理：标题和低频按钮让位给「执行」 */
   .editor-bar { padding: 7px 10px; }
   .editor-label { display: none; }
-  /* 低频按钮收进「更多」，而不是直接删掉 —— 手机上也还能用执行计划和清空 */
-  #btnExplain, #btnClear { display: none; }
-  .more-btn { display: inline-flex; align-items: center; }
+  /* 工具栏只剩「执行计划 / 执行探测」两颗，窄屏也放得下 —— 不再需要「更多」菜单 */
+  .editor-actions { gap: 5px; }
   /* 窄屏的编辑器最低高度跟 JS 的 editorMinH() 对齐（4 行左右）：
      CSS 里写死 180px 会让「跟着内容长」永远退化成 180，两行 SQL 也占半屏。 */
   #editor, .CodeMirror { min-height: 104px; }

@@ -714,7 +714,7 @@ function leadingKeyword(text) {
 // 两个坑都踩过：
 //   1. 编辑器里已经写了 EXPLAIN（比如从帮助示例填进来）→ 会变成 EXPLAIN EXPLAIN；
 //   2. 事务演示那种 BEGIN / UPDATE 被硬加上 EXPLAIN → 服务端报 only supports SELECT。
-// withExplain 给每条查询加前缀。执行计划和探测执行都走这里：
+// withExplain 给每条查询加前缀。执行计划和执行探测都走这里：
 // 前者只出「打算怎么做」，后者真跑一遍出「每一步实际花了多少」。
 function withExplain(raw, prefix) {
   const head = prefix || 'EXPLAIN ';
@@ -756,7 +756,7 @@ async function run(prefix) {
       showPaneError({
         title: probe ? '无法探测' : '无法生成执行计划',
         message: skipped.length
-          ? `「${probe ? '探测执行' : '执行计划'}」只能${probe ? '探测' : '解释'}查询语句（SELECT / WITH / VALUES）。当前这批是 ${skipped.join('、')}，想直接跑它们请点「执行」。`
+          ? `「${probe ? '执行探测' : '执行计划'}」只能${probe ? '探测' : '解释'}查询语句（SELECT / WITH / VALUES）。当前这批是 ${skipped.join('、')}，想直接跑它们请点「执行」。`
           : '编辑器里还没有可解释的语句。',
       });
       return;
@@ -1083,7 +1083,7 @@ function showPaneError(err) {
 
 // 只有真返回了行的语句才配一个「结果 N」tab；UPDATE / DDL 没有表可看，信息栏里说清楚即可
 //
-// 探测执行例外：它的结果是一棵算子树，不是可以翻页的表。硬摊成「结果 1」的
+// 执行探测例外：它的结果是一棵算子树，不是可以翻页的表。硬摊成「结果 1」的
 // 表格反而把 QUERY PLAN 那列文本当数据看，所以单独一种视图，不列结果 tab。
 function resultTabModels(data) {
   if (data && data.probeView) return [{ kind: 'probe' }];
@@ -1251,7 +1251,7 @@ function infoPanel(data) {
   return box;
 }
 
-/* ---------------- 探测执行 ----------------
+/* ---------------- 执行探测 ----------------
    一张「每一步花了多少」的账。
 
    为什么不是再画一遍执行计划：计划只回答「打算怎么做」，而这里要回答的是
@@ -1340,7 +1340,7 @@ function probePhaseBar(r) {
 function probeCard(r, idx, stmts) {
   const card = el('div', 'probe-card');
   const head = el('div', 'probe-head');
-  head.appendChild(el('span', 'result-tag probe-tag', '探测执行'));
+  head.appendChild(el('span', 'result-tag probe-tag', '执行探测'));
 
   const meta = [];
   if (r.tookNs !== undefined) meta.push('服务端 ' + fmtTook(r.tookNs));
@@ -5436,46 +5436,18 @@ document.getElementById('btnRun').addEventListener('click', () => {
   if (busy) { stopRun(); return; }
   run();
 });
-document.getElementById('btnClear').addEventListener('click', () => {
-  editor.value = '';
+// 清空编辑器。CodeMirror 接管之后直接改 textarea.value 是没用的 ——
+// CM 会把自己的内容同步回去，看着像「点了没反应」。必须走 cm.setValue。
+function clearEditor() {
+  if (cm) cm.setValue('');
+  else editor.value = '';
   localStorage.removeItem('godb.sql');
   autoSize();
-  editor.focus();
-});
+  if (cm) cm.focus(); else editor.focus();
+}
+
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
 document.getElementById('btnProbe').addEventListener('click', () => run('probe'));
-
-// 窄屏「更多」菜单：执行计划 / 清空 在 ≤720px 被藏起来，这里给一条出路。
-(function initMoreMenu() {
-  const btn = document.getElementById('btnMore');
-  const menu = document.getElementById('moreMenu');
-  const setOpen = on => {
-    menu.classList.toggle('hidden', !on);
-    btn.setAttribute('aria-expanded', on ? 'true' : 'false');
-  };
-  btn.addEventListener('click', ev => {
-    ev.stopPropagation();
-    setOpen(menu.classList.contains('hidden'));
-  });
-  menu.addEventListener('click', ev => {
-    const act = ev.target.closest('button')?.dataset.act;
-    if (!act) return;
-    setOpen(false);
-    const target = { explain: 'btnExplain', probe: 'btnProbe', clear: 'btnClear' }[act];
-    if (target) document.getElementById(target).click();
-  });
-  document.addEventListener('click', ev => {
-    if (!menu.classList.contains('hidden') && !ev.target.closest('#moreMenu, #btnMore')) setOpen(false);
-  });
-  document.addEventListener('keydown', ev => {
-    if (ev.key === 'Escape' && !menu.classList.contains('hidden')) setOpen(false);
-  });
-  // 转回宽屏时菜单要收起来，否则按钮回来了、菜单还飘着
-  window.addEventListener('resize', () => {
-    if (window.innerWidth > 720) setOpen(false);
-  });
-})();
-document.getElementById('btnFormat').addEventListener('click', formatSQL);
 // 搜索表名：图标按钮展开输入框，边打边过滤；Esc 收起并清空。
 document.getElementById('btnTableSearch').addEventListener('click', () => {
   const sidebar = document.querySelector('.sidebar');
@@ -6838,6 +6810,11 @@ function openEditorMenu(x, y) {
   tplItem.addEventListener('click', () => openTemplateMenu(tplItem));
   ctxMenu.appendChild(tplItem);
   sep();
+  // 美化 / 历史 / 清空 从工具栏挪到这儿：低频动作不该天天占着工具栏。
+  // 清空放最后第二个 —— 它会造成「刚才那段没了」，不该紧挨着脸熟的位置。
+  add('历史', null, () => openHistoryPanel());
+  add('清空', null, () => clearEditor());
+  sep();
   // 这是「光标离开菜单」的入口：菜单里有执行，会立刻关掉面板，不用先点空白
   add('执行', 'Ctrl+Enter', () => run());
   // 先挪到屏幕外量尺寸再摆位，避免在鼠标处闪一下
@@ -7729,11 +7706,14 @@ function closeHistory() {
   document.getElementById('historyModal').classList.add('hidden');
 }
 
-document.getElementById('btnHistory').addEventListener('click', () => {
+// 从右键菜单打开历史：先把搜索条件清掉，否则上次的关键字还留着，
+// 打开看着像「只剩几条记录」。
+function openHistoryPanel() {
   histQuery = '';
-  document.getElementById('histSearch').value = '';
+  const box = document.getElementById('histSearch');
+  if (box) box.value = '';
   openHistory();
-});
+}
 document.getElementById('histSearch').addEventListener('input', ev => {
   histQuery = ev.target.value;
   openHistory();

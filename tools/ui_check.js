@@ -253,7 +253,7 @@ class CDP {
 
     // 0.1b) 美化 SQL：子句换行 + 关键字大写，字符串里的内容一个字都不能动
     await cdp.eval(`cm.setValue("select id,name from t where a='it''s' and b=1 order by id")`);
-    await cdp.eval(`document.getElementById('btnFormat').click()`);
+    await cdp.eval(`formatSQL()`);
     const fmted = await cdp.eval(`cm.getValue()`);
     check('美化：子句换行 + 关键字大写 + 字符串原样',
       /^SELECT id,/.test(fmted) && /\nFROM t\n/.test(fmted) &&
@@ -262,7 +262,7 @@ class CDP {
 
     // 括号没配对就一个字都不改（宁可不动，也不要吐出半截 SQL 让人再改回去）
     await cdp.eval(`cm.setValue("select * from t where (a = 1")`);
-    await cdp.eval(`document.getElementById('btnFormat').click()`);
+    await cdp.eval(`formatSQL()`);
     const broken = await cdp.eval(`cm.getValue()`);
     check('美化：括号不配对时保持原样', broken === 'select * from t where (a = 1', JSON.stringify(broken));
 
@@ -2123,7 +2123,7 @@ class CDP {
         { sql: 'SELECT count(*) FROM t_hist_b', at: 2000 },
       ];
       localStorage.setItem(k, JSON.stringify(seed));
-      document.getElementById('btnHistory').click();
+      openHistoryPanel();
       const total = document.querySelectorAll('#historyBody .hist-item').length;
       const i = document.getElementById('histSearch');
       i.value = 'hist_b';
@@ -2352,10 +2352,34 @@ class CDP {
         inView: b.right <= window.innerWidth + 1 && b.bottom <= window.innerHeight + 1,
       };
     })()`);
-    // 7 项：剪切 / 复制 / 粘贴 / 全选 / 美化 / 插入 SQL 模板 / 执行（模板那一项另有专门断言）
-    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/模板/执行）',
-      ctx.prevented && ctx.open && ctx.items.length === 7 && ctx.seps === 3 && ctx.inView,
+    // 9 项：剪切/复制/粘贴/全选/美化/插入 SQL 模板/历史/清空/执行（模板那项另有专门断言）
+    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/模板/历史/清空/执行）',
+      ctx.prevented && ctx.open && ctx.items.length === 9 && ctx.seps === 4 && ctx.inView,
       ctx.items.join(' · '));
+
+    // 美化 / 历史 / 清空 从工具栏搬进右键菜单：工具栏只剩执行计划和执行探测。
+    const toolbar = await cdp.eval(`({
+      format: !!document.getElementById('btnFormat'),
+      history: !!document.getElementById('btnHistory'),
+      clear: !!document.getElementById('btnClear'),
+      probe: (document.getElementById('btnProbe') || {}).textContent,
+    })`);
+    check('工具栏只剩「执行计划 / 执行探测」',
+      !toolbar.format && !toolbar.history && !toolbar.clear && toolbar.probe === '执行探测',
+      JSON.stringify(toolbar));
+
+    // 右键里的「清空」要真的清空。以前工具栏那颗改的是隐藏的 textarea，
+    // CodeMirror 会把自己的内容同步回去，看着像「点了没反应」。
+    await cdp.eval(`(() => {
+      cm.setValue('SELECT 1');
+      openEditorMenu(40, 40);
+      [...document.querySelectorAll('#ctxMenu .ctx-item')]
+        .find(x => x.textContent.trim() === '清空').click();
+    })()`);
+    await sleep(250);
+    check('右键「清空」真的清空（CodeMirror 下也生效）',
+      await cdp.eval(`cm.getValue() === ''`),
+      JSON.stringify(await cdp.eval(`cm.getValue()`)));
 
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 });
     await sleep(250);
@@ -2555,7 +2579,7 @@ class CDP {
         })(),
       };
     })()`);
-    check('探测执行给出算子账本（不是 QUERY PLAN 文本表格）',
+    check('执行探测给出算子账本（不是 QUERY PLAN 文本表格）',
       probe.rows >= 4 && probe.tab.includes('探测结果'),
       `${probe.rows} 行 · tab=${probe.tab}`);
     check('探测里每一步都有行数，不只最底下那行',
@@ -2624,7 +2648,7 @@ class CDP {
       rows: document.querySelectorAll('.probe-row').length,
       tab: [...document.querySelectorAll('.result-tab')].map(b => b.textContent).join(','),
     })`);
-    check('普通执行不会串到探测视图',
+    check('普通执行不会串到执行探测视图',
       noProbe.rows === 0 && !noProbe.tab.includes('探测结果'), `tab=${noProbe.tab}`);
 
     const bad = results.filter(r => !r.ok);

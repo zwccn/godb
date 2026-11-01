@@ -622,8 +622,15 @@ class CDP {
       `${spUi.heads.length} 列 · 末列「${vacText}」· 全部 ${JSON.stringify(spUi.vacAll)}`);
 
     await cdp.eval(`document.querySelector('#spaceBody tr').click()`);
-    await waitFor(cdp, `(() => { const d = document.getElementById('spaceDetail');
-      return !!d && !d.classList.contains('hidden'); })()`, { label: '页级构成展开' });
+    // 注意：点一下只让面板「先打开」，页级构成是**随后**逐页扫出来的，
+    // 中间会显示「正在逐页统计…」。只等「面板可见」会在扫描没跑完时就去量，
+    // 拿到 0 段 0 图例（实测踩过 —— 面板先开、内容后填）。
+    await waitFor(cdp, `(() => {
+      const d = document.getElementById('spaceDetail');
+      if (!d || d.classList.contains('hidden')) return false;
+      return d.querySelectorAll('.space-dbar .space-dseg').length === 3 &&
+        /VACUUM/.test(d.textContent);
+    })()`, { label: '页级构成扫完（3 段 + 回收建议）' });
     await settle(cdp);
     const spDet = await cdp.eval(`(() => {
       const d = document.getElementById('spaceDetail');

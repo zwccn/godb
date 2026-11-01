@@ -283,14 +283,77 @@ func (s *Store) FsyncProfile() FsyncProfile {
 //
 // 只读文件头附近的信息（os.Stat），不读内容——未加载的表也不需要把行读进内存。
 // 表还没落过盘（只有 WAL 里有）时 Bytes 为 0。
+//
+// 加锁分三段，**不嵌套**（顺序：loadMu → 放掉 → CommitMu → 放掉 → 没有任何锁）：
+//
+//	1. loadMu.RLock：读 s.Data / loaded / tableRows / tableFree / tableVac 这些 map，
+//	   顺手把已加载表的 *TableData 指针抄出来（map 读必须持锁，否则并发写会 panic）。
+//	2. CommitMu.Lock：只读第 1 步抄出来的那些 td 的 Live / pages —— 它们由提交、
+//	   VACUUM、重写在 CommitMu 下改，和 loadMu 不是一个锁。
+//	3. 无锁：os.Stat 各文件、算页数与密度。文件 IO 绝不能放在锁里（这套诊断的
+//	   基本原则），也不需要在锁里 —— 文件大小本来就和内存状态无关。
+//
+// 为什么第 2 步必须存在：以前这里只持 loadMu 就读 td.Live / td.pages.freeBytes()，
+// 而提交路径是「schema 读锁 + CommitMu」下 `td.Live++` 的。两个读锁互不排斥，于是
+// 一边在提交、一边在轮询监控，就是一个数据竞争：轻则 -race 报红（本地没装 gcc
+// 跑不了 -race，所以一直没被发现），重则 freeBytes() 读到正在被改的空闲空间图，
+// 监控接口 panic 一回 500 —— 前端只显示「加载失败」，没有任何线索。
 func (s *Store) TableSizes() []TableSize {
 	if s.Cat == nil {
 		return nil
 	}
-	out := make([]TableSize, 0, len(s.Cat.Tables))
+	tables := s.Cat.Tables
+
+	// 1) map 侧（loadMu）
+	type memSnap struct {
+		td    *TableData // 已加载：第 2 步再去读它的字段；未加载为 nil
+		rows  int
+		free  int64
+		vac   vacuumTimes
+		vacOK bool
+	}
+	snaps := make([]memSnap, len(tables))
 	s.loadMu.RLock()
-	for _, t := range s.Cat.Tables {
+	for i, t := range tables {
 		key := cleanName(t.Name)
+		// 整理时间是「这张表上次被 VACUUM 的时刻」，和加载状态无关 —— 必须每张都读。
+		snaps[i].vac, snaps[i].vacOK = s.tableVac[key]
+		if td := s.Data[key]; td != nil && s.loaded[key] {
+			snaps[i].td = td
+			continue
+		}
+		snaps[i].rows = s.tableRows[key]
+		snaps[i].free = s.tableFree[key]
+	}
+	s.loadMu.RUnlock()
+
+	// 2) 内存态（CommitMu）。注意这里只碰第 1 步抄下来的指针，不再碰 map，
+	//    所以不需要也不能再取 loadMu（避免形成 loadMu ↔ CommitMu 的嵌套）。
+	has := false
+	for i := range snaps {
+		if snaps[i].td != nil {
+			has = true
+			break
+		}
+	}
+	if has {
+		s.CommitMu.Lock()
+		for i := range snaps {
+			td := snaps[i].td
+			if td == nil {
+				continue
+			}
+			snaps[i].rows = td.Live // 真实行数（槽位数组可能带空槽，不能数长度）
+			if td.pages != nil {
+				snaps[i].free = td.pages.freeBytes()
+			}
+		}
+		s.CommitMu.Unlock()
+	}
+
+	// 3) 文件（无锁）
+	out := make([]TableSize, 0, len(tables))
+	for i, t := range tables {
 		ts := TableSize{Name: t.Name}
 		if st, err := os.Stat(tablePagePath(s.Dir, t.ID)); err == nil {
 			ts.Bytes = st.Size()
@@ -309,30 +372,24 @@ func (s *Store) TableSizes() []TableSize {
 				})
 			}
 		}
-		loadedNow := false
-		if td := s.Data[key]; td != nil && s.loaded[key] {
-			loadedNow = true
-			ts.Rows = td.Live
-			if td.pages != nil {
-				ts.Pages = int(td.pages.pageCount())
-				ts.FreeBytes = td.pages.freeBytes()
-			}
-		} else {
-			ts.Rows = s.tableRows[key]
-			ts.FreeBytes = s.tableFree[key]
+		loadedNow := snaps[i].td != nil
+		ts.Rows = snaps[i].rows
+		ts.FreeBytes = snaps[i].free
+		if loadedNow && snaps[i].td.pages != nil {
+			ts.Pages = int(snaps[i].td.pages.pageCount())
 		}
 		// 未加载的表按文件大小算页数：meta 里的 pages 只在「这张表被写过」的那轮
 		// 落盘更新，一直干净的表会永远报旧值（VACUUM FULL 换过文件尤其明显）。
 		if !loadedNow && ts.Bytes > 0 {
 			ts.Pages = int(ts.Bytes / PageSize)
 		}
-		if v, ok := s.tableVac[key]; ok {
-			ts.VacuumAt, ts.RewriteAt = v.At, v.Full
+		if snaps[i].vacOK {
+			ts.VacuumAt, ts.RewriteAt = snaps[i].vac.At, snaps[i].vac.Full
 		}
 		// 空闲字节从哪来：加载过的表实时算，没加载的只能信 meta 里上次记的值。
 		// meta 里没有（=0）说明这张表还没被这一版落过盘，密度算不出来 —— 不能当成
 		// 「一点空闲都没有」，否则一张从没打开过的表会报 100% 满。
-		ts.FillKnown = (loadedNow && ts.Pages > 0) || (!loadedNow && s.tableFree[key] > 0)
+		ts.FillKnown = (loadedNow && ts.Pages > 0) || (!loadedNow && snaps[i].free > 0)
 		if ts.FillKnown && ts.Pages > 0 {
 			capacity := float64(ts.Pages) * PageSize
 			ts.Fill = 1 - float64(ts.FreeBytes)/capacity
@@ -346,7 +403,6 @@ func (s *Store) TableSizes() []TableSize {
 		}
 		out = append(out, ts)
 	}
-	s.loadMu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Bytes > out[j].Bytes })
 	return out
 }

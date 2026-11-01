@@ -585,7 +585,7 @@ body {
   padding: 8px 8px 16px;
 }
 
-.empty-hint, .welcome-tip { color: var(--text-3); font-size: calc(12px * var(--fs)); }
+.empty-hint { color: var(--text-3); font-size: calc(12px * var(--fs)); }
 
 .table-node {
   border-radius: 6px;
@@ -1113,18 +1113,17 @@ body {
   margin-bottom: 8px;
   color: var(--text);
 }
-.welcome p { margin: 0 0 6px; color: var(--text-2); font-size: calc(12.5px * var(--fs)); }
 
 /* 欢迎页的「试试这些」：以前示例只藏在帮助弹窗里，第一次打开面对空白只能瞎写。
-   点击只填编辑器、不自动执行（在别人的库上误跑一条 UPDATE 就麻烦了）。 */
+   点击只填编辑器、不自动执行（在别人的库上误跑一条 UPDATE 就麻烦了）。
+   空态现在只有「准备就绪」一行标题 + 这排 chip，不再跟一段说明，所以
+   标题与 chip 之间不需要虚线分隔，贴紧一点反而更像一个整体。 */
 .welcome-quick {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--border-soft);
+  margin-top: 10px;
 }
 .quick-label {
   flex: 0 0 100%;
@@ -1148,16 +1147,6 @@ body {
   border-color: var(--accent);
   background: var(--accent-soft-bg);
 }
-.welcome code {
-  font-family: var(--mono);
-  font-size: calc(11.5px * var(--fs));
-  background: var(--bg-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
-  padding: 1px 5px;
-  color: var(--accent-soft-text);
-}
-
 .result-card {
   border: 1px solid var(--border);
   border-radius: 8px;

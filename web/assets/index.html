@@ -153,9 +153,10 @@ try {
       <div id="resultTabs" class="result-tabs hidden" role="tablist" aria-label="执行结果"></div>
       <div id="resultPane" class="result-pane">
         <div class="welcome">
+          <!-- 空态只留一句话的标题 + 一排可点的示例。
+               原来这里还有两段说明（表结构怎么用、数据文件落在哪），每天打开都看一遍，
+               而且左侧表树、帮助弹窗、README 里都写着同样的事 —— 删掉。 -->
           <div class="welcome-title">准备就绪</div>
-          <p>左侧是表结构，点击表名可快速查询。支持多语句（用 <code>;</code> 分隔），每条语句的结果在下方 <code>结果 N</code> 里各占一个 tab，执行的细节都收在 <code>信息</code> 里。</p>
-          <p class="welcome-tip">数据落在工作目录的 <code>godb-data/</code>：<code>catalog.json</code> 表结构、<code>meta.json</code> 落盘进度、<code>tables/t&lt;ID&gt;.dat</code> 表数据页（同目录的 <code>.lob</code> 是大字段、<code>.idx</code> 是索引）、<code>wal.log</code> 提交日志。落盘节奏与端口在右上角「设置」里改。</p>
           <!-- 快速开始：示例 SQL 以前只在帮助弹窗里，第一次打开只能自己瞎写 -->
           <div class="welcome-quick" id="welcomeQuick">
             <span class="quick-label">试试这些（点一下填进编辑器，不会自动执行）：</span>

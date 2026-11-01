@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"godb/catalog"
+	"godb/hrtime"
 	"godb/sql"
 	"godb/storage"
 	"godb/syscat"
@@ -32,8 +33,14 @@ type Result struct {
 	Affected int             `json:"affected"`
 	Plan     []string        `json:"plan,omitempty"`
 	// PlanTree 是 Plan 的结构化版本（每个算子的行数/轮次/独占耗时）。
-	// 只有 EXPLAIN 结果才带；「探测执行」用它画「哪一步最贵」。
+	// 只有 EXPLAIN ANALYZE 结果才带；「执行探测」用它画「哪一步最贵」。
 	PlanTree *PlanNode `json:"planTree,omitempty"`
+	// PlanNs 是「规划」耗时：解析表达式、挑索引、把算子树搭起来。
+	//
+	// 它包含在 TookNs 里，却**不在** PlanTree 的任何节点上 —— 算子的计时从 Open()
+	// 才开始。所以「服务端 221 µs、执行 204 µs，但每一步加起来才 26 µs」的那段差额，
+	// 大头就在这里（实测：5 万行表 LIMIT 100，规划 130~140 µs，真执行 28 µs）。
+	PlanNs int64 `json:"planNs,omitempty"`
 	// Phases 是 TookNs 的去向（装载 / 等锁 / 执行 / 收尾）。由 db 层填。
 	// 光有总算时会出一桩悬案：EXPLAIN ANALYZE 里每一步都不到 1ms，
 	// 服务端却说花了 19ms —— 那 19ms 在算子树之外，必须单独报出来。
@@ -183,7 +190,12 @@ const (
 )
 
 func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*Result, error) {
+	// 规划单独计时。选索引、编译表达式、搭算子树都在这一步完成，而算子的
+	// begin/done 要等 Open() 才开始 —— 不单独记，「执行 204 µs / 每步 26 µs」
+	// 那 178 µs 的差额在界面上就没人认领。
+	t0 := hrtime.Now()
 	plan, err := e.planner(tx).BuildSelect(s)
+	planNs := hrtime.Since(t0)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +231,7 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 			RowCount: len(rows),
 			Plan:     planText,
 			PlanTree: tree,
+			PlanNs:   planNs,
 		}, nil
 	}
 
@@ -258,6 +271,7 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 		Rows:     rows,
 		RowCount: len(rows),
 		Plan:     ExplainPlan(plan),
+		PlanNs:   planNs,
 	}, nil
 }
 

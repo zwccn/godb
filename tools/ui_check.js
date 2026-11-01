@@ -2685,12 +2685,29 @@ class CDP {
         segs: [...box.querySelectorAll('.probe-phase-bar i')].length,
       };
     })()`);
-    check('探测卡给出「时间去向」：装载 / 等锁 / 执行 / 收尾',
-      !!phase && /执行/.test(phase.text) && phase.segs >= 1,
-      phase ? phase.text.slice(0, 70) : '没有分段');
+    // 「执行」必须拆成 规划 / 执行 / 整理输出 三段：不拆的话条上写「执行 204 µs」，
+    // 而下面的算子各行加起来只有 26 µs —— 那 178 µs 在规划里，却没人认领。
+    check('探测卡给出「时间去向」：等锁 / 规划 / 执行 / 整理输出 / 收尾',
+      !!phase && /规划/.test(phase.text) && /执行/.test(phase.text) &&
+        /整理输出/.test(phase.text) && phase.segs >= 3,
+      phase ? phase.text.slice(0, 90) : '没有分段');
     check('表已在内存时不该出现「装载表」那一段',
       !!phase && !/装载表/.test(phase.text),
       phase ? phase.text.slice(0, 50) : '');
+
+    // 规划占大头时给一句解释。用「轻查询」来复现：扫 100 行、执行几十微秒，
+    // 规划那一两百微秒就成了大头（聚合那种 ms 级查询反而看不到这句）。
+    await cdp.eval(`cm.setValue('SELECT * FROM big_demo LIMIT 100')`);
+    await cdp.eval(`document.getElementById('btnProbe').click()`);
+    await sleep(2500);
+    const planHint = await cdp.eval(`(() => {
+      const box = document.querySelector('.probe-phases');
+      const items = box ? [...box.querySelectorAll('.probe-phase-item')].map(x => x.textContent) : [];
+      const h = [...document.querySelectorAll('.probe-phase-hint')].map(x => x.textContent).join(' ');
+      return { items, has: /规划/.test(h), txt: h.slice(0, 90) };
+    })()`);
+    check('规划占大头时解释一句「时间花在规划上」',
+      planHint.has, planHint.items.join(' · ') || '没有分段');
 
     /* 探测说明默认收起：那几句每次执行都一样，常驻会把卡片撑高三行。
        点右上角的「?」才展开，再点收起。 */

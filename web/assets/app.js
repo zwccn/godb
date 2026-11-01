@@ -1302,10 +1302,22 @@ function probePanel(data) {
 function probePhaseBar(r) {
   const ph = r.phases;
   if (!ph) return null;
+  // execNs 是「规划 + 跑算子 + 整理输出」的总和。不拆开就会出现
+  // 「执行 204 µs，可每一步加起来才 26 µs」—— 那 178 µs 全在规划和渲染里，
+  // 而这两件事的优化方向和「跑得慢」完全不同。
+  const execAll = ph.execNs || 0;
+  const planNs = r.planNs || 0;
+  // 「执行」直接用算子树的合计：这样条上的执行段与下面每一行严格对得上
+  // （否则又会出现「执行 204 µs，各行加起来 26 µs」的对不上账）。
+  const runNs = (r.planTree && r.planTree.totalNs) || 0;
+  // 剩下的是「整理输出」：渲染 EXPLAIN 文本、建统计树 —— 探测自身的开销。
+  const tailNs = Math.max(0, execAll - planNs - runNs);
   const segs = [
     { cls: 'load', label: '装载表', ns: ph.loadNs || 0 },
     { cls: 'lock', label: '等锁', ns: ph.lockNs || 0 },
-    { cls: 'exec', label: '执行', ns: ph.execNs || 0 },
+    { cls: 'plan', label: '规划', ns: planNs },
+    { cls: 'exec', label: '执行', ns: runNs },
+    { cls: 'explain', label: '整理输出', ns: tailNs },
     { cls: 'end', label: '收尾', ns: ph.endNs || 0 },
   ].filter(s => s.ns > 0);
   const total = segs.reduce((a, s) => a + s.ns, 0);
@@ -1335,6 +1347,17 @@ function probePhaseBar(r) {
     legend.appendChild(item);
   }
   box.appendChild(legend);
+
+  // 规划占执行阶段的大头时点一句。这是最容易被误读的一段：
+  // 看着「执行 204 µs」以为查询慢，其实算子在跑的时间只有几十微秒。
+  if (planNs > 0 && execAll > 0 && planNs >= 20000 && planNs * 100 / execAll >= 40) {
+    const pct = Math.round(planNs * 100 / execAll);
+    box.appendChild(el('div', 'probe-phase-hint',
+      '这一条的时间大头在「规划」（' + fmtDur(planNs) + '，占执行阶段的 ' + pct
+      + '%）：挑索引、编译条件、把算子树搭起来，这些都发生在第一个算子开始跑之前。'
+      + (runNs > 0 ? '真正跑算子只用了 ' + fmtDur(runNs) + '。' : '')
+      + '两者要分开看：规划贵通常是表/索引多、条件复杂；执行贵才是数据量或索引没走对。'));
+  }
 
   if (ph.loadNs > 0) {
     const io = ph.loadIoNs || 0;

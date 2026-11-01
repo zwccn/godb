@@ -225,6 +225,11 @@ try {
 
   <div class="mon-body" id="monBody">
     <div class="mon-page" data-page="overview">
+      <!-- 0. 结论：一句话 + 三个数字 + 一句建议。
+           下面的水位条是给「知道自己在看什么」的人看的；第一次打开的人需要先知道
+           「有没有事、要不要动手」，所以结论放最上面，明细往下沉。 -->
+      <section class="mon-card mon-verdict" id="monVerdict" aria-live="polite"></section>
+
       <!-- 1. 水位条：一排数字 + 健康灯。绿灯不用往下看。 -->
       <div class="mon-water" id="monWater"></div>
 

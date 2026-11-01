@@ -465,6 +465,42 @@ class CDP {
     })()`);
     // 顺序是「排查时先看哪个」：诊断紧跟概览（健康灯一亮就在这儿找原因），
     // 存储排在它后面（确认是磁盘问题才去），空间地图最后。
+    /* 概览第一块是「结论」：一句话 + 三个数字 + 有才出现的建议。
+       目的是让第一次打开的人不用先读懂水位/P95 那一排，就知道「有没有事」。 */
+    const vdOk = await cdp.eval(`(() => {
+      const b = document.getElementById('monVerdict');
+      const page = document.querySelector('.mon-page[data-page="overview"]');
+      return {
+        first: page.firstElementChild === b,
+        title: (b.querySelector('.vd-title') || {}).textContent || '',
+        stats: b.querySelectorAll('.vd-stat').length,
+        advice: b.querySelectorAll('.vd-adv').length,
+        level: b.dataset.level,
+      };
+    })()`);
+    // 建议行不是「正常就一定没有」：跑过测试之后慢查询记录里总会有几条，
+    // 所以这里只断言「最多两条」和结构，具体文案在下面那条里造数据验。
+    check('概览第一块是结论卡：一句结论 + 三个数字（建议最多两条）',
+      vdOk.first && /运行正常|有点忙|有点撑不住/.test(vdOk.title) && vdOk.stats === 3
+      && vdOk.advice <= 2 && vdOk.level === 'green',
+      `${vdOk.title} · ${vdOk.stats} 个数字 · 建议 ${vdOk.advice} 条 · ${vdOk.level}`);
+
+    // 造一个「有排队 + 有慢查询」的状态：建议行必须出现，且按钮真的能跳到对应 Tab
+    const vdBusy = await cdp.eval(`(() => {
+      renderVerdict({ water: { exec: 6, execMax: 32, wait: 2, queue: 3, level: 'yellow' },
+        layers: { running: { count: 6, maxNs: 2600000000 } }, slowSql: [{ n: 4 }, { n: 5 }] });
+      const b = document.getElementById('monVerdict');
+      const rows = [...b.querySelectorAll('.vd-adv')].map(r => r.textContent);
+      b.querySelectorAll('.vd-adv button')[0].click();
+      return { level: b.dataset.level, rows, page: monPageTab, tab: monTab };
+    })()`);
+    check('忙的时候给出建议动作，按钮直接跳到诊断的对应 Tab',
+      vdBusy.level === 'yellow' && vdBusy.rows.length === 2
+      && /排队/.test(vdBusy.rows[0]) && /慢查询/.test(vdBusy.rows[1])
+      && vdBusy.page === 'diag' && vdBusy.tab === 'lock',
+      `${vdBusy.level} · ${vdBusy.rows.join(' | ')} → ${vdBusy.page}/${vdBusy.tab}`);
+    await cdp.eval(`setMonPage('overview')`);
+
     check('监控顶部有页面级 Tab（概览 / 诊断 / 存储 / 空间地图），默认概览',
       navUi.n === 4 && navUi.labels.join('/') === '概览/诊断/存储/空间地图' && navUi.on === 'overview',
       navUi.labels.join(' / ') + ' · 当前 ' + navUi.on);

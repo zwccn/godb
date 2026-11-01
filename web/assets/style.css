@@ -4232,3 +4232,67 @@ html[data-theme="steel"] .ctx-menu {
   font-size: calc(11.5px * var(--fs));
   line-height: 1.5;
 }
+
+/* ---------- 概览：结论卡 ----------
+   概览页最上面那块。它只回答三件事：有没有事、现在多忙、要不要动手。
+   下面的水位条 / 三层 / 曲线一个都不删 —— 它们是「详情」，结论卡负责让人不用先读懂它们。 */
+.mon-verdict { padding: 12px 14px; }
+.vd-head { display: flex; align-items: center; gap: 10px; }
+.vd-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--ok-text);
+}
+/* 光晕用 rgba 而不是 --tint-*：那套变量是给大面积底色用的（透明度很低），
+   套在这三个 9px 的点上会看不见。 */
+.vd-dot.green { background: var(--ok-text); box-shadow: 0 0 0 3px rgba(63, 185, 80, .16); }
+.vd-dot.yellow { background: var(--warn-text); box-shadow: 0 0 0 3px rgba(217, 164, 65, .16); }
+.vd-dot.red { background: var(--danger-text); box-shadow: 0 0 0 3px rgba(240, 97, 109, .18); }
+.vd-headtext { min-width: 0; }
+.vd-title { font-size: calc(14px * var(--fs)); font-weight: 600; color: var(--text); }
+.vd-sub { margin-top: 1px; font-size: calc(11.5px * var(--fs)); color: var(--text-3); }
+
+/* 三个数字：一眼扫完就够，不必再往下看 */
+.vd-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.vd-stat {
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--bg-2);
+}
+.vd-v {
+  font-family: var(--mono);
+  font-size: calc(17px * var(--fs));
+  line-height: 1.2;
+  color: var(--text);
+}
+.vd-k { margin-top: 1px; font-size: calc(11px * var(--fs)); color: var(--text-2); }
+.vd-n { margin-top: 1px; font-size: calc(10.5px * var(--fs)); color: var(--text-3); }
+
+/* 建议动作：正常的时候一条都没有，所以它出现就说明「确实有事」 */
+.vd-advice { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.vd-adv {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--warn-text);
+  border-radius: 6px;
+  background: var(--bg-2);
+}
+.vd-advtext { flex: 1 1 auto; min-width: 0; font-size: calc(11.5px * var(--fs)); color: var(--text-2); }
+
+@media (max-width: 720px) {
+  /* 窄屏三列会挤成一根竖条，改成两行 */
+  .vd-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .vd-v { font-size: calc(15px * var(--fs)); }
+  .vd-stat { padding: 6px 8px; }
+}

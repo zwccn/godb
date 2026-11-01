@@ -1693,6 +1693,7 @@ function renderSchema(tables) {
 
 const monPanel = document.getElementById('monPanel');
 const monEls = {
+  verdict: document.getElementById('monVerdict'),
   water: document.getElementById('monWater'),
   layers: document.getElementById('monLayers'),
   lockBody: document.getElementById('monLockBody'),
@@ -2087,6 +2088,7 @@ function syncTopDot() {
 function renderMonitor(m) {
   monEls.db.textContent = m.water.db || '';
   monEls.updated.textContent = new Date(m.nowMs || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
+  renderVerdict(m);
   renderWater(m.water || {});
   renderLayers(m.layers || {});
   renderRates(m);
@@ -2104,6 +2106,82 @@ function renderMonitor(m) {
   } else {
     updateDiagSub();
   }
+}
+
+/* ---- 0. 结论卡 ----
+   概览页原来一上来就是「水位 / 执行槽位 0/32 / 等锁 0 / P95 …」，全是数字。
+   看得懂的人当然看得懂，但第一次打开的人要自己判断「这算正常吗」。
+   这一块只回答三个问题：有没有事、现在多忙、要不要动手。 */
+
+function renderVerdict(m) {
+  const box = monEls.verdict;
+  if (!box) return;
+  const w = m.water || {};
+  const run = (m.layers || {}).running || {};
+  const exec = w.exec || 0;
+  const execMax = w.execMax > 0 ? w.execMax : 0;
+  const waiting = (w.wait || 0) + (w.queue || 0);
+  const slowN = (m.slowSql || []).reduce((s, x) => s + (x.n || 0), 0);
+  const longest = run.maxNs || 0;
+
+  // 结论只跟健康灯走：yellow = 有排队/等锁，red = 已经顶到上限。
+  const lvl = w.level === 'red' ? 'red' : (w.level === 'yellow' ? 'yellow' : 'green');
+  const title = lvl === 'red' ? '有点撑不住了' : (lvl === 'yellow' ? '有点忙' : '运行正常');
+  const sub = lvl === 'green'
+    ? '没人排队、没人在等锁，下面这些数字可以不用管'
+    : '先看「诊断」——那里能回答「谁在挡谁」';
+
+  box.innerHTML = '';
+  const head = el('div', 'vd-head');
+  head.appendChild(el('span', 'vd-dot ' + lvl));
+  const ht = el('div', 'vd-headtext');
+  ht.appendChild(el('div', 'vd-title', title));
+  ht.appendChild(el('div', 'vd-sub', sub));
+  head.appendChild(ht);
+  box.appendChild(head);
+
+  const stats = el('div', 'vd-stats');
+  const stat = (label, value, note) => {
+    const c = el('div', 'vd-stat');
+    c.appendChild(el('div', 'vd-v', value));
+    c.appendChild(el('div', 'vd-k', label));
+    c.appendChild(el('div', 'vd-n', note));
+    stats.appendChild(c);
+  };
+  stat('正在执行', String(exec), execMax ? `上限 ${execMax}` : '不限并发');
+  stat('等锁 / 排队', String(waiting), waiting ? '有人被挡住了' : '没人等');
+  // 「最久一条」比 P95 更直白：它回答的是「有没有一条已经跑很久了」
+  stat('最久一条', longest > 0 ? fmtTook(longest) : '—',
+    run.count ? `在跑 ${run.count} 条` : '现在没有语句在跑');
+  box.appendChild(stats);
+
+  // 建议动作：最多两条，没有就不出现 —— 正常的时候不该有按钮在勾人去点
+  const advice = [];
+  if ((w.queue || 0) > 0) {
+    advice.push({ text: `有 ${w.queue} 条在排队等执行槽位`, tab: 'lock', btn: '看锁明细' });
+  } else if ((w.wait || 0) > 0) {
+    advice.push({ text: `有 ${w.wait} 个事务在等锁`, tab: 'lock', btn: '看锁明细' });
+  }
+  if (slowN >= 3) {
+    advice.push({ text: `记录了 ${slowN} 条慢查询，可以看看是哪几条`, tab: 'sql', btn: '看慢 SQL' });
+  }
+  if (advice.length) {
+    const wrap = el('div', 'vd-advice');
+    for (const a of advice.slice(0, 2)) {
+      const row = el('div', 'vd-adv');
+      row.appendChild(el('span', 'vd-advtext', a.text));
+      const b = el('button', 'space-rescan', a.btn);
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        setMonPage('diag');
+        setMonTab(a.tab, true);
+      });
+      row.appendChild(b);
+      wrap.appendChild(row);
+    }
+    box.appendChild(wrap);
+  }
+  box.dataset.level = lvl;
 }
 
 /* ---- 1. 水位条 ---- */

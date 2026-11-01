@@ -2820,7 +2820,47 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 /* 高度固定：五组内容差得多（外观 300 出头、性能近 700），跟着内容走的话切 Tab 窗口就忽大忽小。
    打开时 JS（lockSettingsHeight）按最高的一组精确设定；这条兜底保证没跑到 JS 时也是固定的。
    系数是拿默认字号实测的：固定部分约 172px（标题栏 + Tab 条 + 底栏 + 边框），内容随 --fs 缩放。 */
-.modal-card.set-win { height: min(calc(172px + 430px * var(--fs)), calc(100vh - 80px)); }
+/* 设置页：复用 .mon 的全屏骨架（fixed + 顶栏 + 正文），只是正文限宽居中。
+   原来是 .modal-card.set-win 居中弹窗，高度得用公式钉死；成了页面之后，
+   高度天然恒定，切 Tab 不再跳，也不用再算「最高的一组有多高」。 */
+.set-page .set-body {
+  flex: 1 1 auto;
+  min-height: 0;      /* 没有它，内容超长时这个 flex 子项会撑破容器、滚不动 */
+  overflow-y: auto;
+}
+.set-page .set-inner {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 10px 20px 26px;
+}
+
+/* 底栏也限宽对齐正文：满宽时「保存并应用」会飘到屏幕最右边，离内容半米远 */
+.set-page .set-foot {
+  padding: 0;
+  background: var(--bg-1);
+}
+.set-page .set-foot-in {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 11px 20px;
+}
+.set-page .set-foot-in .modal-hint { flex: 0 1 auto; }
+.set-page .set-foot-gap { flex: 1 1 auto; }
+.set-page .set-foot-in .btn { flex: 0 0 auto; }
+
+/* 窄屏：标题里那句「配置文件在哪」不是当场必须看的，先让位给「设置」二字；
+   正文与底栏的左右留白也收窄，否则 390px 上内容只剩 300 出头。 */
+@media (max-width: 720px) {
+  .set-page .mon-title .mon-updated { display: none; }
+  .set-page .set-inner { padding: 8px 12px 20px; }
+  .set-page .set-foot-in { padding: 10px 12px; }
+  .set-page .set-foot-in .modal-hint { font-size: calc(11px * var(--fs)); }
+}
 
 /* 五组横排：连接 / 安全 / 性能 / 外观 / 数据。窄屏横向滚动，不换行、不折成两排。 */
 .set-tabs {

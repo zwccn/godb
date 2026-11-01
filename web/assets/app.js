@@ -531,8 +531,6 @@ function resetCard(card) {
   card.dataset.framed = '0';
   delete card.dataset.userSize;
   card.classList.remove('framed', 'dragging', 'resizing');
-  // 设置窗的高度是量出来的（见 lockSettingsHeight）：复位把 inline 高度清掉了，得重新量
-  if (card.classList.contains('set-win')) lockSettingsHeight();
 }
 
 // startDrag 抓标题栏拖动。用 pointer 事件 + setPointerCapture：
@@ -581,7 +579,7 @@ function startResize(card, ev) {
   card.style.height = r.height + 'px';
   card.style.maxWidth = 'none';
   card.style.maxHeight = 'none';
-  // 手动改过尺寸：以后打开设置不再按内容重新量高度（见 lockSettingsHeight）
+  // 手动改过尺寸：以后打开这个弹窗就保持这个大小，不再按内容重算
   card.dataset.userSize = '1';
   const grip = ev.currentTarget;
   card.classList.add('resizing');
@@ -2134,15 +2132,26 @@ if (monEls.sort) {
 
 // 顶栏两个入口反映「当前在哪」：在编辑器亮「首页」，看监控亮「监控」。
 // 和页面级 Tab 用的是同一个选中底色，不另造一套视觉语言。
+// 顶栏三颗是「你在哪一页」：首页（编辑器）/ 监控 / 设置，同一时刻只亮一颗。
 function syncTopNav() {
   const home = document.getElementById('btnHome');
   const mon = document.getElementById('btnMonitor');
-  if (home) home.classList.toggle('on', !monOpen);
+  const set = document.getElementById('btnSettings');
+  const setOpen = !settingsPanel.classList.contains('hidden');
+  if (home) home.classList.toggle('on', !monOpen && !setOpen);
   if (mon) mon.classList.toggle('on', monOpen);
+  if (set) set.classList.toggle('on', setOpen);
 }
 
 function toggleMonitor(force) {
-  monOpen = force === undefined ? !monOpen : force;
+  const want = force === undefined ? !monOpen : force;
+  // 设置和监控是同级页面，不能叠在一起（两层都是 fixed 覆盖全屏）。
+  // 有未保存改动时 closeSettings 会问一句，用户选「不关」就放弃这次切换。
+  if (want && !settingsPanel.classList.contains('hidden')) {
+    closeSettings();
+    if (!settingsPanel.classList.contains('hidden')) return;
+  }
+  monOpen = want;
   monPanel.classList.toggle('hidden', !monOpen);
   document.body.classList.toggle('mon-open', monOpen);
   if (monOpen) pollMonitor();
@@ -5496,7 +5505,7 @@ document.getElementById('btnHome').addEventListener('click', () => {
   // 「首页」= 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
   // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
   toggleMonitor(false);
-  if (!settingsModal.classList.contains('hidden')) {
+  if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
     return;
   }
@@ -5811,7 +5820,7 @@ editorEl.addEventListener('input', onEditorChange);
 
 /* ---------------- 设置（落盘节奏 / 端口 / 密码） ---------------- */
 
-const settingsModal = document.getElementById('settingsModal');
+const settingsPanel = document.getElementById('settingsPanel');
 const settingsBody = document.getElementById('settingsBody');
 const settingsHint = document.getElementById('settingsHint');
 let settingsData = null;
@@ -5830,7 +5839,14 @@ function fmtBytes(n) {
 }
 
 async function openSettings() {
-  settingsModal.classList.remove('hidden');
+  // 设置和监控是同级页面：开一个就收另一个，别让两层 fixed 叠着。
+  // 顺序有讲究 —— 先收监控（它没有未保存状态），再显示设置。
+  toggleMonitor(false);
+  settingsPanel.classList.remove('hidden');
+  const dbTag = document.getElementById('settingsDB');
+  const sel = document.getElementById('dbSelect');
+  if (dbTag && sel && sel.value) dbTag.textContent = sel.value;
+  syncTopNav();
   settingsBody.innerHTML = '';
   setHint('加载中…', '');
   try {
@@ -5855,7 +5871,8 @@ function closeSettings(force) {
     const n = dirtyIds().length + (setClearPw ? 1 : 0);
     if (n && !confirm('有 ' + n + ' 处改动还没保存，确定关闭？')) return;
   }
-  settingsModal.classList.add('hidden');
+  settingsPanel.classList.add('hidden');
+  syncTopNav();
 }
 
 function setRow(labelText, input, unit) {
@@ -6360,43 +6377,6 @@ function renderSettings() {
   // 刚建出来的按钮需要拿到当前档位的 disabled 状态
   applyFontScale(currentFsPct(), false);
   refreshDirty();
-  lockSettingsHeight();
-}
-
-// lockSettingsHeight 把弹窗高度钉在「最高的那一组」上。
-//
-// 五组内容差得多（外观 300 出头、性能近 700），高度跟着内容走的话，点一下 Tab
-// 窗口就蹿高或缩回去，鼠标下的按钮跟着跑。钉死之后矮组下方留白，切组纹丝不动。
-// 量的时候必须先把卡片高度松开：卡片有固定高度时 body 会被撑开，
-// scrollHeight 只会返回可视高度，五组量出来一样高，等于没量。
-// 用户拽过右下角（userSize）就还给他设的尺寸 —— 但每次打开都重新量，
-// 否则改过字号以后再打开，高度还停在旧的那一档上。
-function lockSettingsHeight() {
-  const card = settingsModal.querySelector('.modal-card');
-  const panes = [...settingsBody.querySelectorAll('.set-pane')];
-  if (!card || !panes.length || card.dataset.userSize === '1') return;
-
-  const shown = Math.max(0, panes.findIndex(p => !p.classList.contains('hidden')));
-  const hadMax = card.style.maxHeight;
-  card.style.height = 'auto';
-  card.style.maxHeight = 'none';
-
-  let max = 0;
-  for (let i = 0; i < panes.length; i++) {
-    panes.forEach((q, j) => q.classList.toggle('hidden', i !== j));
-    max = Math.max(max, settingsBody.scrollHeight);
-  }
-  panes.forEach((q, j) => q.classList.toggle('hidden', j !== shown));
-
-  const head = card.querySelector('.modal-head');
-  const foot = card.querySelector('.modal-foot');
-  const chrome = (head ? head.offsetHeight : 0)
-    + settingsTabs.offsetHeight
-    + (foot ? foot.offsetHeight : 0)
-    + 2; // 上下边框
-  card.style.maxHeight = hadMax;
-  if (max <= 0) return; // 弹窗还藏着（display:none）时量不出高度，别把卡片压成 0
-  card.style.height = Math.min(Math.ceil(chrome + max), window.innerHeight - 80) + 'px';
 }
 
 async function saveSettings() {
@@ -6489,7 +6469,7 @@ document.addEventListener('keydown', e => {
   // 确认框开着的时候 Esc 只该关它自己，别顺手把底下的设置页也关掉
   // （设置页里的两个按钮都会弹这个确认框，叠在一起）。
   const cfOpen = !document.getElementById('confirmModal').classList.contains('hidden');
-  if (e.key === 'Escape' && !cfOpen && !settingsModal.classList.contains('hidden')) closeSettings();
+  if (e.key === 'Escape' && !cfOpen && !settingsPanel.classList.contains('hidden')) closeSettings();
   // Esc 先收浮层，再关面板（一层一层退，别一下全关掉）
   if (e.key === 'Escape' && monSettingsOpen()) { setMonSettings(false); return; }
   // 空间地图里 Esc 先退一级（表视图 → 库视图），再按一次才关整个面板 ——

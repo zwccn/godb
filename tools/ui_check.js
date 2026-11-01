@@ -1560,7 +1560,7 @@ class CDP {
     // 2) 设置面板
     await cdp.eval(`openSettings()`);
     await sleep(900);
-    check('设置：打开后可见', await cdp.eval(`!document.getElementById('settingsModal').classList.contains('hidden')`));
+    check('设置：打开后可见', await cdp.eval(`!document.getElementById('settingsPanel').classList.contains('hidden')`));
 
     // 顶栏只留高频入口，皮肤/字号/示例数据/清库都进设置页
     const setUi = await cdp.eval(`(() => {
@@ -1820,20 +1820,28 @@ class CDP {
       `危险框 ${dataPane.borderStyle} / ${dataPane.btns} 按钮 / ${dataPane.stats} 项统计`);
     await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'look').click()`);
 
-    // 固定高度：五组内容差得多（外观一百多、性能五百多），跟着内容走的话切 Tab 窗口忽大忽小，
-    // 指针底下的按钮跟着跑。打开时按最高的一组钉死，矮组下方留白。
+    // 设置是「页面」不是「弹窗」：高度天然恒定，切 Tab 不再需要钉死高度；
+    // 内容超出时由正文自己滚（底栏始终可见）。
     const setH = await cdp.eval(`(() => {
-      const card = document.querySelector('#settingsModal .modal-card');
+      const panel = document.getElementById('settingsPanel');
       const h = [];
       for (const t of document.querySelectorAll('.set-tab')) {
         t.click();
-        h.push(Math.round(card.getBoundingClientRect().height));
+        h.push(Math.round(panel.getBoundingClientRect().height));
       }
-      return { h, inline: card.style.height };
+      const body = document.querySelector('#settingsPanel .set-body');
+      const foot = document.querySelector('#settingsPanel .set-foot');
+      const pr = panel.getBoundingClientRect();
+      const fr = foot.getBoundingClientRect();
+      return { h, scroll: getComputedStyle(body).overflowY,
+               top: Math.round(pr.top), width: Math.round(pr.width),
+               footAtBottom: Math.abs(fr.bottom - pr.bottom) < 2 };
     })()`);
-    check('切五个 Tab 弹窗高度纹丝不动',
-      new Set(setH.h).size === 1 && setH.h[0] > 400 && !!setH.inline,
-      setH.h.join(' / ') + ' · inline ' + setH.inline);
+    check('设置是页面级视图：切五个 Tab 高度不动，正文自己滚，底栏贴底',
+      new Set(setH.h).size === 1 && setH.h[0] > 400 && setH.scroll === 'auto' && setH.footAtBottom,
+      setH.h.join(' / ') + ' · overflow ' + setH.scroll + ' · 底栏贴底 ' + setH.footAtBottom);
+    check('设置页不遮挡顶栏（不是浮层遮罩）',
+      setH.top >= 40 && setH.width >= 1000, `top ${setH.top}px · 宽 ${setH.width}px`);
     await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'look').click()`);
 
     // 点了要立刻生效（不依赖「保存并应用」）
@@ -1852,13 +1860,33 @@ class CDP {
     await cdp.eval(`document.querySelector('.theme-pick[data-theme="sky"]').click()`);
     await sleep(150);
 
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 8, y: 8, button: 'left', clickCount: 1 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 8, y: 8, button: 'left', clickCount: 1 });
-    await sleep(200);
-    check('设置：点遮罩后仍然打开', await cdp.eval(`!document.getElementById('settingsModal').classList.contains('hidden')`));
+    // 顶栏三颗是同级页面：同一时刻只亮一颗。设置页开着时点「监控」应该切过去。
+    const navOn = await cdp.eval(`({
+      set: document.getElementById('btnSettings').classList.contains('on'),
+      home: document.getElementById('btnHome').classList.contains('on'),
+      mon: document.getElementById('btnMonitor').classList.contains('on'),
+    })`);
+    check('设置页打开时顶栏只有「设置」亮着',
+      navOn.set && !navOn.home && !navOn.mon, JSON.stringify(navOn));
+    await cdp.eval(`document.getElementById('btnMonitor').click()`);
+    await sleep(400);
+    const swap1 = await cdp.eval(`({
+      setHidden: document.getElementById('settingsPanel').classList.contains('hidden'),
+      monShown: !document.getElementById('monPanel').classList.contains('hidden'),
+    })`);
+    check('点「监控」会收起设置（同级页面互斥）',
+      swap1.setHidden && swap1.monShown, JSON.stringify(swap1));
+    await cdp.eval(`document.getElementById('btnSettings').click()`);
+    await sleep(500);
+    const swap2 = await cdp.eval(`({
+      setShown: !document.getElementById('settingsPanel').classList.contains('hidden'),
+      monHidden: document.getElementById('monPanel').classList.contains('hidden'),
+    })`);
+    check('点「设置」会收起监控',
+      swap2.setShown && swap2.monHidden, JSON.stringify(swap2));
     await cdp.eval(`document.getElementById('btnSettingsClose').click()`);
     await sleep(200);
-    check('设置：点 × 能关掉', await cdp.eval(`document.getElementById('settingsModal').classList.contains('hidden')`));
+    check('设置：点 × 能关掉', await cdp.eval(`document.getElementById('settingsPanel').classList.contains('hidden')`));
 
     // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
     await cdp.eval(`openSettings()`);
@@ -1870,7 +1898,7 @@ class CDP {
     const saved = await cdp.eval(`(() => {
       const t = document.getElementById('toast');
       return {
-        closed: document.getElementById('settingsModal').classList.contains('hidden'),
+        closed: document.getElementById('settingsPanel').classList.contains('hidden'),
         toast: (t.textContent || ''),
         shown: !t.classList.contains('hidden'),
       };

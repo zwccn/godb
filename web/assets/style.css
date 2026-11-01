@@ -1247,6 +1247,195 @@ body {
 }
 .plan.show { display: block; }
 
+/* ---------- 探测执行：每一步花了多少 ---------- */
+/* 一行一个算子。名字 → 决策说明 → 计数标签 → 独占时间柱 → 时间 → 占比。
+   柱子画的是**独占**时间（父减子），不是累计时间：累计时间越往上越大，
+   拿它画柱子等于每张图都一样长，等于没画。 */
+.probe-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.probe-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.probe-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+.probe-sql {
+  max-width: 38%;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.probe-note {
+  padding: 8px 12px;
+  border-bottom: 1px dashed var(--border-soft);
+  color: var(--text-3);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.7;
+}
+.probe-empty {
+  margin: 10px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: calc(12px * var(--fs));
+  line-height: 1.7;
+}
+.probe-list { padding: 6px 6px 8px; }
+.probe-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-left: 2px solid transparent;
+  border-radius: 6px;
+}
+.probe-row:hover { background: var(--row-hover); }
+/* 最贵的一步：竖条 + 淡色底。只加一条竖线会看不出来，只加底色又不够明确 */
+.probe-row.is-worst {
+  border-left-color: var(--warn);
+  background: var(--warn-bg);
+}
+.probe-row.is-worst:hover { background: var(--warn-bg-hover); }
+
+.probe-name {
+  flex: 0 1 auto;
+  max-width: 44%;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--fs));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.probe-row.is-worst .probe-name { color: var(--warn-text); }
+.probe-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.probe-row.is-worst .probe-detail { color: var(--warn-text); opacity: .75; }
+
+.probe-tags { flex: 0 0 auto; display: flex; gap: 6px; }
+.probe-chip {
+  padding: 0 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  line-height: 1.8;
+  white-space: nowrap;
+}
+/* 「读了这么多行」比「吐了多少行」更值得警觉，给它一点颜色 */
+.probe-chip.scan {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+.probe-chip.loops {
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+}
+
+.probe-bar {
+  flex: 0 0 110px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.probe-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width .18s ease;
+}
+.probe-row.is-worst .probe-bar i { background: var(--warn); }
+
+.probe-time {
+  flex: 0 0 68px;
+  text-align: right;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  font-variant-numeric: tabular-nums;
+}
+.probe-row.is-worst .probe-time { color: var(--warn-text); }
+.probe-pct {
+  flex: 0 0 38px;
+  text-align: right;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  font-variant-numeric: tabular-nums;
+}
+
+.probe-verdict {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: calc(12px * var(--fs));
+}
+.probe-verdict-key {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--warn-border);
+  border-radius: 4px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: calc(10.5px * var(--fs));
+}
+.probe-verdict-text { font-family: var(--mono); }
+
+/* 窄屏：一行放不下六样东西。丢掉「决策说明」「占比数字」「柱子」，把宽度让给
+   算子名 —— 名字被截成 "HashAggregate (group b…" 是最糟的结果，它恰恰是
+   这行唯一不能省的标识。柱子没了不影响结论（时间数字和下面那句「最贵一步」还在）。 */
+@media (max-width: 720px) {
+  .probe-body { padding: 8px; }
+  .probe-detail, .probe-pct, .probe-bar { display: none; }
+  .probe-sql { display: none; }
+  .probe-row { gap: 8px; }
+  .probe-name {
+    flex: 1 1 auto;
+    max-width: none;
+    white-space: normal;   /* 长名字换行，不省略 */
+    line-height: 1.5;
+  }
+}
+
 .msg {
   padding: 10px 14px;
   font-size: calc(12.5px * var(--fs));

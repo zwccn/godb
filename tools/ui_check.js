@@ -2517,6 +2517,60 @@ class CDP {
     check('结果超过 2000 行时提示「数据已全量载入，表格只画当前页」',
       bigWarn.has && /3,?000 行/.test(bigWarn.text), bigWarn.text || '没有提示');
 
+    /* 探测执行：真跑一遍，给出「每一步花了多少」。
+       这三条正好是「把 EXPLAIN 文本排版好看」做不到的：① 每步都有行数（以前只有
+       扫描节点有数字）；② 最贵的一步被点出来（独占时间，不是累计时间）；
+       ③ 视图是算子账本而不是一张 QUERY PLAN 文本表格。 */
+    await cdp.eval(`cm.setValue('SELECT v, count(*) AS n FROM big_demo GROUP BY v ORDER BY n DESC LIMIT 5')`);
+    await cdp.eval(`document.getElementById('btnProbe').click()`);
+    await sleep(3000);
+    const probe = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('.probe-row')];
+      const worst = document.querySelector('.probe-row.is-worst');
+      return {
+        rows: rows.length,
+        names: rows.map(r => (r.querySelector('.probe-name') || {}).textContent || ''),
+        chips: rows.filter(r => r.querySelector('.probe-chip')).length,
+        worst: worst ? (worst.querySelector('.probe-name') || {}).textContent : '',
+        verdict: (document.querySelector('.probe-verdict-text') || {}).textContent || '',
+        tab: [...document.querySelectorAll('.result-tab')].map(b => b.textContent).join(','),
+        raw: (() => {
+          const b = document.querySelector('.probe-raw');
+          return b ? b.classList.contains('show') : null;
+        })(),
+      };
+    })()`);
+    check('探测执行给出算子账本（不是 QUERY PLAN 文本表格）',
+      probe.rows >= 4 && probe.tab.includes('探测结果'),
+      `${probe.rows} 行 · tab=${probe.tab}`);
+    check('探测里每一步都有行数，不只最底下那行',
+      probe.chips >= 4, `${probe.chips} 行带计数标签`);
+    check('最贵的一步被标出来，并有一句结论',
+      /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
+      `${probe.worst} · ${probe.verdict.slice(0, 40)}`);
+
+    // 原始文本仍在（有人就是习惯看树形文本）：点一下能展开
+    await cdp.eval(`[...document.querySelectorAll('.probe-card .plan-btn')][0].click()`);
+    await sleep(200);
+    const rawShown = await cdp.eval(`(() => {
+      const b = document.querySelector('.probe-raw');
+      return { shown: b ? b.classList.contains('show') : null, text: b ? b.textContent.slice(0, 30) : '' };
+    })()`);
+    check('探测卡能展开原始 EXPLAIN 文本',
+      rawShown.shown === true && /Limit|Aggregate|Scan/.test(rawShown.text),
+      rawShown.text.replace(/\s+/g, ' '));
+
+    // 普通「执行」不该带着探测视图（否则一个 SELECT 也会被当成探测结果显示）
+    await cdp.eval(`cm.setValue('SELECT 7 AS x')`);
+    await cdp.eval(`document.getElementById('btnRun').click()`);
+    await sleep(1200);
+    const noProbe = await cdp.eval(`({
+      rows: document.querySelectorAll('.probe-row').length,
+      tab: [...document.querySelectorAll('.result-tab')].map(b => b.textContent).join(','),
+    })`);
+    check('普通执行不会串到探测视图',
+      noProbe.rows === 0 && !noProbe.tab.includes('探测结果'), `tab=${noProbe.tab}`);
+
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);
     if (bad.length) process.exitCode = 1;

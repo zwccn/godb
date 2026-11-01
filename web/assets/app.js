@@ -687,7 +687,10 @@ function leadingKeyword(text) {
 // 两个坑都踩过：
 //   1. 编辑器里已经写了 EXPLAIN（比如从帮助示例填进来）→ 会变成 EXPLAIN EXPLAIN；
 //   2. 事务演示那种 BEGIN / UPDATE 被硬加上 EXPLAIN → 服务端报 only supports SELECT。
-function withExplain(raw) {
+// withExplain 给每条查询加前缀。执行计划和探测执行都走这里：
+// 前者只出「打算怎么做」，后者真跑一遍出「每一步实际花了多少」。
+function withExplain(raw, prefix) {
+  const head = prefix || 'EXPLAIN ';
   const keep = [];
   const skipped = [];
   for (const part of splitStatements(raw)) {
@@ -695,7 +698,7 @@ function withExplain(raw) {
     if (!kw) continue;
     if (kw === 'explain') { keep.push(part + ';'); continue; }
     if (kw === 'select' || kw === 'with' || kw === 'values') {
-      keep.push('EXPLAIN ' + part + ';');
+      keep.push(head + part + ';');
       continue;
     }
     skipped.push(kw.toUpperCase());
@@ -717,15 +720,16 @@ async function run(prefix) {
     if (r) selBase = Math.min(r.anchor.line, r.head.line);
   }
   let skipped = [];
-  if (prefix === 'explain') {
-    const ex = withExplain(sql);
+  const probe = prefix === 'probe';
+  if (prefix === 'explain' || probe) {
+    const ex = withExplain(sql, probe ? 'EXPLAIN ANALYZE ' : 'EXPLAIN ');
     skipped = ex.skipped;
     if (!ex.sql) {
       // 一条能解释的都没有：别把请求发出去换个看不懂的报错回来
       showPaneError({
-        title: '无法生成执行计划',
+        title: probe ? '无法探测' : '无法生成执行计划',
         message: skipped.length
-          ? `「执行计划」只能解释查询语句（SELECT / WITH / VALUES）。当前这批是 ${skipped.join('、')}，想直接跑它们请点「执行」。`
+          ? `「${probe ? '探测执行' : '执行计划'}」只能${probe ? '探测' : '解释'}查询语句（SELECT / WITH / VALUES）。当前这批是 ${skipped.join('、')}，想直接跑它们请点「执行」。`
           : '编辑器里还没有可解释的语句。',
       });
       return;
@@ -741,6 +745,8 @@ async function run(prefix) {
   try {
     const data = await api('/api/query', { sql }, runAbort.signal);
     data.roundTripMs = performance.now() - t0;
+    // 探测有自己的视图：一份「每步花了多少」的账，而不是 EXPLAIN 的文本表格
+    data.probeView = probe;
     renderResults(data);
     // 报错文本里带 (line N, column M) 就标到编辑器上；没带也不硬猜
     if (data.error) markSqlError(data.error, selBase);
@@ -748,7 +754,8 @@ async function run(prefix) {
     updateTx(data.tx);
     pushHistory(sql);
     if (skipped.length) {
-      toast('已解释查询，跳过 ' + skipped.join('、') + '（EXPLAIN 只解释 SELECT / WITH / VALUES）');
+      toast('已' + (probe ? '探测' : '解释') + '查询，跳过 ' + skipped.join('、')
+        + '（EXPLAIN 只处理 SELECT / WITH / VALUES）');
     }
     // DDL 之后刷新表结构
     const ddl = /(create|drop|alter)\s+table/i.test(sql);
@@ -1048,7 +1055,11 @@ function showPaneError(err) {
 }
 
 // 只有真返回了行的语句才配一个「结果 N」tab；UPDATE / DDL 没有表可看，信息栏里说清楚即可
+//
+// 探测执行例外：它的结果是一棵算子树，不是可以翻页的表。硬摊成「结果 1」的
+// 表格反而把 QUERY PLAN 那列文本当数据看，所以单独一种视图，不列结果 tab。
 function resultTabModels(data) {
+  if (data && data.probeView) return [{ kind: 'probe' }];
   const list = (data && data.results) || [];
   const models = [{ kind: 'info' }];
   list.forEach((r, i) => {
@@ -1125,7 +1136,10 @@ function renderResultTabs(data) {
     renderResultPane(data);
   };
 
-  addTab('信息', 0, data.error ? 'has-err' : '', '往返时间、每条语句的耗时与报错');
+  addTab(data.probeView ? '探测结果' : '信息', 0, data.error ? 'has-err' : '',
+    data.probeView
+      ? '每一步输出多少行、从堆里读了多少行、跑了几轮、独占多少时间'
+      : '往返时间、每条语句的耗时与报错');
 
   let n = 0;
   for (let i = 1; i < models.length; i++) {
@@ -1153,6 +1167,7 @@ function renderResultPane(data) {
   const cur = models[resultTab] || models[0];
   pane.innerHTML = '';
   if (!cur || cur.kind === 'info') pane.appendChild(infoPanel(data));
+  else if (cur.kind === 'probe') pane.appendChild(probePanel(data));
   else pane.appendChild(resultCard(cur.r, cur.idx));
 }
 
@@ -1209,8 +1224,182 @@ function infoPanel(data) {
   return box;
 }
 
-function infoStatus(r) {
-  const bits = [];
+/* ---------------- 探测执行 ----------------
+   一张「每一步花了多少」的账。
+
+   为什么不是再画一遍执行计划：计划只回答「打算怎么做」，而这里要回答的是
+   「时间到底花在哪」。所以每行画的是**独占时间**（自己的总时长减掉所有子节点），
+   柱子按它占整条查询的比例给长度 —— 只看总时长的话，父节点永远最大，
+   因为父的数字里含着子节点，越往上数字越大，等于什么都没说。
+
+   三个诚实前提直接写在卡片头上，不藏在帮助里：
+     · 这是真执行（EXPLAIN ANALYZE 的语义），只是把结果丢掉；
+     · 总耗时含探测自己的开销（每吐一行读一次时钟）；
+     · 比本机时钟步进还短的耗时只能显示成 <步进，那是测不出来，不是真的 0。 */
+
+function probePanel(data) {
+  const box = el('div', 'probe-body');
+  const results = data.results || [];
+  const cards = results.filter(r => r.planTree);
+  if (!cards.length) {
+    if (data.error) box.appendChild(errorCard(data.error));
+    else box.appendChild(el('div', 'results-empty', '没有拿到执行计划'));
+    return box;
+  }
+  const stmts = splitStatements(lastSubmittedSQL || '');
+  cards.forEach((r, i) => box.appendChild(probeCard(r, i, stmts)));
+  return box;
+}
+
+function probeCard(r, idx, stmts) {
+  const card = el('div', 'probe-card');
+  const head = el('div', 'probe-head');
+  head.appendChild(el('span', 'result-tag probe-tag', '探测执行'));
+
+  const meta = [];
+  if (r.tookNs !== undefined) meta.push('服务端 ' + fmtTook(r.tookNs));
+  head.appendChild(el('span', 'result-meta', meta.join(' · ')));
+
+  const sql = (stmts[idx] || '').trim();
+  if (sql) {
+    // 探测的 SQL 是加过前缀的，展示时把 EXPLAIN ANALYZE 去掉，看的是原来那句
+    const shown = sql.replace(/^explain\s+(analyze\s+)?/i, '');
+    const s = el('span', 'probe-sql', shown.split('\n')[0].slice(0, 70));
+    s.title = sql;
+    head.appendChild(s);
+  }
+  head.appendChild(el('span', 'spacer'));
+
+  // 原始文本留着：有人就是习惯看树形文本，而且它是「没加工过」的那一份
+  const txtBtn = el('button', 'plan-btn', '原始文本');
+  txtBtn.type = 'button';
+  const pre = el('pre', 'plan probe-raw', (r.plan || []).join('\n'));
+  txtBtn.addEventListener('click', () => {
+    pre.classList.toggle('show');
+    txtBtn.classList.toggle('on');
+  });
+  head.appendChild(txtBtn);
+  card.appendChild(head);
+  card.appendChild(pre);
+
+  const tree = r.planTree;
+  const nodes = [];
+  (function walk(n, depth) {
+    nodes.push({ n: n, depth: depth });
+    (n.children || []).forEach(c => walk(c, depth + 1));
+  })(tree, 0);
+
+  const total = tree.totalNs || 0;
+  let worst = nodes[0];
+  for (const it of nodes) if (it.n.selfNs > worst.n.selfNs) worst = it;
+
+  const notes = [
+    '真的跑了一遍，结果丢弃 —— 所以慢查询也要等它跑完。',
+    '总耗时含探测开销（每吐一行读一次时钟），比正常执行略高。',
+  ];
+  if (clockGranNs > 0) {
+    notes.push('本机时钟步进 ' + fmtDur(clockGranNs) + '，比它短的会显示成 <'
+      + fmtDur(clockGranNs) + '，那是测不出来，不是零成本。');
+  }
+  card.appendChild(el('div', 'probe-note', notes.join(' ')));
+
+  if (total <= 0) {
+    card.appendChild(el('div', 'probe-empty',
+      '整条查询短于本机时钟步进，探测分辨不出哪个算子更贵。想定位热点，'
+      + '换一条接近真实数据量的查询再探测。'));
+  }
+
+  const list = el('div', 'probe-list');
+  for (const it of nodes) {
+    list.appendChild(probeRow(it.n, it.depth, total, total > 0 ? worst.n : null));
+  }
+  card.appendChild(list);
+
+  if (total > 0 && worst.n.selfNs > 0) {
+    const pct = Math.round(worst.n.selfNs * 100 / total);
+    const line = el('div', 'probe-verdict');
+    line.appendChild(el('span', 'probe-verdict-key', '最贵一步'));
+    const bits = [worst.n.name];
+    bits.push('独占 ' + fmtTook(worst.n.selfNs) + '，占 ' + pct + '%');
+    if (worst.n.rows) bits.push('输出 ' + fmtCount(worst.n.rows) + ' 行');
+    if (worst.n.scanned && worst.n.scanned !== worst.n.rows) {
+      bits.push('读取 ' + fmtCount(worst.n.scanned) + ' 行');
+    }
+    if (worst.n.loops) bits.push('跑了 ' + fmtCount(worst.n.loops) + ' 轮');
+    line.appendChild(el('span', 'probe-verdict-text', bits.join(' · ')));
+    card.appendChild(line);
+  }
+  return card;
+}
+
+// 一行 = 一个算子。缩进表示树里的层级，但**不做折叠**：
+// 一棵执行计划通常不到 10 行，折叠省不了多少地方，却要多一次点击。
+function probeRow(n, depth, total, worst) {
+  const row = el('div', 'probe-row' + (n === worst ? ' is-worst' : ''));
+  row.style.paddingLeft = (8 + depth * 16) + 'px';
+
+  const name = el('span', 'probe-name', n.name);
+  name.title = n.name + (total > 0 ? '\n累计（含子节点）' + fmtTook(n.totalNs) : '');
+  row.appendChild(name);
+
+  // detail 的第一条当副标题。扫描算子那条「已扫描 N 行」不在这儿重复 ——
+  // 右边的计数标签已经写了「读取 N 行」，同一件事说两遍只会把行挤满。
+  const detail = (n.detail || []).find(t => !/^已扫描/.test(t));
+  if (detail) {
+    const d = el('span', 'probe-detail', detail);
+    d.title = n.detail.join('\n');
+    row.appendChild(d);
+  } else {
+    row.appendChild(el('span', 'probe-detail'));
+  }
+
+  const tags = el('span', 'probe-tags');
+  if (n.scanned) {
+    // 扫描节点：真正值得看的是「读了多少」，它才是代价的来源；
+    // 输出行数对 Seq Scan 来说和它几乎一样，没必要并排写两个数字。
+    const c = el('span', 'probe-chip scan', '读取 ' + fmtCount(n.scanned) + ' 行');
+    c.title = '从堆表实际读出的行数（含被上层过滤掉的）';
+    tags.appendChild(c);
+  } else if (n.rows) {
+    tags.appendChild(el('span', 'probe-chip', fmtCount(n.rows) + ' 行'));
+  }
+  if (n.loops) {
+    const c = el('span', 'probe-chip loops', '×' + fmtCount(n.loops) + ' 轮');
+    c.title = '子节点被重新启动的次数（嵌套循环跑了几轮）';
+    tags.appendChild(c);
+  }
+  row.appendChild(tags);
+
+  const pct = total > 0 ? Math.min(100, n.selfNs * 100 / total) : 0;
+  const bar = el('span', 'probe-bar');
+  const fill = el('i');
+  // 有耗时但不到 2% 时也给一格，否则「花了一点时间」和「没花时间」看起来一样
+  fill.style.width = pct > 0 ? Math.max(2, pct) + '%' : '0';
+  bar.appendChild(fill);
+  row.appendChild(bar);
+
+  // 时间列写的是**独占**时间（和柱子同口径）。独占为 0 的节点（Limit、Project
+  // 这种纯透传）不打「<步进」—— 那会让人以为「很快」，其实它根本没有自己的活。
+  let timeCell, timeTitle;
+  if (total <= 0) {
+    timeCell = fmtTook(n.totalNs);
+    timeTitle = '';
+  } else if (n.selfNs > 0) {
+    timeCell = fmtTook(n.selfNs);
+    timeTitle = '独占 ' + fmtTook(n.selfNs) + '（累计 ' + fmtTook(n.totalNs) + '）';
+  } else {
+    timeCell = '—';
+    timeTitle = '没有自己的开销，时间都在子节点（累计 ' + fmtTook(n.totalNs) + '）';
+  }
+  const t = el('span', 'probe-time', timeCell);
+  if (timeTitle) t.title = timeTitle;
+  row.appendChild(t);
+
+  row.appendChild(el('span', 'probe-pct', pct > 0 ? Math.round(pct) + '%' : ''));
+  return row;
+}
+
+function infoStatus(r) {  const bits = [];
   if (typeof r.rowCount === 'number' && r.command === 'SELECT') bits.push(r.rowCount + ' 行');
   if (typeof r.affected === 'number' && r.affected > 0 && r.command !== 'SELECT') bits.push('影响 ' + r.affected + ' 行');
   if (r.tookNs !== undefined) bits.push('服务端 ' + fmtTook(r.tookNs));
@@ -5124,6 +5313,7 @@ document.getElementById('btnClear').addEventListener('click', () => {
   editor.focus();
 });
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
+document.getElementById('btnProbe').addEventListener('click', () => run('probe'));
 
 // 窄屏「更多」菜单：执行计划 / 清空 在 ≤720px 被藏起来，这里给一条出路。
 (function initMoreMenu() {
@@ -5141,7 +5331,8 @@ document.getElementById('btnExplain').addEventListener('click', () => run('expla
     const act = ev.target.closest('button')?.dataset.act;
     if (!act) return;
     setOpen(false);
-    document.getElementById(act === 'explain' ? 'btnExplain' : 'btnClear').click();
+    const target = { explain: 'btnExplain', probe: 'btnProbe', clear: 'btnClear' }[act];
+    if (target) document.getElementById(target).click();
   });
   document.addEventListener('click', ev => {
     if (!menu.classList.contains('hidden') && !ev.target.closest('#moreMenu, #btnMore')) setOpen(false);

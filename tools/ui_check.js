@@ -1196,15 +1196,30 @@ class CDP {
       await cdp.eval(`localStorage.getItem('godb.editorH') === null &&
         Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height) < ${eh1}`));
 
-    // 自动模式下粘一大段 SQL：应该长高（封顶 55vh），而不是原地出滚动条
+    // 自动模式下粘一大段 SQL：应该长高，但封顶在「和结果区 1:2」——
+    // 上限不再按视口百分比算，而是量 .main 的实际高度再切三份。
     const grow = await cdp.eval(`(() => {
       cm.setValue(Array.from({length: 40}, (_, i) => 'SELECT ' + i + ';').join('\\n'));
       const h = document.querySelector('.CodeMirror').getBoundingClientRect().height;
-      return { h: Math.round(h), cap: Math.round(window.innerHeight * 0.55) + 2 };
+      const main = document.querySelector('.main').clientHeight;
+      const bar = document.querySelector('.editor-bar').offsetHeight || 40;
+      return { h: Math.round(h), cap: Math.floor((main - bar) / 3) + 2 };
     })()`);
-    check('长 SQL 会自动长高（不超过 55vh）',
-      grow.h > 300 && grow.h <= grow.cap, `${grow.h}px（上限 ${grow.cap}px）`);
+    check('长 SQL 会自动长高，但不超过「和结果区 1:2」的上限',
+      grow.h > 200 && grow.h <= grow.cap, `${grow.h}px（上限 ${grow.cap}px）`);
     await cdp.eval(`cm.setValue('')`);
+    await sleep(200);
+
+    // 默认分屏：编辑器小、结果区大。1:2 是设计值，浏览器里会有几十像素的
+    // 边距/边框误差，所以给一个区间而不是死磕 2.00。
+    const split = await cdp.eval(`(() => {
+      const e = document.querySelector('.editor-wrap').getBoundingClientRect().height;
+      const r = document.getElementById('results').getBoundingClientRect().height;
+      return { e: Math.round(e), r: Math.round(r), ratio: +(r / e).toFixed(2) };
+    })()`);
+    check('默认分屏：结果区是编辑器的 2 倍左右',
+      split.ratio >= 1.7 && split.ratio <= 2.6,
+      `${split.e}px : ${split.r}px（${split.ratio}×）`);
 
     // 0.6) 智能提示：库表列 + PG 关键字，全本地无 CDN
     const assets = await cdp.eval(`[...document.querySelectorAll('script[src],link[rel=stylesheet]')]

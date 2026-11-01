@@ -260,14 +260,18 @@ function fmtTook(ns) {
 // ---------------- 编辑器高度 ----------------
 //
 // 两种模式：
-//   自动（默认）—— 跟着内容长高，到 55vh 封顶，之后自己滚；
+//   自动（默认）—— 跟着内容长高，到「和结果区 1:2」为止，之后自己滚；
 //   手动（拖过底边）—— 固定高度，存在 localStorage，下次打开还是这么高。
 // 双击拖手回到自动模式。
 
 const EDITOR_MIN = 180;               // 桌面：约 8 行，也是 CSS 的 min-height
 const EDITOR_MIN_NARROW = 104;        // 窄屏：约 4 行
-const EDITOR_RESULT_ROOM = 320;       // 至少给下面的结果区留这么多
+const EDITOR_RESULT_ROOM = 320;       // 拖动时至少给下面的结果区留这么多
 const EDITOR_H_KEY = 'godb.editorH';
+// 编辑区 : 结果区 = 1 : 2。改这一处，两个区域的高度跟着走。
+// 为什么不做黄金比例：0.382 只把结果区从 62% 抬到 62%（等于 1:1.62），
+// 而结果表一行 26px，1:2 能多显示三四行 —— 对「看数据」这件事更值。
+const EDITOR_SPLIT = 3;               // 编辑 1 份 + 结果 2 份
 
 let editorManualH = 0; // 0 表示自动
 
@@ -277,7 +281,29 @@ function editorMinH() {
   return window.innerWidth <= 720 ? EDITOR_MIN_NARROW : EDITOR_MIN;
 }
 
-function editorMaxH() {
+// mainAvailH 是「编辑器 + 结果区」能分的总高度。
+//
+// 用 .main 的实际高度而不是 window.innerHeight：顶栏、事务条、外边距都在里面，
+// 拿视口算会把比例算偏（900px 视口下编辑器会多出 40px，结果区少 40px）。
+function mainAvailH() {
+  const main = document.querySelector('.main');
+  const h = main ? main.clientHeight : 0;
+  return h > 200 ? h : window.innerHeight - 120;
+}
+
+function editorBarH() {
+  const bar = document.querySelector('.editor-bar');
+  return bar && bar.offsetHeight ? bar.offsetHeight : 40;
+}
+
+// 自动模式的上限：编辑区只占可用高度的 1/3，剩下 2/3 全给结果区。
+function editorAutoMaxH() {
+  const avail = mainAvailH() - editorBarH();
+  return Math.max(editorMinH(), Math.floor(avail / EDITOR_SPLIT));
+}
+
+// 拖动时可以比默认更宽：用户自己拖的，只保证结果区还剩 EDITOR_RESULT_ROOM。
+function editorDragMaxH() {
   return Math.max(editorMinH(), window.innerHeight - EDITOR_RESULT_ROOM);
 }
 
@@ -294,7 +320,7 @@ function setEditorHeight(h) {
 function autoSize() {
   if (editorManualH) {
     // 手动定过高度就别再跟着内容跳了，否则刚拖好的框一打字又变回去
-    setEditorHeight(Math.min(editorManualH, editorMaxH()));
+    setEditorHeight(Math.min(editorManualH, editorDragMaxH()));
     return;
   }
   // 内容高度 + 最低 180px：一行 SQL 时不该塌成一条缝
@@ -309,7 +335,8 @@ function autoSize() {
     editorEl.style.height = 'auto';
     content = editorEl.scrollHeight + 2;
   }
-  const h = Math.max(editorMinH(), Math.min(content, window.innerHeight * 0.55));
+  // 上限是「和结果区 1:2」，不是视口的一个百分比 —— 见 editorAutoMaxH。
+  const h = Math.max(editorMinH(), Math.min(content, editorAutoMaxH()));
   setEditorHeight(h);
 }
 
@@ -402,7 +429,7 @@ function initCodeMirror() {
     try { grip.setPointerCapture(ev.pointerId); } catch (e) {}
 
     const move = e => {
-      const h = Math.max(editorMinH(), Math.min(startH + (e.clientY - startY), editorMaxH()));
+      const h = Math.max(editorMinH(), Math.min(startH + (e.clientY - startY), editorDragMaxH()));
       editorManualH = h;
       setEditorHeight(h);
     };
@@ -429,8 +456,8 @@ function initCodeMirror() {
 
 // 窗口变矮时把编辑器夹回来，别把结果区挤成 0
 window.addEventListener('resize', () => {
-  if (editorManualH > editorMaxH()) {
-    editorManualH = editorMaxH();
+  if (editorManualH > editorDragMaxH()) {
+    editorManualH = editorDragMaxH();
     setEditorHeight(editorManualH);
   } else if (!editorManualH) {
     autoSize();

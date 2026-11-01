@@ -718,7 +718,7 @@ body {
   display: block;
   width: 100%;
   min-height: 180px; /* 大约 8 行，写一段多行 SQL 不用一上来就滚动 */
-  max-height: none;  /* 上限由 JS 控制：自动增长 55vh，手动拖动最多留 320px 给结果区 */
+  max-height: none;  /* 上限由 JS 控制：自动时和结果区 1:2，拖动时最多留 320px 给结果区 */
   padding: 12px 16px;
   border: none;
   outline: none;

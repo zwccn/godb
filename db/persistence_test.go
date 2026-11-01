@@ -709,3 +709,38 @@ func TestAlterTableColumnPersists(t *testing.T) {
 	defer d3.Close()
 	assertRows(t, run(t, d3, s, `SELECT count(*) FROM ad`), []string{"3"})
 }
+
+// 「小表直接写」这条门槛用的是**表在磁盘上的真实字节**，不是「行数 × 每行 64 字节」
+// 的估算。
+//
+// 估算按行数算：250 行 × 64 = 16KB，会被当成小表 → 每次提交都整表重写；而这
+// 张表实际约 375KB。改一行落一次盘就是上万倍写放大 —— 正是这条门槛要避免的事。
+// 反过来看宽行（4KB 一行）的表：40MB 会被算成 640KB，同样被当成小表。
+func TestCheckpointWideRowsAreNotTiny(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	d.Store.SetCheckpointPolicy(storage.CheckpointPolicy{Commits: 1})
+	run(t, d, s, `CREATE TABLE wide (id int4 PRIMARY KEY, pad text)`)
+
+	// 1.5KB 的正文：低于 2KB 门槛，留在页里（再大就进 .lob，不算页字节了）
+	pad := strings.Repeat("x", 1500)
+	for start := 1; start <= 250; start += 50 {
+		var b strings.Builder
+		b.WriteString(`INSERT INTO wide VALUES `)
+		for i := start; i < start+50; i++ {
+			if i > start {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, "(%d,'%s')", i, pad)
+		}
+		run(t, d, s, b.String())
+	}
+	run(t, d, s, `CHECKPOINT`)
+	base := d.Store.Info().WrittenTotal
+
+	// 只改一行：脏行 1/250 = 0.4%，远不到 10% 的门槛，不该为它重写这张表
+	run(t, d, s, `UPDATE wide SET pad = 'y' WHERE id = 1`)
+	if got := d.Store.Info().WrittenTotal; got != base {
+		t.Fatalf("宽行表（约 375KB / 250 行）只改 1 行就重写了 %d 字节 —— 小表判据又退回用行数估算了", got-base)
+	}
+}

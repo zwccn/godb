@@ -131,34 +131,56 @@ func (s *Store) needCheckpointLocked() (bool, string) {
 }
 
 const (
-	// minCheckpointBytes 以下的小库不值得省这次写：写几十 KB 和写几 MB 不是一回事。
-	minCheckpointBytes = 1 << 20
+	// minCheckpointBytes 以下的小表不值得省这次写：写几十 KB 和写几 MB 不是一回事。
+	//
+	// 256KB（不是 1MB）：这条判据的**单位换过**。以前是「总行数 × 64 字节」的估算，
+	// 1MB 大致等于「1.6 万行以内算小表」；现在改成表在磁盘上的真实字节，若还写 1MB，
+	// 就等于把「600KB 的表」也当小表 —— 那会有 1 万倍写放大（改一行落一次）。
+	// 256KB 是「重写一次还不到一毫秒」的量级，和旧代码对窄行的实际边界接近，
+	// 对宽行则不再误判（旧估算会把 40MB 的表算成小表）。
+	minCheckpointBytes = 256 << 10
 	// 大表要求「自上次落盘以来改过的行 >= 总行数的 1/10」才整表重写。
 	dirtyRatioNum = 1
 	dirtyRatioDen = 10
-	// bytesPerRow 估算行在磁盘上的大小（实测 4 列约 51 字节），只用来判断值不值得写。
-	bytesPerRow = 64
 )
 
 // worthWritingLocked 判断攒的改动是否值得为它重写整张表。
+//
+// 调用方必须持 CommitMu（提交路径与后台定时器都持）：它要读 td.pages 与
+// td.SlotCount()，这两样是在 CommitMu 下面被改的。map 类的（dirty / dirtyRows /
+// Data / loaded）由 loadMu 保护，所以这里再取一次 loadMu —— 持 CommitMu 再取
+// loadMu 是本库既有的顺序（提交路径 engine.go 里就这样），不会成环。
+//
+// 两处判据用不同口径，别混：
+//   - 「这次重写要花多少」看**脏表在磁盘上的真实字节**（整表重写，代价 ≈ 表大小）。
+//     以前用「总行数 × 64 字节」估算，行宽差得远时就系统性偏 —— 4KB 的行被低估
+//     64 倍，于是 40MB 的表被当成小表，改一行就整份重写；反过来 20 字节的行被
+//     高估 3 倍，本来该直接写的小表被拦住。
+//   - 「改动够不够多」看行数比例：脏行 / 该表总行数。这一条本来就与字节无关。
 func (s *Store) worthWritingLocked() bool {
-	var dirtyRows int64
+	s.loadMu.RLock()
+	var dirtyRows, dirtyBytes, totalRows int64
 	for key, d := range s.dirty {
-		if d {
-			dirtyRows += s.dirtyRows[key]
+		if !d {
+			continue
+		}
+		dirtyRows += s.dirtyRows[key]
+		if td := s.Data[key]; td != nil && td.pages != nil {
+			dirtyBytes += int64(td.pages.pageCount()) * PageSize
 		}
 	}
-	if dirtyRows == 0 {
-		return false // 一点改动都没有，没必要写
-	}
-	var totalRows int64
 	for key, td := range s.Data {
 		if td != nil && s.loaded[key] {
 			totalRows += int64(td.SlotCount())
 		}
 	}
-	if totalRows*bytesPerRow <= minCheckpointBytes {
-		return true // 小库：直接写，省这点没意义
+	s.loadMu.RUnlock()
+
+	if dirtyRows == 0 {
+		return false // 一点改动都没有，没必要写
+	}
+	if dirtyBytes <= minCheckpointBytes {
+		return true // 要重写的表本来就小：直接写，省这点没意义
 	}
 	return dirtyRows*dirtyRatioDen >= totalRows*dirtyRatioNum
 }

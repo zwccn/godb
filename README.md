@@ -361,6 +361,11 @@ Limit (limit=5)                  5 行              —      —
 `Result.Phases` 里的基础四段（`loadNs` / `loadIoNs` / `loadPages` / `lockNs` / `execNs` /
 `endNs`）由 db 层在 `execOneInner` 里打点；`PlanNs` 由 `exec.execSelect` 单独计。
 
+六段的颜色是专门挑的马卡龙 / 糖果色（橙 / 草莓粉 / 薰衣草 / 糖果蓝 / 薄荷 / 银灰），
+不跟皮肤走语义色：`warn` 那种深黄、`danger` 那种深红挤在一条 6px 的条子上既闷又难分。
+**相邻两段的色相至少差 40°**，浅色主题（sky / taro / mint）里换成同色相压深一档的版本
+—— 亮黄落在 `#f3f8fd` 上对比只有 1.4:1，7px 的圆点等于看不见。
+
 ### 每步的 I/O：等页文件算在哪
 
 `storage` 在真正 pread 的地方记了累计（`storage/iostat.go`：纳秒 / 页数 / 字节）。

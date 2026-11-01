@@ -9,6 +9,16 @@
   --text-2: #9aa7b4;
   --text-3: #7b8795;
   --accent: #4c9ef0;
+  /* 探测「时间去向」的六段配色：马卡龙 / 糖果色，明度高、彼此色相拉得开。
+     相邻两段至少差 40° 色相（橙 35 → 粉 348 → 紫 263 → 蓝 210 → 薄荷 152 → 中性灰），
+     不用皮肤里的语义色 —— warn/danger 那种深黄深红放在条子上又闷又挨得近。
+     浅色主题在文件后面统一覆盖成深一档（亮黄在浅底上几乎看不见）。 */
+  --ph-load: #ffc46b;     /* 装载表 · 蜜橙 */
+  --ph-lock: #ff8fa3;     /* 等锁 · 草莓粉 */
+  --ph-plan: #c0a6ff;     /* 规划 · 薰衣草 */
+  --ph-exec: #6bb6ff;     /* 执行 · 糖果蓝 */
+  --ph-explain: #4ed8a0;  /* 整理输出 · 薄荷 */
+  --ph-end: #a8b2c1;      /* 收尾 · 银灰 */
   --accent-dim: #1f3a56;
   --ok: #3fb950;
   --warn: #d9a441;
@@ -229,6 +239,19 @@ html[data-theme="mint"] {
 /* 科技灰：冷调深灰（蓝灰），参照 VS Code / Catppuccin Mocha 那一类配色 ——
    底色几乎无彩，只有主色和几个语义色带一点点蓝紫，久看不刺眼。
    主色用 #89b4fa（浅天蓝）做链接/图标；实心按钮仍用更深的 #3a6bcc，保证白字可读。 */
+/* 浅色主题：同一套色相压深一档。亮黄 #ffc46b 落在 #f3f8fd 上对比只有 1.4:1，
+   7px 的圆点基本看不见；压深之后仍有「糖果感」，只是不再发白。 */
+html[data-theme="sky"],
+html[data-theme="taro"],
+html[data-theme="mint"] {
+  --ph-load: #d9820a;
+  --ph-lock: #e24a6b;
+  --ph-plan: #7c5cd6;
+  --ph-exec: #1f74c9;
+  --ph-explain: #0e9e77;
+  --ph-end: #6b7686;
+}
+
 html[data-theme="steel"] {
   /* 比第一版（#101017 起步）整体提亮一档 —— 纯黑灰看久了发闷；现在对齐
      Catppuccin 的 mantle / base（#181825 / #1e1e2e）。仍保持四级层次：
@@ -1292,16 +1315,16 @@ body {
 /* 阶段类名统一带 ph- 前缀。原因：`.plan` 是 EXPLAIN 文本块的类（display:none），
    叫 `.plan` 的图例圆点会被它连坐 —— 点不显示、条子上那一段也消失，而且
    还会继承 padding / background: code-bg。血泪教训。 */
-.probe-phase-bar i.ph-load { background: var(--warn); }
-.probe-phase-bar i.ph-lock { background: var(--danger); }
-/* 规划用「浅一档的蓝」（--accent-soft-text）：它和执行是同一件事（这条语句的耗时），
-   但性质不同 —— 规划发生在第一个算子之前，改 SQL 结构才影响它；执行才受数据量、索引影响。
-   以前用 accent + opacity:.5，7px 的图例圆点淡到几乎看不见，还不如直接用实色的浅蓝。 */
-.probe-phase-bar i.ph-plan { background: var(--accent-soft-text); }
-.probe-phase-bar i.ph-exec { background: var(--accent); }
+.probe-phase-bar i.ph-load { background: var(--ph-load); }
+.probe-phase-bar i.ph-lock { background: var(--ph-lock); }
+/* 规划用薰衣草紫：和执行（蓝）同一族「这条语句的耗时」，但性质不同 ——
+   规划发生在第一个算子之前，改 SQL 结构才影响它；执行才受数据量、索引影响。
+   以前用 accent + opacity:.5，7px 的图例圆点淡到几乎看不见。 */
+.probe-phase-bar i.ph-plan { background: var(--ph-plan); }
+.probe-phase-bar i.ph-exec { background: var(--ph-exec); }
 /* 整理输出（渲染 EXPLAIN 文本 + 建统计树）是探测自身的开销 */
-.probe-phase-bar i.ph-explain { background: var(--text-3); }
-.probe-phase-bar i.ph-end { background: var(--text-2); }
+.probe-phase-bar i.ph-explain { background: var(--ph-explain); }
+.probe-phase-bar i.ph-end { background: var(--ph-end); }
 
 .probe-phase-legend {
   display: flex;
@@ -1314,12 +1337,12 @@ body {
 }
 .probe-phase-item { display: flex; align-items: center; gap: 6px; }
 .probe-phase-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
-.probe-phase-dot.ph-load { background: var(--warn); }
-.probe-phase-dot.ph-lock { background: var(--danger); }
-.probe-phase-dot.ph-plan { background: var(--accent-soft-text); }
-.probe-phase-dot.ph-exec { background: var(--accent); }
-.probe-phase-dot.ph-explain { background: var(--text-3); }
-.probe-phase-dot.ph-end { background: var(--text-2); }
+.probe-phase-dot.ph-load { background: var(--ph-load); }
+.probe-phase-dot.ph-lock { background: var(--ph-lock); }
+.probe-phase-dot.ph-plan { background: var(--ph-plan); }
+.probe-phase-dot.ph-exec { background: var(--ph-exec); }
+.probe-phase-dot.ph-explain { background: var(--ph-explain); }
+.probe-phase-dot.ph-end { background: var(--ph-end); }
 
 .probe-phase-hint {
   margin-top: 7px;

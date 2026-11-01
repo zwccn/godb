@@ -26,6 +26,50 @@ function get(path) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+/* ---------- 等条件，而不是等时间 ----------
+
+   原来满屏 `await sleep(1200)`：点了执行就睡 1.2 秒，假装结果已经回来了。
+   机器快时白等（整个回归大半时间在睡觉），机器慢时又不够 —— 加探测卡那轮，
+   1200ms 不够用，只能一路加到 2500。所以这里换成「每 40ms 问一次」。
+
+   waitFor 超时**不抛**：返回 null，让后面的 check() 照常记一条失败。
+   一条卡住就把后面几十条断言全带走，是最难查的那种红。 */
+async function waitFor(cdp, cond, opt = {}) {
+  const timeout = opt.timeout || 5000;
+  const every = opt.every || 40;
+  const label = opt.label || '条件';
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    let v = null;
+    try {
+      v = typeof cond === 'function' ? await cond() : await cdp.eval(cond);
+    } catch (e) {
+      v = null; // 页面正在重载、元素还不存在时求值会抛，当作「还没好」
+    }
+    if (v) return v;
+    if (Date.now() >= deadline) {
+      console.log(`      （等不到「${label}」，已等 ${timeout}ms）`);
+      return null;
+    }
+    await sleep(every);
+  }
+}
+
+// waitIdle 等「这次执行真的结束」：busy 是 app.js 顶层的执行中标志，
+// 从页面全局作用域能直接读到。快就立刻返回，慢（慢查询/大结果集）也不会假失败。
+function waitIdle(cdp, opt = {}) {
+  return waitFor(cdp, `typeof busy !== 'undefined' && busy === false && runAbort === null`,
+    Object.assign({ label: '执行结束', timeout: 20000 }, opt));
+}
+
+// settle 让浏览器画两帧：改完 DOM 立刻量尺寸会读到旧布局（差一帧）。
+// 用它替代「改完睡 300ms」。
+async function settle(cdp) {
+  try {
+    await cdp.eval(`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+  } catch (e) { /* 页面正在导航时忽略 */ }
+}
+
 class CDP {
   constructor(ws) { this.ws = ws; this.id = 0; this.wait = new Map(); }
   static async open(url) {
@@ -79,7 +123,10 @@ class CDP {
     let cdp = await CDP.open(page.webSocketDebuggerUrl);
     await cdp.send('Page.enable');
     await cdp.send('Page.navigate', { url: URL });
-    await sleep(2500);
+    // 等控制台真的起来（编辑器接管 + 结果区挂上），而不是睡 2.5 秒
+    await waitFor(cdp, `typeof cm !== 'undefined' && cm &&
+      !!document.querySelector('.CodeMirror') && !!document.getElementById('results')`,
+      { label: '控制台初始化', timeout: 15000 });
 
     const results = [];
     const check = (name, ok, detail) => {
@@ -129,7 +176,7 @@ class CDP {
 
     await cdp.eval(`cm.setValue('SELECT 4242 AS answer')`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(1200);
+    await waitIdle(cdp);
     check('点「执行」能跑出结果',
       await cdp.eval(`document.getElementById('results').textContent.includes('4242')`));
 
@@ -186,21 +233,28 @@ class CDP {
        慢查询时人靠它决定「再等等」还是「点停止」——原来只有「停止」两个字，
        跑 0.8 秒和跑 40 秒看起来一模一样。 */
     await cdp.eval(`setRunning(true)`);
-    await sleep(450);
+    // 等到「已经走了至少 0.2 秒」：等 0.0s 也算条件成立的话，量到的就是起点那一帧
+    await waitFor(cdp, `(() => { const b = document.getElementById('runTimer');
+      const t = b.textContent;
+      return /^\\d+\\.\\ds$/.test(t) && parseFloat(t) >= 0.2 &&
+        getComputedStyle(b).display !== 'none'; })()`,
+      { label: '秒表走到 0.2 秒' });
     const tm1 = await cdp.eval(`(() => {
       const b = document.getElementById('runTimer');
       return { text: b.textContent, shown: getComputedStyle(b).display !== 'none',
                w: Math.round(b.getBoundingClientRect().width) };
     })()`);
-    await sleep(3100);
+    // 等它真的转黄（>3 秒），而不是睡死 3.1 秒 —— 以后阈值调小这条也不会白等
+    await waitFor(cdp, `document.getElementById('runTimer').classList.contains('slow')`,
+      { label: '秒表转警示色', timeout: 6000 });
     const tm2 = await cdp.eval(`(() => {
       const b = document.getElementById('runTimer');
       return { text: b.textContent, slow: b.classList.contains('slow'),
                color: getComputedStyle(b).color };
     })()`);
     await cdp.eval(`setRunning(false)`);
-    await sleep(200);
-    const tm3 = await cdp.eval(`document.getElementById('runTimer').classList.contains('hidden')`);
+    const tm3 = await waitFor(cdp, `document.getElementById('runTimer').classList.contains('hidden')`,
+      { label: '秒表收回', timeout: 2000 });
     check('执行中按钮旁有秒表，超过 3 秒转警示色，结束后收回',
       tm1.shown && /^\d+\.\ds$/.test(tm1.text) && parseFloat(tm1.text) >= 0.2 && tm1.w > 20
       && parseFloat(tm2.text) >= 3 && tm2.slow && tm3,
@@ -230,7 +284,8 @@ class CDP {
     await cdp.eval(`cm.setValue('SELECT 7 AS f5;'); window.__f5mark = 'alive'; lastSubmittedSQL = null`);
     await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'F5', code: 'F5', windowsVirtualKeyCode: 116, nativeVirtualKeyCode: 116 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'F5', code: 'F5', windowsVirtualKeyCode: 116, nativeVirtualKeyCode: 116 });
-    await sleep(1400);
+    await waitFor(cdp, `lastSubmittedSQL === 'SELECT 7 AS f5;'`, { label: 'F5 提交语句' });
+    await waitIdle(cdp);
     const f5Ui = await cdp.eval(`({ sql: lastSubmittedSQL, alive: window.__f5mark })`);
     check('F5 直接执行，而且页面没有被刷新',
       f5Ui.sql === 'SELECT 7 AS f5;' && f5Ui.alive === 'alive',
@@ -271,9 +326,10 @@ class CDP {
 
     // 0.1c) 结果区：一条 tab 栏（信息 / 结果 N）+ 同一时刻只有一条滚动条。
     //      以前 .results 自己滚、卡片里的 .grid-wrap 又按 52vh 滚，必然出现两条。
-    const runSqlX = async (sql, wait = 1100) => {
+    // 执行一条 SQL 并等它真的跑完（不再猜「1.1 秒大概够」）
+    const runSqlX = async (sql) => {
       await cdp.eval(`cm.setValue(${JSON.stringify(sql)}); document.getElementById('btnRun').click()`);
-      await sleep(wait);
+      await waitIdle(cdp);
     };
     const tabState = () => cdp.eval(`(() => {
       const tabs = [...document.querySelectorAll('.result-tab')];
@@ -306,7 +362,8 @@ class CDP {
     check('多语句：有结果集的语句各占一个 tab，不再纵向堆叠',
       tMulti.labels.join('|') === '信息|结果 1|结果 2', tMulti.labels.join('|'));
     await cdp.eval(`[...document.querySelectorAll('.result-tab')].find(t => t.textContent.trim() === '信息').click()`);
-    await sleep(300);
+    await waitFor(cdp, `(() => { const a = document.querySelector('.result-tab.on');
+      return !!a && a.textContent.trim() === '信息'; })()`, { label: '切到「信息」tab' });
     const tInfo = await tabState();
     check('「信息」tab = 往返时间 + 逐条语句明细',
       tInfo.pane.indexOf('info-body') === 0 && /浏览器往返/.test(tInfo.text) && /SELECT 1 AS a/.test(tInfo.text),
@@ -323,14 +380,14 @@ class CDP {
     const planText = () => cdp.eval(`(document.getElementById('results').textContent || '').replace(/\\s+/g, ' ')`);
     await cdp.eval(`cm.setValue("BEGIN; UPDATE employees SET salary = salary; SELECT * FROM employees LIMIT 1;")`);
     await cdp.eval(`document.getElementById('btnExplain').click()`);
-    await sleep(1200);
+    await waitIdle(cdp);
     const mixed = await planText();
     check('执行计划：多语句里只解释 SELECT（不再报错）',
       /Scan|Project/.test(mixed) && !/only supports/i.test(mixed), mixed.slice(0, 120));
 
     await cdp.eval(`cm.setValue("EXPLAIN SELECT 1;")`);
     await cdp.eval(`document.getElementById('btnExplain').click()`);
-    await sleep(900);
+    await waitIdle(cdp);
     const doubleEx = await planText();
     check('执行计划：已经是 EXPLAIN 的语句不再套一层',
       /Result|Project/.test(doubleEx) && !/only supports/i.test(doubleEx), doubleEx.slice(0, 120));
@@ -338,7 +395,7 @@ class CDP {
     // 字符串里的分号不能被当成分隔符
     await cdp.eval(`cm.setValue("SELECT 'a;b' AS v;")`);
     await cdp.eval(`document.getElementById('btnExplain').click()`);
-    await sleep(900);
+    await waitIdle(cdp);
     const semi = await planText();
     check('执行计划：字符串里的分号不会被切开',
       /Result|Project/.test(semi) && !/only supports|执行失败/i.test(semi), semi.slice(0, 120));
@@ -346,16 +403,16 @@ class CDP {
     // 一条能解释的都没有：直接说清楚，别发个请求换回看不懂的报错
     await cdp.eval(`cm.setValue("UPDATE employees SET salary = salary WHERE id = 1;")`);
     await cdp.eval(`document.getElementById('btnExplain').click()`);
-    await sleep(700);
+    await waitIdle(cdp);
     const onlyWrite = await planText();
     check('执行计划：全是非查询语句时给出明确提示',
       /只能解释查询语句/.test(onlyWrite) && /UPDATE/.test(onlyWrite), onlyWrite.slice(0, 100));
 
     // 0.3) 新能力：Top-N、interval、精确 numeric、快聚合、覆盖索引
-    const runSql = async (sql, wait = 900) => {
+    const runSql = async (sql) => {
       await cdp.eval(`cm.setValue(${JSON.stringify(sql)})`);
       await cdp.eval(`document.getElementById('btnRun').click()`);
-      await sleep(wait);
+      await waitIdle(cdp);
       return (await cdp.eval(`document.getElementById('results').textContent`) || '').replace(/\s+/g, ' ');
     };
     const t1 = await runSql(`SELECT 0.1::numeric + 0.2::numeric AS x`);
@@ -396,9 +453,11 @@ class CDP {
     // 表格里只有一行「还没有执行记录」，下面的断言就会随机变红。
     await cdp.eval(`cm.setValue("SELECT 1 AS ping")`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(700);
+    await waitIdle(cdp);
     await cdp.eval(`document.getElementById('btnMonitor').click()`);
-    await sleep(1200);
+    // 面板会自己拉一次 /api/monitor 再渲染，等慢 SQL 表格真的出现
+    await waitFor(cdp, `!!document.querySelector('#monSlowSQL tr')`,
+      { label: '监控-慢SQL 表格' });
     const monUi = await cdp.eval(`(() => {
       const tb = document.querySelector('#monSlowSQL').closest('table');
       const cell = document.querySelector('#monSlowSQL td.c-sql');
@@ -525,7 +584,9 @@ class CDP {
 
     // 存储页：四块占比条 + 明细表；点一行才去逐页扫「洞」
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="storage"]').click()`);
-    await sleep(1400);
+    await waitFor(cdp, `document.querySelectorAll('#spaceBody tr').length > 0`,
+      { label: '存储页表格' });
+    await settle(cdp);
     const spUi = await cdp.eval(`(() => {
       const rows = document.querySelectorAll('#spaceBody tr');
       const heads = [...document.querySelectorAll('#spaceTable thead th, .space-table thead th')]
@@ -561,7 +622,9 @@ class CDP {
       `${spUi.heads.length} 列 · 末列「${vacText}」· 全部 ${JSON.stringify(spUi.vacAll)}`);
 
     await cdp.eval(`document.querySelector('#spaceBody tr').click()`);
-    await sleep(1400);
+    await waitFor(cdp, `(() => { const d = document.getElementById('spaceDetail');
+      return !!d && !d.classList.contains('hidden'); })()`, { label: '页级构成展开' });
+    await settle(cdp);
     const spDet = await cdp.eval(`(() => {
       const d = document.getElementById('spaceDetail');
       return {
@@ -578,7 +641,9 @@ class CDP {
     // 空间地图：库视图 = 矩形树图（面积 = 字节），双击进表视图 = 页网格。
     // 这一页是「大视野」：画布吃满剩余高度，一张 785 页的表要能一屏铺完。
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="map"]').click()`);
-    await sleep(1600);
+    await waitFor(cdp, `document.querySelectorAll('#mapTree .tv-cell').length > 0`,
+      { label: '空间地图树图' });
+    await settle(cdp);
     const tvUi = await cdp.eval(`(() => {
       const cells = [...document.querySelectorAll('#mapTree .tv-cell')];
       const box = document.getElementById('mapTree').getBoundingClientRect();
@@ -613,7 +678,9 @@ class CDP {
     // 「按文件」把每棵索引拆成独立块：块数一定变多
     const beforeFile = tvUi.n;
     await cdp.eval(`document.querySelector('#mapGroup button[data-group="file"]').click()`);
-    await sleep(700);
+    await waitFor(cdp, `(document.querySelector('#mapGroup button.on') || {}).dataset.group === 'file'`,
+      { label: '按文件分组生效' });
+    await settle(cdp);
     const fileUi = await cdp.eval(`(() => ({
       n: document.querySelectorAll('#mapTree .tv-cell').length,
       on: (document.querySelector('#mapGroup button.on') || {}).dataset.group,
@@ -722,7 +789,9 @@ class CDP {
       const c = document.querySelector('#mapTree .tv-cell');
       c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     })()`);
-    await sleep(1800);
+    await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
+      { label: '表视图页网格' });
+    await settle(cdp);
     const gridUi = await cdp.eval(`(() => {
       const cells = [...document.querySelectorAll('#pmGrid .pm-c')];
       const g = document.getElementById('pmGrid').getBoundingClientRect();
@@ -873,7 +942,8 @@ class CDP {
 
     // 页检查器：点一格看结构 / 文本 / 十六进制（直接读文件，不进缓冲池）
     await cdp.eval(`document.querySelector('#pmGrid .pm-c').click()`);
-    await sleep(1200);
+    await waitFor(cdp, `(() => { const h = document.querySelector('#pmSide .pm-head');
+      return !!h && /第 \\d+ 页/.test(h.textContent); })()`, { label: '页检查器结构面板' });
     const pmStruct = await cdp.eval(`(() => {
       const side = document.getElementById('pmSide');
       const rows = [...side.querySelectorAll('.pm-row')].map(r => r.textContent);
@@ -890,7 +960,8 @@ class CDP {
 
     // 关联链：点一条行（不论是从数据页还是索引叶子点），应该出现「RID → 堆页 N 槽 M」
     await cdp.eval(`document.querySelector('#pmSide .pm-row').click()`);
-    await sleep(1200);
+    await waitFor(cdp, `!!document.querySelector('#pmSide .pm-link')`,
+      { label: 'RID 关联块' });
     const pmLink = await cdp.eval(`(() => {
       const box = document.querySelector('#pmSide .pm-link');
       return { text: box ? box.textContent : '', onRow: document.querySelectorAll('#pmSide .pm-row.on').length };
@@ -912,17 +983,21 @@ class CDP {
     })()`);
     if (ixNav) {
       await cdp.eval(`enterTable(${JSON.stringify(ixNav.table)}, 'index', ${JSON.stringify(ixNav.ix)})`);
-      await sleep(1600);
+      await waitFor(cdp, `!!document.querySelector('#pmGrid .pm-c[data-no="0"]')`,
+        { label: '索引页网格' });
       // 右栏可能还停在上一条断言切的「十六进制」页，先回结构页 —— 结构页才有 RID
       await cdp.eval(`pmTab = 'struct'`);
       await cdp.eval(`document.querySelector('#pmGrid .pm-c[data-no="0"]').click()`);
-      await sleep(1000);
+      await waitFor(cdp, `!!document.querySelector('#pmSide .pm-path')`,
+        { label: '索引头页路径条' });
       const idxHead = await cdp.eval(`(() => ({
         path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
         rootLink: document.querySelectorAll('#pmSide .pm-row.linkable').length,
       }))()`);
       await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
-      await sleep(1000);
+      // 等路径条从「头页 0」往下走一层（比「睡 1 秒」准：这一跳要读页）
+      await waitFor(cdp, `(() => { const p = document.querySelector('#pmSide .pm-path');
+        return !!p && p.textContent.trim() !== '头页 0'; })()`, { label: '路径条下钻一层' });
       const idxRoot = await cdp.eval(`(() => ({
         path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
         inner: /内部节点/.test(document.getElementById('pmSide').textContent),
@@ -931,8 +1006,14 @@ class CDP {
       // 根是内部节点才再下一层；小表的根本身就是叶子
       let idxLeaf = { path: idxRoot.path };
       if (idxRoot.inner) {
+        // 记下当前路径，要求它真的变了（叶子这一层是「内部 N›叶子 M」）
+        const beforeLeaf = (idxRoot.path || '').trim();
         await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
-        await sleep(1000);
+        await waitFor(cdp, `(() => { const p = document.querySelector('#pmSide .pm-path');
+          if (!p) return false;
+          const t = p.textContent.trim();
+          return t !== '头页 0' && t !== ${JSON.stringify(beforeLeaf)}; })()`,
+          { label: '路径条再下一层' });
         idxLeaf = await cdp.eval(`(() => ({
           path: (document.querySelector('#pmSide .pm-path') || {}).textContent || '',
           leaf: /叶子/.test(document.getElementById('pmSide').textContent),
@@ -947,7 +1028,8 @@ class CDP {
         && /^头页 0›(内部|叶子) \d+$/.test(idxRoot.path) && deepOk,
         `${idxHead.path} → ${idxRoot.path}` + (idxRoot.inner ? ` → ${idxLeaf.path}` : '（根即叶子）'));
       await cdp.eval(`document.querySelector('#pmSide .pm-path-i').click()`);
-      await sleep(900);
+      await waitFor(cdp, `(() => { const p = document.querySelector('#pmSide .pm-path');
+        return !!p && p.textContent.trim() === '头页 0'; })()`, { label: '退回头页' });
       const idxBack = await cdp.eval(
         `(document.querySelector('#pmSide .pm-path') || {}).textContent || ''`);
       check('点路径条能退回上一层（不用重新点网格）', idxBack === '头页 0', idxBack || '路径条没了');
@@ -960,16 +1042,20 @@ class CDP {
     })()`);
     if (hasIx) {
       await cdp.eval(`enterTable(${JSON.stringify(hasIx.table)}, 'index', ${JSON.stringify(hasIx.ix)})`);
-      await sleep(1800);
+      await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
+        { label: '索引页网格（整链）' });
       const idxPage = await cdp.eval(`(() => {
         const c = [...document.querySelectorAll('#pmGrid .pm-c')].find(x => x.classList.contains('idx'));
         if (!c) return null;
         c.click();
         return c.dataset.no;
       })()`);
-      await sleep(1200);
+      await waitFor(cdp, `!!document.querySelector('#pmSide .pm-row.linkable')`,
+        { label: '索引页里的可点行' });
       await cdp.eval(`document.querySelector('#pmSide .pm-row.linkable').click()`);
-      await sleep(2400);
+      // 这一跳要换文件 + 读堆页，等「关联块里出现堆页」再收尾
+      await waitFor(cdp, `(() => { const t = document.querySelector('#pmSide .pm-link');
+        return !!t && /堆页/.test(t.textContent); })()`, { label: '跳到堆页' });
       const chain = await cdp.eval(`(() => {
         const txt = s => { const e = document.querySelector(s); return e ? e.textContent : ''; };
         const on = document.querySelector('#mapFiles .map-file.on');
@@ -1028,9 +1114,10 @@ class CDP {
       const c = document.querySelector('#mapTree .tv-cell');
       c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     })()`);
-    await sleep(1500);
+    await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
+      { label: '表视图页网格（Esc 用例）' });
     await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
-    await sleep(600);
+    await settle(cdp);
     const escUi = await cdp.eval(`(() => ({
       panelOpen: !document.getElementById('monPanel').classList.contains('hidden'),
       gridHidden: document.getElementById('pmGrid').classList.contains('hidden'),
@@ -1433,7 +1520,8 @@ class CDP {
     // 深链 #help 一进页面就打开帮助：此时 schema 可能还没加载完，
     // 页脚不能因此误报「没有示例表」（实测踩过：两张截图字节完全一样）
     await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8080/?theme=sky#help' });
-    await sleep(2600);
+    await waitFor(cdp, `(() => { const m = document.getElementById('helpModal');
+      return !!m && !m.classList.contains('hidden'); })()`, { label: '#help 深链打开帮助' });
     const deepLink = await cdp.eval(`(() => ({
       text: document.getElementById('helpDataHint').textContent.trim(),
       hidden: document.getElementById('btnHelpSample').classList.contains('hidden'),
@@ -1890,11 +1978,14 @@ class CDP {
 
     // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
     await cdp.eval(`openSettings()`);
-    await sleep(800);
+    await waitFor(cdp, `!!document.getElementById('setPoolPages')`, { label: '设置表单渲染' });
     // 外观组在无改动时按钮是「关闭」，保存用例必须先切回可保存的组
     await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'conn').click()`);
     await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
-    await sleep(1300);
+    // 保存是异步的：等面板关闭 + toast 出现（它就是「保存成功」的可见信号）
+    await waitFor(cdp, `(() => { const t = document.getElementById('toast');
+      return document.getElementById('settingsPanel').classList.contains('hidden') &&
+        !!t && !t.classList.contains('hidden'); })()`, { label: '保存完成并提示' });
     const saved = await cdp.eval(`(() => {
       const t = document.getElementById('toast');
       return {
@@ -1909,7 +2000,7 @@ class CDP {
     // 缓冲池页数：行能换出之后，这个值决定「每张表留多少热页的行在内存里」。
     // 改完要重启才生效，但值本身必须存得住（不然用户以为没保存）。
     await cdp.eval(`openSettings()`);
-    await sleep(700);
+    await waitFor(cdp, `!!document.getElementById('setPoolPages')`, { label: '设置表单（缓冲池）' });
     const pool0 = await cdp.eval(`(() => { const n = document.getElementById('setPoolPages'); return n ? n.value : null; })()`);
     check('设置页有「缓冲池页数」字段', pool0 !== null && pool0 !== '', String(pool0));
     await cdp.eval(`[...document.querySelectorAll('.set-tab')].find(t => t.dataset.pane === 'perf').click()`);
@@ -1928,9 +2019,10 @@ class CDP {
     await cdp.eval(`document.getElementById('setPoolPages').value = '512'`);
     await cdp.eval(`document.getElementById('setPoolPages').dispatchEvent(new Event('input', { bubbles: true }))`);
     await cdp.eval(`document.getElementById('btnSettingsSave').click()`);
-    await sleep(1200);
+    await waitFor(cdp, `document.getElementById('settingsPanel').classList.contains('hidden')`,
+      { label: '保存后面板关闭' });
     await cdp.eval(`openSettings()`);
-    await sleep(700);
+    await waitFor(cdp, `!!document.getElementById('setPoolPages')`, { label: '重新打开设置' });
     const pool1 = await cdp.eval(`document.getElementById('setPoolPages').value`);
     check('缓冲池页数能存住（512）', pool1 === '512', `保存前 ${pool0} → 重新打开 ${pool1}`);
     // 还原成打开时读到的值（默认是 4096 页 = 32MB），别把测试的副作用留在配置文件里
@@ -2187,11 +2279,13 @@ class CDP {
        所以后端按 step 页聚合成块，点进去才是逐页。这里用 ?pmblock=64 把 big_demo
        的 785 页压成 13 块来验证整条下钻链路 —— 真造一张二十万页的表跑不动测试。 */
     await cdp.send('Page.navigate', { url: URL + '&pmblock=64' });
-    await sleep(2500);
+    await waitFor(cdp, `typeof cm !== 'undefined' && cm && !!document.querySelector('.CodeMirror')`,
+      { label: '刷新后控制台就绪', timeout: 15000 });
     await cdp.eval(`toggleMonitor(true)`);
-    await sleep(500);
     await cdp.eval(`gotoMap('big_demo')`);
-    await sleep(1500);
+    await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
+      { label: '块级页地图' });
+    await settle(cdp);
     const bv = await cdp.eval(`(() => ({
       n: document.querySelectorAll('#pmGrid .pm-c').length,
       note: (document.getElementById('mapNote') || {}).textContent || '',
@@ -2220,7 +2314,7 @@ class CDP {
 
     // 退要一级一级退：块内 → 块视图 → 库视图
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', windowsVirtualKeyCode: 27 });
-    await sleep(800);
+    await settle(cdp);
     const esc1 = await cdp.eval(`({
       n: document.querySelectorAll('#pmGrid .pm-c').length,
       crumb: (document.getElementById('mapCrumbs') || {}).textContent || '',
@@ -2240,11 +2334,13 @@ class CDP {
        这里不去造一张真能留洞的表 —— checkpoint 有时会把页紧凑重写，洞不稳定；
        直接喂一块带 advice 的块数据，验证渲染、文案和按钮这条链路。 */
     await cdp.send('Page.navigate', { url: URL + '&pmblock=64' });
-    await sleep(2500);
+    await waitFor(cdp, `typeof cm !== 'undefined' && cm && !!document.querySelector('.CodeMirror')`,
+      { label: '刷新后控制台就绪', timeout: 15000 });
     await cdp.eval(`toggleMonitor(true)`);
-    await sleep(500);
     await cdp.eval(`gotoMap('big_demo')`);
-    await sleep(1500);
+    await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
+      { label: '块级页地图' });
+    await settle(cdp);
     await cdp.eval(`(() => {
       pmMap = { table: pmSel.table, kind: 'data', total: 1000, step: 256, vacuumThreshold: 4, blocks: [
         { from: 0, to: 256, pages: 256, live: 100, slots: 300, used: 200000, free: 8000,
@@ -2507,7 +2603,7 @@ class CDP {
       d.setSelection({ line: 0, ch: 0 }, { line: 0, ch: cm.getLine(0).length });
     })()`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(1400);
+    await waitIdle(cdp);
     const selRun = await cdp.eval(`lastSubmittedSQL`);
     check('有选区时只执行选区（改一句不用把整段删掉重写）',
       selRun === 'SELECT 1 AS a;', JSON.stringify(selRun));
@@ -2527,7 +2623,7 @@ class CDP {
     // 语法错：第 2 行第 8 列 → 红底 + 行号露出来 + 光标跳到出错位置
     await cdp.eval(`cm.setValue(['SELECT 1;','SELECT FROM;','SELECT 3;'].join(String.fromCharCode(10)))`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(1600);
+    await waitIdle(cdp);
     const errMark = await cdp.eval(`(() => ({
       lines: document.querySelectorAll('.cm-errline').length,
       gutter: cm.getOption('lineNumbers'),
@@ -2541,7 +2637,7 @@ class CDP {
     // 执行成功 → 标记清掉、行号收回
     await cdp.eval(`cm.setValue('SELECT 42 AS ok;')`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(1600);
+    await waitIdle(cdp);
     const errGone = await cdp.eval(`(() => ({
       lines: document.querySelectorAll('.cm-errline').length,
       gutter: cm.getOption('lineNumbers'),
@@ -2592,7 +2688,7 @@ class CDP {
     // 大结果集提示：表格只画当前页，但数据是全量进来的
     await cdp.eval(`cm.setValue('SELECT * FROM big_demo LIMIT 3000')`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(2500);
+    await waitIdle(cdp);
     const bigWarn = await cdp.eval(`(() => {
       const w = document.querySelector('#results .grid-warn');
       return { has: !!w, text: w ? w.textContent.slice(0, 40) : '' };
@@ -2606,7 +2702,8 @@ class CDP {
        ③ 视图是算子账本而不是一张 QUERY PLAN 文本表格。 */
     await cdp.eval(`cm.setValue('SELECT v, count(*) AS n FROM big_demo GROUP BY v ORDER BY n DESC LIMIT 5')`);
     await cdp.eval(`document.getElementById('btnProbe').click()`);
-    await sleep(3000);
+    await waitFor(cdp, `document.querySelectorAll('.probe-row').length > 0`,
+      { label: '探测算子账本', timeout: 20000 });
     const probe = await cdp.eval(`(() => {
       const rows = [...document.querySelectorAll('.probe-row')];
       const worst = document.querySelector('.probe-row.is-worst');
@@ -2711,7 +2808,8 @@ class CDP {
     // 规划那一两百微秒就成了大头（聚合那种 ms 级查询反而看不到这句）。
     await cdp.eval(`cm.setValue('SELECT * FROM big_demo LIMIT 100')`);
     await cdp.eval(`document.getElementById('btnProbe').click()`);
-    await sleep(2500);
+    await waitFor(cdp, `document.querySelectorAll('.probe-row').length > 0`,
+      { label: '探测算子账本（规划占比）', timeout: 20000 });
     const planHint = await cdp.eval(`(() => {
       const box = document.querySelector('.probe-phases');
       const items = box ? [...box.querySelectorAll('.probe-phase-item')].map(x => x.textContent) : [];
@@ -2779,7 +2877,7 @@ class CDP {
     // 普通「执行」不该带着探测视图（否则一个 SELECT 也会被当成探测结果显示）
     await cdp.eval(`cm.setValue('SELECT 7 AS x')`);
     await cdp.eval(`document.getElementById('btnRun').click()`);
-    await sleep(1200);
+    await waitIdle(cdp);
     const noProbe = await cdp.eval(`({
       rows: document.querySelectorAll('.probe-row').length,
       tab: [...document.querySelectorAll('.result-tab')].map(b => b.textContent).join(','),

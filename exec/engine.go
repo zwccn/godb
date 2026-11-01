@@ -320,6 +320,13 @@ func (e *Engine) buildColumns(defs []*sql.ColumnDef) ([]*catalog.Column, error) 
 // 不安全的动作仍然做一次全量 checkpoint；安全的动作只写 catalog.json，
 // 数据交给后续的自动 checkpoint（每 128 次提交）或显式 CHECKPOINT。
 func (e *Engine) persistSchema(needsSnapshot bool) error {
+	// 所有 DDL 都会走到这里（建表 / 改表 / 建删索引 / TRUNCATE），所以目录快照的
+	// 代次在这里统一递增。放在最前面而不是落盘之后：内存里的结构已经变了，
+	// 就算落盘失败（返回错误），缓存也不该再拿旧快照去解释新结构。
+	//
+	// Catalog.Add / Drop / Rename 里各自也递增一次 —— 那是 catalog 包自己的语义
+	// （单独用 catalog 的代码也该拿到正确的代次）。重复递增没有害处，只要求单调。
+	e.Cat.Gen++
 	if err := e.Cat.Save(e.Dir); err != nil {
 		return err
 	}

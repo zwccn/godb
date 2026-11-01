@@ -76,3 +76,39 @@ func BenchmarkPlanJoin(b *testing.B) {
 		}
 	}
 }
+
+// 客户端最常发的元数据查询：pg_class / pg_attribute。Navicat、psql \d、ORM
+// 连接时都会连发几十条这种查询。
+func BenchmarkMetaPgClass(b *testing.B) {
+	d := benchDB(b)
+	sess := d.Session("s")
+	q := `SELECT relname FROM pg_class LIMIT 5`
+	if _, err := d.Exec(sess, q); err != nil {
+		b.Fatalf("warmup: %v", err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := d.Exec(sess, q); err != nil {
+			b.Fatalf("exec: %v", err)
+		}
+	}
+}
+
+// 对照：每轮把 catalog 代次推进一格，强制目录快照失效。
+// 与 BenchmarkMetaPgClass（命中缓存）相比，差值就是一次 buildMeta 的成本 ——
+// 用来判断「meta 缓存到底值不值得留」。
+func BenchmarkMetaPgClassCold(b *testing.B) {
+	d := benchDB(b)
+	sess := d.Session("s")
+	q := `SELECT relname FROM pg_class LIMIT 5`
+	if _, err := d.Exec(sess, q); err != nil {
+		b.Fatalf("warmup: %v", err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.Cat.Gen++ // 只推进代次，不动结构：等价于「缓存没命中」
+		if _, err := d.Exec(sess, q); err != nil {
+			b.Fatalf("exec: %v", err)
+		}
+	}
+}

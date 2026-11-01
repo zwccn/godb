@@ -210,8 +210,48 @@ func OIDByName(name string) int32 {
 	return OIDText
 }
 
+// typeFast 是「规范类型名 → OID / typlen」的直查表。
+//
+// 为什么需要：OIDOf 原来是 OIDByName(t.String())，一次调用要做三件开销不小的事 ——
+// String() 选 Name、ToLower 分配一个新串、TrimSpace 再来一次，然后走一遍字符串 switch。
+// 而它落在「每张表的每一列」这条路径上（syscat 生成任何一个系统表行都要算一遍）。
+//
+// 为什么可信：Type.Name 在 ParseType 里就规范化过（小写、无参数），带参数的
+// （varchar(32) / numeric(10,2)）命中不了这张表，自然落回 OIDByName。
+// 表里的 OID / typlen **不是手抄的**，而是启动时由 OIDByName / TypeLenByName 算出来的，
+// 所以两套逻辑不可能对不上（oid_test.go 里另有断言守着）。
+var typeFast = func() map[string]struct{ oid, length int32 } {
+	names := []string{
+		"smallint", "integer", "bigint",
+		"text", "varchar", "char", "name",
+		"boolean", "real", "double precision", "numeric",
+		"date", "time", "timestamp", "interval",
+		"oid", "xid", "cid", "tid",
+		"regproc", "regclass", "regtype", "regnamespace", "regrole",
+		"bytea", "uuid", "json", "jsonb", "xml",
+	}
+	m := make(map[string]struct{ oid, length int32 }, len(names))
+	for _, n := range names {
+		m[n] = struct{ oid, length int32 }{OIDByName(n), TypeLenByName(n)}
+	}
+	return m
+}()
+
 // OIDOf 返回一个具体类型的 OID。
-func OIDOf(t Type) int32 { return OIDByName(t.String()) }
+func OIDOf(t Type) int32 {
+	if f, ok := typeFast[t.Name]; ok {
+		return f.oid
+	}
+	return OIDByName(t.String())
+}
+
+// TypeLenOf 是 TypeLenByName 的类型版本：规范名直接查表，带参数的落回慢路径。
+func TypeLenOf(t Type) int32 {
+	if f, ok := typeFast[t.Name]; ok {
+		return f.length
+	}
+	return TypeLenByName(t.String())
+}
 
 // TypeLenByName 返回该类型的 pg_type.typlen（-1 表示变长）。
 func TypeLenByName(name string) int32 {

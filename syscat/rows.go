@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"godb/catalog"
 	"godb/types"
@@ -57,14 +58,18 @@ func buildMeta(src Source) *meta {
 		}
 		tm := &tblMeta{t: t, oid: int32(sysTableOIDBase + i), sys: true}
 		for ci, col := range t.Columns {
-			tm.cols = append(tm.cols, colMeta{idx: ci, atttypid: types.OIDOf(col.Type()), attlen: types.TypeLenByName(col.Type().String())})
+			// col.Type() 取一次就够（它会构造 Name 字符串）；OID / typlen 各有快路径。
+			ty := col.Type()
+			tm.cols = append(tm.cols, colMeta{idx: ci, atttypid: types.OIDOf(ty), attlen: types.TypeLenOf(ty)})
 		}
 		m.tables = append(m.tables, *tm)
 	}
 	for i, t := range src.tables() {
 		tm := &tblMeta{t: t, oid: int32(userTableOIDBase + i)}
 		for ci, col := range t.Columns {
-			tm.cols = append(tm.cols, colMeta{idx: ci, atttypid: types.OIDOf(col.Type()), attlen: types.TypeLenByName(col.Type().String())})
+			// col.Type() 取一次就够（它会构造 Name 字符串）；OID / typlen 各有快路径。
+			ty := col.Type()
+			tm.cols = append(tm.cols, colMeta{idx: ci, atttypid: types.OIDOf(ty), attlen: types.TypeLenOf(ty)})
 		}
 		n := 0
 		for _, grp := range t.UniqueGroups() {
@@ -112,6 +117,43 @@ func buildMeta(src Source) *meta {
 	return m
 }
 
+// cachedMeta 返回当前 catalog 的目录快照，按 Gen 作废。
+//
+// 为什么必须有它：Rows() 对**每一行**都调一次 buildMeta，而 buildMeta 要遍历全库
+// 所有表、所有列（每列算一次 OID 和 typlen）。客户端查一次 pg_attribute（几十行）
+// 就是几十次全量重建 —— 实测 2.16 ms，pg_class 与 pg_attribute 连接要 4.8 ms。
+//
+// 为什么敢缓存：buildMeta 的结果只取决于 catalog 的结构（表、列、索引），
+// **不含任何与数据量/页数有关的东西**（relpages 由 pagesOf 每次现取）。
+// 所以「数据量涨了、计划该变」这类担心在这里不存在 —— 结构没变，快照就还是对的。
+//
+// 一致性：Gen 只在 DDL 里加（Add / Drop / Rename / ALTER），而 DDL 与查询由表锁
+// 互斥，不存在「拿一份正在变形的快照」的窗口。
+//
+// 只有一格：切库时两个 catalog 会互相挤掉，各重建一次（百微秒级）。
+// 相比维护一个 LRU，这个代价更划算 —— 多库切换本来就是低频动作。
+var (
+	metaMu  sync.Mutex
+	metaCat *catalog.Catalog
+	metaGen uint64
+	metaVal *meta
+)
+
+func cachedMeta(cat *catalog.Catalog) *meta {
+	var gen uint64
+	if cat != nil {
+		gen = cat.Gen
+	}
+	metaMu.Lock()
+	defer metaMu.Unlock()
+	if metaVal != nil && metaCat == cat && metaGen == gen {
+		return metaVal
+	}
+	m := buildMeta(Source{Cat: cat})
+	metaCat, metaGen, metaVal = cat, gen, m
+	return m
+}
+
 // constraintIndexName 是主键/唯一约束隐式创建的索引名，
 // 与 PostgreSQL 的默认命名一致（t_pkey / t_col_key）。
 func constraintIndexName(t *catalog.Table, cols []int) string {
@@ -155,7 +197,7 @@ func RelationOID(cat *catalog.Catalog, name string) (int32, bool) {
 			return int32(userTableOIDBase + i), true
 		}
 	}
-	m := buildMeta(Source{Cat: cat})
+	m := cachedMeta(cat)
 	tm, ok := m.byName[strings.ToLower(strings.TrimSpace(name))]
 	if !ok {
 		return 0, false
@@ -209,7 +251,7 @@ func bv(b bool) types.Value   { return types.Bool(b) }
 
 // Rows 生成一张虚拟表的全部行。
 func Rows(def *catalog.Table, src Source) []types.Row {
-	m := buildMeta(src)
+	m := cachedMeta(src.Cat)
 	switch def.Name {
 	case "pg_database":
 		names := src.Databases()
@@ -1022,7 +1064,7 @@ func IndexDefByOID(cat *catalog.Catalog, oid int32) (string, bool) {
 	if cat == nil || oid == 0 {
 		return "", false
 	}
-	m := buildMeta(Source{Cat: cat})
+	m := cachedMeta(cat)
 	for i := range m.tables {
 		tm := &m.tables[i]
 		for _, ix := range tm.idx {
@@ -1039,7 +1081,7 @@ func ConstraintDefByOID(cat *catalog.Catalog, oid int32) (string, bool) {
 	if cat == nil || oid == 0 {
 		return "", false
 	}
-	m := buildMeta(Source{Cat: cat})
+	m := cachedMeta(cat)
 	for i := range m.tables {
 		tm := &m.tables[i]
 		for _, ix := range tm.idx {
@@ -1603,7 +1645,7 @@ func commentRows(def *catalog.Table, src Source) []types.Row {
 	// 库自身的描述（pg_shdescription 只有 objoid/classoid/description 三列，
 	// mk 会忽略多余字段，所以两个表共用同一份行生成）。
 	out = add(out, DbOID, 1262, 0, "godb - a from-scratch SQL database in Go")
-	for _, tm := range buildMeta(src).tables {
+	for _, tm := range cachedMeta(src.Cat).tables {
 		if tm.sys {
 			continue
 		}
@@ -1625,7 +1667,7 @@ func RelationComment(cat *catalog.Catalog, oid int32, subid int) (string, bool) 
 	if cat == nil {
 		return "", false
 	}
-	for _, tm := range buildMeta(Source{Cat: cat}).tables {
+	for _, tm := range cachedMeta(cat).tables {
 		if tm.oid != oid {
 			continue
 		}

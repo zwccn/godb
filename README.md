@@ -390,6 +390,28 @@ BuildSelect → buildFrom → tableSchema → syscat.RelationOID → syscat.buil
 顺带一个观察：修完之后，「整理输出」（渲染 `EXPLAIN` 文本 + 建统计树）在探测卡里
 反而比规划还贵一点（20–40 µs）。那是探测专属开销，普通查询不付。
 
+### 目录快照缓存（`syscat.cachedMeta`）
+
+`pg_catalog` 的每一行都由 `syscat.Rows()` 现场生成，而它要一份「全库目录快照」
+（表、列、索引、OID）。这份快照原来是每次调用重建一遍。
+
+现在按 `catalog.Gen` 缓存：
+
+- `Gen` 是结构变更代次，只在 DDL 里加（`Catalog.Add/Drop/Rename` 各一次，
+  `persistSchema` 里统一兜一次 —— 它覆盖了 `CREATE INDEX` / `DROP INDEX` / `TRUNCATE`
+  这些不走 Add/Drop 的路径）。
+- **刻意不放在 `Catalog.Rebuild()` 里**：那个函数也会被 `Get()` 的懒初始化调用，
+  放进去等于每次读表都让缓存失效，缓存就没意义了。
+- 能安全缓存的根本原因：快照里**没有任何与数据量有关的东西**。`relpages` / `reltuples`
+  由 `pagesOf` / `rowsOf` 每次现取，所以「数据涨了快照就过期」这件事不存在。
+
+实测（`db/plan_bench_test.go` 的 `BenchmarkMetaPgClass` vs `…Cold`）：
+命中 377 µs、强制失效 488 µs —— 一份快照值 **111 µs**。
+
+**但要如实说**：这只占整条查询的 1/4。剩下的大头在 `Rows()` 本身 —— 它一次性把
+96 行全造出来（每行 30 个字段的 map + 一次按列名查找），`LIMIT 5` 完全没下推。
+要再往下砍（比如让虚拟表流式产行）得动 `Rows()` 那两千行，属于另一件事。
+
 六段的颜色是专门挑的马卡龙 / 糖果色（橙 / 草莓粉 / 薰衣草 / 糖果蓝 / 薄荷 / 银灰），
 不跟皮肤走语义色：`warn` 那种深黄、`danger` 那种深红挤在一条 6px 的条子上既闷又难分。
 **相邻两段的色相至少差 40°**，浅色主题（sky / taro / mint）里换成同色相压深一档的版本

@@ -204,6 +204,15 @@ type Catalog struct {
 	Tables []*Table `json:"tables"`
 
 	byName map[string]*Table
+
+	// Gen 是「结构变更代次」：加表 / 删表 / 改名 / ALTER 之后加一。
+	//
+	// 它只有一个用途：让缓存知道自己什么时候该作废（syscat 的目录快照就靠它）。
+	// 刻意不放在 Rebuild() 里 —— Rebuild 也会被 Get() 的懒初始化调用，
+	// 那样每次读表都会加一，缓存等于没有。
+	//
+	// 不持久化：进程重启后从头算，没有跨进程的缓存要失效。
+	Gen uint64 `json:"-"`
 }
 
 // New 创建空 Catalog。
@@ -267,6 +276,7 @@ func (c *Catalog) Add(t *Table) error {
 	c.Tables = append(c.Tables, t)
 	c.EnsureIDs()
 	c.Rebuild()
+	c.Gen++
 	return nil
 }
 
@@ -283,6 +293,7 @@ func (c *Catalog) Drop(name string) error {
 		}
 	}
 	c.Rebuild()
+	c.Gen++
 	return nil
 }
 
@@ -297,5 +308,6 @@ func (c *Catalog) Rename(oldName, newName string) error {
 	}
 	t.Name = newName
 	c.Rebuild()
+	c.Gen++
 	return nil
 }

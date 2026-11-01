@@ -2549,6 +2549,24 @@ class CDP {
       /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
       `${probe.worst} · ${probe.verdict.slice(0, 40)}`);
 
+    /* 时间去向：服务端 19ms、每一步却 0.5ms 的悬案，靠这条分段对上账。
+       这里跑的是热查询（big_demo 前面已经查过），所以只该有「执行」一段 ——
+       装载表那段只在服务启动后第一次碰这张表时出现。 */
+    const phase = await cdp.eval(`(() => {
+      const box = document.querySelector('.probe-phases');
+      if (!box) return null;
+      return {
+        text: box.textContent.replace(/\s+/g, ' '),
+        segs: [...box.querySelectorAll('.probe-phase-bar i')].length,
+      };
+    })()`);
+    check('探测卡给出「时间去向」：装载 / 等锁 / 执行 / 收尾',
+      !!phase && /执行/.test(phase.text) && phase.segs >= 1,
+      phase ? phase.text.slice(0, 70) : '没有分段');
+    check('表已在内存时不该出现「装载表」那一段',
+      !!phase && !/装载表/.test(phase.text),
+      phase ? phase.text.slice(0, 50) : '');
+
     // 原始文本仍在（有人就是习惯看树形文本）：点一下能展开
     await cdp.eval(`[...document.querySelectorAll('.probe-card .plan-btn')][0].click()`);
     await sleep(200);

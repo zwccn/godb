@@ -1291,6 +1291,48 @@ body {
   font-size: calc(11.5px * var(--fs));
   line-height: 1.7;
 }
+
+/* 服务端耗时的时间去向（装载 / 等锁 / 执行 / 收尾）。
+   放在算子树前面：先解释「19ms 在哪」，再看「每一步怎么花的」。 */
+.probe-phases {
+  padding: 9px 12px 10px;
+  border-bottom: 1px dashed var(--border-soft);
+}
+.probe-phase-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-3);
+}
+.probe-phase-bar i { display: block; height: 100%; }
+.probe-phase-bar i.load { background: var(--warn); }
+.probe-phase-bar i.lock { background: var(--danger); }
+.probe-phase-bar i.exec { background: var(--accent); }
+.probe-phase-bar i.end { background: var(--text-3); }
+
+.probe-phase-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 8px;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+}
+.probe-phase-item { display: flex; align-items: center; gap: 6px; }
+.probe-phase-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.probe-phase-dot.load { background: var(--warn); }
+.probe-phase-dot.lock { background: var(--danger); }
+.probe-phase-dot.exec { background: var(--accent); }
+.probe-phase-dot.end { background: var(--text-3); }
+
+.probe-phase-hint {
+  margin-top: 7px;
+  color: var(--warn-text);
+  font-size: calc(11.5px * var(--fs));
+  line-height: 1.7;
+}
 .probe-empty {
   margin: 10px 12px;
   padding: 10px 12px;
@@ -1363,9 +1405,15 @@ body {
   background: var(--accent-soft-bg);
   color: var(--accent-soft-text);
 }
+.probe-chip.io {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
 
 .probe-bar {
   flex: 0 0 110px;
+  display: flex;
   height: 6px;
   border-radius: 3px;
   background: var(--bg-3);
@@ -1375,11 +1423,12 @@ body {
   display: block;
   height: 100%;
   width: 0;
-  border-radius: 3px;
   background: var(--accent);
   transition: width .18s ease;
 }
-.probe-row.is-worst .probe-bar i { background: var(--warn); }
+/* 等页文件的那一截用红：它和「算得慢」是两回事，混成一个颜色就看不出该修哪边 */
+.probe-bar i.io { background: var(--danger); }
+.probe-row.is-worst .probe-bar i.rest { background: var(--warn); }
 
 .probe-time {
   flex: 0 0 68px;

@@ -1251,6 +1251,65 @@ function probePanel(data) {
   return box;
 }
 
+// 服务端耗时去哪了：装载表 / 等锁 / 执行 / 收尾。
+//
+// 这一段是为了解释一桩悬案：探测里每一步都不到 1 ms，服务端却说 19 ms。
+// 那 19 ms 里有 18 ms 花在「把表从页文件装进内存」—— 它发生在任何算子开始之前，
+// 所以算子树里一分钱都看不到。不把这四段拆开，看的人只能猜「是不是磁盘慢」。
+function probePhaseBar(r) {
+  const ph = r.phases;
+  if (!ph) return null;
+  const segs = [
+    { cls: 'load', label: '装载表', ns: ph.loadNs || 0 },
+    { cls: 'lock', label: '等锁', ns: ph.lockNs || 0 },
+    { cls: 'exec', label: '执行', ns: ph.execNs || 0 },
+    { cls: 'end', label: '收尾', ns: ph.endNs || 0 },
+  ].filter(s => s.ns > 0);
+  const total = segs.reduce((a, s) => a + s.ns, 0);
+  if (!total) return null;
+
+  const box = el('div', 'probe-phases');
+
+  // 条：按「各段占整条语句」画，不用独占口径 —— 这四段本来就是相加关系
+  const bar = el('div', 'probe-phase-bar');
+  for (const s of segs) {
+    const i = el('i', s.cls);
+    i.style.width = (s.ns * 100 / total) + '%';
+    i.title = s.label + ' ' + fmtDur(s.ns);
+    bar.appendChild(i);
+  }
+  box.appendChild(bar);
+
+  const legend = el('div', 'probe-phase-legend');
+  for (const s of segs) {
+    const item = el('span', 'probe-phase-item');
+    item.appendChild(el('span', 'probe-phase-dot ' + s.cls));
+    let text = s.label + ' ' + fmtDur(s.ns);
+    if (s.cls === 'load' && ph.loadPages > 0) {
+      text += '（读页 ' + fmtDur(ph.loadIoNs || 0) + ' / ' + fmtCount(ph.loadPages) + ' 页）';
+    }
+    item.appendChild(el('span', null, text));
+    legend.appendChild(item);
+  }
+  box.appendChild(legend);
+
+  if (ph.loadNs > 0) {
+    const io = ph.loadIoNs || 0;
+    const other = Math.max(0, ph.loadNs - io);
+    let hint = '这一次是首次访问这张表：' + fmtDur(ph.loadNs)
+      + ' 花在把它装进内存，那时候还没有任何算子开始跑 —— 算子树里只剩执行的那点时间。'
+      + '再执行一次就没有这一段了。';
+    if (io > 0) {
+      hint += '装载里读盘占 ' + Math.round(io * 100 / ph.loadNs) + '%（' + fmtDur(io)
+        + '），其余 ' + fmtDur(other) + ' 是装载本身的开销（建页框、扫页内元组、打开索引），不是磁盘慢。';
+    } else {
+      hint += '这一次没有读页文件：页已经在缓冲池里。';
+    }
+    box.appendChild(el('div', 'probe-phase-hint', hint));
+  }
+  return box;
+}
+
 function probeCard(r, idx, stmts) {
   const card = el('div', 'probe-card');
   const head = el('div', 'probe-head');
@@ -1281,6 +1340,11 @@ function probeCard(r, idx, stmts) {
   head.appendChild(txtBtn);
   card.appendChild(head);
   card.appendChild(pre);
+
+  // 时间去向排在算子树之前：先回答「服务端那 19ms 在哪」，
+  // 再看「每一步怎么花的」。顺序反了，读者会先被一排 0 搞糊涂。
+  const phBar = probePhaseBar(r);
+  if (phBar) card.appendChild(phBar);
 
   const tree = r.planTree;
   const nodes = [];
@@ -1368,14 +1432,31 @@ function probeRow(n, depth, total, worst) {
     c.title = '子节点被重新启动的次数（嵌套循环跑了几轮）';
     tags.appendChild(c);
   }
+  if (n.selfIoNs > 0) {
+    let txt = 'I/O ' + fmtDur(n.selfIoNs);
+    if (n.selfIOPages > 0) txt += ' / ' + fmtCount(n.selfIOPages) + ' 页';
+    const c = el('span', 'probe-chip io', txt);
+    c.title = '这一步自己等页文件等了多久（不含子节点）';
+    tags.appendChild(c);
+  }
   row.appendChild(tags);
 
   const pct = total > 0 ? Math.min(100, n.selfNs * 100 / total) : 0;
   const bar = el('span', 'probe-bar');
-  const fill = el('i');
   // 有耗时但不到 2% 时也给一格，否则「花了一点时间」和「没花时间」看起来一样
-  fill.style.width = pct > 0 ? Math.max(2, pct) + '%' : '0';
-  bar.appendChild(fill);
+  const shown = pct > 0 ? Math.max(2, pct) : 0;
+  // 柱子分两段：等页文件的那截标黄。只有真读盘时才分得出来 ——
+  // 默认配置下数据都在内存里，两段合一，和以前一样。
+  const ioShare = (n.selfNs > 0 && n.selfIoNs > 0) ? Math.min(1, n.selfIoNs / n.selfNs) : 0;
+  const rest = el('i', 'rest');
+  rest.style.width = (shown * (1 - ioShare)) + '%';
+  bar.appendChild(rest);
+  if (ioShare > 0) {
+    const ioBar = el('i', 'io');
+    ioBar.style.width = (shown * ioShare) + '%';
+    ioBar.title = '其中等页文件 ' + fmtDur(n.selfIoNs);
+    bar.appendChild(ioBar);
+  }
   row.appendChild(bar);
 
   // 时间列写的是**独占**时间（和柱子同口径）。独占为 0 的节点（Limit、Project

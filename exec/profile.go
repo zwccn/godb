@@ -24,12 +24,24 @@ type OpProfile struct {
 	rows  int64
 	loops int64
 	ns    int64
+	// io 由 setProfiling 注入（storage.Store 实现）。它为 nil 时所有 I/O 记账跳过。
+	io      ioStat
+	ioNs    int64
+	ioPages int64
+}
+
+// ioStat 是「读页阻塞」的计口。exec 不关心它怎么实现，只要能在任意时刻取快照 ——
+// 算子在自己每次调用前后各取一次，差值就是这次调用等页文件等了多久。
+type ioStat interface {
+	IOSnapshot() (ns, pages, bytes int64)
 }
 
 // Start 在句子的开头调一次；没开统计时返回零值，调用方照样往下走。
 type timer struct {
-	p  *OpProfile
-	t0 hrtime.Stamp
+	p   *OpProfile
+	t0  hrtime.Stamp
+	io0 int64
+	pg0 int64
 }
 
 // profiler 是算子可选的统计能力。实现了它，EXPLAIN ANALYZE 才能看到行数与耗时。
@@ -46,6 +58,7 @@ type detailer interface {
 func (p *OpProfile) enableProfile(on bool) {
 	p.on = on
 	p.rows, p.loops, p.ns = 0, 0, 0
+	p.ioNs, p.ioPages = 0, 0
 }
 
 func (p *OpProfile) profile() (int64, int64) { return p.rows, p.ns }
@@ -66,7 +79,11 @@ func (p *OpProfile) begin() timer {
 	if p == nil || !p.on {
 		return timer{}
 	}
-	return timer{p: p, t0: hrtime.Now()}
+	t := timer{p: p, t0: hrtime.Now()}
+	if p.io != nil {
+		t.io0, t.pg0, _ = p.io.IOSnapshot()
+	}
+	return t
 }
 
 // done 结算一次调用：ok 表示这次真的吐了一行。
@@ -78,19 +95,31 @@ func (t timer) done(ok bool) {
 	if ok {
 		t.p.rows++
 	}
+	if t.p.io != nil {
+		ns, pages, _ := t.p.io.IOSnapshot()
+		t.p.ioNs += ns - t.io0
+		t.p.ioPages += pages - t.pg0
+	}
 }
 
 // setProfiling 递归打开/关闭整棵树的统计。
-func setProfiling(op Operator, on bool) {
+func setProfiling(op Operator, on bool, io ioStat) {
 	if p, ok := op.(profiler); ok {
 		p.enableProfile(on)
+		if pp, ok := op.(interface{ setIO(ioStat) }); ok {
+			pp.setIO(io)
+		}
 	}
 	if pn, ok := op.(planNode); ok {
 		for _, c := range pn.Children() {
-			setProfiling(c, on)
+			setProfiling(c, on, io)
 		}
 	}
 }
+
+// setIO 由 OpProfile 提供，setProfiling 通过类型断言调用：
+// 每个算子都嵌了 OpProfile，所以只要嵌了就有这个方法。
+func (p *OpProfile) setIO(io ioStat) { p.io = io }
 
 // ExplainPlan 渲染执行计划。
 //
@@ -105,9 +134,9 @@ func ExplainPlan(op Operator) []string {
 // 结果集会被丢弃（EXPLAIN ANALYZE 只关心统计），所以只用于 SELECT。
 // 第二个返回值是同一份统计的结构化版本（给 Web 的「探测执行」用）；
 // 文本版一个字都没改 —— PG 客户端和既有断言都还依赖那段格式。
-func ExplainAnalyze(op Operator) ([]string, *PlanNode, error) {
-	setProfiling(op, true)
-	defer setProfiling(op, false)
+func ExplainAnalyze(op Operator, io ioStat) ([]string, *PlanNode, error) {
+	setProfiling(op, true, io)
+	defer setProfiling(op, false, nil)
 	if err := op.Open(); err != nil {
 		return nil, nil, err
 	}
@@ -146,6 +175,12 @@ type PlanNode struct {
 	// TotalNs 含所有子节点；SelfNs 是独占时间。
 	TotalNs int64 `json:"totalNs"`
 	SelfNs  int64 `json:"selfNs"`
+	// IONs / IOPages 是这次调用里等页文件的墙钟与页数（同样含子节点）；
+	// SelfIONs 是独占的那部分。默认配置下多半是 0：数据全在内存，根本没读盘。
+	IONs        int64 `json:"ioNs,omitempty"`
+	IOPages     int64 `json:"ioPages,omitempty"`
+	SelfIONs    int64 `json:"selfIoNs,omitempty"`
+	SelfIOPages int64 `json:"selfIoPages,omitempty"`
 
 	Children []*PlanNode `json:"children,omitempty"`
 }
@@ -175,6 +210,9 @@ func ExplainTree(op Operator) *PlanNode {
 			if pl, ok := o.(loopProfiler); ok {
 				n.Loops = pl.profileLoops()
 			}
+			if ip, ok := o.(ioProfiler); ok {
+				n.IONs, n.IOPages = ip.profileIO()
+			}
 		}
 		if sr, ok := o.(scannedReporter); ok {
 			n.Scanned = sr.ScanRows()
@@ -182,14 +220,25 @@ func ExplainTree(op Operator) *PlanNode {
 		if d, ok := o.(detailer); ok {
 			n.Detail = d.ExplainDetail()
 		}
-		var kidNs int64
+		var kidNs, kidIo int64
+		var kidPages int64
 		for _, k := range kids {
 			kn := walk(k)
 			if kn == nil {
 				continue
 			}
 			kidNs += kn.TotalNs
+			kidIo += kn.IONs
+			kidPages += kn.IOPages
 			n.Children = append(n.Children, kn)
+		}
+		n.SelfIONs = n.IONs - kidIo
+		if n.SelfIONs < 0 {
+			n.SelfIONs = 0
+		}
+		n.SelfIOPages = n.IOPages - kidPages
+		if n.SelfIOPages < 0 {
+			n.SelfIOPages = 0
 		}
 		n.SelfNs = n.TotalNs - kidNs
 		if n.SelfNs < 0 {
@@ -208,6 +257,13 @@ type loopProfiler interface {
 }
 
 func (p *OpProfile) profileLoops() int64 { return p.loops }
+
+// ioProfiler 是「等页文件等了多久」的口子。
+type ioProfiler interface {
+	profileIO() (ns, pages int64)
+}
+
+func (p *OpProfile) profileIO() (int64, int64) { return p.ioNs, p.ioPages }
 
 func renderPlan(op Operator, withStats bool) []string {
 	var out []string

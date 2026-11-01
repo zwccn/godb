@@ -2615,17 +2615,22 @@ class CDP {
     check('有选区时只执行选区（改一句不用把整段删掉重写）',
       selRun === 'SELECT 1 AS a;', JSON.stringify(selRun));
 
-    /* 编辑器里的两处标记：当前语句（淡底）+ 出错行（红底 + 临时行号）。
-       行号默认藏着 —— 编辑器只有几行高，常驻 gutter 要吃掉 30px 宽度。 */
-    await cdp.eval(`cm.setValue(['SELECT 1 AS a;','SELECT 2 AS b;','SELECT 3 AS c;'].join(String.fromCharCode(10)))`);
-    await cdp.eval(`cm.setCursor({line:1,ch:4})`);
+    /* 编辑器里的两处标记：当前语句（行号列一条竖线）+ 出错行（红底 + 行号变红）。
+       竖线是行级的（addLineClass 到 gutter），不再是字符级的 markText ——
+       所以这里验「哪几行被标」，而不是「标了哪段文字」。 */
+    await cdp.eval(`cm.setValue(['SELECT 1 AS a;','','SELECT 2 AS b,','  3 AS c;','SELECT 4 AS d;'].join(String.fromCharCode(10)))`);
+    await cdp.eval(`cm.setCursor({line:2,ch:4})`);
     await sleep(300);
     const stmt = await cdp.eval(`(() => {
-      const ms = cm.getAllMarks().filter(m => m.className === 'cm-stmt');
-      return { n: ms.length, text: ms.length ? cm.getRange(ms[0].find().from, ms[0].find().to) : '' };
+      const g = i => (cm.getLineHandle(i) || {}).gutterClass || '';
+      return { l0: g(0), l1: g(1), l2: g(2), l3: g(3), l4: g(4),
+               bg: document.querySelectorAll('.CodeMirror-gutter-background.cm-stmt-line').length,
+               marks: cm.getAllMarks().length };
     })()`);
-    check('光标所在的那条语句有淡色底（多语句脚本里不迷路）',
-      stmt.n === 1 && stmt.text === 'SELECT 2 AS b;', JSON.stringify(stmt));
+    check('光标所在的那条语句在行号列标竖线，且只标这一句（多语句脚本里不迷路）',
+      stmt.l2 === 'cm-stmt-line' && stmt.l3 === 'cm-stmt-line'
+      && stmt.l0 === '' && stmt.l1 === '' && stmt.l4 === '' && stmt.bg === 2 && stmt.marks === 0,
+      JSON.stringify(stmt));
 
     // 语法错：第 2 行第 8 列 → 红底 + 行号露出来 + 光标跳到出错位置
     await cdp.eval(`cm.setValue(['SELECT 1;','SELECT FROM;','SELECT 3;'].join(String.fromCharCode(10)))`);

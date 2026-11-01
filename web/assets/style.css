@@ -3685,8 +3685,18 @@ body.editor-resizing * { cursor: ns-resize !important; }
 .cm-errline { background: var(--tint-danger); }
 .cm-errline-gutter { color: var(--danger-text) !important; }
 
-/* 光标所在的那条语句：淡底。多语句脚本里改一句时，先看清楚自己在改哪一块 */
-.cm-stmt { background: var(--tint-hover); }
+/* 光标所在的那条语句：行号列里一条竖线（原来铺整行淡底，一屏几块色太吵）。
+   线画在每行的 `.CodeMirror-gutter-background` 上 —— CM5 给带 gutter 类的行自动建
+   这个 div，宽度正好等于整个行号列，右边缘就是代码区的左边界。
+   用 border 而不是 inset 阴影：阴影的方向靠「正负 offset」表达，读的人得在脑子里
+   反推一遍才确定线在哪边（这里第一版就画反了，跑到行号列最左边去了）。
+   必须带 box-sizing: border-box —— 这个 div 的宽度是 CM 内联写死的行号列宽，
+   content-box 下加 2px border 会把它撑宽 2px，压到代码的第一个字上。 */
+.CodeMirror-gutter-background.cm-stmt-line {
+  box-sizing: border-box;
+  border-right: 2px solid var(--accent);
+}
+.cm-stmt-line .CodeMirror-linenumber { color: var(--text-2); }
 
 /* 补全弹层：跟控制台其它弹窗同一套配色，别跳出一个系统默认的白框 */
 .CodeMirror-hints {

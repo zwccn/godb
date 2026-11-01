@@ -920,7 +920,7 @@ async function stopRun() {
 /* ---------- 编辑器标记 ---------- */
 
 let errLine = -1;        // 当前标着「出错」的行（-1 = 没有）
-let stmtMark = null;     // 当前语句的 markText 句柄
+let stmtLines = [];      // 当前语句标到的行（LineHandle；编辑时行号会整体挪位）
 let stmtTimer = 0;
 
 function clearSqlError() {
@@ -989,23 +989,38 @@ function stmtBounds(text, pos) {
   return [start, end];
 }
 
+/* 光标所在语句的「行范围」，标在行号列里（一条竖线）。
+   以前用 markText 铺整行淡底：多语句脚本里一屏好几块色，太吵；
+   而这条竖线只要说清「这一段是一句」，信息量一样，又不抢代码的注意力。 */
 function highlightStatement() {
   if (!cm) return;
-  if (stmtMark) { stmtMark.clear(); stmtMark = null; }
+  clearStmtLines();
   const text = cm.getValue();
   // 超长脚本不值得每次移动光标都扫一遍，收益也小
   if (text.length > 200000) return;
   const [a, b] = stmtBounds(text, cm.indexFromPos(cm.getCursor()));
   if (b <= a) return;
-  // 掐掉首尾空白的边界（分号后面那个换行、缩进），高亮只贴文字，不贴一整行
+  // 掐掉首尾空白的边界（分号后面那个换行、缩进），别把语句后面的空行也标上
   let a2 = a, b2 = b;
   while (a2 < b2 && /\s/.test(text[a2])) a2++;
   while (b2 > a2 && /\s/.test(text[b2 - 1])) b2--;
   if (b2 <= a2) return;
-  stmtMark = cm.markText(cm.posFromIndex(a2), cm.posFromIndex(b2), { className: 'cm-stmt' });
+  const from = cm.posFromIndex(a2).line;
+  const to = cm.posFromIndex(b2 - 1).line; // 用 b2-1：语句末尾那个换行不算进范围
+  for (let ln = from; ln <= to; ln++) {
+    stmtLines.push(cm.addLineClass(ln, 'gutter', 'cm-stmt-line'));
+  }
 }
 
-// 光标动一下就重算会很吵，80ms 防抖；markText 只触发 changes，不会把这条链再绕回来
+// 清掉上一批行标记。存 LineHandle 而不是行号：插入/删除行之后行号就对不上了。
+function clearStmtLines() {
+  if (!cm) return;
+  for (const h of stmtLines) cm.removeLineClass(h, 'gutter', 'cm-stmt-line');
+  stmtLines.length = 0;
+}
+
+// 光标动一下就重算会很吵，80ms 防抖；addLineClass 走的是 changeLine → changes，
+// 不触发 change，所以不会把这条链再绕回来。
 function scheduleStmt() {
   clearTimeout(stmtTimer);
   stmtTimer = setTimeout(highlightStatement, 80);

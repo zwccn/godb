@@ -5448,6 +5448,7 @@ function clearEditor() {
 
 document.getElementById('btnExplain').addEventListener('click', () => run('explain'));
 document.getElementById('btnProbe').addEventListener('click', () => run('probe'));
+document.getElementById('btnFormat').addEventListener('click', () => formatSQL());
 // 搜索表名：图标按钮展开输入框，边打边过滤；Esc 收起并清空。
 document.getElementById('btnTableSearch').addEventListener('click', () => {
   const sidebar = document.querySelector('.sidebar');
@@ -6814,9 +6815,6 @@ function openEditorMenu(x, y) {
   // 清空放最后第二个 —— 它会造成「刚才那段没了」，不该紧挨着脸熟的位置。
   add('历史', null, () => openHistoryPanel());
   add('清空', null, () => clearEditor());
-  sep();
-  // 这是「光标离开菜单」的入口：菜单里有执行，会立刻关掉面板，不用先点空白
-  add('执行', 'Ctrl+Enter', () => run());
   // 先挪到屏幕外量尺寸再摆位，避免在鼠标处闪一下
   ctxMenu.style.left = '-9999px';
   ctxMenu.style.top = '0px';

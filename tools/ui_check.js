@@ -2352,21 +2352,25 @@ class CDP {
         inView: b.right <= window.innerWidth + 1 && b.bottom <= window.innerHeight + 1,
       };
     })()`);
-    // 9 项：剪切/复制/粘贴/全选/美化/插入 SQL 模板/历史/清空/执行（模板那项另有专门断言）
-    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/模板/历史/清空/执行）',
-      ctx.prevented && ctx.open && ctx.items.length === 9 && ctx.seps === 4 && ctx.inView,
+    // 8 项：剪切/复制/粘贴/全选/美化/插入 SQL 模板/历史/清空（模板那项另有专门断言）。
+    // 「执行」不在菜单里 —— 编辑器已经有 Ctrl+Enter / F5 / 工具栏的执行按钮。
+    check('编辑器右键弹出自己的菜单（剪切/复制/粘贴/全选/美化/模板/历史/清空）',
+      ctx.prevented && ctx.open && ctx.items.length === 8 && ctx.seps === 3 && ctx.inView,
       ctx.items.join(' · '));
 
-    // 美化 / 历史 / 清空 从工具栏搬进右键菜单：工具栏只剩执行计划和执行探测。
+    // 工具栏右端：执行计划 / 执行探测 / 美化。历史、清空只在右键里。
     const toolbar = await cdp.eval(`({
-      format: !!document.getElementById('btnFormat'),
       history: !!document.getElementById('btnHistory'),
       clear: !!document.getElementById('btnClear'),
       probe: (document.getElementById('btnProbe') || {}).textContent,
+      format: (document.getElementById('btnFormat') || {}).textContent,
+      actions: [...document.querySelectorAll('.editor-actions button')].map(b => b.textContent.trim()),
     })`);
-    check('工具栏只剩「执行计划 / 执行探测」',
-      !toolbar.format && !toolbar.history && !toolbar.clear && toolbar.probe === '执行探测',
-      JSON.stringify(toolbar));
+    check('工具栏右端是「执行计划 / 执行探测 / 美化」，历史与清空在右键里',
+      !toolbar.history && !toolbar.clear &&
+        toolbar.probe === '执行探测' && toolbar.format === '美化' &&
+        toolbar.actions.join('/') === '执行计划/执行探测/美化',
+      toolbar.actions.join(' / '));
 
     // 右键里的「清空」要真的清空。以前工具栏那颗改的是隐藏的 textarea，
     // CodeMirror 会把自己的内容同步回去，看着像「点了没反应」。

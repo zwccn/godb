@@ -16,6 +16,7 @@ import (
 // 左操作数的列名与类型决定结果的 schema（和 PostgreSQL 一致）。
 // 两侧行数必须一致，否则报错 —— 和 PG 一样，不做隐式补齐。
 type setOp struct {
+	OpProfile
 	left, right Operator
 	op          string
 	all         bool
@@ -30,6 +31,9 @@ type setOp struct {
 func (o *setOp) Schema() Schema { return o.sc }
 
 func (o *setOp) Open() error {
+	t := o.begin()
+	// 两侧都物化在 Open 里做完，计时包住整段。
+	defer func() { t.done(false) }()
 	if len(o.sc) == 0 {
 		o.sc = o.left.Schema()
 	}
@@ -103,11 +107,14 @@ func (o *setOp) materialize() error {
 }
 
 func (o *setOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.buf) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.buf[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
 }
 
@@ -150,6 +157,7 @@ func drain(op Operator) ([]types.Row, error) {
 
 // rowsOp 是一张内存行表：FROM 子查询与集合函数的结果都走它。
 type rowsOp struct {
+	OpProfile
 	name string
 	sc   Schema
 	rows []types.Row
@@ -162,6 +170,9 @@ type rowsOp struct {
 func (o *rowsOp) Schema() Schema { return o.sc }
 
 func (o *rowsOp) Open() error {
+	t := o.begin()
+	// 子查询在这里被跑完 —— 派生表的代价全在 Open，不能只计 Next。
+	defer func() { t.done(false) }()
 	o.i = 0
 	if o.child == nil {
 		return nil
@@ -175,11 +186,14 @@ func (o *rowsOp) Open() error {
 }
 
 func (o *rowsOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.rows[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
 }
 

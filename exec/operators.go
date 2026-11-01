@@ -94,6 +94,10 @@ func (o *scanOp) ExplainDetail() []string {
 	return out
 }
 
+// ScanRows 把「从堆里读了多少行」交给结构化计划（探测执行的「读取 N 行」）。
+// 它和 profile 的 rows 是两回事：读了 5 万行、上层过滤后只吐 1 行，差额就是白读的。
+func (o *scanOp) ScanRows() int64 { return int64(o.scanned) }
+
 func (o *scanOp) Close() error { o.it = nil; return nil }
 
 func (o *scanOp) Describe() string {
@@ -320,19 +324,28 @@ func (o *indexRangeScanOp) setReversed(v bool)       { o.desc = v }
 // ---------- 单行（无 FROM 的 SELECT） ----------
 
 type oneRowOp struct {
+	OpProfile
 	done bool
 }
 
-func (o *oneRowOp) Schema() Schema       { return nil }
-func (o *oneRowOp) Open() error          { o.done = false; return nil }
-func (o *oneRowOp) Close() error         { return nil }
+func (o *oneRowOp) Schema() Schema { return nil }
+func (o *oneRowOp) Open() error {
+	t := o.begin()
+	o.done = false
+	t.done(false)
+	return nil
+}
+func (o *oneRowOp) Close() error   { return nil }
 func (o *oneRowOp) Describe() string     { return "Result (no FROM)" }
 func (o *oneRowOp) Children() []Operator { return nil }
 func (o *oneRowOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.done {
+		t.done(false)
 		return nil, false, nil
 	}
 	o.done = true
+	t.done(true)
 	return types.Row{}, true, nil
 }
 
@@ -340,19 +353,27 @@ func (o *oneRowOp) Next() (types.Row, bool, error) {
 // PG 里它就是一个查询，所以既能独立执行，也能当派生表 `FROM (VALUES …) x(a,b)`，
 // 后面还能接 UNION。列名是 column1、column2……，由外层的别名列表改名。
 type valuesOp struct {
+	OpProfile
 	rows [][]Eval
 	sc   Schema
 	i    int
 }
 
-func (o *valuesOp) Schema() Schema       { return o.sc }
-func (o *valuesOp) Open() error          { o.i = 0; return nil }
+func (o *valuesOp) Schema() Schema { return o.sc }
+func (o *valuesOp) Open() error {
+	t := o.begin()
+	o.i = 0
+	t.done(false)
+	return nil
+}
 func (o *valuesOp) Close() error         { return nil }
 func (o *valuesOp) Describe() string     { return fmt.Sprintf("Values (%d rows)", len(o.rows)) }
 func (o *valuesOp) Children() []Operator { return nil }
 
 func (o *valuesOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	evs := o.rows[o.i]
@@ -361,23 +382,32 @@ func (o *valuesOp) Next() (types.Row, bool, error) {
 	for j, ev := range evs {
 		v, err := ev.Eval(nil)
 		if err != nil {
+			t.done(false)
 			return nil, false, err
 		}
 		row[j] = v
 	}
+	t.done(true)
 	return row, true, nil
 }
 
 // ---------- 过滤 ----------
 
 type filterOp struct {
+	OpProfile
 	child Operator
 	pred  Eval
 	label string
 }
 
-func (o *filterOp) Schema() Schema       { return o.child.Schema() }
-func (o *filterOp) Open() error          { return o.child.Open() }
+func (o *filterOp) Schema() Schema { return o.child.Schema() }
+func (o *filterOp) Open() error {
+	// 计时必须包住 child.Open()：父节点的总时长要含整棵子树，
+	// 否则 SelfNs = 父 - 子 会算出负数，根节点还会显示成 0。
+	t := o.begin()
+	defer func() { t.done(false) }()
+	return o.child.Open()
+}
 func (o *filterOp) Close() error         { return o.child.Close() }
 func (o *filterOp) Children() []Operator { return []Operator{o.child} }
 func (o *filterOp) Describe() string {
@@ -388,20 +418,25 @@ func (o *filterOp) Describe() string {
 }
 
 func (o *filterOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	for {
 		row, ok, err := o.child.Next()
 		if err != nil || !ok {
+			t.done(false)
 			return nil, ok, err
 		}
 		v, err := o.pred.Eval(row)
 		if err != nil {
+			t.done(false)
 			return nil, false, err
 		}
 		b, isNull, err := asBool(v)
 		if err != nil {
+			t.done(false)
 			return nil, false, err
 		}
 		if !isNull && b {
+			t.done(true)
 			return row, true, nil
 		}
 	}
@@ -410,13 +445,18 @@ func (o *filterOp) Next() (types.Row, bool, error) {
 // ---------- 投影 ----------
 
 type projectOp struct {
+	OpProfile
 	child Operator
 	exprs []Eval
 	sc    Schema
 }
 
-func (o *projectOp) Schema() Schema       { return o.sc }
-func (o *projectOp) Open() error          { return o.child.Open() }
+func (o *projectOp) Schema() Schema { return o.sc }
+func (o *projectOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
+	return o.child.Open()
+}
 func (o *projectOp) Close() error         { return o.child.Close() }
 func (o *projectOp) Children() []Operator { return []Operator{o.child} }
 
@@ -429,24 +469,29 @@ func (o *projectOp) Describe() string {
 }
 
 func (o *projectOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	row, ok, err := o.child.Next()
 	if err != nil || !ok {
+		t.done(false)
 		return nil, ok, err
 	}
 	out := make(types.Row, len(o.exprs))
 	for i, e := range o.exprs {
 		v, err := e.Eval(row)
 		if err != nil {
+			t.done(false)
 			return nil, false, err
 		}
 		out[i] = v
 	}
+	t.done(true)
 	return out, true, nil
 }
 
 // ---------- 去重 ----------
 
 type distinctOp struct {
+	OpProfile
 	child Operator
 	seen  map[string]bool
 	buf   []types.Row
@@ -460,6 +505,8 @@ func (o *distinctOp) Children() []Operator { return []Operator{o.child} }
 func (o *distinctOp) Describe() string     { return "Distinct" }
 
 func (o *distinctOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
 	if err := o.child.Open(); err != nil {
 		return err
 	}
@@ -485,11 +532,14 @@ func (o *distinctOp) Open() error {
 }
 
 func (o *distinctOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.buf) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.buf[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
 }
 
@@ -508,6 +558,7 @@ type sortEntry struct {
 }
 
 type sortOp struct {
+	OpProfile
 	child Operator
 	keys  []sortKey
 	rows  []sortEntry
@@ -592,6 +643,10 @@ func (h *topNHeap) Pop() any {
 }
 
 func (o *sortOp) Open() error {
+	t := o.begin()
+	// 排序的活全在 Open 里（物化 + 比较），计时必须包住整段；
+	// 只计 Next 的话，一次几十万行的排序会被算成「0 微秒」。
+	defer func() { t.done(false) }()
 	if err := o.child.Open(); err != nil {
 		return err
 	}
@@ -666,17 +721,21 @@ func (o *sortOp) Open() error {
 }
 
 func (o *sortOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.rows[o.i].row
 	o.i++
+	t.done(true)
 	return r, true, nil
 }
 
 // ---------- LIMIT / OFFSET ----------
 
 type limitOp struct {
+	OpProfile
 	child  Operator
 	limit  int64
 	offset int64
@@ -684,8 +743,13 @@ type limitOp struct {
 	emited int64
 }
 
-func (o *limitOp) Schema() Schema       { return o.child.Schema() }
-func (o *limitOp) Open() error          { o.seen, o.emited = 0, 0; return o.child.Open() }
+func (o *limitOp) Schema() Schema { return o.child.Schema() }
+func (o *limitOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
+	o.seen, o.emited = 0, 0
+	return o.child.Open()
+}
 func (o *limitOp) Close() error         { return o.child.Close() }
 func (o *limitOp) Children() []Operator { return []Operator{o.child} }
 func (o *limitOp) Describe() string {
@@ -696,9 +760,11 @@ func (o *limitOp) Describe() string {
 }
 
 func (o *limitOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	for o.emited < o.limit {
 		row, ok, err := o.child.Next()
 		if err != nil || !ok {
+			t.done(false)
 			return nil, ok, err
 		}
 		if o.seen < o.offset {
@@ -706,7 +772,9 @@ func (o *limitOp) Next() (types.Row, bool, error) {
 			continue
 		}
 		o.emited++
+		t.done(true)
 		return row, true, nil
 	}
+	t.done(false)
 	return nil, false, nil
 }

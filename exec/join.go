@@ -235,6 +235,7 @@ func (o *joinOp) buildOutput() error {
 	if o.typ == sql.JoinRight {
 		matchedRow := make([]bool, len(o.leftRows))
 		for _, rrow := range o.rightRows {
+			o.loop() // 每换一行驱动行，内层就整轮重扫一次
 			matched := false
 			for li, lrow := range o.leftRows {
 				row := combine(lrow, rrow)
@@ -261,6 +262,7 @@ func (o *joinOp) buildOutput() error {
 	}
 
 	for _, lrow := range o.leftRows {
+		o.loop() // 同上：一轮 = 把右表整个扫一遍
 		matched := false
 		for _, rrow := range o.rightRows {
 			row := combine(lrow, rrow)
@@ -517,6 +519,7 @@ func (o *indexJoinOp) nullInner() types.Row { return make(types.Row, len(o.isc))
 
 // fetch 用当前外行去查内表索引，把命中的行填进 matched。
 func (o *indexJoinOp) fetch(orow types.Row) error {
+	o.loop() // 一次 fetch = 一次内表点查（这就是「循环了多少次」）
 	o.matched = o.matched[:0]
 	o.mi = 0
 	if o.vals == nil || len(o.vals) != len(o.outerKeys) {

@@ -138,6 +138,7 @@ func endpointIndex(t *catalog.Table, col int) (string, bool) {
 
 // fastAggOp 在 Open 时算出聚合结果，Next 只吐一行。
 type fastAggOp struct {
+	OpProfile
 	tx    *storage.Tx
 	t     *catalog.Table
 	slots []fastAggSlot
@@ -154,6 +155,8 @@ func (o *fastAggOp) Close() error    { return nil }
 func (o *fastAggOp) Describe() string { return "Fast Aggregate on " + o.t.Name }
 
 func (o *fastAggOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
 	o.done = false
 	o.row = make(types.Row, len(o.slots))
 	for i, sl := range o.slots {
@@ -178,10 +181,13 @@ func (o *fastAggOp) Open() error {
 }
 
 func (o *fastAggOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.done {
+		t.done(false)
 		return nil, false, nil
 	}
 	o.done = true
+	t.done(true)
 	return o.row, true, nil
 }
 

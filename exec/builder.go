@@ -1948,14 +1948,24 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, er
 
 // aliasOp 给整棵子树的列换一个限定符，用于括号联接组起别名。
 type aliasOp struct {
+	OpProfile
 	inner Operator
 	sc    Schema
 }
 
-func (o *aliasOp) Schema() Schema                 { return o.sc }
-func (o *aliasOp) Open() error                    { return o.inner.Open() }
-func (o *aliasOp) Next() (types.Row, bool, error) { return o.inner.Next() }
-func (o *aliasOp) Close() error                   { return o.inner.Close() }
+func (o *aliasOp) Schema() Schema { return o.sc }
+func (o *aliasOp) Open() error {
+	t := o.begin()
+	defer func() { t.done(false) }()
+	return o.inner.Open()
+}
+func (o *aliasOp) Close() error   { return o.inner.Close() }
+func (o *aliasOp) Next() (types.Row, bool, error) {
+	t := o.begin()
+	row, ok, err := o.inner.Next()
+	t.done(ok && err == nil)
+	return row, ok, err
+}
 func (o *aliasOp) Describe() string               { return "Alias(" + o.sc[0].Qualifier + ")" }
 func (o *aliasOp) Children() []Operator           { return []Operator{o.inner} }
 
@@ -2042,6 +2052,7 @@ func (p *Planner) lookupCTE(name string) *cteData {
 
 // cteScan 把一个物化好的 CTE 当作表来读。
 type cteScan struct {
+	OpProfile
 	sc   Schema
 	rows []types.Row
 	i    int
@@ -2062,16 +2073,21 @@ func newCTEScan(d *cteData, qual string) *cteScan {
 func (o *cteScan) Schema() Schema { return o.sc }
 
 func (o *cteScan) Open() error {
+	t := o.begin()
 	o.i = 0
+	t.done(false)
 	return nil
 }
 
 func (o *cteScan) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.rows[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
 }
 

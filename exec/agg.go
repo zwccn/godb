@@ -442,6 +442,7 @@ func newAccum(spec *aggSpec) accum {
 
 // aggOp 是哈希聚合算子：输出 schema 为 [组键..., 聚合结果...]。
 type aggOp struct {
+	OpProfile
 	child      Operator
 	groupEvals []Eval
 	groupTypes []types.Type
@@ -472,6 +473,9 @@ type aggGroup struct {
 }
 
 func (o *aggOp) Open() error {
+	t := o.begin()
+	// 聚合的活全在 Open 里（拉完子节点、建哈希表），必须包住整段。
+	defer func() { t.done(false) }()
 	if err := o.child.Open(); err != nil {
 		return err
 	}
@@ -546,11 +550,14 @@ func (o *aggOp) Open() error {
 }
 
 func (o *aggOp) Next() (types.Row, bool, error) {
+	t := o.begin()
 	if o.i >= len(o.rows) {
+		t.done(false)
 		return nil, false, nil
 	}
 	r := o.rows[o.i]
 	o.i++
+	t.done(true)
 	return r, true, nil
 }
 

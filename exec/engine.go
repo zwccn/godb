@@ -31,6 +31,9 @@ type Result struct {
 	RowCount int             `json:"rowCount"`
 	Affected int             `json:"affected"`
 	Plan     []string        `json:"plan,omitempty"`
+	// PlanTree 是 Plan 的结构化版本（每个算子的行数/轮次/独占耗时）。
+	// 只有 EXPLAIN 结果才带；「探测执行」用它画「哪一步最贵」。
+	PlanTree *PlanNode `json:"planTree,omitempty"`
 	Message  string          `json:"message,omitempty"`
 	// TookNs 是这条语句的耗时（纳秒，含等待锁，不含 SQL 解析），由 db 层填充。
 	TookNs int64 `json:"tookNs"`
@@ -162,11 +165,13 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 
 	if mode != explainOff {
 		var planText []string
+		var tree *PlanNode
 		if mode == explainAnalyze {
 			// 真跑一遍：结果丢掉，只留每个算子的行数与耗时
-			planText, err = ExplainAnalyze(plan)
+			planText, tree, err = ExplainAnalyze(plan)
 		} else {
 			planText = ExplainPlan(plan)
+			tree = ExplainTree(plan)
 		}
 		if err != nil {
 			return nil, err
@@ -186,6 +191,7 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 			Rows:     rows,
 			RowCount: len(rows),
 			Plan:     planText,
+			PlanTree: tree,
 		}, nil
 	}
 

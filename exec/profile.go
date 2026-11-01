@@ -20,9 +20,10 @@ import (
 //   - Detail：算子用文字讲清自己的决策（走不走索引、用了哪种连接算法、估算多少行）。
 //     不用开关，EXPLAIN 就直接打出来。
 type OpProfile struct {
-	on   bool
-	rows int64
-	ns   int64
+	on    bool
+	rows  int64
+	loops int64
+	ns    int64
 }
 
 // Start 在句子的开头调一次；没开统计时返回零值，调用方照样往下走。
@@ -44,10 +45,21 @@ type detailer interface {
 
 func (p *OpProfile) enableProfile(on bool) {
 	p.on = on
-	p.rows, p.ns = 0, 0
+	p.rows, p.loops, p.ns = 0, 0, 0
 }
 
 func (p *OpProfile) profile() (int64, int64) { return p.rows, p.ns }
+
+// loop 记一次「重新启动子节点」。
+//
+// 只有嵌套循环类算子用得上：哈希连接把右表建一次哈希表就算完，而索引连接
+// 是「外表每来一行就点查一次内表」—— 那个「跑了几轮」不记下来，就只能看到
+// 一个总行数，看不出代价是线性堆起来的。profile 关着时是一次空指针判断。
+func (p *OpProfile) loop() {
+	if p != nil && p.on {
+		p.loops++
+	}
+}
 
 // begin 开始计时。没开统计时返回的 timer 什么都不做（零开销的分支预测）。
 func (p *OpProfile) begin() timer {
@@ -91,27 +103,111 @@ func ExplainPlan(op Operator) []string {
 // ExplainAnalyze 跑一遍计划，返回带「实际行数 + 耗时」的计划。
 //
 // 结果集会被丢弃（EXPLAIN ANALYZE 只关心统计），所以只用于 SELECT。
-func ExplainAnalyze(op Operator) ([]string, error) {
+// 第二个返回值是同一份统计的结构化版本（给 Web 的「探测执行」用）；
+// 文本版一个字都没改 —— PG 客户端和既有断言都还依赖那段格式。
+func ExplainAnalyze(op Operator) ([]string, *PlanNode, error) {
 	setProfiling(op, true)
 	defer setProfiling(op, false)
 	if err := op.Open(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for {
 		_, ok, err := op.Next()
 		if err != nil {
 			op.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
 			break
 		}
 	}
 	if err := op.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return renderPlan(op, true), nil
+	return renderPlan(op, true), ExplainTree(op), nil
 }
+
+// PlanNode 是执行计划的结构化版本：一台「每步花了多少」的账。
+//
+// 只看 TotalNs 会误判：父节点的耗时里含子节点，越往上数字越大，看起来永远
+// 是根节点最贵。真正要回答「时间花在哪」的是 SelfNs（独占时间）：父的总时长
+// 减掉所有子节点的总时长。火山模型里父算子的每次调用都包住子调用，这个减法
+// 是成立的（父子时钟严格嵌套），不需要在每次调用时做指针记账。
+type PlanNode struct {
+	Name string `json:"name"`
+	// Detail 是算子自己写的决策说明（走没走索引、为什么没走、哪种连接算法）。
+	Detail []string `json:"detail,omitempty"`
+	// Rows 是「往上吐了多少行」。
+	Rows int64 `json:"rows"`
+	// Loops 是子节点被重新启动的次数（嵌套循环跑了几轮），0 表示不适用。
+	Loops int64 `json:"loops,omitempty"`
+	// Scanned 是从堆表里真读了多少行 —— 只对全表扫描有意义（读了 5 万行才吐 1 行）。
+	Scanned int64 `json:"scanned,omitempty"`
+	// TotalNs 含所有子节点；SelfNs 是独占时间。
+	TotalNs int64 `json:"totalNs"`
+	SelfNs  int64 `json:"selfNs"`
+
+	Children []*PlanNode `json:"children,omitempty"`
+}
+
+// scannedReporter 是「我从堆表读了多少行」的口子。
+// 只有全表扫描实现它：索引扫描吐多少行就读多少行，两者没有差额。
+type scannedReporter interface {
+	ScanRows() int64
+}
+
+// ExplainTree 把算子树的统计摊成结构化的树。
+//
+// 统计没开时（普通执行也会调一次来填 Result.Plan）行数与耗时全是 0，
+// 前端据此只当成「计划长什么样」，不会拿 0 去算命。
+func ExplainTree(op Operator) *PlanNode {
+	var walk func(o Operator) *PlanNode
+	walk = func(o Operator) *PlanNode {
+		n := &PlanNode{Name: fmt.Sprintf("%T", o)}
+		kids := []Operator(nil)
+		if pn, ok := o.(planNode); ok {
+			n.Name = pn.Describe()
+			kids = pn.Children()
+		}
+		if p, ok := o.(profiler); ok {
+			rows, ns := p.profile()
+			n.Rows, n.TotalNs = rows, ns
+			if pl, ok := o.(loopProfiler); ok {
+				n.Loops = pl.profileLoops()
+			}
+		}
+		if sr, ok := o.(scannedReporter); ok {
+			n.Scanned = sr.ScanRows()
+		}
+		if d, ok := o.(detailer); ok {
+			n.Detail = d.ExplainDetail()
+		}
+		var kidNs int64
+		for _, k := range kids {
+			kn := walk(k)
+			if kn == nil {
+				continue
+			}
+			kidNs += kn.TotalNs
+			n.Children = append(n.Children, kn)
+		}
+		n.SelfNs = n.TotalNs - kidNs
+		if n.SelfNs < 0 {
+			// 子节点比父节点还久只可能是「父没计时、子计了」或者时钟回退，
+			// 与其报个负数让人猜，不如认成 0。
+			n.SelfNs = 0
+		}
+		return n
+	}
+	return walk(op)
+}
+
+// loopProfiler 是轮次统计的口子（只有嵌套循环实现）。
+type loopProfiler interface {
+	profileLoops() int64
+}
+
+func (p *OpProfile) profileLoops() int64 { return p.loops }
 
 func renderPlan(op Operator, withStats bool) []string {
 	var out []string

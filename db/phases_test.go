@@ -162,28 +162,36 @@ func TestPlanTreeLobIO(t *testing.T) {
 // 规划耗时：BuildSelect（挑索引、编译表达式、搭算子树）发生在第一个算子 Open 之前，
 // 所以它不在任何算子节点上。不单独记的话，界面上就会出现「执行 204 µs、
 // 每一步加起来才 26 µs」——差额没人认领，用户会怀疑计时坏了。
+//
+// 精度依赖：测试进程不走 main.go，hrtime 没标定过，退化成 time.Now —— 沙箱里那是
+// 219 µs 的步进，微秒级的规划耗时会读成 0。**这种情况下不跳过整条用例**（跳过
+// 等于这台机器上没测），而是把「必须 > 0」降级成「不许为负」，其余一致性照查 ——
+// 那些不依赖精度，在任何机器上都成立。
 func TestPlanNsRecorded(t *testing.T) {
 	d := setupProbeTable(t)
 	res := run(t, d, "s", `EXPLAIN ANALYZE SELECT * FROM big WHERE v > 59985`)
 	r := res[0]
-	// 测试进程不走 main.go，hrtime 没标定过，退化成 time.Now —— 沙箱里那是
-	// 219 µs 的步进，微秒级的规划耗时会被读成 0。这种情况只校验一致性。
-	if r.PlanNs == 0 && hrtime.Granularity() >= 1000 {
-		t.Skipf("时钟步进 %v 太粗，测不出微秒级规划耗时", hrtime.Granularity())
-	}
-	if r.PlanNs <= 0 {
-		t.Fatalf("规划耗时应 > 0，实际 %d", r.PlanNs)
-	}
+
 	if r.Phases == nil {
 		t.Fatal("应带分段耗时")
-	}
-	if r.PlanNs > r.Phases.ExecNs {
-		t.Fatalf("规划 %d 不该超过执行阶段的总和 %d", r.PlanNs, r.Phases.ExecNs)
 	}
 	if r.PlanTree == nil {
 		t.Fatal("应带统计树")
 	}
-	// 规划 + 树 + 整理 应当落在执行阶段里（允许几微秒的计时误差）
+	if r.PlanNs < 0 {
+		t.Fatalf("规划耗时不该为负，实际 %d", r.PlanNs)
+	}
+	// 时钟够细时（TSC / 正常 Linux），规划必须真的被量到
+	if gran := hrtime.Granularity(); gran < 1000 {
+		if r.PlanNs <= 0 {
+			t.Fatalf("时钟步进 %v 足够细，规划耗时应 > 0，实际 %d", gran, r.PlanNs)
+		}
+	}
+	if r.PlanNs > r.Phases.ExecNs {
+		t.Fatalf("规划 %d 不该超过执行阶段的总和 %d", r.PlanNs, r.Phases.ExecNs)
+	}
+	// 规划 + 树 + 整理 应当落在执行阶段里（允许几微秒的计时误差）。
+	// 这条与时钟精度无关：规划发生在执行阶段内部，两者之和不可能超出它。
 	rest := r.Phases.ExecNs - r.PlanNs - r.PlanTree.TotalNs
 	if rest < -5000 {
 		t.Fatalf("规划 %d + 执行 %d 已经超出执行阶段 %d",

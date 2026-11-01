@@ -57,7 +57,7 @@ go build -o godb.exe .
 |---|---|
 | 持久化 | `CHECKPOINT` / `FLUSH`（刷脏页 + 记代次 + 轮转 WAL，返回代次与统计）；`VACUUM [表]`（整理页内空洞 + 回收尾部空页，返回整理/回收的页数）；`ANALYZE`（识别并成功，暂无统计信息） |
 | 索引 | `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验；**`ORDER BY` 命中 PK/NOT NULL 索引前缀时可免排序，带 `LIMIT` 还能提前停（Top-N 分页）** |
-| 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
+| 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`（`ADD CONSTRAINT` / `ADD PRIMARY KEY` 不支持，报错会直说「请在建表时声明」）、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
 | 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名）；`ON CONFLICT [(cols)] DO NOTHING / DO UPDATE SET …`（含 `EXCLUDED`）；`UPDATE … FROM`、`DELETE … USING`（数据源同 `SELECT` 的 `FROM`：多表 / `JOIN` / 派生表 / `(VALUES …)`）；`WHERE` / `SET` / `VALUES` 里可以用子查询（`IN (SELECT …)`、标量、`EXISTS`） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` / `EXPLAIN ANALYZE` |
@@ -2165,20 +2165,52 @@ gid），所以索引完全不用重建 —— 换完文件照样能走索引点
 ## 测试
 
 ```bash
-go test ./...        # 220 个用例
+go test ./...            # 423 个用例
+node tools/ui_check.js   # 前端回归：210 条断言，真实点击（约 1 分钟）
 go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 ```
 
+- `sql/`：**表驱动**用例 147 条。90+ 条语句（DDL / DML / 查询 / 客户端兼容语句）先被折成
+  一行「AST 形状」再逐字比对，读失败信息就能看出解析成了什么；30+ 条表达式做「解析 → 打印」
+  往返，盯的是优先级与结合性（`1 + 2 * 3`、`a = 1 AND b = 2 OR c = 3`、`NOT a = 1`、
+  `a BETWEEN 1 AND 5 AND b = 2`）；20 条错误用例断言错误信息里该有的字 —— 包括
+  「不是语法错，而是不支持」（`ALTER TABLE … ADD CONSTRAINT`、`FULL JOIN`、`WITH RECURSIVE`）。
+  这个包原先一条测试都没有，全靠 `db` 的端到端用例间接覆盖。
 - `storage/`：B+Tree 插入/查找/范围扫描、重复键、删空后复用、反向游标；保序键编码的序与 `types.Compare` 一致（多列、NUL 字节、`-0.0` 归一）。
 - `lock/`：S-S 相容、S-X / X-X 冲突、批量申请原子性、释放唤醒、S→X 升级、等待图死锁（只让年轻者放弃）、快照。
 - `db/persistence_test.go`：增量 checkpoint（没改的表文件 mtime 不变）、按需加载（启动 0 张、查一张变 1 张）、旧 `snapshot.json` 自动迁移、快照与 WAL 重叠时不重复应用、catalog 与快照列数不一致时能打开、二进制 WAL 往返、旧版 JSON WAL 兼容、尾部截断帧容错、`CHECKPOINT` 语句、组提交 fsync 合并、`ADD COLUMN` 不重写快照。
 - `db/`：CRUD 与约束、NULL 三值逻辑、排序分页、分组聚合、四种 JOIN、DISTINCT、表达式与函数、事务提交回滚、中毒事务、WAL 崩溃恢复、ALTER 四种动作、错误路径；并发部分覆盖读读并行、跨表写并行、读写互斥、写挡读、保守预扫描消除升级、死锁检测、未提交不可见、20 次并发自增不丢更新。
 - `pgwire/`：简单查询（含多语句）、扩展查询与文本参数、事务状态、错误 SQLSTATE、密码认证（错密码 / 错用户 / 正确密码 / 未启用时 trust）、系统目录能查但只读且不加锁、扩展协议 `Execute` 不重复回 `RowDescription`（Npgsql 严格校验这点）。
 - `web/`：`/api/dbs` 列表 / 建库 / 切库写 cookie / 删库规则 / **非本机写被拒**；`/api/config` 读取、保存、远程写被拒、非法值被拒。
+- `storage/policy_test.go`：按时间落盘的三条判定（到点写 / 空闲不写 / 阈值 0 不动）靠
+  **把 `cpLastNs` 拨到过去**直接验，不靠等真实 ticker —— 判定只看「阈值 + 上次落盘时刻 +
+  未落盘提交数」这三样，摆好再调一次 `tickCheckpoint()` 就覆盖完了。
 - `config/`：配置原子写与校验、`-http`/`-pg` 只作首次种子、密码哈希往返（PBKDF2），以及 SCRAM / MD5 的哈希工具。
 
 > `-race` 需要 cgo（`gcc`），本机未安装 C 编译器，因此本地跑不了；CI 里额外跑一遍
 > `go test ./... -race` 覆盖并发正确性。
+
+### 前端回归：`node tools/ui_check.js`
+
+起一个 headless Chrome，用 DevTools 协议做**真实点击**（合成事件测不到浏览器默认动作，
+比如 F5 会不会被拦），跑 210 条断言：结果区 tab 与滚动条、空间地图缩放与惯性、块级下钻、
+索引树三级导航、右键模板、执行秒表、探测卡、设置页、登录跳转……
+
+**等条件，不等时间。** 脚本原来满屏 `await sleep(1200)`：机器快就白等，机器慢就假失败
+（加探测卡那轮，1200ms 不够用，一路加到 2500 才勉强稳）。现在统一成
+`waitFor(cond, timeout)` —— 每 40ms 问一次页面，条件成立立刻往下走：
+
+| 等什么 | 判据 |
+|---|---|
+| 一次执行结束 | `busy === false`（`app.js` 顶层的执行中标志） |
+| 结果真的画出来 | `.probe-row` / `#monSlowSQL tr` / `#pmGrid .pm-c` 挂上 DOM |
+| 页检查器下钻一层 | 路径条文本变了（不是「睡 1 秒」） |
+| 设置保存完成 | 面板关闭 + toast 出现 |
+| 布局稳定 | 两帧 `requestAnimationFrame`（替代「等 300ms」） |
+
+超时**不抛异常**，只记一条失败并把「等的是什么」打出来 —— 一条卡住不该把后面几十条断言
+全带走。整套从 **3~4 分钟降到约 1 分钟**；剩下的等待多是缩放惯性、拖拽滑行这类
+「本身就是时间」的动作，故意保留。
 
 ## 已知限制
 
@@ -2228,7 +2260,9 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
 - 表一旦加载就不会再被换出（没有淘汰策略），长期运行、表很多时内存只增不减。
 - `NUMERIC(p,s)` 用精确十进制（`big.Rat` 存文本），但落盘后按声明精度重新定标，
   末尾的 0 不保留（`12345678.90` 读回来是 `12345678.9`）。
-- 耗时精度受操作系统时钟限制：小于本机时钟步进（沙箱里约 0.2ms）的操作只能显示上界 `<0.20 ms`。
+- 耗时精度受计时源限制：Linux/macOS 的 `time.Now()` 本来就是纳秒级；Windows 的 QPC 可能只有
+  0.2ms（虚拟机尤甚），所以 Windows/amd64 上默认改用 CPU 的 TSC（刻度约 0.5ns）；
+  不可用时会自动退回 `time.Now`，那时小于步进的操作只显示上界 `<0.20 ms`。
 - JOIN 会物化两侧数据；连接结果超过 200 万行会直接报错而不是把内存吃光。
 - 没有统计信息，连接策略和索引选择都是**估算**（表行数 + 「有没有过滤条件」）。
   谓词下推只做「只碰一张表」的整条合取项，不会拆 `a = 1 OR b = 2` 这种；

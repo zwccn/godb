@@ -2815,23 +2815,169 @@ function renderRates(m) {
   }
 
   box.appendChild(sparkLines(pts, [
-    { get: pt => pt.qps, color: 'var(--accent)', width: 1.4 },
+    { get: pt => pt.qps, color: 'var(--accent)', width: 1.4, label: 'QPS', fmt: v => String(v) },
     // TPS 用虚线：自动提交时 QPS 和 TPS 完全相等，两条实线会重叠成一条，
     // 看着像「TPS 没画出来」。虚线叠在实线上，两条都在。
-    { get: pt => pt.tps, color: 'var(--ok)', width: 1.2, opacity: 0.9, dash: '5 3' },
+    { get: pt => pt.tps, color: 'var(--ok)', width: 1.2, opacity: 0.9, dash: '5 3', label: 'TPS', fmt: v => String(v) },
   ], {
     mode: 'zero',
+    key: 'rate-qps',
     legend: '<span class="spark-row"><i class="spark-k cpu"></i>QPS<i class="spark-k mem"></i>TPS（虚线）</span>',
     tip: '两条线共用纵轴：都是「每秒次数」，量级天生可比。QPS 远高于 TPS 说明基本是自动提交',
   }));
 
   box.appendChild(sparkLines(pts, [
-    { get: pt => pt.conns, color: 'var(--warn)', width: 1.2 },
+    { get: pt => pt.conns, color: 'var(--warn)', width: 1.2, label: '连接数', fmt: v => String(v) },
   ], {
     mode: 'range',
+    key: 'rate-conn',
     legend: '<span class="spark-row"><i class="spark-k conn"></i>连接数</span>',
     tip: '纵轴取这段区间的上下界：连接数平时几乎不动，从 0 起画就只是一条贴顶直线',
   }));
+}
+
+/* ---- 曲线通用件：刻度 + 悬浮读数 ---- */
+
+// 时刻只到秒：采样本来就是秒级的，毫秒既没意义又占宽度。
+function fmtClock(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const p = x => (x < 10 ? '0' : '') + x;
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+// 刻度数字。左边沟槽只有 40px，位数必须克制：小于 1 的留两位（0.25 核），
+// 其余最多一位小数，上千就取整。
+function fmtAxis(v) {
+  const a = Math.abs(v);
+  if (a >= 1000) return String(Math.round(v));
+  if (a < 1) return String(Math.round(v * 100) / 100);
+  return String(Math.round(v * 10) / 10);
+}
+
+// 三档刻度：顶 / 中 / 底。取整后和相邻档撞车就把这一档丢掉，
+// 免得沟槽里出现两个一模一样的数（连接数 12~13 这种窄区间很容易撞）。
+function axisTicks(lo, hi, yPct, fmt) {
+  const cand = [[hi, yPct(hi)], [(lo + hi) / 2, yPct((lo + hi) / 2)], [lo, yPct(lo)]];
+  const out = [];
+  for (const [v, pct] of cand) {
+    const text = fmt(v);
+    if (out.length && out[out.length - 1].text === text) continue;
+    out.push({ text: text, pct: pct });
+  }
+  return out;
+}
+
+// 覆盖层：刻度文字 + 竖线 + 跟随点 + 读数卡片。
+// 全部是 HTML 绝对定位，一个字都不放进 SVG —— 图是 preserveAspectRatio="none"
+// 横向拉伸铺满卡片的，画在里面的 <text> 会跟着被拉扁，字读不出来。
+function sparkOverlay(ticks, lines) {
+  let h = '';
+  for (const t of ticks) {
+    h += `<span class="spark-y" style="top:${t.pct.toFixed(1)}%">${t.text}</span>`;
+  }
+  h += '<i class="spark-cursor"></i>';
+  for (const l of lines) h += `<i class="spark-dot" style="background:${l.color}"></i>`;
+  h += '<div class="spark-hover"></div>';
+  return h;
+}
+
+// 横轴只标起点 / 中点 / 终点：一分钟就是 60 个采样点，全标出来是一团黑。
+// 点少的时候中点和起点常常落在同一秒，那就留空占位 —— 空着也比重复两次强，
+// 两端对齐也不会跑。
+function sparkAxisX(points) {
+  const n = points.length;
+  const a = fmtClock(points[0].atMs);
+  const mid = fmtClock(points[Math.floor((n - 1) / 2)].atMs);
+  const b = fmtClock(points[n - 1].atMs);
+  return '<div class="spark-x">' +
+    `<span>${a}</span>` +
+    `<span>${mid === a || mid === b ? '' : mid}</span>` +
+    `<span>${b}</span>` +
+    '</div>';
+}
+
+// 曲线悬停状态。监控每秒刷一次、每秒重建整块卡片，卡片上的读数也会跟着没掉 ——
+// 鼠标不动却看见卡片闪一下，是比「弹得慢」更难受的毛病。所以把位置记在外面，
+// 重建后按同一个比例放回去。
+let sparkHover = null; // { key, xr, yr }
+
+// 悬浮读数：pointermove 里按 x 反算最近的采样点，直接改 DOM。
+// 为什么不用原生 title —— 那是系统级提示，鼠标停住后要等 0.7~1 秒才弹，
+// 内容也只能是一句固定说明，「这一刻到底是多少」它答不了。
+function attachSparkHover(plot, points, lines, key) {
+  const n = points.length;
+  const cursor = plot.querySelector('.spark-cursor');
+  const card = plot.querySelector('.spark-hover');
+  const dots = plot.querySelectorAll('.spark-dot');
+  const hide = () => {
+    cursor.style.opacity = 0;
+    card.style.opacity = 0;
+    for (const d of dots) d.style.opacity = 0;
+  };
+
+  // 按比例定位（0~1 横向 / 0~1 纵向）。重放也走这里，所以「鼠标没动，
+  // 卡片就不该动」在数据刷新之后依然成立。
+  const place = (xr, yr) => {
+    const w = plot.clientWidth;
+    const h = plot.clientHeight;
+    if (n < 2 || !w) return;
+    const i = Math.round(xr * (n - 1));
+    const px = (i / (n - 1)) * w;
+    const pt = points[i];
+    cursor.style.left = px + 'px';
+    cursor.style.opacity = 1;
+    let html = `<span class="spark-row spark-when">${fmtClock(pt.atMs)}</span>`;
+    for (let k = 0; k < dots.length; k++) {
+      const l = lines[k];
+      dots[k].style.left = px + 'px';
+      dots[k].style.top = l.yPct(pt) + '%';
+      dots[k].style.opacity = 1;
+      html += `<span class="spark-row"><i class="spark-k" style="background:${l.color}"></i>` +
+        `${l.label} <b>${l.fmt(l.get(pt) || 0)}</b></span>`;
+    }
+    card.innerHTML = html;
+    card.style.left = px + 'px';
+    // 横向：靠右半边时翻到竖线左侧，否则会被绘图区边缘切掉。
+    // 纵向：跟着指针走并夹紧在绘图区内，固定贴顶会挡住顶部那条峰值虚线。
+    const ch = card.offsetHeight || 40;
+    const cy = Math.min(Math.max(yr * h, ch / 2), Math.max(ch / 2, h - ch / 2));
+    card.style.top = cy + 'px';
+    card.style.transform = px > w * 0.55
+      ? 'translate(calc(-100% - 10px), -50%)'
+      : 'translate(10px, -50%)';
+    card.style.opacity = 1;
+  };
+
+  plot.addEventListener('pointermove', ev => {
+    const w = plot.clientWidth;
+    const h = plot.clientHeight;
+    if (n < 2 || !w) return;
+    const rect = plot.getBoundingClientRect();
+    const xr = Math.min(1, Math.max(0, (ev.clientX - rect.left) / w));
+    const yr = Math.min(1, Math.max(0, (ev.clientY - rect.top) / h));
+    sparkHover = { key: key, xr: xr, yr: yr };
+    place(xr, yr);
+  });
+  const leave = () => {
+    // 旧节点被 innerHTML='' 摘掉时也可能顺手派一个 leave，那不是指针真的走了
+    if (!plot.isConnected) return;
+    sparkHover = null;
+    hide();
+  };
+  plot.addEventListener('pointerleave', leave);
+  plot.addEventListener('pointercancel', leave);
+
+  // 这张图是刷新后重建的，而上一次悬停就在它上面：原样放回去。
+  // 必须等一帧 —— 此刻它还没被 appendChild 进文档，clientWidth 是 0，
+  // 直接 place 会算出 0 宽度然后什么也不画（踩过：卡片每次刷新都消失）。
+  if (sparkHover && sparkHover.key === key) {
+    requestAnimationFrame(() => {
+      if (sparkHover && sparkHover.key === key && plot.isConnected) {
+        place(sparkHover.xr, sparkHover.yr);
+      }
+    });
+  }
 }
 
 // 折线图。两条归一化策略：
@@ -2869,6 +3015,9 @@ function sparkLines(points, lines, opt) {
 
   const X = i => (n === 1 ? 0 : (i / (n - 1)) * W);
   const Y = v => H - padB - Math.min(1, Math.max(0, (v - lo) / (hi - lo || 1))) * (H - padT - padB);
+  const yPct = v => (Y(v) / H) * 100;
+  // 悬浮层要按点算纵坐标，挂在每条线上比再传一份归一化参数省事
+  for (const l of lines) l.yPct = pt => yPct(l.get(pt) || 0);
 
   let paths = '';
   for (const l of lines) {
@@ -2883,10 +3032,22 @@ function sparkLines(points, lines, opt) {
   }
 
   const wrap = el('div', 'mon-spark');
-  if (opt.tip) wrap.title = opt.tip;
-  wrap.innerHTML =
+  const plot = el('div', 'spark-plot');
+  plot.innerHTML =
     `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>` +
-    `<span class="spark-tip">${opt.legend || ''}</span>`;
+    sparkOverlay(axisTicks(lo, hi, yPct, fmtAxis), lines);
+  const box = el('div', 'spark-wrap');
+  box.appendChild(plot);
+  box.insertAdjacentHTML('beforeend', sparkAxisX(points));
+  wrap.appendChild(box);
+
+  const legend = el('span', 'spark-tip');
+  legend.innerHTML = opt.legend || '';
+  // 说明挂图例上而不是整块图上：鼠标在图上时用户要的是读数，
+  // 停在图例上才需要「这张图怎么看」。原生 title 慢在这里无所谓。
+  if (opt.tip) legend.title = opt.tip;
+  wrap.appendChild(legend);
+  attachSparkHover(plot, points, lines, opt.key || 'rate');
   return wrap;
 }
 
@@ -2988,11 +3149,23 @@ function sparkline(points, maxCore) {
   const cpuNow = last.cpuCore || 0;
   const memNow = last.heapBytes || 0;
 
+  // 沟槽里只画 CPU 轴：两条线各自归一化，一个刻度管不了两条 ——
+  // 内存轴的范围写在下面图例里，悬浮读数才是两条线的真值。
+  const yPctCpu = v => (y(v) / H) * 100;
+  const lines = [
+    {
+      get: pt => pt.heapBytes, color: 'var(--ok)', label: '内存', fmt: fmtBytes,
+      yPct: pt => (yMem(pt.heapBytes || 0) / H) * 100,
+    },
+    {
+      get: pt => pt.cpuCore, color: 'var(--accent)', label: 'CPU',
+      fmt: v => v.toFixed(2) + ' 核', yPct: pt => yPctCpu(pt.cpuCore || 0),
+    },
+  ];
+
   const wrap = el('div', 'proc-spark');
-  wrap.title = `最近 ${n} 个秒级采样点（约 ${n} 秒）。CPU 纵轴 0~${max} 核；`
-    + `内存纵轴 ${flat ? '持平' : fmtBytes(memLo) + '~' + fmtBytes(memHi)}。`
-    + '两条线各自归一化，只比形状不比高低。';
-  wrap.innerHTML =
+  const plot = el('div', 'spark-plot');
+  plot.innerHTML =
     `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` +
     `<line x1="0" y1="${y(max).toFixed(1)}" x2="${W}" y2="${y(max).toFixed(1)}" ` +
     `stroke="var(--border-soft)" stroke-width="0.5" stroke-dasharray="3 3"/>` +
@@ -3002,12 +3175,24 @@ function sparkline(points, maxCore) {
     `<path d="${dCpu}" fill="none" stroke="var(--accent)" stroke-width="1.4" ` +
     `stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
     `</svg>` +
-    `<span class="spark-tip">` +
+    sparkOverlay(axisTicks(0, max, yPctCpu, fmtAxis), lines);
+  const box = el('div', 'spark-wrap');
+  box.appendChild(plot);
+  box.insertAdjacentHTML('beforeend', sparkAxisX(points));
+  wrap.appendChild(box);
+
+  const legend = el('span', 'spark-tip');
+  legend.innerHTML =
     `<span class="spark-row"><i class="spark-k cpu"></i>CPU 峰值 ${peak.toFixed(2)} · 现在 ${cpuNow.toFixed(2)} 核` +
     `（纵轴 0~${max}）</span>` +
     `<span class="spark-row"><i class="spark-k mem"></i>内存 峰值 ${fmtBytes(memHi)} · 现在 ${fmtBytes(memNow)}` +
     (flat ? '（波动小于 2%，按持平画）' : `（纵轴 ${fmtBytes(memLo)}~${fmtBytes(memHi)}）`) +
-    `</span></span>`;
+    `</span>`;
+  legend.title = `最近 ${n} 个秒级采样点（约 ${n} 秒）。CPU 纵轴 0~${max} 核；`
+    + `内存纵轴 ${flat ? '持平' : fmtBytes(memLo) + '~' + fmtBytes(memHi)}。`
+    + '两条线各自归一化，只比形状不比高低。';
+  wrap.appendChild(legend);
+  attachSparkHover(plot, points, lines, 'proc');
   return wrap;
 }
 

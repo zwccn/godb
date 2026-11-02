@@ -2445,12 +2445,85 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 /* 曲线：CPU 一条线 + 内存一片面积。高度从 44 提到 76 —— 44 在 1600 宽的卡片里
    就是一条几乎平的细线，「刚才有没有尖峰」根本看不出来。 */
 .proc-spark { padding: 2px 12px 9px; }
-.proc-spark svg { width: 100%; height: 76px; display: block; }
+.proc-spark .spark-plot svg { height: 76px; }
 
 /* 吞吐与连接：两行小图叠在一张卡里（QPS/TPS 一行、连接数一行）。
    每行 64px：比进程资源那块矮一点，因为它是两行，加起来反而更高。 */
 .mon-spark { padding: 2px 12px 8px; }
-.mon-spark svg { width: 100%; height: 64px; display: block; }
+.mon-spark .spark-plot svg { height: 64px; }
+
+/* 绘图区：左侧留 42px 给纵轴刻度，文字全部在 SVG 外面 ——
+   图是 preserveAspectRatio="none" 拉伸铺满卡片的，里面画 <text> 会被横向拉扁。 */
+.spark-wrap { padding-left: 42px; }
+.spark-plot { position: relative; }
+.spark-plot svg { width: 100%; display: block; }
+.spark-y {
+  position: absolute;
+  right: calc(100% + 5px);
+  width: 38px;
+  text-align: right;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--fs));
+  line-height: 1;
+  color: var(--text-3);
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* 横轴只放起点/中点/终点，颜色再压淡一档，免得和曲线抢注意力 */
+.spark-x {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--fs));
+  line-height: 1;
+  color: var(--text-3);
+  opacity: .75;
+}
+.spark-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text-3);
+  opacity: 0;
+  pointer-events: none;
+}
+.spark-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: 0 0 0 1.5px var(--bg-2);
+}
+/* 读数卡片：跟随指针，零延迟。原生 title 是系统提示，要等 0.7~1 秒，
+   而且只能说一句固定的话，鼠标放上去想知道「这一刻多少」它答不了。
+   坐标 top/left 与 transform 由 attachSparkHover 算，这里只管长相。 */
+.spark-hover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  display: grid;
+  gap: 2px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--fs));
+  color: var(--text);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+}
+.spark-hover b { color: var(--text); font-weight: 600; }
+.spark-when { color: var(--text-2); }
 /* 图例两行（CPU / 内存各一行），不再挤在一行里换行 ——
    挤成一行时「（轴 …）」会被折到下一行，看着像两句没说完的话。 */
 .spark-tip {

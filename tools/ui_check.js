@@ -582,6 +582,91 @@ class CDP {
       sumUi.n === 3 && sumUi.keys.join('/') === 'fsync/缓冲池/页密度' && sumUi.inView,
       `${sumUi.keys.join(' / ')} · 卡片 ${sumUi.h}px · 首屏内 ${sumUi.inView}`);
 
+
+    // 0.4c2) 监控曲线：纵横轴 + 零延迟悬浮读数。
+    // 这两块以前缺得最明显 —— 悬停靠原生 title（系统提示，停住 0.7~1 秒才弹，
+    // 而且只说一句固定的话），纵横轴一个都没有，鼠标放上去什么也问不出来。
+    await waitFor(cdp, `document.querySelectorAll('#monPanel .mon-page[data-page="overview"] .spark-plot').length >= 3`,
+      { label: '监控曲线' });
+    const axUi = await cdp.eval(`(() => {
+      return [...document.querySelectorAll('#monPanel .mon-page[data-page="overview"] .spark-plot')].map(p => ({
+        ys: [...p.querySelectorAll('.spark-y')].map(s => s.textContent.trim()),
+        xs: [...p.parentElement.querySelectorAll('.spark-x span')].map(s => s.textContent.trim()),
+        // 刻度必须是 HTML：图是 preserveAspectRatio="none" 拉伸铺满卡片的，
+        // 画在 SVG 里的 <text> 会跟着被横向拉扁，字读不出来
+        textInSvg: p.querySelectorAll('svg text').length,
+      }));
+    })()`);
+    check('监控曲线：三张图都有纵轴刻度（≥2 档）+ 横轴三个时刻',
+      axUi.length === 3 && axUi.every(a => a.ys.length >= 2 && a.xs.length === 3
+        && /^\d\d:\d\d:\d\d$/.test(a.xs[0]) && /^\d\d:\d\d:\d\d$/.test(a.xs[2])),
+      axUi.map(a => a.ys.join('/') + ' | ' + a.xs.join(' ')).join(' ‖ '));
+    // 中间那格允许是空的：点少的时候中点和起点落在同一秒，会留空占位而不是重复两次
+    check('横轴时刻按「起点 → 中点 → 终点」递增',
+      axUi.every(a => a.xs[0] <= a.xs[2]
+        && (!a.xs[1] || (a.xs[0] <= a.xs[1] && a.xs[1] <= a.xs[2]))),
+      axUi.map(a => a.xs.join('→')).join(' ‖ '));
+    check('纵轴刻度不重复（区间窄、取整撞车时丢掉中间那一档）',
+      axUi.every(a => new Set(a.ys).size === a.ys.length),
+      axUi.map(a => a.ys.join('/')).join(' ‖ '));
+    check('刻度文字是 HTML 覆盖层，SVG 里一个 text 都没有（否则会被拉伸变形）',
+      axUi.every(a => a.textInSvg === 0), axUi.map(a => a.textInSvg).join(','));
+
+    // 悬浮：鼠标落在绘图区 70% 处。headless 下第一次 mouseMoved 只算「进入页面」，
+    // 同一个点要再发一次才落到元素上（所以上面那几条不要照抄这个发两次的写法）。
+    await cdp.eval(`document.querySelector('#monPanel .proc-spark .spark-plot').scrollIntoView({ block: 'center' })`);
+    await sleep(150);
+    const sparkBox = await cdp.eval(`(() => {
+      const b = document.querySelector('#monPanel .proc-spark .spark-plot').getBoundingClientRect();
+      return { x: b.left, y: b.top, w: b.width, h: b.height };
+    })()`);
+    const snoop = { x: Math.round(sparkBox.x + sparkBox.w * 0.7), y: Math.round(sparkBox.y + sparkBox.h * 0.5) };
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: snoop.x, y: snoop.y, button: 'none' });
+    await sleep(80);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: snoop.x, y: snoop.y, button: 'none' });
+    await sleep(140);
+    const hov = await cdp.eval(`(() => {
+      const p = document.querySelector('#monPanel .proc-spark .spark-plot');
+      const c = p.querySelector('.spark-hover');
+      const cur = p.querySelector('.spark-cursor');
+      const cb = c.getBoundingClientRect();
+      const pb = p.getBoundingClientRect();
+      return {
+        text: c.textContent,
+        op: getComputedStyle(c).opacity,
+        curOp: getComputedStyle(cur).opacity,
+        dots: [...p.querySelectorAll('.spark-dot')].map(d => getComputedStyle(d).opacity),
+        flip: c.style.transform,
+        inside: cb.top >= pb.top - 1 && cb.bottom <= pb.bottom + 1
+          && cb.left >= pb.left - 1 && cb.right <= pb.right + 1,
+      };
+    })()`);
+    check('曲线悬浮：竖线 + 每条线的跟随点 + 读数卡片同时出现',
+      hov.op === '1' && hov.curOp === '1' && hov.dots.length === 2 && hov.dots.every(o => o === '1'),
+      `卡片 ${hov.op} / 竖线 ${hov.curOp} / 点 ${hov.dots.join(',')}`);
+    check('读数卡片：那一刻的时刻 + 两条线的数值，整块落在绘图区内',
+      /^\d\d:\d\d:\d\d/.test(hov.text) && /CPU/.test(hov.text) && /内存/.test(hov.text) && hov.inside,
+      `${hov.text.slice(0, 40)} · 区内 ${hov.inside}`);
+    check('指针靠右时卡片翻到竖线左边（不会顶出绘图区）',
+      hov.flip.includes('-100%'), hov.flip);
+
+    // 监控每秒刷新、每秒重建整块卡片。重建后必须把读数原样放回去，
+    // 否则鼠标一动不动，卡片也会每秒闪一下（甚至直接消失）。
+    await sleep(1600);
+    const hov2 = await cdp.eval(`(() => {
+      const p = document.querySelector('#monPanel .proc-spark .spark-plot');
+      const c = p.querySelector('.spark-hover');
+      return { op: getComputedStyle(c).opacity, text: c.textContent };
+    })()`);
+    check('曲线每秒重绘后读数卡片仍在（鼠标没动也不该闪掉）',
+      hov2.op === '1' && /^\d\d:\d\d:\d\d/.test(hov2.text), `${hov2.op} · ${hov2.text.slice(0, 30)}`);
+
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' });
+    await sleep(140);
+    const sparkGone = await cdp.eval(
+      `getComputedStyle(document.querySelector('#monPanel .proc-spark .spark-hover')).opacity`);
+    check('指针离开曲线后读数卡片收起', String(sparkGone) === '0', String(sparkGone));
+
     // 存储页：四块占比条 + 明细表；点一行才去逐页扫「洞」
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="storage"]').click()`);
     await waitFor(cdp, `document.querySelectorAll('#spaceBody tr').length > 0`,

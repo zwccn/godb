@@ -2368,14 +2368,17 @@ if (monEls.sort) {
 
 // 顶栏两个入口反映「当前在哪」：在编辑器亮「首页」，看监控亮「监控」。
 // 和页面级 Tab 用的是同一个选中底色，不另造一套视觉语言。
-// 顶栏三颗是「你在哪一页」：首页（编辑器）/ 监控 / 设置，同一时刻只亮一颗。
+// 顶栏四颗是「你在哪一页」：首页（编辑器）/ 监控 / 基准 / 设置，同一时刻只亮一颗。
 function syncTopNav() {
   const home = document.getElementById('btnHome');
   const mon = document.getElementById('btnMonitor');
+  const bench = document.getElementById('btnBench');
   const set = document.getElementById('btnSettings');
   const setOpen = !settingsPanel.classList.contains('hidden');
-  if (home) home.classList.toggle('on', !monOpen && !setOpen);
+  const benchOpen = !benchPanel.classList.contains('hidden');
+  if (home) home.classList.toggle('on', !monOpen && !setOpen && !benchOpen);
   if (mon) mon.classList.toggle('on', monOpen);
+  if (bench) bench.classList.toggle('on', benchOpen);
   if (set) set.classList.toggle('on', setOpen);
 }
 
@@ -5926,9 +5929,10 @@ document.getElementById('sbSearchClear').addEventListener('click', () => {
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
 document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
 document.getElementById('btnHome').addEventListener('click', () => {
-  // 「首页」= 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
+  // 「首页」= 回到编辑器：监控面板、基准页和设置弹窗一起收，焦点还给编辑器。
   // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
   toggleMonitor(false);
+  if (!benchPanel.classList.contains('hidden')) closeBench();
   if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
     return;
@@ -6897,6 +6901,7 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
+  if (e.key === 'Escape' && !benchPanel.classList.contains('hidden')) closeBench();
 });
 
 /* ---------- 编辑器右键菜单 ---------- */
@@ -8405,3 +8410,182 @@ loadDBs().then(() => {
   // #dbs 深链：直接打开库管理（分享链接或者刷新后停在同一个面板）
   if (location.hash === '#dbs') openDBModal();
 });
+
+/* ---------- 基准测试 ---------- */
+// 一次跑几分钟（灌 100 万行 + 7 个场景各 3 轮），所以是异步任务：
+// start 秒回，status 轮询进度。结果存 data/bench-history.json 供「本次 vs 上次」对比。
+
+const benchPanel = document.getElementById('benchPanel');
+const benchEls = {
+  db: document.getElementById('benchDB'),
+  scale: document.getElementById('benchScale'),
+  start: document.getElementById('btnBenchStart'),
+  cancel: document.getElementById('btnBenchCancel'),
+  progress: document.getElementById('benchProgress'),
+  result: document.getElementById('benchResult'),
+  cmp: document.getElementById('benchCmp'),
+  rows: document.getElementById('benchRows'),
+  batch: document.getElementById('benchBatch'),
+};
+
+let benchTimer = 0;
+let benchRunning = false;
+let benchHistory = null; // 上一次完整跑完的结果
+
+function openBench() {
+  // 和监控/设置是同级页面：开一个收其余两个。
+  toggleMonitor(false);
+  if (!settingsPanel.classList.contains('hidden')) closeSettings();
+  benchPanel.classList.remove('hidden');
+  document.body.classList.toggle('mon-open', true);
+  const sel = document.getElementById('dbSelect');
+  if (benchEls.db && sel && sel.value) benchEls.db.textContent = sel.value;
+  syncTopNav();
+  // 读一次历史，供「对比上次」用（没有就不显示对比列）
+  api('/api/bench/history').then(d => {
+    benchHistory = d && d.history ? d.history : null;
+  }).catch(() => { benchHistory = null; });
+  // 先探一下当前有没有任务在跑（刷新页面后任务还在后台）
+  pollBench();
+}
+
+function closeBench() {
+  benchPanel.classList.add('hidden');
+  document.body.classList.toggle('mon-open', monOpen);
+  syncTopNav();
+  stopBenchPoll();
+}
+
+function stopBenchPoll() {
+  if (benchTimer) { clearInterval(benchTimer); benchTimer = 0; }
+}
+
+async function startBench() {
+  if (benchRunning) return;
+  benchEls.start.disabled = true;
+  benchEls.cancel.classList.remove('hidden');
+  benchEls.result.classList.add('hidden');
+  benchEls.progress.textContent = '准备中…';
+  try {
+    const r = await api('/api/bench/start', {});
+    if (r.error) { benchEls.progress.textContent = r.error; }
+    benchRunning = true;
+  } catch (e) {
+    benchEls.progress.textContent = '启动失败：' + e.message;
+    benchEls.start.disabled = false;
+    benchEls.cancel.classList.add('hidden');
+    return;
+  }
+  benchEls.progress.textContent = '建表并写入基准数据…';
+  stopBenchPoll();
+  benchTimer = setInterval(pollBench, 1000);
+}
+
+async function cancelBench() {
+  try { await api('/api/bench/cancel', {}); } catch (e) { /* 取消失败不打断 */ }
+}
+
+async function pollBench() {
+  let d;
+  try { d = await api('/api/bench/status'); } catch (e) {
+    benchEls.progress.textContent = '读取进度失败：' + e.message;
+    return;
+  }
+  if (!d || !d.result) {
+    // 没有任务在跑：清进度、恢复按钮
+    benchRunning = false;
+    stopBenchPoll();
+    benchEls.start.disabled = false;
+    benchEls.cancel.classList.add('hidden');
+    benchEls.progress.textContent = '';
+    return;
+  }
+  if (d.step) benchEls.progress.textContent = d.step + (d.total ? `（${d.done}/${d.total}）` : '');
+  if (d.error) benchEls.progress.textContent = '出错了：' + d.error;
+
+  if (!d.running && d.result && d.result.finished) {
+    // 跑完了
+    benchRunning = false;
+    stopBenchPoll();
+    benchEls.start.disabled = false;
+    benchEls.cancel.classList.add('hidden');
+    benchEls.progress.textContent = '';
+    renderBenchResult(d.result);
+  }
+}
+
+function fmtPerSec(v) {
+  if (!v || v <= 0) return '—';
+  if (v >= 10000) return (v / 10000).toFixed(1) + ' 万/秒';
+  if (v >= 1000) return (v / 1000).toFixed(1) + ' k/秒';
+  return v.toFixed(0) + '/秒';
+}
+
+function fmtRows(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(0) + 'k';
+  return String(n);
+}
+
+function renderBenchResult(res) {
+  benchEls.result.classList.remove('hidden');
+
+  // 对比上次：按场景名找上次的同名值，算涨跌
+  const prev = new Map();
+  if (benchHistory && Array.isArray(benchHistory.scenarios)) {
+    for (const s of benchHistory.scenarios) prev.set(s.name, s.perSec);
+  }
+  if (benchHistory && benchHistory.startedAt) {
+    benchEls.cmp.textContent = `上次 ${benchHistory.startedAt}（v${benchHistory.version || '?'}）`;
+  } else {
+    benchEls.cmp.textContent = '还没有历史记录 —— 这是第一次跑';
+  }
+
+  benchEls.rows.innerHTML = '';
+  for (const s of res.scenarios || []) {
+    const tr = el('tr');
+    tr.appendChild(el('td', '', s.error ? (s.name + '（出错）') : s.name));
+    tr.appendChild(el('td', 'dim', s.commit || ''));
+    tr.appendChild(el('td', 'num', s.error ? '—' : fmtRows(s.rows)));
+    tr.appendChild(el('td', 'num strong', s.error ? '—' : fmtPerSec(s.perSec)));
+    // 对比列
+    let cmpTd;
+    if (s.error || !prev.has(s.name)) {
+      cmpTd = el('td', 'dim', '—');
+    } else {
+      const last = prev.get(s.name);
+      const delta = last > 0 ? ((s.perSec - last) / last) * 100 : 0;
+      const txt = (delta >= 0 ? '▲ ' : '▼ ') + Math.abs(delta).toFixed(0) + '%';
+      cmpTd = el('td', delta >= 0 ? 'up' : 'down', txt);
+      cmpTd.title = `上次 ${fmtPerSec(last)}`;
+    }
+    tr.appendChild(cmpTd);
+    benchEls.rows.appendChild(tr);
+  }
+
+  // 批量插入的「批大小 → 吞吐」曲线
+  if (res.batches && res.batches.length) {
+    benchEls.batch.innerHTML = '';
+    const head = el('div', 'bench-batch-title', '批量插入：批大小 → 吞吐');
+    benchEls.batch.appendChild(head);
+    const list = el('div', 'bench-batch-list');
+    const max = Math.max(...res.batches.map(b => b.perSec));
+    for (const b of res.batches) {
+      const row = el('div', 'bench-batch-row');
+      row.appendChild(el('span', 'bb-size', b.size + ' 行/批'));
+      const bar = el('div', 'bb-track');
+      const fill = el('div', 'bb-fill');
+      fill.style.width = max > 0 ? ((b.perSec / max) * 100).toFixed(1) + '%' : '0%';
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      row.appendChild(el('span', 'bb-val', fmtPerSec(b.perSec)));
+      list.appendChild(row);
+    }
+    benchEls.batch.appendChild(list);
+  }
+}
+
+document.getElementById('btnBench').addEventListener('click', openBench);
+document.getElementById('btnBenchClose').addEventListener('click', closeBench);
+document.getElementById('btnBenchStart').addEventListener('click', startBench);
+document.getElementById('btnBenchCancel').addEventListener('click', cancelBench);

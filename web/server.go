@@ -33,6 +33,9 @@ type Server struct {
 
 	// lastRollbackErr 记录配置回滚失败（正常情况下永远是空）。
 	lastRollbackErr string
+
+	// bench 是基准测试的运行器，同一时刻只跑一个。
+	bench benchRunner
 }
 
 // New 创建服务器。
@@ -107,6 +110,12 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/dbs", s.handleDBs)
 	// 备份导出（恢复走 /api/query，不单开接口）
 	mux.HandleFunc("/api/backup", s.handleBackup)
+
+	// 基准测试：跑一次要几十秒到几分钟，异步执行（start 秒回任务、status 轮询）。
+	mux.HandleFunc("/api/bench/start", s.handleBenchStart)
+	mux.HandleFunc("/api/bench/status", s.handleBenchStatus)
+	mux.HandleFunc("/api/bench/cancel", s.handleBenchCancel)
+	mux.HandleFunc("/api/bench/history", s.handleBenchHistory)
 
 	// 登录相关：本机访问根本走不到这里（withAuth 直接放行），远程才用得上。
 	mux.HandleFunc("/login", s.handleLogin)

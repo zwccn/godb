@@ -2132,6 +2132,34 @@ class CDP {
     await sleep(200);
     check('设置：点 × 能关掉', await cdp.eval(`document.getElementById('settingsPanel').classList.contains('hidden')`));
 
+    // 基准页：轻量冒烟 —— 只验证入口存在、能打开、接口返回空（不真跑 100 万行，
+    // 那是 web/bench_test.go 的 Go 单测用 2000 行小规模在跑的）。
+    const benchBtn = await cdp.eval(`({
+      exists: !!document.getElementById('btnBench'),
+      text: (document.getElementById('btnBench') || {}).textContent,
+    })`);
+    check('顶栏有「基准」入口',
+      benchBtn.exists && benchBtn.text.trim() === '基准', JSON.stringify(benchBtn));
+    await cdp.eval(`document.getElementById('btnBench').click()`);
+    await sleep(400);
+    const benchUi = await cdp.eval(`({
+      shown: !document.getElementById('benchPanel').classList.contains('hidden'),
+      hasStart: !!document.getElementById('btnBenchStart'),
+      scale: (document.getElementById('benchScale') || {}).textContent,
+      navOn: document.getElementById('btnBench').classList.contains('on'),
+    })`);
+    check('基准页能打开：有开始按钮、显示规模、顶栏「基准」亮',
+      benchUi.shown && benchUi.hasStart && /1,?000,?000/.test(benchUi.scale) && benchUi.navOn,
+      JSON.stringify(benchUi));
+    // 接口无任务时返回空 result（冒烟，不发 start 以免真灌 100 万行）
+    const benchStatus = await cdp.eval(`fetch('/api/bench/status').then(r => r.json())`);
+    check('基准接口：无任务时返回 result:null',
+      benchStatus && benchStatus.result === null, JSON.stringify(benchStatus).slice(0, 80));
+    await cdp.eval(`document.getElementById('btnBenchClose').click()`);
+    await sleep(200);
+    check('基准页点 × 能关掉',
+      await cdp.eval(`document.getElementById('benchPanel').classList.contains('hidden')`));
+
     // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
     await cdp.eval(`openSettings()`);
     await waitFor(cdp, `!!document.getElementById('setPoolPages')`, { label: '设置表单渲染' });

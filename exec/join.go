@@ -61,6 +61,11 @@ func (o *joinOp) Describe() string {
 	return fmt.Sprintf("%s %s Join", algo, kind)
 }
 
+// MemRows 是两侧物化下来的行数之和。连接要把左右两边都拉完才能建表
+// （见 Open：先 left 拉到空、再 right 拉到空，然后 buildOutput），
+// 所以占的是「两张表加起来」，不是输出行数。输出通常远小于这个数。
+func (o *joinOp) MemRows() int64 { return int64(len(o.leftRows) + len(o.rightRows)) }
+
 func (o *joinOp) Close() error {
 	if err := o.left.Close(); err != nil {
 		return err

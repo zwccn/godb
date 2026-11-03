@@ -504,6 +504,10 @@ func (o *distinctOp) Close() error         { return o.child.Close() }
 func (o *distinctOp) Children() []Operator { return []Operator{o.child} }
 func (o *distinctOp) Describe() string     { return "Distinct" }
 
+// MemRows 是去重缓冲的行数（buf）。seen 里还有一份序列化后的键，没有计入 ——
+// 面板只说「攒了多少行」，字节口径由 ExplainTree 统一折算。
+func (o *distinctOp) MemRows() int64 { return int64(len(o.buf)) }
+
 func (o *distinctOp) Open() error {
 	t := o.begin()
 	defer func() { t.done(false) }()
@@ -588,6 +592,10 @@ func (o *sortOp) Describe() string {
 	}
 	return name
 }
+
+// MemRows 是排序物化下来的行数。排序是全量物化的 —— 输入多少攒多少，
+// 哪怕调用方只取前 10 行；只有走了 Top-N（带 LIMIT）才真的只留 N 行。
+func (o *sortOp) MemRows() int64 { return int64(len(o.rows)) }
 
 // lessEntry 按排序键比较两行：true 表示 a 应该排在 b 前面。
 func (o *sortOp) lessEntry(a, b sortEntry) bool {

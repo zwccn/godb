@@ -1470,6 +1470,13 @@ body {
   background: var(--danger-bg);
   color: var(--danger-text);
 }
+/* 内存占用：和「读取 N 行」同色系（都是「这一步的量有多大」），
+   用 warn 而不是 danger —— 它不一定是错，只是要盯着。 */
+.probe-chip.mem {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
 
 .probe-bar {
   flex: 0 0 110px;

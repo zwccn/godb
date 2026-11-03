@@ -175,6 +175,18 @@ type PlanNode struct {
 	Loops int64 `json:"loops,omitempty"`
 	// Scanned 是从堆表里真读了多少行 —— 只对全表扫描有意义（读了 5 万行才吐 1 行）。
 	Scanned int64 `json:"scanned,omitempty"`
+	// MemRows / MemBytes 是「这一步在内存里攒着多少」。
+	//
+	// 只有把输入整份物化的算子才有值：Sort、Distinct、HashAggregate、哈希连接。
+	// 流式算子（扫描、Filter、Project）边拉边吐，不在这里报。
+	//
+	// 为什么不用 Rows：物化算子的输出往往比它攒的少得多 —— HashAggregate 吃 30 万行
+	// 只吐 20 个分组。只看 Rows 的话，「这一步占了 100MB」这件事永远不会显示。
+	//
+	// MemBytes 是**下限**：只算行本身（slice 头 + 每列一个 Value），不含排序键、
+	// 哈希桶、map 的桶数组。前端必须显示成「约」。
+	MemRows  int64 `json:"memRows,omitempty"`
+	MemBytes int64 `json:"memBytes,omitempty"`
 	// TotalNs 含所有子节点；SelfNs 是独占时间。
 	TotalNs int64 `json:"totalNs"`
 	SelfNs  int64 `json:"selfNs"`
@@ -194,6 +206,33 @@ type PlanNode struct {
 // 只有全表扫描实现它：索引扫描吐多少行就读多少行，两者没有差额。
 type scannedReporter interface {
 	ScanRows() int64
+}
+
+// memReporter 是「这一步内存里攒着多少行」的口子。
+//
+// 各算子报**行数**，字节数由 ExplainTree 统一折算（见 memRowBytes）。不让算子
+// 自己算字节：口径一分散，探测面板上的数字就没法横向比了 —— 同一个「12 MB」，
+// 一个算的是行、一个算的是字节缓冲，读的人没法判断哪个更危险。
+//
+// 只报「整份物化」的算子：Sort / Distinct / HashAggregate / 哈希连接。
+// 扫描、Filter、Project 是边拉边吐的，报了只会让人以为它们也占内存。
+type memReporter interface {
+	MemRows() int64
+}
+
+// memRowBytes 是一行在堆上的下限：slice 头 24 字节 + 每列一个 types.Value（32 字节）。
+//
+// 这是**下限**，不是估算的「差不多」：排序键、哈希桶、map 的桶数组、以及行里
+// 字符串的实际内容都不在内。真实占用只会更高，所以展示时必须说「约」。
+// 基准来自实测（unsafe.Sizeof: Value=32、Row=24），不是拍脑袋的系数。
+const memRowHead = 24
+const memValueBytes = 32
+
+func memRowBytes(cols int) int64 {
+	if cols < 0 {
+		cols = 0
+	}
+	return int64(memRowHead + memValueBytes*cols)
 }
 
 // ExplainTree 把算子树的统计摊成结构化的树。
@@ -221,6 +260,14 @@ func ExplainTree(op Operator) *PlanNode {
 		}
 		if sr, ok := o.(scannedReporter); ok {
 			n.Scanned = sr.ScanRows()
+		}
+		// 内存里攒了多少。只问「行数」，字节在这里统一折算 —— 口径放在一处，
+		// 探测面板上各行的数字才能横向比（见 memReporter / memRowBytes 的注释）。
+		if mr, ok := o.(memReporter); ok {
+			if rows := mr.MemRows(); rows > 0 {
+				n.MemRows = rows
+				n.MemBytes = rows * memRowBytes(len(o.Schema()))
+			}
 		}
 		if d, ok := o.(detailer); ok {
 			n.Detail = d.ExplainDetail()

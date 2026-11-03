@@ -472,6 +472,12 @@ type aggGroup struct {
 	accs []accum
 }
 
+// MemRows 是分组数，不是输入行数。聚合的内存按分组存（每组一份键 + 每个聚合
+// 一个累加器）：吃 30 万行只吐 20 组时，真正占内存的是那 20 组，报输入行数会
+// 虚高三个数量级。代价是折算出的字节偏低 —— 累加器不是 Value，不在
+// memRowBytes 的公式里。面板上必须显示成「约」，原因就在这。
+func (o *aggOp) MemRows() int64 { return int64(len(o.rows)) }
+
 func (o *aggOp) Open() error {
 	t := o.begin()
 	// 聚合的活全在 Open 里（拉完子节点、建哈希表），必须包住整段。

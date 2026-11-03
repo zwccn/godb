@@ -2863,6 +2863,47 @@ class CDP {
       seqs.length === probe.rows && asc.every((v, i) => v === i + 1) && seqs[0] === probe.rows,
       seqs.join(', '));
 
+    /* 物化算子的内存占用：全量排序把 5 万行拉进内存，这块**不在页池预算里**，
+       是「进程内存为什么涨」最可能的答案。以前探测只能说「5 万行、55ms」，
+       说不出它吃了多少 —— 数字要显示，且必须让人看出是下限（「约」+ title 说明）。 */
+    await cdp.eval(`cm.setValue('SELECT id, v FROM big_demo ORDER BY v DESC')`);
+    await cdp.eval(`document.getElementById('btnProbe').click()`);
+    // 等的是「出现 Sort 行」，不是「有 .probe-row」—— 上一轮的探测卡还在 DOM 里，
+    // 只等行数大于 0 会立刻返回，然后去读上一轮的结果（那轮是 Top-N，没有 Sort）。
+    await waitFor(cdp, `[...document.querySelectorAll('.probe-name')].some(n => /^Sort/i.test(n.textContent.trim()))`,
+      { label: '排序探测', timeout: 20000 });
+    const mem = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('.probe-row')];
+      const sortRow = rows.find(r => /^Sort/i.test(((r.querySelector('.probe-name') || {}).textContent || '').trim()));
+      const chip = sortRow ? sortRow.querySelector('.probe-chip.mem') : null;
+      return {
+        has: !!chip,
+        text: chip ? chip.textContent : '',
+        tip: chip ? chip.title : '',
+      };
+    })()`);
+    check('全量排序显示内存占用，并说明这是下限',
+      mem.has && /约 [\d.]+ MB/.test(mem.text) && /下限/.test(mem.tip),
+      `${mem.text} · ${mem.tip.slice(0, 26)}`);
+    /* 过滤只发生在展示层：服务端照实报（一个分组的聚合也有 56 B），前端按
+       256KB 以下不显示。这条把分工钉住 —— 哪天有人把阈值挪到服务端，数据就少了。
+       注意不能用 `count(*)` 探：那条会走 Fast Aggregate（直接读行数），
+       压根不进聚合算子的内存，找不到节点；得用 count(列) 逼出真聚合。 */
+    const small = await cdp.eval(`(async () => {
+      const r = await fetch('/api/query', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: 'EXPLAIN ANALYZE SELECT count(v) FROM big_demo' }) }).then(x => x.json());
+      const find = n => {
+        if ((n.memBytes || 0) > 0) return n;
+        for (const c of (n.children || [])) { const f = find(c); if (f) return f; }
+        return null;
+      };
+      const hit = find(r.results[0].planTree);
+      return hit ? { name: hit.name, memRows: hit.memRows || 0, memBytes: hit.memBytes || 0 } : null;
+    })()`);
+    check('小块内存服务端照实报，由前端按 256KB 过滤展示',
+      small && small.memRows === 1 && small.memBytes > 0 && small.memBytes < 256 * 1024,
+      JSON.stringify(small));
+
     /* 编辑器里已经写着 EXPLAIN 时，「执行探测」必须升级成 ANALYZE。
        否则发出去的是「只规划、不执行」的普通 EXPLAIN —— 探测卡上每一步的行数和耗时
        都是 0，配上「服务端 197 µs」就成了自相矛盾的画面（真的发生过）。 */

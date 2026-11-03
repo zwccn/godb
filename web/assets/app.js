@@ -1581,6 +1581,10 @@ function probeCard(r, idx, stmts) {
   return card;
 }
 
+// 内存标签的显示下限。低于这个量级不占标签位：`SELECT count(*)` 这种只有一个
+// 分组的聚合也会报 56 B，满屏小数字会把真正危险的那个（几十 MB 的排序）淹掉。
+const MEM_CHIP_MIN_BYTES = 256 << 10;
+
 // 一行 = 一个算子。缩进表示树里的层级，但**不做折叠**：
 // 一棵执行计划通常不到 10 行，折叠省不了多少地方，却要多一次点击。
 function probeRow(n, depth, seq, total, worst) {
@@ -1631,6 +1635,18 @@ function probeRow(n, depth, seq, total, worst) {
     else if (n.selfIOBytes > 0) txt += ' / ' + fmtBytes(n.selfIOBytes) + ' 大字段';
     const c = el('span', 'probe-chip io', txt);
     c.title = '这一步自己等页文件等了多久（不含子节点）';
+    tags.appendChild(c);
+  }
+  // 内存里攒了多少。只有物化算子有值（排序 / 去重 / 哈希聚合 / 连接）——
+  // 这几块不受页池预算约束，是「进程内存为什么涨」最可能的答案。
+  // 一定要说「约」：服务端算的是下限（只算行本身），真实占用只会更高。
+  //
+  // 低于 256KB 不给标签：`SELECT count(*)` 这种只有一个分组的聚合也会报 56 B，
+  // 满屏的小数字会把真正危险的那个（几十 MB 的排序）淹掉。
+  if (n.memBytes >= MEM_CHIP_MIN_BYTES) {
+    const c = el('span', 'probe-chip mem', '约 ' + fmtBytes(n.memBytes));
+    c.title = '这一步在内存里攒着 ' + fmtCount(n.memRows) + ' 行，按每行 24 + 32×列 折算的下限。'
+      + '不含排序键、哈希桶、map 的桶数组，真实占用更高。这部分内存不受页池预算约束。';
     tags.appendChild(c);
   }
   row.appendChild(tags);

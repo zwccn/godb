@@ -2904,6 +2904,24 @@ class CDP {
       small && small.memRows === 1 && small.memBytes > 0 && small.memBytes < 256 * 1024,
       JSON.stringify(small));
 
+    /* 连接算子把「规划时估多少」和「实际读到多少」并排摆出来。
+       估的是**表行数**（没有列统计信息），所以「估 5 万 / 实际 19」不是算错，
+       而是优化器手上只有这么多信息 —— 这正是选错连接顺序的常见原因，得让人看见。 */
+    await cdp.eval(`cm.setValue('SELECT count(*) FROM big_demo a JOIN big_demo b ON a.id < b.id WHERE a.id < 20 AND b.id < 40')`);
+    await cdp.eval(`document.getElementById('btnProbe').click()`);
+    await waitFor(cdp, `[...document.querySelectorAll('.probe-name')].some(n => /Join/.test(n.textContent))`,
+      { label: '连接探测', timeout: 20000 });
+    const est = await cdp.eval(`(() => {
+      const row = [...document.querySelectorAll('.probe-row')].find(r => /Join/.test((r.querySelector('.probe-name') || {}).textContent || ''));
+      return { detail: row ? ((row.querySelector('.probe-detail') || {}).textContent || '') : '' };
+    })()`);
+    check('连接算子并排显示「估算 / 实际」，且两组数字确实不同',
+      /估 \d+\/\d+（表行数/.test(est.detail) && /左 \d+ 行 \/ 右 \d+ 行/.test(est.detail)
+      // 自连接两侧同表，估算都是 50000；实际只读到 19/39 —— 数字必须不一样，
+      // 否则说明 estRows 根本没被填（拿的是同一份默认值）
+      && !/估 19\/39/.test(est.detail),
+      est.detail.slice(0, 70));
+
     /* 编辑器里已经写着 EXPLAIN 时，「执行探测」必须升级成 ANALYZE。
        否则发出去的是「只规划、不执行」的普通 EXPLAIN —— 探测卡上每一步的行数和耗时
        都是 0，配上「服务端 197 µs」就成了自相矛盾的画面（真的发生过）。 */

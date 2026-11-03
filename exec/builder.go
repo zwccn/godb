@@ -281,6 +281,24 @@ func (p *Planner) joinSideScore(table string, ref sql.TableRef) int {
 	return 0
 }
 
+// estRows 估这一侧有多少行，只为了回答「估算和实际差多远」。
+//
+// 估的是**整张表的行数**，不含 WHERE 过滤 —— 这个库没有列统计信息，优化器手上
+// 只有 RowCount。所以「估 50000、实际 19」不是 bug，是它的信息量就只有这么多。
+// 把两个数并排显示，是为了让偏差可见，而不是让人以为估算很准。
+//
+// 子查询 / 连接组估不出来，返回 0；前端看到 0 就不显示估算那一半。
+func (p *Planner) estRows(ref sql.TableRef) int {
+	t := p.baseTableOf(ref)
+	if t == nil || p.Tx == nil {
+		return 0
+	}
+	if st := p.Tx.Store(); st != nil {
+		return st.RowCount(t.Name)
+	}
+	return 0
+}
+
 func (p *Planner) newIndexJoin(j *joinOp, lop, rop Operator, inner *catalog.Table,
 	ixName string, ixCols, innerCols []int, swap bool) Operator {
 	o := &indexJoinOp{
@@ -587,7 +605,10 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 		sc := make(Schema, 0, len(lsc)+len(rsc))
 		sc = append(sc, lsc...)
 		sc = append(sc, rsc...)
-		j := &joinOp{left: lop, right: rop, typ: n.Type, lsc: lsc, rsc: rsc, sc: sc}
+		j := &joinOp{
+			left: lop, right: rop, typ: n.Type, lsc: lsc, rsc: rsc, sc: sc,
+			estLeft: p.estRows(n.Left), estRight: p.estRows(n.Right),
+		}
 		// 连接键的列位置：索引连接要靠它判断「内表的哪几列被等值约束」
 		var lcols, rcols []int
 		if n.On != nil {

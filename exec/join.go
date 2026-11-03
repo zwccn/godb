@@ -34,6 +34,12 @@ type joinOp struct {
 
 	// details 是规划器写下的决策说明（为什么用/不用索引连接、谁做构建侧）。
 	details []string
+
+	// estLeft / estRight 是规划时对两侧行数的估计 —— 注意它估的是**整张表的行数**，
+	// 不含 WHERE 过滤（没有列统计信息，优化器只有 RowCount）。
+	// 探测里和实际行数并排显示：偏差一个数量级，就是「连接顺序可能选错」的直接证据。
+	estLeft  int
+	estRight int
 }
 
 const maxJoinOutput = 2000000
@@ -122,6 +128,12 @@ func (o *joinOp) Next() (types.Row, bool, error) {
 
 func (o *joinOp) ExplainDetail() []string {
 	out := append([]string{}, o.details...)
+	// 估算和实际并排。估的是表行数（不含过滤），所以偏差大不代表算错了 ——
+	// 恰恰说明「优化器手上没有过滤后的信息」，这是选错连接顺序的常见原因。
+	// 估不出来（子查询那侧）就只报实际，不硬凑一个 0。
+	if o.estLeft > 0 || o.estRight > 0 {
+		out = append(out, fmt.Sprintf("估 %d/%d（表行数，未过滤）", o.estLeft, o.estRight))
+	}
 	out = append(out,
 		fmt.Sprintf("左 %d 行 / 右 %d 行 → 输出 %d 行", len(o.leftRows), len(o.rightRows), len(o.out)))
 	return out

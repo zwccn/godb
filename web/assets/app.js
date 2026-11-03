@@ -1605,9 +1605,12 @@ function probeRow(n, depth, seq, total, worst) {
   const main = el('div', 'probe-main');
   main.style.paddingLeft = (depth * 16) + 'px'; // 缩进只作用在内容上，序号列保持对齐
   main.appendChild(name);
-  const detail = (n.detail || []).find(t => !/^已扫描/.test(t));
-  if (detail) {
-    const d = el('span', 'probe-detail', detail);
+  // 所有说明都铺出来，不只第一条：连接会写三条（决策理由、估算、实际），
+  // 只显示第一条的话「估 50000 / 实际 19」这种关键对照根本看不到，
+  // 而这正是「为什么顺序可能选错」的答案。
+  const detail = (n.detail || []).filter(t => !/^已扫描/.test(t));
+  if (detail.length) {
+    const d = el('span', 'probe-detail', detail.join(' · '));
     d.title = n.detail.join('\n');
     main.appendChild(d);
   }

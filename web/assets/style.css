@@ -571,8 +571,29 @@ body {
   font-size: calc(14px * var(--fs));
   padding: 2px 5px;
   border-radius: 4px;
+  /* 图标本身只有 20px 宽，点起来费劲（实测 #btnNewTable 20×24、#btnHelp 22×22）。
+     撑到 24×24：WCAG 2.2 的「最小目标尺寸」就是 24，再小要靠指针精度来补。 */
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .icon-btn:hover { color: var(--text); background: var(--bg-3); }
+
+/* 键盘焦点环：四套主题共用一版（steel 那套带光晕，写在后面按主题覆盖）。
+   不用 outline 画在 border 外侧：outline-offset 会在两者之间留一道缝，缝里露出页面
+   底色 —— 放大 4 倍就是「两条线夹一条黑缝」。box-shadow 紧贴 border，没有缝。
+   transparent outline 只做占位，让 Windows 高对比度模式仍能把焦点染成系统色。
+   输入框不在这里：它们自己用 border-color 表示焦点（见下面各处的 input:focus），
+   再套一环就成了「两层蓝贴在一起」。 */
+button:focus-visible,
+[role="button"]:focus-visible,
+a[href]:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--accent-border);
+}
 
 /* ---------- 布局 ---------- */
 .layout {
@@ -988,6 +1009,40 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+}
+
+/* 正在跑一条语句：结果区顶边一条 2px 的走动条。
+   工具栏已经有一个秒表，这里**不重复报秒数**，只回答「这一块正在变」——
+   长查询跑到一半时，人眼睛已经落到结果区了，而旧结果原样留着，
+   没有这条线就分不清看到的是上一次还是这一次。
+   刻意不做「整体压暗」：旧结果仍然可读、可复制、可导出，压暗等于说它不能用了。 */
+.results.is-running::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  /* 亮段占一半宽、周期 1.5s：第一版是 40% + 1.1s，实测在 1118px 宽的结果区里
+     大部分时间只有一小截发亮，扫一眼容易错过 —— 这是状态指示，不是装饰，
+     宁可稳一点，也不要「刚才好像闪了一下」。 */
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: res-running 1.5s linear infinite;
+  pointer-events: none;
+  z-index: 3;
+}
+@keyframes res-running {
+  from { background-position: -60% 0; }
+  to { background-position: 170% 0; }
+}
+/* 关掉动效时留一条静止的实线：状态还在，只是不晃 */
+@media (prefers-reduced-motion: reduce) {
+  .results.is-running::after {
+    animation: none;
+    background: var(--accent);
+    opacity: .55;
+  }
 }
 
 /* 结果 tab 栏：信息 / 结果 1 / 结果 2 …；语句多到放不下就横向滚，不换行 */
@@ -1650,6 +1705,15 @@ table.grid tr:hover td { background: var(--row-hover); }
 table.grid td.num { text-align: right; color: var(--ok-text); }
 table.grid td.null { color: var(--text-3); font-style: italic; }
 table.grid td.bool { color: var(--warn-text); }
+/* 0 行：表头照画，下面一行说明。只说一句 —— 这时人想知道的是「列对不对」，
+   表头已经回答了，再堆「没有数据」「可以改改条件」反而像在解释一个错误。 */
+table.grid td.grid-empty-cell {
+  padding: 16px 14px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: calc(11.5px * var(--fs));
+  border-bottom: none;
+}
 
 /* 长文本单元格：只显示三行预览，点开看全文。
    大字段能存 1MB，pre-wrap 全文展开会把一行撑到几千像素（实测 1200 字 = 411px），
@@ -3560,6 +3624,10 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
   letter-spacing: 0;
   text-transform: none;
   line-height: 1.5;
+  /* 原来实测 46×23：宽度够、高度差 1px 到 24 的舒适线，顺手补齐 */
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
   cursor: pointer;
 }
 

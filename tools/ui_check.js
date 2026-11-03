@@ -375,6 +375,70 @@ class CDP {
       tErr.labels.join('|') === '信息' && tErr.active === '信息' &&
         /does not exist|不存在/.test(tErr.text), tErr.text.slice(0, 70));
 
+    // 失败文案只写一遍「失败」：标题的兜底值本来就叫「执行失败」，
+    // 原来拼成「失败 · 执行失败」，一句话说两遍。
+    const failText = await cdp.eval(`((document.querySelector('.info-status.err') || {}).textContent || '').trim()`);
+    check('失败状态行不重复（不是「失败 · 执行失败」）', failText === '失败', JSON.stringify(failText));
+
+    // 0.1d) 数值列对齐：按**列声明的类型**判，不看值的 JS 类型。
+    //      numeric 走 JSON 是字符串（保精度），只看 typeof 会让 id 右对齐、salary 左对齐。
+    await runSqlX('SELECT id, salary FROM employees ORDER BY id LIMIT 3');
+    await waitFor(cdp, `document.querySelectorAll('table.grid tbody tr td').length >= 2`, { label: '结果表格' });
+    const numAlign = await cdp.eval(`(() => {
+      const tds = [...document.querySelectorAll('table.grid tbody tr:first-child td')];
+      return tds.map(td => ({ text: td.textContent.trim(), cls: td.className, align: getComputedStyle(td).textAlign }));
+    })()`);
+    check('数值列按类型右对齐（numeric 是字符串，也照样算数值）',
+      numAlign.length === 2 && numAlign[0].align === 'right' && numAlign[1].align === 'right'
+        && /num/.test(numAlign[0].cls) && /num/.test(numAlign[1].cls),
+      numAlign.map(c => `${c.text}→${c.align}`).join(', '));
+
+    // 0.1e) 0 行的 SELECT 也要有结果页：表头是服务端真给了的，空集时人第一个想知道
+    //      的就是「列名/类型对不对」。原来只有 rows.length > 0 才建 tab，
+    //      这种查询只剩一个「信息」，看着像没反应。
+    //      （服务端 0 行时**不返回 rows 字段**，不是空数组 —— 入口补成 [] 才能画表头）
+    await runSqlX('SELECT id, name FROM employees WHERE 1 = 0');
+    const zeroTab = await cdp.eval(`(() => ({
+      labels: [...document.querySelectorAll('.result-tab')].map(t => (t.querySelector('.tab-label') || t).textContent.trim()),
+      ths: [...document.querySelectorAll('table.grid thead th')].map(t => t.textContent.trim()),
+      empty: (document.querySelector('.grid-empty-cell') || {}).textContent || '',
+      foot: (document.querySelector('.grid-range') || {}).textContent || '',
+      err: !!(document.querySelector('.error-body')),
+    }))()`);
+    check('0 行的 SELECT 也有结果页（表头 + 一句说明 + 「共 0 行」）',
+      zeroTab.labels.join('|') === '信息|结果 1' && zeroTab.ths.length === 2
+        && /id/.test(zeroTab.ths[0]) && zeroTab.empty === '没有匹配的行'
+        && zeroTab.foot === '共 0 行' && !zeroTab.err,
+      `${zeroTab.labels.join('|')} / 表头 ${zeroTab.ths.length} / 「${zeroTab.empty}」/ ${zeroTab.foot}`);
+
+    // 0.1f) 执行中：结果区顶边一条走动条 + aria-busy。
+    //      直接调 setRunning 而不是发一条慢查询 —— 慢查询在这个数据规模下不可靠地
+    //      慢（同一句 57ms～568ms 都见过），断言会变成随机红绿。这里要钉的是
+    //      「状态切换有没有真的动到 DOM」。
+    const runFlag = await cdp.eval(`(() => {
+      const p = document.getElementById('results');
+      setRunning(true);
+      const on = { cls: p.classList.contains('is-running'), busy: p.getAttribute('aria-busy'),
+        anim: getComputedStyle(p, '::after').animationName };
+      setRunning(false);
+      const off = { cls: p.classList.contains('is-running'), busy: p.getAttribute('aria-busy') };
+      return { on, off };
+    })()`);
+    check('执行中：结果区有走动条且结束即撤（旧结果不压暗）',
+      runFlag.on.cls && runFlag.on.busy === 'true' && runFlag.on.anim === 'res-running'
+        && !runFlag.off.cls && runFlag.off.busy === 'false',
+      `开=${runFlag.on.cls}/${runFlag.on.anim} 关=${runFlag.off.cls}`);
+    await waitIdle(cdp);
+
+    // 0.1g) 图标按钮 24×24：实测原来是 20×24 / 22×22，鼠标点得准才行
+    const iconSizes = await cdp.eval(`['btnNewTable','btnTableSearch','btnHelp','btnRefresh']
+      .map(id => { const e = document.getElementById(id); if (!e) return null;
+        const r = e.getBoundingClientRect(); return { id, w: Math.round(r.width), h: Math.round(r.height) }; })
+      .filter(Boolean)`);
+    check('图标按钮点击目标 ≥ 24×24',
+      iconSizes.length >= 3 && iconSizes.every(s => s.w >= 24 && s.h >= 24),
+      iconSizes.map(s => `${s.id} ${s.w}×${s.h}`).join('  '));
+
     // 0.2)「执行计划」按钮：只解释查询，别把 BEGIN/UPDATE 也套上 EXPLAIN
     //      （以前是 split(';') 全量加前缀，事务演示一按就报 only supports SELECT）
     const planText = () => cdp.eval(`(document.getElementById('results').textContent || '').replace(/\\s+/g, ' ')`);

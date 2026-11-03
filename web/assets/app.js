@@ -883,6 +883,13 @@ function setRunning(on) {
   btn.title = on
     ? '停止执行（已提交的语句会跑完，结果不采用）'
     : '执行 SQL · Ctrl+Enter 或 F5';
+  // 结果区顶边那条走动线（见 .results.is-running）。只标「这里正在变」，
+  // 秒数仍然只在工具栏那个秒表上 —— 两处各报一个时间只会互相打架。
+  const pane = document.getElementById('results');
+  if (pane) {
+    pane.classList.toggle('is-running', on);
+    pane.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
   if (on) startRunTimer();
   else stopRunTimer();
 }
@@ -1122,7 +1129,12 @@ function resultTabModels(data) {
   const models = [{ kind: 'info' }];
   list.forEach((r, i) => {
     if (hiddenResults.has(i)) return; // 手动关掉的
-    if (r.rows && r.rows.length) models.push({ kind: 'res', r: r, idx: i });
+    // 0 行的 SELECT 也建结果页：表头（列名 + 类型）是服务端真给了的，
+    // 而 `WHERE …` 打到空集时，人第一个想知道的就是「列对不对」。
+    // 原来只认 rows.length > 0，于是这种查询只剩一个「信息」tab，看着像没反应。
+    const emptySelect = r.command === 'SELECT' && !r.error
+      && Array.isArray(r.columns) && r.columns.length > 0;
+    if ((r.rows && r.rows.length) || emptySelect) models.push({ kind: 'res', r: r, idx: i });
   });
   return models;
 }
@@ -1136,6 +1148,11 @@ function renderResults(data, keepTab) {
   if (!data) return;
   hiddenResults.clear();
   lastData = data;
+  // 服务端在没有行时**不返回 rows 字段**（json omitempty），不是返回空数组。
+  // 以前只有 rows.length > 0 的结果才会被画成表格，所以没人踩到；0 行的 SELECT
+  // 也要画表头之后，下游到处 `r.rows.length` 就会 TypeError —— 而且它是在 run 的
+  // try 里抛的，会被当成「执行失败」。统一在这里补成空数组，下游一律按数组处理。
+  for (const r of (data.results || [])) if (!r.rows) r.rows = [];
   lastResults = (data.results || []).slice();
   if (data.clockGranNs) clockGranNs = data.clockGranNs;
   const models = resultTabModels(data);
@@ -1275,7 +1292,7 @@ function infoPanel(data) {
       sqlEl.title = failSQL;
       head.appendChild(sqlEl);
       item.appendChild(head);
-      item.appendChild(el('div', 'info-status err', '失败 · ' + (data.error.title || '执行失败')));
+      item.appendChild(el('div', 'info-status err', failLabel(data.error.title)));
       box.appendChild(item);
     }
     const err = errorCard(data.error);
@@ -1730,7 +1747,16 @@ function probeRow(n, depth, seq, total, worst) {
   return row;
 }
 
-function infoStatus(r) {  const bits = [];
+// 状态行的失败文案。标题的兜底值本身就叫「执行失败」，直接拼就成了
+// 「失败 · 执行失败」—— 一句话说两遍。只有标题真的带来新信息时才接在后面
+// （例如「语法错误」「权限不足」）。
+function failLabel(title) {
+  const t = String(title || '').trim();
+  return !t || t === '失败' || t === '执行失败' ? '失败' : '失败 · ' + t;
+}
+
+function infoStatus(r) {
+  const bits = [];
   if (typeof r.rowCount === 'number' && r.command === 'SELECT') bits.push(r.rowCount + ' 行');
   if (typeof r.affected === 'number' && r.affected > 0 && r.command !== 'SELECT') bits.push('影响 ' + r.affected + ' 行');
   if (r.tookNs !== undefined) bits.push('服务端 ' + fmtTook(r.tookNs));
@@ -1914,6 +1940,17 @@ function colGrip(th, ci, st) {
   return g;
 }
 
+// 一根列能不能右对齐，看的是**列声明的类型**，不是值的 JS 类型。
+// 服务端为了不丢精度，把 numeric 序列化成字符串（"42000" 而不是 42000），
+// 于是只看 typeof 的结果是：同一张表里 id 右对齐、salary 左对齐，颜色也差一层。
+// 也不能反过来「像数字的字符串就当数字」—— "007"、金额字符串里的 "1,000" 会被误判。
+const NUMERIC_COL_RE = /^(int2|int4|int8|serial|bigserial|serial4|serial8|smallint|integer|bigint|float4|float8|real|double precision|numeric|decimal|money|oid)$/;
+function isNumericCol(col) {
+  if (!col || !col.type) return false;
+  const base = String(col.type).toLowerCase().replace(/\(.*\)/, '').replace(/\s+/g, ' ').trim();
+  return NUMERIC_COL_RE.test(base);
+}
+
 function gridBlock(r, idx) {
   const box = document.createDocumentFragment();
   const total = r.rows.length;
@@ -1981,10 +2018,10 @@ function gridBlock(r, idx) {
       let td;
       if (v === null || v === undefined) {
         td = el('td', 'null', 'NULL');
-      } else if (typeof v === 'number') {
-        td = el('td', 'num', String(v));
       } else if (typeof v === 'boolean') {
         td = el('td', 'bool', v ? 'true' : 'false');
+      } else if (typeof v === 'number' || isNumericCol(cols[j])) {
+        td = el('td', 'num', String(v));
       } else {
         const s = String(v);
         if (cellIsLong(s)) {
@@ -2001,12 +2038,22 @@ function gridBlock(r, idx) {
     }
     tbody.appendChild(tr2);
   }
+  // 0 行：表头照画，下面补一行说明。只有表头没有字的话，
+  // 分不清是「查了但没数据」还是「表格没画出来」。
+  if (total === 0) {
+    const trE = el('tr', 'grid-empty-row');
+    const tdE = el('td', 'grid-empty-cell', '没有匹配的行');
+    tdE.colSpan = Math.max(1, cols.length);
+    trE.appendChild(tdE);
+    tbody.appendChild(trE);
+  }
   table.appendChild(tbody);
   wrap.appendChild(table);
   box.appendChild(wrap);
 
   const foot = el('div', 'grid-foot');
-  foot.appendChild(el('span', 'grid-range', `第 ${from + 1}–${to} 行 / 共 ${total} 行`));
+  foot.appendChild(el('span', 'grid-range',
+    total === 0 ? '共 0 行' : `第 ${from + 1}–${to} 行 / 共 ${total} 行`));
   foot.appendChild(el('span', 'spacer'));
 
   if (total > 50) {

@@ -166,6 +166,14 @@ func main() {
 				"需要样例请用控制台的「载入示例数据」，误删可从 %s 恢复",
 				*dir, filepath.Join(*dir, storage.TrashDirName()))
 		} else {
+			// 新库：目录里连 catalog.json 都没有。这句必须打在最前面 ——
+			// 双击 exe 启动（不带 -data）会在当前目录悄悄建一个新库，然后载入
+			// 示例数据，看起来就像「原来的表全没了」。说清楚路径，人才知道是
+			// -data 指错了，而不是数据丢了。
+			log.Printf("注意: %s 是一个新建的数据目录（里面没有 catalog.json）——"+
+				"接下来会载入示例数据。如果你以为这里应该有原来的表，那是启动时没带 "+
+				"-data 参数（默认值就是当前目录下的 godb-data），改成 -data <原数据目录> 再启动",
+				*dir)
 			gate.SetPhase("载入示例数据", "departments / employees")
 			init := d.Session("init")
 			if err := d.LoadSample(init); err != nil {

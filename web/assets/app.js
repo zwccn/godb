@@ -1572,7 +1572,7 @@ function probeCard(r, idx, stmts) {
     bits.push('独占 ' + fmtTook(worst.n.selfNs) + '，占 ' + pct + '%');
     if (worst.n.rows) bits.push('输出 ' + fmtCount(worst.n.rows) + ' 行');
     if (worst.n.scanned && worst.n.scanned !== worst.n.rows) {
-      bits.push('读取 ' + fmtCount(worst.n.scanned) + ' 行');
+      bits.push('扫描 ' + fmtCount(worst.n.scanned) + ' 行');
     }
     if (worst.n.loops) bits.push('跑了 ' + fmtCount(worst.n.loops) + ' 轮');
     line.appendChild(el('span', 'probe-verdict-text', bits.join(' · ')));
@@ -1601,7 +1601,7 @@ function probeRow(n, depth, seq, total, worst) {
   // 说明被截在「选索引连接：内表 big_demo 的 bi…」—— 两处都正好截在
   // 最该看的地方。竖排之后名字独占一行，说明在下面吃满整行宽度。
   // detail 的第一条当副标题。扫描算子那条「已扫描 N 行」不在这儿重复 ——
-  // 右边的计数标签已经写了「读取 N 行」，同一件事说两遍只会把行挤满。
+  // 右边的计数标签已经写了「扫描 N 行」，同一件事说两遍只会把行挤满。
   const main = el('div', 'probe-main');
   main.style.paddingLeft = (depth * 16) + 'px'; // 缩进只作用在内容上，序号列保持对齐
   main.appendChild(name);
@@ -1618,10 +1618,16 @@ function probeRow(n, depth, seq, total, worst) {
 
   const tags = el('span', 'probe-tags');
   if (n.scanned) {
-    // 扫描节点：真正值得看的是「读了多少」，它才是代价的来源；
+    // 扫描节点：真正值得看的是「扫过多少」，它才是代价的来源；
     // 输出行数对 Seq Scan 来说和它几乎一样，没必要并排写两个数字。
-    const c = el('span', 'probe-chip scan', '读取 ' + fmtCount(n.scanned) + ' 行');
-    c.title = '从堆表实际读出的行数（含被上层过滤掉的）';
+    //
+    // 叫「扫描」不叫「读取」：这个数字**包含被上层过滤掉的行**，而且是逻辑
+    // 行数 —— 数据在页池里时一行盘都不用读。叫「读取」会让人以为在跟磁盘打交道
+    // （还真被这么问过：「读取 12 行是从磁盘读的吗」）。
+    const c = el('span', 'probe-chip scan', '扫描 ' + fmtCount(n.scanned) + ' 行');
+    c.title = '从堆表扫过多少行（含被上层过滤掉的）。这是逻辑行数，不是磁盘 I/O：'
+      + '数据在页缓冲池里时一次盘都不用读。要判断有没有真读盘，看旁边的 I/O 标签，'
+      + '或者柱子里的黄色段。';
     tags.appendChild(c);
   } else if (n.rows) {
     tags.appendChild(el('span', 'probe-chip', fmtCount(n.rows) + ' 行'));

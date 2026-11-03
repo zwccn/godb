@@ -3109,6 +3109,8 @@ function sparkLines(points, lines, opt) {
 
 /* ---- 4. 资源：进程自身 + 存储 IO ---- */
 
+// 全站唯一的字节格式化（监控、设置、探测的内存标签都用它）。
+// 小数位按量级变：几百 KB 需要一位小数，几十 MB 就不需要了。
 function fmtBytes(n) {
   if (!n || n < 0) return '0 B';
   if (n < 1024) return n + ' B';
@@ -6205,14 +6207,6 @@ function setHint(msg, kind) {
   settingsHint.className = 'modal-hint' + (kind ? ' ' + kind : '');
 }
 
-function fmtBytes(n) {
-  if (!n) return '0 B';
-  if (n < 1024) return n + ' B';
-  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
-  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
-  return (n / 1073741824).toFixed(2) + ' GB';
-}
-
 async function openSettings() {
   // 设置和监控是同级页面：开一个就收另一个，别让两层 fixed 叠着。
   // 顺序有讲究 —— 先收监控（它没有未保存状态），再显示设置。
@@ -7351,6 +7345,30 @@ const TYPE_LIST = ['int2', 'int4', 'int8', 'serial', 'bigserial', 'numeric', 'fl
   'varchar', 'char', 'text', 'boolean', 'date', 'time', 'timestamp', 'timestamptz',
   'interval', 'json', 'jsonb', 'uuid', 'bytea'];
 
+// 默认值输入框里的提示，按类型给例子。
+// 原来所有列都写「如 now()」：timestamp 上是对的，但 id serial / name text /
+// active boolean 填 now() 全是错的 —— 提示本意是帮人写对，写错就是反效果。
+// 只写这个库真认的（now() / current_date / current_time 都在 exec/eval.go 里），
+// 认不出的类型就老实说「可选」，不硬编一个可能不存在的函数。
+function defPlaceholder(ty) {
+  switch (ty) {
+    case 'int2': case 'int4': case 'int8': return '如 0';
+    // serial 自带序列，默认值填不填都行，但别让人以为这里非填不可
+    case 'serial': case 'bigserial': return '自增，可不填';
+    case 'numeric': return '如 0.00';
+    case 'float4': case 'float8': return '如 0.0';
+    case 'boolean': return '如 TRUE';
+    case 'date': return '如 current_date';
+    case 'time': return '如 current_time';
+    case 'timestamp': case 'timestamptz': return '如 now()';
+    case 'interval': return "如 '1 day'";
+    case 'json': case 'jsonb': return "如 '{}'";
+    case 'uuid': return "如 'a0eebc99-…'";
+    case 'varchar': case 'char': case 'text': return "如 'unknown'";
+    default: return '默认值（可选）';
+  }
+}
+
 // 用户建表时可能写全名/别名，统一收敛到 PG 内部名，方便回填下拉。
 const TYPE_ALIAS = {
   smallint: 'int2', integer: 'int4', int: 'int4', int4: 'int4', serial4: 'serial',
@@ -7753,9 +7771,12 @@ function renderDesigner() {
     const defIn = document.createElement('input');
     defIn.type = 'text';
     defIn.spellcheck = false;
-    defIn.placeholder = '如 now()';
     defIn.value = r.def || '';
     defIn.addEventListener('input', () => { r.def = defIn.value; refreshDesignerSql(); });
+    // 类型一改，提示跟着换 —— 从 int4 改成 timestamp 后还挂着「如 0」就误导了
+    const syncDef = () => { defIn.placeholder = defPlaceholder(r.type); };
+    sel.addEventListener('change', syncDef);
+    syncDef();
     tdDef.appendChild(defIn);
     tr.appendChild(tdDef);
 
@@ -8046,6 +8067,16 @@ function fmtWhen(ms) {
   return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
+// 时间列只有 74px，塞不下年份；但历史是本机 localStorage、跨年也留着，
+// 去年 11/2 和今年 11/2 在列表里长得一模一样。完整时刻挂在时间列自己的
+// title 上：鼠标停在时间上就看得到年份，停在其他地方仍是「点击填入编辑器」。
+function fmtWhenFull(ms) {
+  const d = new Date(ms || Date.now());
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // histQuery 是历史弹窗的过滤词（打开弹窗时清空，输入时实时过滤）
 let histQuery = '';
 
@@ -8073,7 +8104,9 @@ function openHistory() {
   }
   for (const item of list) {
     const b = el('button', 'hist-item');
-    b.appendChild(el('span', 'hist-when', fmtWhen(item.at)));
+    const when = el('span', 'hist-when', fmtWhen(item.at));
+    when.title = fmtWhenFull(item.at);
+    b.appendChild(when);
     b.appendChild(el('span', 'hist-sql', item.sql));
     b.title = '点击填入编辑器';
     b.addEventListener('click', () => {

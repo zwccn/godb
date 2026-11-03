@@ -2145,6 +2145,16 @@ class CDP {
       hist.w >= 820 && hist.items > 0 && /^74px /.test(hist.cols) && hist.clamp === '2',
       `${hist.w}px / ${hist.items} 条 / 列 ${hist.cols} / clamp ${hist.clamp}`);
 
+    // 74px 的时间列放不下年份，但历史跨年会留着 —— 完整时刻必须能从 title 读到，
+    // 否则去年的 11/2 和今年的 11/2 在列表里完全一样。
+    const histWhen = await cdp.eval(`(() => {
+      const w = document.querySelector('.hist-when');
+      return w ? { text: w.textContent, tip: w.title } : null;
+    })()`);
+    check('历史：时间列只显示 时:分，完整年月日挂在 title 上',
+      histWhen && /^\d{2}:\d{2}$/.test(histWhen.text) && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(histWhen.tip),
+      histWhen ? `${histWhen.text} · ${histWhen.tip}` : '没找到时间列');
+
     await cdp.eval(`document.getElementById('historyModal').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await sleep(200);
     check('历史：点遮罩后仍然打开', await cdp.eval(`!document.getElementById('historyModal').classList.contains('hidden')`));
@@ -2158,6 +2168,26 @@ class CDP {
     await cdp.eval(`document.getElementById('designerModal').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await sleep(200);
     check('表设计器：点遮罩后仍然打开', await cdp.eval(`!document.getElementById('designerModal').classList.contains('hidden')`));
+
+    // 默认值提示按类型给：原来所有列都写「如 now()」，id serial / name text 上都是错的。
+    // 逐个切类型再读回占位符 —— 顺带验证「改类型后提示跟着换」这条联动，
+    // 只断言初始值的话，改了类型还挂着旧提示这种问题测不出来。
+    const defPh = await cdp.eval(`(() => {
+      const tr = document.querySelector('#designerRows tr');
+      const sel = tr.querySelector('.c-type select');
+      const inp = tr.querySelector('.c-def input');
+      const out = {};
+      for (const t of ['int4', 'serial', 'text', 'timestamp', 'boolean', 'uuid']) {
+        sel.value = t;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        out[t] = inp.placeholder;
+      }
+      return out;
+    })()`);
+    check('表设计器：默认值提示跟着列类型变（不是一律「如 now()」）',
+      defPh.int4 === '如 0' && defPh.serial === '自增，可不填' && defPh.text === "如 'unknown'"
+        && defPh.timestamp === '如 now()' && defPh.boolean === '如 TRUE' && /a0eebc99/.test(defPh.uuid),
+      Object.entries(defPh).map(([k, v]) => `${k}→${v}`).join(', '));
     await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
     await sleep(300);
 

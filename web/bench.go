@@ -2,11 +2,14 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +38,10 @@ const benchScale = 1000000
 // benchTable 是专用的基准表，前缀 __ 表示「工具表，测完删」。
 const benchTable = "__bench_items"
 
+// benchCommitTable 是「逐条提交插入」专用的独立小表。
+// 不复用主表：多出的几千行会让后面的全表扫描 / 聚合行数基准变掉，两次结果就不可比了。
+const benchCommitTable = "__bench_commit"
+
 // 单条插入的批大小档位：批量插入吞吐对批大小极敏感，扫档位能看出「阈值在哪」。
 var benchBatchSizes = []int{100, 500, 1000, 5000}
 
@@ -50,15 +57,28 @@ func scale() int {
 }
 
 // benchState 是基准任务的运行时状态，start 时创建、status 时读出。
+//
+// 进度分三层，缺一层就会出现「长时间没反应」：
+//   - step   ：在跑哪个场景（准备数据 / 批量删除 …）
+//   - detail ：场景内部到哪了（预热、第 2/3 轮、灌数据 62%、删除 4/10 段）
+//   - frac   ：场景内部的比例 0~1，和 done/total 一起算出整体百分比
+//
+// 只报 done/total 是不够的：批量删除光一个场景就要重灌 5 次一百万行的表 + 删 4 次，
+// 三分钟里数字一动不动，看着就像卡死了。
 type benchState struct {
-	mu      sync.Mutex
-	running bool
-	cancel  bool
-	step    string // 当前正在做哪一步（喂给前端进度条）
-	done    int    // 已完成的场景数
-	total   int    // 场景总数
-	result  *benchResult
-	err     string
+	mu        sync.Mutex
+	running   bool
+	cancel    bool
+	step      string  // 当前正在做哪一步（喂给前端进度条）
+	detail    string  // 这一步内部的细分说明
+	frac      float64 // 当前这一步内部完成到几成（0~1）
+	done      int     // 已完成的「步数」（准备数据也算一步）
+	total     int     // 总步数
+	startedAt time.Time
+	stepAt    time.Time
+	sceneSecs []float64 // 每个已完成场景的耗时，用来估剩余时间
+	result    *benchResult
+	err       string
 }
 
 type benchResult struct {
@@ -98,7 +118,12 @@ func (r *benchRunner) start() (*benchState, bool) {
 	if r.cur != nil && r.cur.running {
 		return r.cur, false // 已有任务在跑
 	}
-	s := &benchState{running: true, result: &benchResult{StartedAt: time.Now().Format("2006-01-02 15:04:05")}}
+	s := &benchState{
+		running:   true,
+		startedAt: time.Now(),
+		stepAt:    time.Now(),
+		result:    &benchResult{StartedAt: time.Now().Format("2006-01-02 15:04:05")},
+	}
 	r.cur = s
 	return s, true
 }
@@ -140,7 +165,7 @@ func (s *Server) runBench(st *benchState) {
 		return
 	}
 
-	// 场景清单：7 项，覆盖插入/更新/删除/查询四大类。
+	// 场景清单：8 项，覆盖插入/更新/删除/查询四大类，最后一项是纯磁盘提交对照。
 	// total 用于进度；下面按顺序逐个跑，跑一个 done++。
 	scenes := []struct {
 		name string
@@ -153,42 +178,70 @@ func (s *Server) runBench(st *benchState) {
 		{"点查（主键）", func(x *benchSess) benchScene { return s.scenePointQuery(x) }},
 		{"范围扫描", func(x *benchSess) benchScene { return s.sceneRangeScan(x) }},
 		{"聚合", func(x *benchSess) benchScene { return s.sceneAggregate(x) }},
+		// 放最后：它用自己的小表，跑完即删，不打断前面「主表行数恒定」的那几个场景。
+		{"逐条提交插入", func(x *benchSess) benchScene { return s.sceneInsertCommit(x) }},
 	}
 
 	st.mu.Lock()
-	st.total = len(scenes)
+	// 「准备数据」也算一步：灌一百万行本身就要几十秒，不算进去的话进度条
+	// 会在 0% 上杵着，最容易被当成卡死。
+	st.total = len(scenes) + 1
 	st.result.Scale = scale()
 	st.mu.Unlock()
 
-	sess := &benchSess{d: d}
+	sess := &benchSess{d: d, st: st}
 
 	// 无论正常跑完、取消、还是中途出错，基准表都要清掉（用户选了「测完即删」）。
 	// defer 保证取消路径也不会留一张 100 万行的 __bench_items 在库里。
 	defer func() {
-		if sess.s != nil {
-			_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchTable)
+		if sess.s == nil {
+			return
 		}
+		// 取消时可能正卡在 BEGIN … COMMIT 中间：事务还没结束，表上的 X 锁还在，
+		// DROP 会被自己挡住 —— 而这里的错误是被忽略的，结果就是「取消了，但库里
+		// 多出一张一百万行的表」。先强制回滚把锁放掉。
+		sess.s.ForceRollback()
+		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchTable)
+		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchCommitTable)
 	}()
 
-	// 准备基准表（建表 + 灌 100 万行）。这一步耗时不小，进度单独标「准备数据」。
-	st.setStep("建表并写入基准数据")
-	if err := s.benchSeed(d, sess); err != nil {
+	// 准备基准表（建表 + 灌 100 万行）。这一步耗时不小，进度按「写了多少行」走。
+	st.setStep("准备数据")
+	if err := s.benchSeed(d, sess, progPart{span: 1, label: "建表并写入"}); err != nil {
+		if errors.Is(err, errBenchCancel) {
+			st.canceledNow()
+			return
+		}
 		st.mu.Lock()
 		st.err = "准备基准数据失败：" + err.Error()
 		st.mu.Unlock()
 		return
 	}
+	st.mu.Lock()
+	st.done = 1
+	st.mu.Unlock()
 
 	for i, sc := range scenes {
 		if st.cancelled() {
-			st.setStep("已取消")
+			st.canceledNow()
 			return
 		}
 		st.setStep(sc.name)
+		t0 := time.Now()
 		res := sc.run(sess)
+		// 取消是协作式的：场景内部每轮 / 每段都会检查，这里发现被取消就把
+		// 这一趟的残值丢掉 —— 半轮的数字既不能比也不能存。
+		if st.cancelled() {
+			st.canceledNow()
+			return
+		}
+		took := time.Since(t0).Seconds()
 		st.mu.Lock()
 		st.result.Scenarios = append(st.result.Scenarios, res)
-		st.done = i + 1
+		st.sceneSecs = append(st.sceneSecs, took)
+		st.done = i + 2 // +1 是「准备数据」那一步，+1 是 i 从 0 开始
+		st.frac = 0
+		st.detail = ""
 		st.mu.Unlock()
 	}
 
@@ -212,7 +265,56 @@ func (s *Server) runBench(st *benchState) {
 func (s *benchState) setStep(step string) {
 	s.mu.Lock()
 	s.step = step
+	s.detail = ""
+	s.frac = 0
+	s.stepAt = time.Now()
 	s.mu.Unlock()
+}
+
+// setProgress 汇报「当前这一步内部」的进度。frac 收在 0~1，detail 是给人看的一句话。
+func (s *benchState) setProgress(frac float64, detail string) {
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	s.mu.Lock()
+	s.frac = frac
+	s.detail = detail
+	s.mu.Unlock()
+}
+
+// canceledNow 把状态切成「已取消」：进度停在原地，不再往前走。
+// 顺手在结果里记一句 —— 半途而废的数字不能拿去和完整跑的一轮比。
+func (s *benchState) canceledNow() {
+	s.mu.Lock()
+	s.step = "已取消"
+	s.detail = ""
+	s.frac = 0
+	if s.result != nil {
+		s.result.Error = "已取消：结果不完整，没有写进历史记录"
+	}
+	s.mu.Unlock()
+}
+
+// etaLocked 估剩余时间：拿已完成场景的平均耗时乘剩余步数，再扣掉当前这一步
+// 已经走的部分。少于两个场景就是「还说不准」—— 一个样本估出来的数只会误导人。
+// 调用方必须已持锁。
+func (s *benchState) etaLocked() (int64, bool) {
+	if len(s.sceneSecs) < 2 || s.total <= 0 {
+		return 0, false
+	}
+	sum := 0.0
+	for _, v := range s.sceneSecs {
+		sum += v
+	}
+	avg := sum / float64(len(s.sceneSecs))
+	rem := float64(s.total-s.done) - s.frac
+	if rem <= 0 {
+		return 0, false
+	}
+	return int64(avg * rem * 1000), true
 }
 
 func (s *benchState) cancelled() bool {
@@ -229,11 +331,34 @@ func (s *Server) currentBenchDB() *db.DB {
 	return s.DB
 }
 
-// benchSess 包一层会话，顺带攒「批大小 → 吞吐」曲线。
+// errBenchCancel 是「用户点了停止」。用它区分「真出错」和「主动中断」：
+// 后者不该被记成一条失败场景。
+var errBenchCancel = errors.New("bench: canceled")
+
+// progPart 是「这一趟占整个场景多大比例」。一个场景里常跑好几趟（批量插入扫
+// 4 个批大小档位、批量删除每轮都要先重灌一次一百万行的表），各趟各占一段，
+// 进度条才走得匀，不会一趟顶到底。
+type progPart struct {
+	base, span float64
+	label      string // 非空时当前缀，例如 "batch=5000"
+}
+
+func (p progPart) pre() string {
+	if p.label == "" {
+		return ""
+	}
+	return p.label + " · "
+}
+
+// benchSess 包一层会话，顺带攒「批大小 → 吞吐」曲线和进度。
 type benchSess struct {
 	d       *db.DB
 	s       *txn.Session
 	batches []benchBatch
+	st      *benchState // 进度回报；单测里可能为空
+	part    progPart    // 当前这一趟占场景内多大一段（timed 里设）
+	round   int         // 当前第几轮（0 起）
+	pre     string      // 当前轮的说明前缀，例如 "batch=5000 · 第 2/3 轮"
 }
 
 // exec 执行一条 SQL，返回结果。错误直接向上抛。
@@ -242,9 +367,80 @@ func (x *benchSess) exec(sqlText string) error {
 	return err
 }
 
+// stopped 是「用户点了停止」。大循环每轮 / 每一段都查一次，
+// 否则点完停止要等整个场景跑完才生效（批量删除那种要三分钟）。
+func (x *benchSess) stopped() bool {
+	return x != nil && x.st != nil && x.st.cancelled()
+}
+
+func (x *benchSess) note(frac float64, detail string) {
+	if x == nil || x.st == nil {
+		return
+	}
+	x.st.setProgress(frac, detail)
+}
+
+// within 汇报「某一轮内部」的进度（f 是这一轮自己的 0~1），顺带看一眼要不要停。
+// 大循环（十万行一段的更新/删除、五千行一批的灌数据）走到一半时，百分比
+// 至少在动 —— 这就是「长时间没反应」和「慢但在动」的区别。
+//
+// 进度和取消检查绑在一起是有意的：它们本来就发生在同一批循环边界上，
+// 分开写只会让人忘掉其中一件（忘了查取消，点了停止要等整轮跑完才生效）。
+func (x *benchSess) within(f float64, detail string) error {
+	if x.stopped() {
+		return errBenchCancel
+	}
+	if x == nil || x.st == nil {
+		return nil
+	}
+	p := x.part
+	frac := p.base + p.span*(float64(x.round)+f)/3
+	x.note(frac, x.pre+" · "+detail)
+	return nil
+}
+
+// segPart 是「一串按行数分段的大循环」里的进度：拿已处理行数除以总行数。
+func segPart(done, total int) float64 {
+	if total <= 0 {
+		return 1
+	}
+	return float64(done) / float64(total)
+}
+
+// benchComma 给数字加千分位：进度里「620,000 / 1,000,000 行」比一长串 0 好读。
+func benchComma(n int) string {
+	s := strconv.Itoa(n)
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg, s = true, s[1:]
+	}
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+// benchCap 取两者较小值（最后一批常常不满）。Go 1.20 没有内建 min。
+func benchCap(v, hi int) int {
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 // benchSeed 建基准表并灌满 benchScale 行。用多行 VALUES 分批写入（一条 5000 行），
-// 这样 100 万行也只要 200 条语句，几秒能完成；逐条 INSERT 在这里纯属浪费。
-func (s *Server) benchSeed(d *db.DB, x *benchSess) error {
+// 这样 100 万行也只要 200 条语句；逐条 INSERT 在这里纯属浪费。
+//
+// p 是这一趟在整个场景里占的比例：批量删除每轮都要重灌，不能让它把进度条
+// 一次顶到底。进度按「已完成行数」报，长表上也能几秒动一下。
+func (s *Server) benchSeed(d *db.DB, x *benchSess, p progPart) error {
 	x.s = d.Session("bench-" + newID())
 	if err := x.exec(`DROP TABLE IF EXISTS ` + benchTable); err != nil {
 		return err
@@ -256,10 +452,14 @@ func (s *Server) benchSeed(d *db.DB, x *benchSess) error {
 	}
 
 	const chunk = 5000
-	for base := 0; base < scale(); base += chunk {
+	total := scale()
+	for base := 0; base < total; base += chunk {
+		if x.stopped() {
+			return errBenchCancel
+		}
 		n := chunk
-		if scale()-base < n {
-			n = scale() - base
+		if total-base < n {
+			n = total - base
 		}
 		var b strings.Builder
 		b.WriteString(`INSERT INTO ` + benchTable + ` (grp, v, payload) VALUES `)
@@ -273,6 +473,8 @@ func (s *Server) benchSeed(d *db.DB, x *benchSess) error {
 		if err := x.exec(b.String()); err != nil {
 			return err
 		}
+		x.note(p.base+p.span*segPart(base+n, total),
+			fmt.Sprintf("%s灌数据 %s / %s 行", p.pre(), benchComma(base+n), benchComma(total)))
 	}
 	return nil
 }
@@ -282,12 +484,27 @@ const benchPayload = "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv
 
 // timed 包一层「预热 + 3 轮计时」：warmup 与每轮都调 fn，返回 3 轮墙钟秒。
 // 每轮之间不做 sleep，靠 nextCheckpoint 探测是否撞上后台落盘。
-func (s *Server) timed(x *benchSess, warmup func() error, fn func() error) ([]float64, error) {
+//
+// p 说明这一趟占场景内多大一段（单个场景就是整段，批量插入是 1/4）。
+// 每轮开始前都会把「第 i/3 轮」推到前端 —— 一轮可能就是十几秒，
+// 这中间什么都不说的话，进度条看着就是死的。
+func (s *Server) timed(x *benchSess, p progPart, warmup, fn func() error) ([]float64, error) {
+	x.part = p
+	pre := p.pre()
+	x.round = -1
+	x.pre = pre + "预热"
+	x.note(p.base, x.pre)
 	if err := warmup(); err != nil {
 		return nil, err
 	}
 	out := make([]float64, 0, 3)
 	for i := 0; i < 3; i++ {
+		if x.stopped() {
+			return nil, errBenchCancel
+		}
+		x.round = i
+		x.pre = fmt.Sprintf("%s第 %d/3 轮", pre, i+1)
+		x.note(p.base+p.span*float64(i)/3, x.pre)
 		start := time.Now()
 		if err := fn(); err != nil {
 			return nil, err
@@ -307,10 +524,22 @@ func insertPerRound() int {
 	return 20000
 }
 
+// commitPerRound 是「逐条提交插入」每轮的行数。
+// 一行一个事务，所以这个数字同时也是一轮的 fsync 次数：5000 行在 1.3ms/fsync 的盘上
+// 就是六七秒一轮，够把 p50 稳定下来；再往上加只是把场景拖长，不会让数字更可信。
+func commitPerRound() int {
+	n := insertPerRound() / 4
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 // sceneInsertOne 单条插入：一个事务里逐条 INSERT，测「引擎单条写入上限」。
 // 提交粒度写死在结果里 —— 这是吞吐最大的变量，不说清数字没法比。
 func (s *Server) sceneInsertOne(x *benchSess) benchScene {
 	n := insertPerRound()
+	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`INSERT INTO ` + benchTable + ` (grp, v, payload) VALUES (1,'w','x')`) }
 	fn := func() error {
 		if err := x.exec(`BEGIN`); err != nil {
@@ -320,10 +549,15 @@ func (s *Server) sceneInsertOne(x *benchSess) benchScene {
 			if err := x.exec(fmt.Sprintf(`INSERT INTO %s (grp,v,payload) VALUES (%d,'i','x')`, benchTable, i)); err != nil {
 				return err
 			}
+			if i%2000 == 1999 {
+				if err := x.within(segPart(i+1, n), fmt.Sprintf("%s / %s 行", benchComma(i+1), benchComma(n))); err != nil {
+					return err
+				}
+			}
 		}
 		return x.exec(`COMMIT`)
 	}
-	secs, err := s.timed(x, warmup, fn)
+	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
 		return benchScene{Name: "单条插入", Commit: "单事务逐条", Error: err.Error()}
 	}
@@ -334,7 +568,9 @@ func (s *Server) sceneInsertOne(x *benchSess) benchScene {
 func (s *Server) sceneInsertBatch(x *benchSess) benchScene {
 	perRound := insertPerRound()
 	var best float64
-	for _, bs := range benchBatchSizes {
+	for bi, bs := range benchBatchSizes {
+		// 四个档位各占四分之一：不然扫档位这段时间里进度条一直贴在同一处。
+		p := progPart{base: float64(bi) / 4, span: 0.25, label: fmt.Sprintf("batch=%d", bs)}
 		warmup := func() error {
 			return x.exec(fmt.Sprintf(`INSERT INTO %s (grp,v,payload) VALUES (1,'w','x')`, benchTable))
 		}
@@ -351,10 +587,14 @@ func (s *Server) sceneInsertBatch(x *benchSess) benchScene {
 				if err := x.exec(b.String()); err != nil {
 					return err
 				}
+				if err := x.within(segPart(done+bs, perRound),
+					fmt.Sprintf("%s / %s 行", benchComma(benchCap(done+bs, perRound)), benchComma(perRound))); err != nil {
+					return err
+				}
 			}
 			return nil
 		}
-		secs, err := s.timed(x, warmup, fn)
+		secs, err := s.timed(x, p, warmup, fn)
 		if err != nil {
 			return benchScene{Name: "批量插入", Commit: "多行 VALUES", Error: err.Error()}
 		}
@@ -367,12 +607,67 @@ func (s *Server) sceneInsertBatch(x *benchSess) benchScene {
 	return benchScene{Name: "批量插入", Commit: "多行 VALUES（最优档位）", Rows: perRound, PerSec: round3(best)}
 }
 
+// sceneInsertCommit 逐条提交插入：每行一个事务，每行都等一次 fsync 返回。
+//
+// 全套里只有这一项把「落盘」放在关键路径上，所以它的吞吐基本就是磁盘提交上限
+// （约等于 fsync p50 的倒数）：
+//   - 单条插入是「2 万行一个事务」，整个事务只 fsync 一次；
+//   - 批量插入是每条多行 VALUES 一次；
+//   - 这里是每条 INSERT 一次。
+//
+// 表故意不建主键：只测「提交 + 堆追加」，不掺索引页维护；也用独立小表，
+// 避免多出的几千行改变前面全表扫描 / 聚合的行数基准。
+func (s *Server) sceneInsertCommit(x *benchSess) benchScene {
+	const name = "逐条提交插入"
+	n := commitPerRound()
+	_ = x.exec("DROP TABLE IF EXISTS " + benchCommitTable)
+	if err := x.exec("CREATE TABLE " + benchCommitTable + " (id INT, v TEXT)"); err != nil {
+		return benchScene{Name: name, Commit: "每行一个事务（含 fsync）", Error: err.Error()}
+	}
+	// 计时前后取 fsync 计数：「每行一次」不是嘴上说说，是真数出来的。
+	syncsBefore := x.d.Store.Info().WALSyncs
+
+	warmup := func() error {
+		return x.exec(fmt.Sprintf(`INSERT INTO %s (id,v) VALUES (-1,'w')`, benchCommitTable))
+	}
+	fn := func() error {
+		for i := 0; i < n; i++ {
+			if err := x.exec(fmt.Sprintf(`INSERT INTO %s (id,v) VALUES (%d,'c')`, benchCommitTable, i)); err != nil {
+				return err
+			}
+			if i%500 == 499 {
+				if err := x.within(segPart(i+1, n),
+					fmt.Sprintf("%s / %s 行 · 每行一次 fsync", benchComma(i+1), benchComma(n))); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	secs, err := s.timed(x, progPart{span: 1}, warmup, fn)
+	syncs := x.d.Store.Info().WALSyncs - syncsBefore
+	_ = x.exec("DROP TABLE IF EXISTS " + benchCommitTable)
+	if err != nil {
+		return benchScene{Name: name, Commit: "每行一个事务（含 fsync）", Error: err.Error()}
+	}
+	// 提交次数 = 预热 1 次 + 3 轮各 n 次。fsync 次数往往**少于**提交次数：
+	// 组提交 / 后台 checkpoint 的 SyncTo 会顺带把后面的记录刷掉，那些提交不必自己刷 ——
+	// 数据同样已经落盘，只是不是各自独立的一次 fsync。两个数并排写出来，
+	// 一眼能看出「合并率」，也不会被误读成「有几条没落盘」。
+	commits := 3*n + 1
+	return benchScene{
+		Name:   name,
+		Commit: fmt.Sprintf("每行一事务 · %s fsync / %s 提交", benchComma(int(syncs)), benchComma(commits)),
+		Rows:   n,
+		PerSec: round3(float64(n) / median(secs)),
+	}
+}
+
 // sceneUpdate 批量更新：整表 100 万行都 UPDATE 一次，按 id 区间分几段跑，
 // 避免一条 UPDATE 锁住整张表太久。固定「每行 +1」，各轮可重复。
 func (s *Server) sceneUpdate(x *benchSess) benchScene {
-	const rows = 0 // 占位，真正取值在下面（scale() 不能被 const 调用）
-	_ = rows
 	rowsV := scale()
+	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`UPDATE ` + benchTable + ` SET v = v WHERE id = 1`) }
 	fn := func() error {
 		const seg = 100000
@@ -380,10 +675,15 @@ func (s *Server) sceneUpdate(x *benchSess) benchScene {
 			if err := x.exec(fmt.Sprintf(`UPDATE %s SET v = v WHERE id BETWEEN %d AND %d`, benchTable, lo, lo+seg-1)); err != nil {
 				return err
 			}
+			// 一段十万行，几秒钟；报「已更新到第几行」比只报轮次实在
+			if err := x.within(segPart(benchCap(lo+seg-1, rowsV), rowsV),
+				fmt.Sprintf("已更新 %s / %s 行", benchComma(benchCap(lo+seg-1, rowsV)), benchComma(rowsV))); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
-	secs, err := s.timed(x, warmup, fn)
+	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
 		return benchScene{Name: "批量更新", Commit: "按 id 区间分段", Error: err.Error()}
 	}
@@ -398,37 +698,54 @@ func (s *Server) sceneUpdate(x *benchSess) benchScene {
 // 「重灌（不计时）→ 删光（计时）」，这样三轮的删除代价才可比。
 func (s *Server) sceneDelete(x *benchSess) benchScene {
 	rowsV := scale()
-	del := func() error {
+
+	// 这个场景一共 9 趟：预热（重灌 + 删）、3 轮（重灌 + 删）、收尾重灌。
+	// 每趟各占九分之一 —— 重灌一百万行就要十几秒，不分段的话这个场景
+	// 三分钟里进度条一动不动，正是「看着像卡死」的元凶。
+	const phases = 9
+	phase := 0
+	next := func(label string) progPart {
+		p := progPart{base: float64(phase) / phases, span: 1.0 / phases, label: label}
+		phase++
+		return p
+	}
+	del := func(p progPart) error {
 		const seg = 100000
 		for lo := 1; lo <= rowsV; lo += seg {
 			if err := x.exec(fmt.Sprintf(`DELETE FROM %s WHERE id BETWEEN %d AND %d`, benchTable, lo, lo+seg-1)); err != nil {
 				return err
 			}
+			done := benchCap(lo+seg-1, rowsV)
+			x.note(p.base+p.span*segPart(done, rowsV),
+				fmt.Sprintf("%s已删除 %s / %s 行", p.pre(), benchComma(done), benchComma(rowsV)))
 		}
 		return nil
 	}
 
 	// 预热一轮：重灌 + 删一次，让表加载 / 索引冷启动都过去
-	if err := s.benchSeed(x.d, x); err != nil {
+	if err := s.benchSeed(x.d, x, next("预热 · 重灌")); err != nil {
 		return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光）", Error: "重灌失败：" + err.Error()}
 	}
-	if err := del(); err != nil {
+	if err := del(next("预热 · 删光")); err != nil {
 		return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光）", Error: err.Error()}
 	}
 
 	secs := make([]float64, 0, 3)
 	for i := 0; i < 3; i++ {
-		if err := s.benchSeed(x.d, x); err != nil { // 重灌，不计时
+		if x.stopped() {
+			return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光）", Error: errBenchCancel.Error()}
+		}
+		if err := s.benchSeed(x.d, x, next(fmt.Sprintf("第 %d/3 轮 · 重灌", i+1))); err != nil { // 重灌，不计时
 			return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光）", Error: "重灌失败：" + err.Error()}
 		}
 		start := time.Now()
-		if err := del(); err != nil {
+		if err := del(next(fmt.Sprintf("第 %d/3 轮 · 删光", i+1))); err != nil {
 			return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光）", Error: err.Error()}
 		}
 		secs = append(secs, time.Since(start).Seconds())
 	}
 	// 最后一轮删光后重灌，供后面的点查/范围扫描/聚合继续用
-	if err := s.benchSeed(x.d, x); err != nil {
+	if err := s.benchSeed(x.d, x, next("收尾 · 重灌")); err != nil {
 		return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光）", Error: "收尾重灌失败：" + err.Error()}
 	}
 	return benchScene{Name: "批量删除", Commit: "按 id 区间分段（删光，重灌不计入）", Rows: rowsV, PerSec: round3(float64(rowsV) / median(secs))}
@@ -437,16 +754,22 @@ func (s *Server) sceneDelete(x *benchSess) benchScene {
 // scenePointQuery 点查：按主键查单行，跑多次测索引点查吞吐。
 func (s *Server) scenePointQuery(x *benchSess) benchScene {
 	const n = 5000
+	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`SELECT id FROM ` + benchTable + ` WHERE id = 1`) }
 	fn := func() error {
 		for i := 0; i < n; i++ {
 			if err := x.exec(fmt.Sprintf(`SELECT id FROM %s WHERE id = %d`, benchTable, (i%scale())+1)); err != nil {
 				return err
 			}
+			if i%1000 == 999 {
+				if err := x.within(segPart(i+1, n), fmt.Sprintf("%s / %s 次", benchComma(i+1), benchComma(n))); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
-	secs, err := s.timed(x, warmup, fn)
+	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
 		return benchScene{Name: "点查（主键）", Commit: "单条 SELECT by PK", Error: err.Error()}
 	}
@@ -456,6 +779,7 @@ func (s *Server) scenePointQuery(x *benchSess) benchScene {
 // sceneRangeScan 范围扫描：一次扫一个 id 区间并聚合，测顺序/索引范围扫描。
 func (s *Server) sceneRangeScan(x *benchSess) benchScene {
 	const n = 2000 // 每轮扫 2000 个区间
+	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`SELECT count(*) FROM ` + benchTable + ` WHERE id BETWEEN 1 AND 100`) }
 	fn := func() error {
 		for i := 0; i < n; i++ {
@@ -463,10 +787,15 @@ func (s *Server) sceneRangeScan(x *benchSess) benchScene {
 			if err := x.exec(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id BETWEEN %d AND %d`, benchTable, lo, lo+99)); err != nil {
 				return err
 			}
+			if i%250 == 249 {
+				if err := x.within(segPart(i+1, n), fmt.Sprintf("%s / %s 段", benchComma(i+1), benchComma(n))); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
-	secs, err := s.timed(x, warmup, fn)
+	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
 		return benchScene{Name: "范围扫描", Commit: "区间 SELECT + count", Error: err.Error()}
 	}
@@ -476,16 +805,23 @@ func (s *Server) sceneRangeScan(x *benchSess) benchScene {
 // sceneAggregate 聚合：全表 count + group by，测物化内存与哈希聚合。
 func (s *Server) sceneAggregate(x *benchSess) benchScene {
 	const n = 20
+	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`SELECT count(*) FROM ` + benchTable) }
 	fn := func() error {
 		for i := 0; i < n; i++ {
 			if err := x.exec(`SELECT grp, count(*) FROM ` + benchTable + ` GROUP BY grp`); err != nil {
 				return err
 			}
+			// 一次全表 group by 要一秒上下，每两次报一下
+			if i%2 == 1 {
+				if err := x.within(segPart(i+1, n), fmt.Sprintf("%s / %s 次", benchComma(i+1), benchComma(n))); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
-	secs, err := s.timed(x, warmup, fn)
+	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
 		return benchScene{Name: "聚合", Commit: "GROUP BY 全表", Error: err.Error()}
 	}
@@ -523,17 +859,35 @@ func (s *Server) handleBenchStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBenchStatus(w http.ResponseWriter, r *http.Request) {
 	st := s.bench.status()
 	if st == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"result": nil})
+		// 进程起来之后还没跑过基准：也要明确给出 running=false，
+		// 前端和巡检脚本都是按这个字段判断的，少一个字段就变成 undefined。
+		writeJSON(w, http.StatusOK, map[string]interface{}{"running": false, "result": nil})
 		return
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	// 百分比 = (已完成的步数 + 这一步内部的比例) / 总步数。
+	// 只按 done/total 算的话，一个三分钟的场景会让进度条整段不动。
+	pct := 0.0
+	if st.total > 0 {
+		pct = (float64(st.done) + st.frac) / float64(st.total) * 100
+		if pct > 100 {
+			pct = 100
+		}
+	}
 	resp := map[string]interface{}{
-		"running": st.running,
-		"step":    st.step,
-		"done":    st.done,
-		"total":   st.total,
-		"result":  st.result,
+		"running":   st.running,
+		"step":      st.step,
+		"detail":    st.detail,
+		"done":      st.done,
+		"total":     st.total,
+		"frac":      st.frac,
+		"percent":   math.Round(pct*10) / 10,
+		"elapsedMs": time.Since(st.startedAt).Milliseconds(),
+		"result":    st.result,
+	}
+	if eta, ok := st.etaLocked(); ok {
+		resp["etaMs"] = eta
 	}
 	if st.err != "" {
 		resp["error"] = st.err

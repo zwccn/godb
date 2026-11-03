@@ -2366,19 +2366,16 @@ if (monEls.sort) {
   });
 }
 
-// 顶栏两个入口反映「当前在哪」：在编辑器亮「首页」，看监控亮「监控」。
+// 顶栏三个入口反映「当前在哪」：在编辑器亮「首页」，看监控亮「监控」，开设置亮「设置」。
 // 和页面级 Tab 用的是同一个选中底色，不另造一套视觉语言。
-// 顶栏四颗是「你在哪一页」：首页（编辑器）/ 监控 / 基准 / 设置，同一时刻只亮一颗。
+// 基准从顶栏挪进监控第 5 页后，这里就没有它的事了 —— 它靠「监控」按钮上的百分比 badge 露头。
 function syncTopNav() {
   const home = document.getElementById('btnHome');
   const mon = document.getElementById('btnMonitor');
-  const bench = document.getElementById('btnBench');
   const set = document.getElementById('btnSettings');
   const setOpen = !settingsPanel.classList.contains('hidden');
-  const benchOpen = !benchPanel.classList.contains('hidden');
-  if (home) home.classList.toggle('on', !monOpen && !setOpen && !benchOpen);
+  if (home) home.classList.toggle('on', !monOpen && !setOpen);
   if (mon) mon.classList.toggle('on', monOpen);
-  if (bench) bench.classList.toggle('on', benchOpen);
   if (set) set.classList.toggle('on', setOpen);
 }
 
@@ -2393,8 +2390,14 @@ function toggleMonitor(force) {
   monOpen = want;
   monPanel.classList.toggle('hidden', !monOpen);
   document.body.classList.toggle('mon-open', monOpen);
-  if (monOpen) pollMonitor();
-  else setMonSettings(false);
+  if (monOpen) {
+    pollMonitor();
+    // 上次停在基准页：重开面板要接着看进度，把它的轮询拉起来
+    if (monPageTab === 'bench') openBenchPage();
+  } else {
+    setMonSettings(false);
+    stopBenchPoll(); // 面板关了，基准页的 1 秒轮询也停（任务还在跑就换慢轮询）
+  }
   syncTopNav();
 }
 
@@ -2403,9 +2406,14 @@ function toggleMonitor(force) {
    该不该整理），空间地图看「东西在哪、长什么样」。
    诊断卡内部还有一层小 Tab（慢SQL/慢事务/锁），那是同一个问题的三种切面。 */
 // Tab 顺序 = 使用顺序：先看健康（概览）、马上要排障就看谁在捣乱（诊断）、
-// 确认是磁盘问题才去存储、最后才是图形勘探（空间地图）。DOM 里的顺序要和这里一致。
-const MON_PAGES = ['overview', 'diag', 'storage', 'map'];
+// 确认是磁盘问题才去存储、然后是图形勘探（空间地图），基准放最后 ——
+// 前面四个都是「此刻什么样」，基准是「性能基线」，量级不同的东西不插在中间。
+// DOM 里的顺序要和这里一致。
+const MON_PAGES = ['overview', 'diag', 'storage', 'map', 'bench'];
 let monPageTab = 'overview';
+// 基准页不该出现「暂停刷新 / 立即刷新 / 规则配置」：它跑的是自己那条几分钟的任务，
+// 不跟每秒水位轮询，摆在那儿点不动只会让人以为坏了。
+const MON_PAGES_NO_POLL = ['bench'];
 
 function setMonPage(name) {
   if (MON_PAGES.indexOf(name) < 0) name = MON_PAGES[0];
@@ -2426,6 +2434,12 @@ function setMonPage(name) {
     monEls.body.scrollTop = 0;
     monEls.body.classList.toggle('map-mode', name === 'map');
   }
+  const noPoll = MON_PAGES_NO_POLL.indexOf(name) >= 0;
+  for (const id of ['btnMonSettings', 'btnMonPause', 'btnMonRefresh']) {
+    const b = document.getElementById(id);
+    if (b) b.classList.toggle('hidden', noPoll);
+  }
+  if (monEls.updated) monEls.updated.classList.toggle('hidden', noPoll);
   // 空间是「点开才算」的：要 stat 每张表，下钻还要逐页读，不跟着轮询跑。
   if (name === 'storage' && !spaceData) loadSpace();
   if (name === 'map') {
@@ -2433,6 +2447,10 @@ function setMonPage(name) {
     if (!spaceData) loadSpace();
     else renderMap();
   }
+  // 基准同理：切到这一页才去问一次进度；离开这一页就把它的轮询停掉
+  // （任务在跑时顶栏 badge 还有一条更慢的轮询兜着，见 syncBenchBadge）。
+  if (name === 'bench') openBenchPage();
+  else stopBenchPoll();
 }
 
 if (monEls.nav) {
@@ -5927,12 +5945,17 @@ document.getElementById('sbSearchClear').addEventListener('click', () => {
 });
 
 document.getElementById('btnRefresh').addEventListener('click', loadSchema);
-document.getElementById('btnMonitor').addEventListener('click', () => toggleMonitor());
+document.getElementById('btnMonitor').addEventListener('click', () => {
+  const wasOpen = monOpen;
+  toggleMonitor();
+  // 顶栏 badge 在跳 = 有基准在跑。这时点「监控」多半就是想看它跑到哪了，
+  // 直接落到基准页，省得进去再找一个 Tab。
+  if (!wasOpen && monOpen && benchRunning) setMonPage('bench');
+});
 document.getElementById('btnHome').addEventListener('click', () => {
-  // 「首页」= 回到编辑器：监控面板、基准页和设置弹窗一起收，焦点还给编辑器。
+  // 「首页」= 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
   // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
   toggleMonitor(false);
-  if (!benchPanel.classList.contains('hidden')) closeBench();
   if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
     return;
@@ -6901,7 +6924,6 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
-  if (e.key === 'Escape' && !benchPanel.classList.contains('hidden')) closeBench();
 });
 
 /* ---------- 编辑器右键菜单 ---------- */
@@ -8414,8 +8436,10 @@ loadDBs().then(() => {
 /* ---------- 基准测试 ---------- */
 // 一次跑几分钟（灌 100 万行 + 7 个场景各 3 轮），所以是异步任务：
 // start 秒回，status 轮询进度。结果存 data/bench-history.json 供「本次 vs 上次」对比。
+// 它现在是监控面板的第 5 页 —— 不再单占一个全屏页，「打开」就是切 Tab。
+// 但异步任务的进度必须能跨页看见，所以顶栏「监控」按钮上挂了个百分比 badge：
+// 人在编辑器干活时它每 3 秒慢慢跳，点它就落到基准页。
 
-const benchPanel = document.getElementById('benchPanel');
 const benchEls = {
   db: document.getElementById('benchDB'),
   scale: document.getElementById('benchScale'),
@@ -8426,38 +8450,105 @@ const benchEls = {
   cmp: document.getElementById('benchCmp'),
   rows: document.getElementById('benchRows'),
   batch: document.getElementById('benchBatch'),
+  // 进度块（跑起来才显示）
+  run: document.getElementById('benchRun'),
+  step: document.getElementById('benchStep'),
+  detail: document.getElementById('benchDetail'),
+  pct: document.getElementById('benchPct'),
+  bar: document.getElementById('benchBar'),
+  elapsed: document.getElementById('benchElapsed'),
+  eta: document.getElementById('benchEta'),
 };
 
-let benchTimer = 0;
+let benchTimer = 0;      // 停在基准页时：1 秒一次，进度走得细
+let benchBadgeTimer = 0; // 不在基准页时：3 秒一次，只为顶栏那个百分比
 let benchRunning = false;
 let benchHistory = null; // 上一次完整跑完的结果
+let benchStatus = null;  // 最近一次 /api/bench/status 的顶层响应
 
-function openBench() {
-  // 和监控/设置是同级页面：开一个收其余两个。
-  toggleMonitor(false);
-  if (!settingsPanel.classList.contains('hidden')) closeSettings();
-  benchPanel.classList.remove('hidden');
-  document.body.classList.toggle('mon-open', true);
+// 进入基准页：对齐库名、补历史、起快速轮询。
+function openBenchPage() {
   const sel = document.getElementById('dbSelect');
   if (benchEls.db && sel && sel.value) benchEls.db.textContent = sel.value;
-  syncTopNav();
-  // 读一次历史，供「对比上次」用（没有就不显示对比列）
-  api('/api/bench/history').then(d => {
-    benchHistory = d && d.history ? d.history : null;
-  }).catch(() => { benchHistory = null; });
-  // 先探一下当前有没有任务在跑（刷新页面后任务还在后台）
+  if (!benchHistory) {
+    api('/api/bench/history').then(d => {
+      benchHistory = d && d.history ? d.history : null;
+    }).catch(() => { benchHistory = null; });
+  }
+  syncBenchBadge(benchStatus); // 先按已知状态铺一次，别让进度空着等一秒
+  renderBenchRun(benchStatus);
+  if (!benchTimer) benchTimer = setInterval(pollBench, 1000);
   pollBench();
 }
 
-function closeBench() {
-  benchPanel.classList.add('hidden');
-  document.body.classList.toggle('mon-open', monOpen);
-  syncTopNav();
-  stopBenchPoll();
+// 顶栏百分比：只有「正在跑」才出现。跑完就收起，不留个 100% 挂在顶栏上。
+// 百分比用服务端的 percent（含当前场景内部的进度），不是 done/total ——
+// 后者在一个三分钟的场景里是冻住的。
+function syncBenchBadge(st) {
+  const b = document.getElementById('benchBadge');
+  if (!b) return;
+  const running = !!(st && st.running);
+  b.classList.toggle('hidden', !running);
+  if (!running) { stopBenchBadgePoll(); return; }
+  // 优先用服务端的 percent（含当前场景内部的进度）；老格式只有 done/total 时兜底。
+  const pct = typeof st.percent === 'number'
+    ? st.percent
+    : (st.total > 0 ? (st.done || 0) * 100 / st.total : null);
+  // 封顶 99：跑完的那一下归零收掉，出现 100% 只会让人以为卡住了
+  b.textContent = pct === null ? '…' : Math.min(99, Math.floor(pct)) + '%';
+  b.title = ['基准进行中', st.step, st.detail].filter(Boolean).join(' · ') + ' · 点击查看';
+}
+
+// 把毫秒说成人话：45 秒 / 1:20 / 12:05
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round((ms || 0) / 1000));
+  if (s < 60) return s + ' 秒';
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+// 进度块。四件事缺一不可：哪一步、这一步内部到哪、整体几成、已经花了多久。
+// 只写「正在跑 批量删除」的话，用户没法区分「在跑」和「卡死」。
+function renderBenchRun(d) {
+  if (!benchEls.run) return;
+  if (!d || !d.running) {
+    benchEls.run.classList.add('hidden');
+    return;
+  }
+  // 按钮状态也在这里管：刷新页面时是「先看到任务在跑」，startBench 根本没执行过，
+  // 不在这儿置位的话 → 开始按钮还能点、停止按钮不出现，跑着的任务停不下来。
+  benchEls.start.disabled = true;
+  benchEls.cancel.classList.remove('hidden');
+  benchEls.result.classList.add('hidden');
+  benchEls.run.classList.remove('hidden');
+  benchEls.step.textContent = d.step || '准备中';
+  benchEls.detail.textContent = d.detail || '';
+  const pct = Math.max(0, Math.min(99.9, d.percent || 0));
+  benchEls.pct.textContent = pct > 0 && pct < 1 ? pct.toFixed(1) + '%' : Math.round(pct) + '%';
+  // 只要有进展就先给 1%：宽度从 0 起步看着像「压根没开始」
+  benchEls.bar.style.width = Math.max(1, pct) + '%';
+  benchEls.elapsed.textContent = '已用 ' + fmtDur(d.elapsedMs);
+  benchEls.eta.textContent = d.etaMs > 0 ? '预计还需 ' + fmtDur(d.etaMs) : '';
+}
+
+// 不在基准页时的慢轮询：任务要跑几分钟，切走以后进度不能就此消失。
+function startBenchBadgePoll() {
+  if (benchBadgeTimer) return;
+  benchBadgeTimer = setInterval(async () => {
+    try {
+      const d = await api('/api/bench/status');
+      benchStatus = d || null;
+      syncBenchBadge(benchStatus);
+    } catch (e) { /* 网络抖一下不算失败，下一轮再说 */ }
+  }, 3000);
+}
+function stopBenchBadgePoll() {
+  if (benchBadgeTimer) { clearInterval(benchBadgeTimer); benchBadgeTimer = 0; }
 }
 
 function stopBenchPoll() {
   if (benchTimer) { clearInterval(benchTimer); benchTimer = 0; }
+  // 离开基准页：快速轮询停掉，但任务还在跑的话换成慢速的，badge 继续跳。
+  if (benchRunning) startBenchBadgePoll();
 }
 
 async function startBench() {
@@ -8476,8 +8567,12 @@ async function startBench() {
     benchEls.cancel.classList.add('hidden');
     return;
   }
-  benchEls.progress.textContent = '建表并写入基准数据…';
-  stopBenchPoll();
+  benchEls.progress.textContent = '';
+  // 一开始就把进度块和 badge 露出来：任务要跑几分钟，人很可能点完就切回编辑器了
+  const seed = { running: true, step: '准备数据', detail: '建表中…', percent: 0, elapsedMs: 0 };
+  renderBenchRun(seed);
+  syncBenchBadge(seed);
+  if (benchTimer) clearInterval(benchTimer);
   benchTimer = setInterval(pollBench, 1000);
 }
 
@@ -8491,6 +8586,11 @@ async function pollBench() {
     benchEls.progress.textContent = '读取进度失败：' + e.message;
     return;
   }
+  benchStatus = d || null;
+  syncBenchBadge(benchStatus);
+  // 以服务端为准：刷新页面后任务还在后台跑，本地这个标志一开始是 false，
+  // 不跟着改的话「切走以后要不要起慢轮询」就判错了。
+  if (d) benchRunning = !!d.running;
   if (!d || !d.result) {
     // 没有任务在跑：清进度、恢复按钮
     benchRunning = false;
@@ -8498,9 +8598,10 @@ async function pollBench() {
     benchEls.start.disabled = false;
     benchEls.cancel.classList.add('hidden');
     benchEls.progress.textContent = '';
+    renderBenchRun(null);
     return;
   }
-  if (d.step) benchEls.progress.textContent = d.step + (d.total ? `（${d.done}/${d.total}）` : '');
+  renderBenchRun(d);
   if (d.error) benchEls.progress.textContent = '出错了：' + d.error;
 
   if (!d.running && d.result && d.result.finished) {
@@ -8510,6 +8611,7 @@ async function pollBench() {
     benchEls.start.disabled = false;
     benchEls.cancel.classList.add('hidden');
     benchEls.progress.textContent = '';
+    renderBenchRun(null);
     renderBenchResult(d.result);
   }
 }
@@ -8535,7 +8637,9 @@ function renderBenchResult(res) {
   if (benchHistory && Array.isArray(benchHistory.scenarios)) {
     for (const s of benchHistory.scenarios) prev.set(s.name, s.perSec);
   }
-  if (benchHistory && benchHistory.startedAt) {
+  if (res.error) {
+    benchEls.cmp.textContent = res.error;
+  } else if (benchHistory && benchHistory.startedAt) {
     benchEls.cmp.textContent = `上次 ${benchHistory.startedAt}（v${benchHistory.version || '?'}）`;
   } else {
     benchEls.cmp.textContent = '还没有历史记录 —— 这是第一次跑';
@@ -8585,7 +8689,16 @@ function renderBenchResult(res) {
   }
 }
 
-document.getElementById('btnBench').addEventListener('click', openBench);
-document.getElementById('btnBenchClose').addEventListener('click', closeBench);
 document.getElementById('btnBenchStart').addEventListener('click', startBench);
 document.getElementById('btnBenchCancel').addEventListener('click', cancelBench);
+
+// 刷新页面后发现后台还有基准在跑：把 badge 点起来。
+// 这条只在启动时探一次，之后交给 pollBench / badge 轮询自己维持。
+api('/api/bench/status').then(d => {
+  benchStatus = d || null;
+  if (benchStatus && benchStatus.running) {
+    benchRunning = true;
+    syncBenchBadge(benchStatus);
+    startBenchBadgePoll();
+  }
+}).catch(() => {});

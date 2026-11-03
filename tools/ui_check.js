@@ -624,8 +624,8 @@ class CDP {
       `${vdBusy.level} · ${vdBusy.rows.join(' | ')} → ${vdBusy.page}/${vdBusy.tab}`);
     await cdp.eval(`setMonPage('overview')`);
 
-    check('监控顶部有页面级 Tab（概览 / 诊断 / 存储 / 空间地图），默认概览',
-      navUi.n === 4 && navUi.labels.join('/') === '概览/诊断/存储/空间地图' && navUi.on === 'overview',
+    check('监控顶部有页面级 Tab（概览 / 诊断 / 存储 / 空间地图 / 基准），默认概览',
+      navUi.n === 5 && navUi.labels.join('/') === '概览/诊断/存储/空间地图/基准' && navUi.on === 'overview',
       navUi.labels.join(' / ') + ' · 当前 ' + navUi.on);
 
     // 概览页底部留一行存储摘要：fsync 是最高频的排障入口，不该逼人先切页
@@ -831,6 +831,50 @@ class CDP {
         tvUi.legend === 4 && /面积 = 字节/.test(tvUi.note) && tvUi.bodyMode,
       `画布 ${tvUi.canvas.join('×')} · 右栏 ${tvUi.railW}px · 图例 ${tvUi.legend} · ${tvUi.note}`);
 
+    // 右栏左侧的竖向拖宽条：和编辑器和结果区之间那条是同一套做法（转了 90°）。
+    // 原来悬停是把整条 7px 涂成淡蓝，看着像「一条色带」，不像「一处能抓的地方」。
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' });
+    await sleep(250);
+    const vGripIdle = await cdp.eval(`(() => {
+      const g = document.getElementById('mapGrip');
+      const a = getComputedStyle(g, '::after');
+      return { op: getComputedStyle(g, '::before').opacity, w: a.width, h: a.height };
+    })()`);
+    check('右栏拖宽条常态：渐变柱收起，只剩一小段竖向短条',
+      vGripIdle.op === '0' && vGripIdle.w === '3px' && vGripIdle.h === '36px', JSON.stringify(vGripIdle));
+
+    const vPt = await cdp.eval(`(() => {
+      const b = document.getElementById('mapGrip').getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: vPt.x, y: vPt.y, button: 'none' });
+    await sleep(80);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: vPt.x, y: vPt.y, button: 'none' });
+    await sleep(260);
+    const vGripHover = await cdp.eval(`(() => {
+      const g = document.getElementById('mapGrip');
+      const a = getComputedStyle(g, '::after');
+      const b = getComputedStyle(g, '::before');
+      return {
+        hovered: g.matches(':hover'),
+        lineOp: b.opacity,
+        lineFade: /rgba\\(0, 0, 0, 0\\)/.test(b.backgroundImage),
+        // 方向别查角度：Chrome 把 180deg 规范成默认方向，计算值里根本不带角度。
+        // 查抓手纹理的尺寸更实在 —— 竖版是「1.5×13 的竖条」，横版是「13×1.5 的横条」。
+        vBars: /1\\.5px 13px/.test(a.backgroundSize),
+        w: a.width, h: a.height, radius: a.borderRadius,
+        // 拖宽条本身只有 7px：胶囊 13px 必须拒绝 flex 收缩，否则会被压回 5px
+        gripW: Math.round(g.getBoundingClientRect().width),
+      };
+    })()`);
+    check('右栏拖宽条悬停：竖向渐变柱 + 胶囊手柄，胶囊不被 7px 宽压扁',
+      vGripHover.hovered && vGripHover.lineOp === '0.9' && vGripHover.lineFade && vGripHover.vBars
+        && vGripHover.w === '13px' && vGripHover.h === '44px' && vGripHover.radius === '7px'
+        && vGripHover.gripW === 7,
+      JSON.stringify(vGripHover));
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' });
+    await sleep(200);
+
     // 「按文件」把每棵索引拆成独立块：块数一定变多
     const beforeFile = tvUi.n;
     await cdp.eval(`document.querySelector('#mapGroup button[data-group="file"]').click()`);
@@ -940,10 +984,18 @@ class CDP {
         glideEnd.left >= glideMid.left && glideRest.left === glideEnd.left,
       `拖到 ${glideRel.left} → 滑到 ${glideMid.left} → 停在 ${glideEnd.left}（再看 ${glideRest.left}）`);
 
-    // 双击一块进表视图：页网格
+    // 双击一块进表视图：页网格。
+    // 别拿「第一块」—— 树图里还有 WAL 和「其它」两种块，它们不挂双击，
+    // 基准跑完 WAL 涨到几十 MB 就会排在最前面，双击它什么也不会发生。
     await cdp.eval(`(() => {
-      const c = document.querySelector('#mapTree .tv-cell');
-      c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      // 取面积最大的「可下钻」块：跳过 WAL 块和「其它」块（它们不挂双击）。
+      // 用面积排序而不是取第一个，是为了跟原来的语义一致 —— 双击最显眼的那块。
+      const cells = [...document.querySelectorAll('#mapTree .tv-cell')].filter(x =>
+        !x.classList.contains('other')
+        && !/^WAL$/.test(((x.querySelector('.tv-name') || {}).textContent || '').trim()));
+      const area = x => { const r = x.getBoundingClientRect(); return r.width * r.height; };
+      cells.sort((a, b) => area(b) - area(a));
+      cells[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     })()`);
     await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
       { label: '表视图页网格' });
@@ -1266,9 +1318,14 @@ class CDP {
       backUi.cells > 0 && backUi.gridHidden && !/数据页/.test(backUi.crumbs),
       `${backUi.cells} 块 / ${backUi.crumbs}`);
 
+    // 同上：挑面积最大的可下钻块，WAL / 「其它」块不挂双击
     await cdp.eval(`(() => {
-      const c = document.querySelector('#mapTree .tv-cell');
-      c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      const cells = [...document.querySelectorAll('#mapTree .tv-cell')].filter(x =>
+        !x.classList.contains('other')
+        && !/^WAL$/.test(((x.querySelector('.tv-name') || {}).textContent || '').trim()));
+      const area = x => { const r = x.getBoundingClientRect(); return r.width * r.height; };
+      cells.sort((a, b) => area(b) - area(a));
+      cells[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     })()`);
     await waitFor(cdp, `document.querySelectorAll('#pmGrid .pm-c').length > 0`,
       { label: '表视图页网格（Esc 用例）' });
@@ -1438,6 +1495,47 @@ class CDP {
     check('双击拖手回到自动高度',
       await cdp.eval(`localStorage.getItem('godb.editorH') === null &&
         Math.round(document.querySelector('.CodeMirror').getBoundingClientRect().height) < ${eh1}`));
+
+    // 拖手的悬停观感：常态是一条淡线 + 小短条，移上去才「点亮」成渐变线 + 胶囊手柄。
+    // 这不是纯装饰 —— 分隔条只有 11px 高，没有任何提示的话根本看不出这条缝能拖。
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' });
+    await sleep(250);
+    const gripIdle = await cdp.eval(`(() => {
+      const g = document.getElementById('editorResize');
+      const a = getComputedStyle(g, '::after');
+      return { op: getComputedStyle(g, '::before').opacity, w: a.width, h: a.height };
+    })()`);
+    check('拖手常态：渐变线收起，只剩一小段淡色短条',
+      gripIdle.op === '0' && gripIdle.w === '36px' && gripIdle.h === '3px', JSON.stringify(gripIdle));
+
+    const gripPt = await cdp.eval(`(() => {
+      const b = document.getElementById('editorResize').getBoundingClientRect();
+      return { x: Math.round(b.left + b.width * 0.5), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gripPt.x, y: gripPt.y, button: 'none' });
+    await sleep(80);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gripPt.x, y: gripPt.y, button: 'none' });
+    await sleep(260);
+    const gripHover = await cdp.eval(`(() => {
+      const g = document.getElementById('editorResize');
+      const a = getComputedStyle(g, '::after');
+      const b = getComputedStyle(g, '::before');
+      return {
+        hovered: g.matches(':hover'),
+        lineOp: b.opacity,
+        lineGrad: /linear-gradient/.test(b.backgroundImage),
+        // 渐变必须带「透明」端点：中间实色、两端淡出，才是一条光柱而不是一条整色的线
+        lineFade: /rgba\\(0, 0, 0, 0\\)/.test(b.backgroundImage),
+        w: a.width, h: a.height, radius: a.borderRadius,
+        // 胶囊浮起来但不改布局：容器还是 11px（改了就成「鼠标一过页面抖一下」）
+        gripH: Math.round(g.getBoundingClientRect().height),
+      };
+    })()`);
+    check('拖手悬停：渐变线浮现（中间实、两端透明）+ 胶囊手柄，容器高度不变',
+      gripHover.hovered && gripHover.lineOp === '0.9' && gripHover.lineGrad && gripHover.lineFade
+        && gripHover.w === '44px' && gripHover.h === '13px' && gripHover.radius === '7px'
+        && gripHover.gripH === 11,
+      JSON.stringify(gripHover));
 
     // 自动模式下粘一大段 SQL：应该长高，但封顶在「和结果区 1:2」——
     // 上限不再按视口百分比算，而是量 .main 的实际高度再切三份。
@@ -2132,33 +2230,139 @@ class CDP {
     await sleep(200);
     check('设置：点 × 能关掉', await cdp.eval(`document.getElementById('settingsPanel').classList.contains('hidden')`));
 
-    // 基准页：轻量冒烟 —— 只验证入口存在、能打开、接口返回空（不真跑 100 万行，
+    // 基准：从独立全屏页收进监控第 5 页，顶栏那颗按钮去掉了。
+    // 轻量冒烟 —— 只验证入口位置、切页、接口返回空（不真跑 100 万行，
     // 那是 web/bench_test.go 的 Go 单测用 2000 行小规模在跑的）。
-    const benchBtn = await cdp.eval(`({
-      exists: !!document.getElementById('btnBench'),
-      text: (document.getElementById('btnBench') || {}).textContent,
+    const benchEntry = await cdp.eval(`({
+      topBtn: !!document.getElementById('btnBench'),
+      tab: !!document.querySelector('#monNav .mon-nav-tab[data-page="bench"]'),
+      badgeHidden: document.getElementById('benchBadge').classList.contains('hidden'),
     })`);
-    check('顶栏有「基准」入口',
-      benchBtn.exists && benchBtn.text.trim() === '基准', JSON.stringify(benchBtn));
-    await cdp.eval(`document.getElementById('btnBench').click()`);
+    check('基准入口挪进监控 Tab：顶栏不再有独立按钮，监控按钮挂进度 badge（无任务时隐藏）',
+      !benchEntry.topBtn && benchEntry.tab && benchEntry.badgeHidden, JSON.stringify(benchEntry));
+
+    // 前面几条用例已经把监控开关过几轮，先确保它是开着的再切 Tab
+    await cdp.eval(`(() => { if (document.getElementById('monPanel').classList.contains('hidden'))
+      document.getElementById('btnMonitor').click(); })()`);
+    await sleep(300);
+    await cdp.eval(`document.querySelector('#monNav .mon-nav-tab[data-page="bench"]').click()`);
     await sleep(400);
     const benchUi = await cdp.eval(`({
-      shown: !document.getElementById('benchPanel').classList.contains('hidden'),
+      shown: !document.querySelector('#monPanel .mon-page[data-page="bench"]').classList.contains('hidden'),
       hasStart: !!document.getElementById('btnBenchStart'),
       scale: (document.getElementById('benchScale') || {}).textContent,
-      navOn: document.getElementById('btnBench').classList.contains('on'),
+      navOn: document.querySelector('#monNav .mon-nav-tab[data-page="bench"]').classList.contains('on'),
+      overviewHidden: document.querySelector('#monPanel .mon-page[data-page="overview"]').classList.contains('hidden'),
+      pauseHidden: document.getElementById('btnMonPause').classList.contains('hidden'),
+      refreshHidden: document.getElementById('btnMonRefresh').classList.contains('hidden'),
     })`);
-    check('基准页能打开：有开始按钮、显示规模、顶栏「基准」亮',
-      benchUi.shown && benchUi.hasStart && /1,?000,?000/.test(benchUi.scale) && benchUi.navOn,
-      JSON.stringify(benchUi));
+    check('基准页能打开：开始按钮、规模 1,000,000、Tab 高亮、其它页收起',
+      benchUi.shown && benchUi.hasStart && /1,?000,?000/.test(benchUi.scale) && benchUi.navOn
+        && benchUi.overviewHidden, JSON.stringify(benchUi));
+    check('基准页收起「暂停刷新 / 立即刷新」（它不跟每秒水位轮询）',
+      benchUi.pauseHidden && benchUi.refreshHidden, JSON.stringify(benchUi));
+
     // 接口无任务时返回空 result（冒烟，不发 start 以免真灌 100 万行）
     const benchStatus = await cdp.eval(`fetch('/api/bench/status').then(r => r.json())`);
-    check('基准接口：无任务时返回 result:null',
-      benchStatus && benchStatus.result === null, JSON.stringify(benchStatus).slice(0, 80));
-    await cdp.eval(`document.getElementById('btnBenchClose').click()`);
-    await sleep(200);
-    check('基准页点 × 能关掉',
-      await cdp.eval(`document.getElementById('benchPanel').classList.contains('hidden')`));
+    // 没在跑：result 要么是 null（本次进程还没跑过），要么是上一轮跑完的结果。
+    // 别写死 null —— 跑过一次基准之后再回归，这条就会红，而那是正常状态。
+    check('基准接口：没在跑时 running=false，result 为 null 或已结束的上一轮',
+      benchStatus && benchStatus.running === false
+        && (benchStatus.result === null || benchStatus.result.finished === true),
+      JSON.stringify(benchStatus).slice(0, 80));
+
+    // 切回概览：头部控件必须还回来，否则整个监控页都刷不了
+    await cdp.eval(`document.querySelector('#monNav .mon-nav-tab[data-page="overview"]').click()`);
+    await sleep(300);
+    check('离开基准页后「暂停刷新 / 立即刷新」恢复',
+      await cdp.eval(`!document.getElementById('btnMonPause').classList.contains('hidden') &&
+        !document.getElementById('btnMonRefresh').classList.contains('hidden')`));
+
+    // 顶栏进度 badge：不真灌 100 万行，把「正在跑」的状态直接灌进去看反应。
+    // 这几条守的是「异步任务跨页可见」—— 它原来是独立全屏页，点了开始切回去干活就
+    // 彻底看不见了，只能凭感觉等。
+    const badgeOn = await cdp.eval(`(() => {
+      benchRunning = true;
+      syncBenchBadge({ running: true, percent: 37.4, step: '批量插入', detail: 'batch=1000 · 第 2/3 轮' });
+      const b = document.getElementById('benchBadge');
+      return { hidden: b.classList.contains('hidden'), text: b.textContent.trim(), tip: b.title };
+    })()`);
+    check('基准跑起来时顶栏「监控」挂百分比 badge（带当前步骤与细分）',
+      !badgeOn.hidden && badgeOn.text === '37%' && /批量插入/.test(badgeOn.tip)
+        && /batch=1000/.test(badgeOn.tip),
+      JSON.stringify(badgeOn));
+
+    await cdp.eval(`document.getElementById('btnMonitor').click()`);
+    await sleep(300);
+    check('监控面板关掉后 badge 仍在顶栏（任务跑着切走也看得见）',
+      await cdp.eval(`!document.getElementById('benchBadge').classList.contains('hidden')`));
+
+    await cdp.eval(`document.getElementById('btnMonitor').click()`);
+    await sleep(400);
+    check('badge 亮着时点「监控」，直接落到基准页',
+      (await cdp.eval(`monPageTab`)) === 'bench');
+
+    const badgeOff = await cdp.eval(`(() => {
+      benchRunning = false;
+      syncBenchBadge({ running: false });
+      return document.getElementById('benchBadge').classList.contains('hidden');
+    })()`);
+    check('任务结束后 badge 收起，不留 100% 挂在顶栏', badgeOff === true);
+
+    // 进度块：一次基准要好几分钟，而「批量删除」一个场景就要重灌 5 次一百万行的表。
+    // 只显示「正在跑 批量删除」的话，「这一秒没变化」和「卡死了」看起来一模一样。
+    const runUi = await cdp.eval(`(() => {
+      renderBenchRun({ running: true, step: '批量删除',
+        detail: '第 2/3 轮 · 重灌 · 灌数据 500,000 / 1,000,000 行',
+        percent: 57.3, elapsedMs: 83000, etaMs: 45000 });
+      const q = id => document.getElementById(id).textContent.trim();
+      return {
+        shown: !document.getElementById('benchRun').classList.contains('hidden'),
+        step: q('benchStep'), detail: q('benchDetail'), pct: q('benchPct'),
+        barW: document.getElementById('benchBar').style.width,
+        elapsed: q('benchElapsed'), eta: q('benchEta'),
+        // 刷新页面时是「先看到任务在跑」，startBench 没执行过 —— 按钮状态得由这里管，
+        // 否则开始按钮还能点、停止不出现，跑着的任务停不下来
+        startDisabled: document.getElementById('btnBenchStart').disabled,
+        cancelShown: !document.getElementById('btnBenchCancel').classList.contains('hidden'),
+      };
+    })()`);
+    check('基准进度块：步骤 + 场景内细分 + 百分比 + 进度条 + 已用/预计剩余',
+      runUi.shown && runUi.step === '批量删除' && /灌数据 500,000/.test(runUi.detail)
+        && runUi.pct === '57%' && parseFloat(runUi.barW) > 50
+        && runUi.elapsed === '已用 1:23' && runUi.eta === '预计还需 45 秒',
+      JSON.stringify(runUi));
+    check('跑着的时候「开始」禁用、「停止」可见（刷新后也能停）',
+      runUi.startDisabled && runUi.cancelShown,
+      `开始 disabled=${runUi.startDisabled} / 停止 显示=${runUi.cancelShown}`);
+
+    const runOff = await cdp.eval(`(() => {
+      renderBenchRun({ running: false });
+      const hidden = document.getElementById('benchRun').classList.contains('hidden');
+      // 收尾：把按钮还原，别让后面用例看见一个禁用的「开始基准」
+      document.getElementById('btnBenchStart').disabled = false;
+      document.getElementById('btnBenchCancel').classList.add('hidden');
+      return { hidden };
+    })()`);
+    check('任务结束后进度块收起', runOff.hidden === true, JSON.stringify(runOff));
+
+    // 结果表：新加的「逐条提交插入」要能在表里原样出现，并把 fsync / 提交次数带出来。
+    // 表格是数据驱动的，但「后端加了场景、前端没显示」这种断链只有真渲染一次才看得见。
+    const tableUi = await cdp.eval(`(() => {
+      renderBenchResult({ startedAt: '2026-11-03 22:32:30', version: '0.4.0', scenarios: [
+        { name: '单条插入', commit: '单事务逐条', rows: 20000, perSec: 1490.07 },
+        { name: '逐条提交插入', commit: '每行一事务 · 15,078 fsync / 20,001 提交', rows: 5000, perSec: 1243.77 },
+      ] });
+      const trs = [...document.querySelectorAll('#benchRows tr')];
+      const txt = i => trs[i] ? trs[i].textContent.replace(/\\s+/g, ' ').trim() : '';
+      const out = { n: trs.length, last: txt(1) };
+      renderBenchResult({ scenarios: [] });
+      return out;
+    })()`);
+    check('结果表渲染「逐条提交插入」，并带出 fsync / 提交次数',
+      tableUi.n === 2 && /逐条提交插入/.test(tableUi.last)
+        && /15,078 fsync \/ 20,001 提交/.test(tableUi.last),
+      JSON.stringify(tableUi));
 
     // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
     await cdp.eval(`openSettings()`);

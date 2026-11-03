@@ -21,6 +21,10 @@ type Column struct {
 	// 表达式/聚合列保持 0 —— 客户端据此判断结果集能不能回写。
 	TableOID int32 `json:"-"`
 	AttNum   int16 `json:"-"`
+	// 稳定表 ID / 列 ID：向量列的数据在列文件里，要把 Value 里的槽位号
+	// 变成可显示/可传输的文本，就得知道读哪个文件。
+	TableID int64 `json:"-"`
+	ColID   int64 `json:"-"`
 }
 
 // Result 是一条语句的执行结果。
@@ -243,8 +247,10 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 	sc := plan.Schema()
 	cols := make([]Column, len(sc))
 	for i, c := range sc {
-		cols[i] = Column{Name: c.Name, Type: c.Type.String(), TableOID: c.TableOID, AttNum: c.AttNum}
+		cols[i] = Column{Name: c.Name, Type: c.Type.String(), TableOID: c.TableOID,
+			AttNum: c.AttNum, TableID: c.TableID, ColID: c.ColID}
 	}
+	vecFix := vecCellFixer(tx, cols)
 	var rows [][]interface{}
 	for {
 		row, ok, err := plan.Next()
@@ -259,6 +265,9 @@ func (e *Engine) execSelect(tx *storage.Tx, s *sql.Select, mode explainMode) (*R
 			ct := ""
 			if i < len(cols) {
 				ct = cols[i].Type
+			}
+			if vecFix != nil {
+				v = vecFix(i, v)
 			}
 			out[i] = cellValue(v, ct)
 		}
@@ -366,6 +375,10 @@ func (e *Engine) execCreateTable(s *sql.CreateTable) (*Result, error) {
 		return nil, err
 	}
 	e.Store.AddTable(t.Name)
+	// 建表时给向量列建文件（幂等；没有向量列时是一次空遍历）。
+	if err := e.Store.SyncVectorFiles(); err != nil {
+		return nil, err
+	}
 	if err := e.persistSchema(false); err != nil {
 		return nil, err
 	}
@@ -400,6 +413,10 @@ func (e *Engine) execDropTable(s *sql.DropTable) (*Result, error) {
 			return nil, err
 		}
 		e.Store.DropTable(name)
+	}
+	// catalog 里已经没有这些表了，它们的向量列文件随之移进回收站。
+	if err := e.Store.SyncVectorFiles(); err != nil {
+		return nil, err
 	}
 	if err := e.persistSchema(false); err != nil {
 		return nil, err
@@ -441,9 +458,16 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		return nil, fmt.Errorf("relation %q does not exist", s.Table)
 	}
 	td := e.Store.Table(t.Name)
-	// ALTER 会按下标重写每一行，先压实空槽：否则空槽会被当成
-	// 「全默认值的一行」写回去，行数凭空多出来。
-	td.CompactRows()
+	// 这里**不能**调 td.CompactRows()。
+	//
+	// 它会把带空洞的行紧凑重排，槽位号整体前移；而 WAL 里更早的 DELETE/UPDATE
+	// 记录还带着旧槽位号，重放时就会应用到错的行上 —— 实测表现是「ADD COLUMN
+	// 之后重启，多出一行 / 少一行」。而 ADD COLUMN 又刻意不重写快照（大数据量
+	// 下那是最贵的操作，见 db.TestAddColumnDoesNotRewriteSnapshot），
+	// 没有 checkpoint 来兜住这次槽位重排，两者是矛盾的。
+	//
+	// 空槽本来就不需要压实：下面的循环用 RowAt 取行、取不到就跳过，
+	// MarkFullSync 之后 drainPending 会把空槽按「删除」写回页里。
 	act := s.Action
 	note := ""
 	switch act.Kind {
@@ -599,7 +623,13 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 	// 任何一种 ALTER 都可能让现有的哈希索引失效（列位置、表名、列类型都变了），
 	// 统一重建一次。DDL 本来就少，不值得为省这一次扫描去区分。
 	e.Store.RebuildIndex(t.Name)
-	// DROP COLUMN / RENAME TABLE / ALTER TYPE 必须重写快照，见 persistSchema 的说明
+	// 加列要建文件、删列要把文件移走、改类型可能要换维度 —— 统一对一次账。
+	if err := e.Store.SyncVectorFiles(); err != nil {
+		return nil, err
+	}
+	// DROP COLUMN / RENAME TABLE / ALTER TYPE 必须重写快照，见 persistSchema 的说明。
+	// ADD COLUMN 刻意不在其中：新列在每行尾部追加，老行读出来时由宽容解码补 NULL，
+	// 数据文件不用动（大数据量下重写一次快照就是几十 GB）。
 	needsSnapshot := act.Kind == "drop_column" || act.Kind == "rename_table" || act.Kind == "alter_type"
 	if err := e.persistSchema(needsSnapshot); err != nil {
 		return nil, err
@@ -823,6 +853,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 	syscat.NoteDML(t.Name, int64(len(rows)-skipped), 0, 0)
 	if len(retEvals) > 0 {
 		res.Columns = retCols
+		vecFix := vecCellFixer(tx, retCols)
 		for _, r := range inserted {
 			out := make([]interface{}, len(retEvals))
 			for i, ev := range retEvals {
@@ -833,6 +864,9 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 				ct := ""
 				if i < len(retCols) {
 					ct = retCols[i].Type
+				}
+				if vecFix != nil {
+					v = vecFix(i, v)
 				}
 				out[i] = cellValue(v, ct)
 			}
@@ -1119,8 +1153,19 @@ func (e *Engine) compileReturning(sc Schema, items []*sql.SelectItem, tx *storag
 				name = "?column?"
 			}
 		}
+		col := Column{Name: name, Type: ev.Type().String()}
+		// 直接引用表列时把来源信息带上：PG 协议的 RowDescription 要它
+		// （全 0 时客户端把结果集设成只读），向量列还要靠 TableID/ColID
+		// 去列文件里取值。
+		if cr, ok := it.Expr.(*sql.ColumnRef); ok {
+			if idx, _, rerr := sc.Resolve(cr.Table, cr.Name); rerr == nil && idx < len(sc) {
+				ci := sc[idx]
+				col.TableOID, col.AttNum = ci.TableOID, ci.AttNum
+				col.TableID, col.ColID = ci.TableID, ci.ColID
+			}
+		}
 		evals = append(evals, ev)
-		cols = append(cols, Column{Name: name, Type: ev.Type().String()})
+		cols = append(cols, col)
 	}
 	return evals, cols, nil
 }
@@ -1466,7 +1511,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 	syscat.NoteDML(t.Name, 0, int64(affected), 0)
 	if len(retEvals) > 0 {
 		res.Columns = retCols
-		if err := fillReturning(res, retEvals, retRows); err != nil {
+		if err := fillReturning(tx, res, retEvals, retRows); err != nil {
 			return nil, err
 		}
 	}
@@ -1490,7 +1535,60 @@ func cellValue(v types.Value, colType string) interface{} {
 	return v.Interface()
 }
 
-func fillReturning(res *Result, evals []Eval, rows []types.Row) error {
+// vecCellFixer 返回一个把结果行里的向量引用换成内联文本的函数。
+//
+// 为什么需要它：Value 只有 32 字节，向量本体在列文件里，行里存的是槽位号。
+// 要让客户端或控制台看到 `[1,2,3]`，必须知道这个槽位属于哪一列 ——
+// 同一个槽位号在两张表里是完全不同的数据。结果列带着 TableID/ColID，
+// 正好能定位。
+//
+// 换不出来（文件没打开、槽位越界）时保留 `[vector:7]` 的引用形态：
+// 让人一眼看出「这里有个向量但读不到」，比显示零向量诚实得多。
+//
+// 返回 nil 表示这个查询没有可用向量来源，调用方连判断都可以省掉。
+func vecCellFixer(tx *storage.Tx, cols []Column) func(int, types.Value) types.Value {
+	if tx == nil {
+		return nil
+	}
+	src := tx.VecSource()
+	if src == nil {
+		return nil
+	}
+	var buf []float32
+	return func(i int, v types.Value) types.Value {
+		if v.K != types.KVector || v.IsVecInline() {
+			return v
+		}
+		if i >= len(cols) || cols[i].TableID == 0 || cols[i].ColID == 0 {
+			return v
+		}
+		id, ok := v.VecID()
+		if !ok {
+			return v
+		}
+		dim := v.VecDim()
+		if cap(buf) < dim {
+			buf = make([]float32, dim)
+		}
+		vec, err := src.VecAt(storage.VecColumn{
+			TableOID: cols[i].TableOID,
+			TableID:  cols[i].TableID,
+			ColumnID: cols[i].ColID,
+			Dim:      dim,
+			AttNum:   cols[i].AttNum,
+		}, id, buf[:dim])
+		if err != nil {
+			return v
+		}
+		return types.VectorLiteral(types.VectorText(vec), len(vec))
+	}
+}
+
+func fillReturning(tx *storage.Tx, res *Result, evals []Eval, rows []types.Row) error {
+	// RETURNING 同样可能返回向量列：行里存的是槽位号，要换成文本才能外发。
+	// 这一步必须在提交之前做 —— DELETE 的槽位是在提交时回收的，
+	// 提交之后再去读就是读一个已经被放回空闲位图的位置。
+	vecFix := vecCellFixer(tx, res.Columns)
 	for _, r := range rows {
 		out := make([]interface{}, len(evals))
 		for i, ev := range evals {
@@ -1501,6 +1599,9 @@ func fillReturning(res *Result, evals []Eval, rows []types.Row) error {
 			ct := ""
 			if i < len(res.Columns) {
 				ct = res.Columns[i].Type
+			}
+			if vecFix != nil {
+				v = vecFix(i, v)
 			}
 			out[i] = cellValue(v, ct)
 		}
@@ -1634,7 +1735,7 @@ deleteRows:
 	syscat.NoteDML(t.Name, 0, 0, int64(len(refs)))
 	if len(retEvals) > 0 {
 		res.Columns = retCols
-		if err := fillReturning(res, retEvals, delRows); err != nil {
+		if err := fillReturning(tx, res, retEvals, delRows); err != nil {
 			return nil, err
 		}
 	}

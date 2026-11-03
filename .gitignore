@@ -20,6 +20,10 @@ config.json.bak-*
 # 调试用的临时截图
 _shot_*.png
 
+# 本机运行数据（-data ./data，GB 级：表文件 + WAL + 回收站）与手动备份
+/data/
+/_bak/
+
 # 日志与临时文件
 *.log
 pg-queries.log

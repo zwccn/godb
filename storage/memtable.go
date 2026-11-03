@@ -713,6 +713,12 @@ func (td *TableData) Compact(t *catalog.Table) {
 //
 // ALTER TABLE 会按下标重写每一行，空槽必须先压实，否则会被当成
 // 「全默认值的一行」写回去，行数凭空多出来。
+// CompactRows 把带空洞的行数组压紧：行按原顺序前移，槽位号整体变小。
+//
+// **调用之后必须立刻 checkpoint**（ALTER TABLE ADD COLUMN 就是这么用的）。
+// 槽位号在 WAL 里是主键：压紧之前写进日志的 DELETE / UPDATE 都带着旧号，
+// 压紧之后不落盘就直接崩，重放会把改动应用到错的行上 —— 实测表现是
+// 重启后多一行或少一行。DDL 路径统一走 persistSchema(needsSnapshot=true)。
 func (td *TableData) CompactRows() {
 	if len(td.free) == 0 {
 		return

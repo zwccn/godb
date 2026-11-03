@@ -20,14 +20,18 @@ import (
 //	4 text     uint32 长度 + UTF-8 字节
 //	5 time     int64 UnixNano + int32 时区偏移（秒）
 //	6 decimal  uint32 长度 + 规范十进制文本（NUMERIC 精确值）
+//	8 vector   槽位号 uint64 + 维度 uint16       （已落盘，数据在 .vec 文件里）
+//	9 vector   文本 uint32 长度 + `[1,2,3]`      （过渡期兜底，见下）
 const (
-	tagNull    byte = 0
-	tagInt     byte = 1
-	tagFloat   byte = 2
-	tagBool    byte = 3
-	tagText    byte = 4
-	tagTime    byte = 5
-	tagDecimal byte = 6
+	tagNull      byte = 0
+	tagInt       byte = 1
+	tagFloat     byte = 2
+	tagBool      byte = 3
+	tagText      byte = 4
+	tagTime      byte = 5
+	tagDecimal   byte = 6
+	tagVector    byte = 8
+	tagVectorTxt byte = 9
 )
 
 func appendValue(b []byte, v types.Value) []byte {
@@ -59,6 +63,21 @@ func appendValue(b []byte, v types.Value) []byte {
 		b = binary.LittleEndian.AppendUint64(b, uint64(v.I))
 		_, off := v.Time().Zone()
 		return binary.LittleEndian.AppendUint32(b, uint32(int32(off)))
+	case types.KVector:
+		// 已落盘的向量只记槽位号 + 维度（11 字节）：768 维一行是 3 KB，
+		// 1000 万行就是 30 GB 日志，checkpoint 会疯（见设计文档 6.3）。
+		// 内联字面量（还没走到写入路径）按文本存 —— 宁可多占字节，也不能
+		// 像以前那样落到 default 分支变成 NULL，那是静默丢数据。
+		// T4 接上写入路径后，行里的向量一定是槽位引用，tag 9 只会出现在
+		// 「先建表后接存储」这种过渡期数据里。
+		if id, ok := v.VecID(); ok {
+			b = append(b, tagVector)
+			b = binary.LittleEndian.AppendUint64(b, uint64(id))
+			return binary.LittleEndian.AppendUint16(b, uint16(v.VecDim()))
+		}
+		b = append(b, tagVectorTxt)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(v.S)))
+		return append(b, v.S...)
 	}
 	return append(b, tagNull)
 }
@@ -121,6 +140,30 @@ func readValue(b []byte, off int) (types.Value, int, error) {
 		off += 4
 		loc := time.FixedZone("", int(offSec))
 		return types.Time(time.Unix(0, nanos).In(loc)), off, nil
+	case tagVector:
+		if off+10 > len(b) {
+			return types.Null, off, fmt.Errorf("vector 越界")
+		}
+		id := int64(binary.LittleEndian.Uint64(b[off:]))
+		off += 8
+		dim := int(binary.LittleEndian.Uint16(b[off:]))
+		off += 2
+		return types.VectorRef(id, dim), off, nil
+	case tagVectorTxt:
+		if off+4 > len(b) {
+			return types.Null, off, fmt.Errorf("vector 文本长度越界")
+		}
+		n := int(binary.LittleEndian.Uint32(b[off:]))
+		off += 4
+		if off+n > len(b) {
+			return types.Null, off, fmt.Errorf("vector 文本内容越界")
+		}
+		s := string(b[off : off+n])
+		dim := 0
+		if v, err := types.ParseVector(s); err == nil {
+			dim = len(v)
+		}
+		return types.VectorLiteral(s, dim), off + n, nil
 	}
 	return types.Null, off, fmt.Errorf("未知的值 tag %d", tag)
 }

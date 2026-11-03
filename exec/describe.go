@@ -114,6 +114,8 @@ func tableScopeOf(cat *catalog.Catalog, t *catalog.Table, alias string) Schema {
 			Type:      c.Type(),
 			TableOID:  oid,
 			AttNum:    int16(i + 1),
+			TableID:   t.ID,
+			ColID:     c.ID,
 		}
 	}
 	return sc

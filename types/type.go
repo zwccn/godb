@@ -24,8 +24,25 @@ func (t Type) String() string {
 
 func (t Type) IsNumeric() bool { return t.Kind == KInt || t.Kind == KFloat }
 
+// Dim 返回向量类型的维度；非向量返回 0。
+//
+// 维度存在 Len 里（和 varchar 的长度共用一个字段）——两者不会同时出现：
+// vector 没有字符长度，varchar 没有维度。
+func (t Type) Dim() int {
+	if t.Kind != KVector {
+		return 0
+	}
+	return t.Len
+}
+
 // TypeOf 返回值的自然类型。
-func TypeOf(v Value) Type { return Type{Kind: v.K, Name: v.K.String()} }
+func TypeOf(v Value) Type {
+	if v.K == KVector {
+		// 维度是类型的一部分：vector(3) 与 vector(768) 不能当成同一个类型
+		return Type{Kind: KVector, Name: fmt.Sprintf("vector(%d)", v.VecDim()), Len: v.VecDim()}
+	}
+	return Type{Kind: v.K, Name: v.K.String()}
+}
 
 // LiteralType 返回「字面量」的类型。
 //
@@ -79,6 +96,16 @@ func ParseType(name string, args []int) (Type, error) {
 	case "interval":
 		// interval：I=纳秒、z=月数（见 types.Interval）
 		t = Type{Kind: KInterval, Name: "interval"}
+	case "vector":
+		// 维度必填：pgvector 允许无维度的 vector（不校验），但那会让
+		// 「插进去 768 维、查的时候按 512 维算」变成运行时才发现的错误。
+		if len(args) == 0 || args[0] <= 0 {
+			return Type{}, fmt.Errorf("vector dimension must be between 1 and %d", MaxVectorDim)
+		}
+		if args[0] > MaxVectorDim {
+			return Type{}, fmt.Errorf("vector dimension %d exceeds the maximum of %d", args[0], MaxVectorDim)
+		}
+		t = Type{Kind: KVector, Name: fmt.Sprintf("vector(%d)", args[0]), Len: args[0]}
 	case "oid", "xid", "cid", "tid", "regproc", "regprocedure", "regoper", "regoperator":
 		t = Type{Kind: KInt, Name: n}
 	case "regclass", "regtype", "regnamespace", "regrole", "regconfig", "regdictionary":

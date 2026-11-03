@@ -232,9 +232,13 @@ func (l *lexer) next() (Token, error) {
 		return Token{Kind: QIdent, Text: b.String(), Line: startLine, Col: startCol}, nil
 	}
 
-	// 三字符运算符（正则取反）
+	// 三字符运算符（正则取反、向量距离）
+	//
+	// 必须排在双字符之前：`<=>` 若先被切成 `<=` + `>`，语法上是合法表达式
+	// （`a <= (>) b` 会在后面报错），错误信息会指到无关的位置。
 	if l.pos+2 < len(l.src) {
-		if tri := string([]rune{l.peekAt(0), l.peekAt(1), l.peekAt(2)}); tri == "!~*" {
+		switch tri := string([]rune{l.peekAt(0), l.peekAt(1), l.peekAt(2)}); tri {
+		case "!~*", "<->", "<=>", "<#>":
 			l.advance()
 			l.advance()
 			l.advance()

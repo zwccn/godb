@@ -744,3 +744,28 @@ func TestCheckpointWideRowsAreNotTiny(t *testing.T) {
 		t.Fatalf("宽行表（约 375KB / 250 行）只改 1 行就重写了 %d 字节 —— 小表判据又退回用行数估算了", got-base)
 	}
 }
+
+// ADD COLUMN 之后重启，行数必须不变。
+//
+// 曾经的实现先在 ALTER 开头调 CompactRows() 把带空洞的行压紧（槽位号整体前移），
+// 之后才追加新列 —— 但 ADD COLUMN 刻意不重写快照（见上一个用例），WAL 里更早的
+// DELETE / UPDATE 记录还带着旧槽位号，重放就落到错的行上。
+// 实测表现：`INSERT 3 行 → 删中间一行 → ADD COLUMN → 更新最后一行 → 重启`
+// 之后表里多出一行。
+func TestAddColumnWithHolesSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	d := openDir(t, dir)
+	s := "s"
+	run(t, d, s, `CREATE TABLE h (id INT, v TEXT)`)
+	run(t, d, s, `INSERT INTO h VALUES (1,'a'),(2,'b'),(3,'c')`)
+	run(t, d, s, `DELETE FROM h WHERE id = 2`)
+	run(t, d, s, `ALTER TABLE h ADD COLUMN note TEXT`)
+	run(t, d, s, `UPDATE h SET note = 'z' WHERE id = 3`)
+	assertRows(t, run(t, d, s, `SELECT count(*) FROM h`), []string{"2"})
+	d.Close()
+
+	d2 := openDir(t, dir)
+	defer d2.Close()
+	assertRows(t, run(t, d2, s, `SELECT count(*) FROM h`), []string{"2"})
+	assertRows(t, run(t, d2, s, `SELECT id, note FROM h ORDER BY id`), []string{"1|<nil>", "3|z"})
+}

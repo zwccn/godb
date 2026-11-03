@@ -1880,6 +1880,13 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   line-height: 15px;
   text-align: center;
 }
+/* 基准进度：和待处理计数同一个形状，但用主色区分语义 ——
+   黄色是「有事等你处理」，蓝色是「正在忙，你不用管」。 */
+.badge.bench-badge {
+  background: var(--accent-soft-bg);
+  color: var(--accent);
+  margin-left: 4px;
+}
 
 .drawer {
   position: fixed;
@@ -3781,6 +3788,7 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
 /* 放在 textarea 正下方：拖动改的是文本框高度，示例 chip 跟着下移，观感和
    「拽着输入框底边」一致。7px 高但热区靠 padding 撑到 11px，好点中。 */
 .editor-resize {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3789,23 +3797,65 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
   cursor: ns-resize;
   background: transparent;
   touch-action: none;
-  /* 一条极淡的分割线：让「编辑器到哪结束」有明确边界，中间的短条才是拖手 */
+  /* 常态是一条极淡的分割线：让「编辑器到哪结束」有明确边界。
+     亮起来的那条交给 ::before —— border 没法做渐变。 */
   border-top: 1px solid var(--border-soft);
 }
 
+/* 鼠标移上来才浮现的渐变线：中段亮、两端渐隐，像是给分隔处「点了灯」。
+   用 opacity 淡入而不是改 border 颜色 —— 鼠标扫过时不会「啪」一下闪，
+   也不参与布局（绝对定位，1px 高，盖在常态那条线上）。 */
+.editor-resize::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 1px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .18s ease;
+  /* 中间实、两端虚：实色只占中间 1/5，剩下的交给渐变淡出。
+     整条线一直有（下面那层 border 撑着），亮起来的只是中段 —— 参考图那种
+     「一段光柱」的观感，靠的就是「整条淡淡的、中间突然亮」。 */
+  background: linear-gradient(90deg,
+    transparent 8%,
+    var(--accent) 38%,
+    var(--accent) 62%,
+    transparent 92%);
+}
+
+.editor-resize:hover::before,
+.editor-resizing .editor-resize::before { opacity: .9; }
+
+/* 拖手：常态是一小段浅色短条（提示「这儿能拖」），悬停时收成一颗胶囊，
+   里面两道主色短横当抓手 —— 比单纯加宽更像「可以握住的东西」。 */
 .editor-resize::after {
   content: "";
   width: 36px;
   height: 3px;
   border-radius: 2px;
   background: var(--border-hover);
-  transition: background .12s ease, width .12s ease;
+  transition: width .16s ease, height .16s ease, border-radius .16s ease,
+    background-color .16s ease, box-shadow .16s ease;
 }
 
 .editor-resize:hover::after,
 .editor-resizing .editor-resize::after {
-  background: var(--accent);
-  width: 52px;
+  width: 44px;
+  height: 13px;
+  border-radius: 7px;
+  /* 底色取编辑器底色：胶囊看着像从线上「掏」出来的，不抢主体 */
+  background-color: var(--bg-1);
+  border: 1px solid var(--border-hover);
+  box-shadow: 0 1px 6px var(--shadow-color);
+  /* 两道短横 = 抓手纹理，颜色跟主色走（用背景图叠两层，省掉额外 DOM） */
+  background-image:
+    linear-gradient(var(--accent), var(--accent)),
+    linear-gradient(var(--accent), var(--accent));
+  background-size: 13px 1.5px, 13px 1.5px;
+  background-position: center calc(50% - 3px), center calc(50% + 3px);
+  background-repeat: no-repeat;
 }
 
 /* 拖动过程中锁住光标与文本选中，鼠标划过页面别变成选字 */
@@ -4412,16 +4462,81 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   flex-direction: column;
   background: var(--bg-1);
 }
+/* 竖向拖宽条：跟编辑器与结果区之间那条是同源做法，只是转了 90° ——
+   常态只有一条极淡的边界，鼠标移上来中段亮起渐变柱、拖手从短条收成胶囊。
+   原来悬停是整条 7px 涂成淡蓝，看着像「一条色带」而不是「一处可抓的地方」。 */
 .map-grip {
   position: absolute;
   left: -3px;
   top: 0;
   bottom: 0;
   width: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: col-resize;
+  touch-action: none;
   z-index: 2;
 }
-.map-grip:hover, .map-grip.drag { background: var(--accent-soft-bg); }
+
+/* 渐变柱：1px 宽，正好压在 .map-rail 的 border-left 上。left:3px 是相对拖宽条
+   自身（左边超出 rail 3px）算出来的位置，别改成 0。 */
+.map-grip::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .18s ease;
+  background: linear-gradient(180deg,
+    transparent 8%,
+    var(--accent) 38%,
+    var(--accent) 62%,
+    transparent 92%);
+}
+
+.map-grip:hover::before,
+.map-grip.drag::before { opacity: .9; }
+
+/* 拖手：竖向版本，尺寸是横版的转置（3×36 → 13×44），抓手纹理也从
+   「两道横线上下排」变成「两道竖线左右排」。 */
+.map-grip::after {
+  content: "";
+  /* 拖宽条本身只有 7px 宽，胶囊 13px 必须拒绝收缩 —— 否则 flex 会把它压回 5px
+     （13 - 两侧各 1px 边框 = 5，正是「看着没变大」的原因）。 */
+  flex: 0 0 auto;
+  /* 盖住竖线：::before 是绝对定位、::after 在文档流里，不这样写的话那条渐变线
+     会从胶囊正中间穿过去，胶囊看着像被劈成两半（编辑器那条是横的，线走胶囊上沿，
+     碰巧没这问题）。 */
+  position: relative;
+  z-index: 1;
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  background: var(--border-hover);
+  transition: width .16s ease, height .16s ease, border-radius .16s ease,
+    background-color .16s ease, box-shadow .16s ease;
+}
+
+.map-grip:hover::after,
+.map-grip.drag::after {
+  width: 13px;
+  height: 44px;
+  border-radius: 7px;
+  /* 底色取右栏底色：胶囊看着像从边界里「掏」出来的 */
+  background-color: var(--bg-1);
+  border: 1px solid var(--border-hover);
+  box-shadow: 0 1px 6px var(--shadow-color);
+  background-image:
+    linear-gradient(var(--accent), var(--accent)),
+    linear-gradient(var(--accent), var(--accent));
+  background-size: 1.5px 13px, 1.5px 13px;
+  background-position: calc(50% - 3px) center, calc(50% + 3px) center;
+  background-repeat: no-repeat;
+}
 .pm-side {
   flex: 1 1 auto;
   min-height: 0;
@@ -4812,17 +4927,17 @@ html[data-theme="steel"] .ctx-menu {
   .vd-stat { padding: 6px 8px; }
 }
 
-/* ---------- 基准测试 ---------- */
-.bench .bench-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
-.bench .bench-intro {
-  max-width: 860px;
+/* ---------- 基准测试（监控面板第 5 页） ---------- */
+/* 原来是个独立全屏页，自带 .bench-body 负责滚。收进 Tab 后滚动交给 .mon-body，
+   这里只剩两件事：卡片收窄居中（铺满 1600px 的话一行字要横跨半个屏幕才读得完）、
+   卡片头跟内容左右对齐。 */
+[data-page="bench"] .mon-card {
+  width: 100%;
+  max-width: 900px;
   margin: 0 auto;
-  padding: 18px 20px 28px;
 }
+[data-page="bench"] .mon-card-head { padding: 9px 18px; }
+[data-page="bench"] .bench-intro { padding: 16px 18px 18px; }
 .bench-note { margin: 0 0 10px; font-size: calc(12.5px * var(--fs)); line-height: 1.7; }
 .bench-note code {
   font-family: var(--mono);
@@ -4845,10 +4960,70 @@ html[data-theme="steel"] .ctx-menu {
   font-family: var(--mono);
 }
 
-.bench-result {
-  max-width: 860px;
-  margin: 0 auto;
-  padding: 4px 20px 32px;
+/* 跑起来才出现的进度块。四件事：哪一步、这一步内部到哪、整体几成、花了多久。
+   光有一个百分比不够 —— 一个场景三分钟，百分比本来就不会动。 */
+.bench-run { margin-top: 14px; max-width: 620px; }
+.bench-run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: calc(12.5px * var(--fs));
+}
+.bench-run-head b { font-weight: 500; color: var(--text); }
+/* 呼吸点：页面每秒刷新一次，但这条一直在动 —— 「还在跑」得有连续的证据 */
+.bench-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+  animation: bench-pulse 1.1s ease-in-out infinite;
+}
+@keyframes bench-pulse {
+  0%, 100% { opacity: .25; transform: scale(.75); }
+  50% { opacity: 1; transform: scale(1); }
+}
+.bench-run-detail {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bench-run-pct {
+  margin-left: auto;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.bench-bar {
+  margin-top: 7px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.bench-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-soft-text));
+  transition: width .45s ease;
+}
+.bench-run-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
+}
+
+[data-page="bench"] .bench-result {
+  padding: 12px 18px 18px;
 }
 .bench-cmp {
   color: var(--text-3);

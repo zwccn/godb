@@ -91,6 +91,10 @@ func OIDByName(name string) int32 {
 		return OIDFloat8
 	case "numeric", "decimal":
 		return OIDNumeric
+	case "vector":
+		// 首期不注册自定义 OID：按 text 下发，值编码成 "[0.1,0.2]"。
+		// 好处是 psql / Navicat / JDBC 都能直接看到值，不会因为「未知 OID」报错。
+		return OIDText
 	case "date":
 		return OIDDate
 	case "time", "time without time zone":

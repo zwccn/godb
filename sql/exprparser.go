@@ -61,7 +61,10 @@ func (p *parser) parseComparison() (Expr, error) {
 		if t.Kind == Punct {
 			op := ""
 			switch t.Text {
-			case "=", "<", ">", "<=", ">=", "<>", "!=", "~", "~*", "!~", "!~*":
+			case "=", "<", ">", "<=", ">=", "<>", "!=", "~", "~*", "!~", "!~*",
+				// 向量距离算子（pgvector 命名）：L2 / 余弦 / 负内积。
+				// 优先级与 < > 同为「比较级」，和 pgvector 一致。
+				"<->", "<=>", "<#>":
 				op = t.Text
 			}
 			if op != "" {

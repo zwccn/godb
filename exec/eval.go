@@ -29,6 +29,10 @@ type ColInfo struct {
 	// —— 全 0 时它把数据网格设成只读（能看不能改）。
 	TableOID int32
 	AttNum   int16
+	// 这一列所属表的 ID 与列 ID（catalog 里的稳定编号）。
+	// 向量列文件按它们命名，RENAME 不影响；表达式列与派生列保持 0。
+	TableID int64
+	ColID   int64
 }
 
 // Schema 是一组列。
@@ -86,6 +90,9 @@ type compileCtx struct {
 
 	// planner 非 nil 时允许在表达式里编译子查询（标量子查询）。
 	planner *Planner
+	// vec 非 nil 时可以在表达式里读取列文件里的向量（距离算子）。
+	// 为 nil 时只能算内联向量，槽位引用会明确报错。
+	vec VecSource
 	// outerScopes 是子查询能看到的层层外层作用域（由外到内），
 	// 用于解析相关子查询里对上层列的引用。
 	outerScopes []outerScope
@@ -122,6 +129,13 @@ func Compile(e sql.Expr, sc Schema) (Eval, error) {
 func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 	if e == nil {
 		return nil, fmt.Errorf("empty expression")
+	}
+	// 向量来源：只要有 planner 就有事务，也就能读列文件。
+	// 在这里统一注入，比让每个 &compileCtx{...} 都记得传一遍可靠 ——
+	// 漏掉某处的表现是「距离算子在某些语句里报 vector is not wired」，
+	// 那是很难从报错反推的。
+	if c.vec == nil && c.planner != nil && c.planner.Tx != nil {
+		c.vec = c.planner.Tx.VecSource()
 	}
 	// 聚合后模式：先尝试按整棵子树匹配组键或聚合结果
 	if c.postAgg {
@@ -183,6 +197,11 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		return &colEval{idx: idx, t: t}, nil
 
 	case *sql.Binary:
+		// 向量距离单独走一条编译路径：两侧都要按「向量」取数（常量预解析、
+		// 列引用绑定 VecColumn），用通用的 binEval 装不下这个上下文。
+		if isVecDistOp(n.Op) {
+			return compileVecDist(n, c)
+		}
 		l, err := compile(n.L, c)
 		if err != nil {
 			return nil, err

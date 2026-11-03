@@ -22,6 +22,7 @@ const (
 	KTime
 	KDecimal  // NUMERIC：S 存规范十进制文本，运算精确
 	KInterval // I = 纳秒（天/时/分/秒），z = 月数（含年*12）
+	KVector   // 向量：I = .vec 槽位号（<0 表示未落盘的内联字面量，S 存文本），z = 维度
 )
 
 func (k Kind) String() string {
@@ -40,6 +41,8 @@ func (k Kind) String() string {
 		return "numeric"
 	case KInterval:
 		return "interval"
+	case KVector:
+		return "vector"
 	case KNull:
 		return "unknown"
 	}
@@ -86,6 +89,48 @@ func Time(t time.Time) Value {
 func Interval(months, nanos int64) Value {
 	return Value{K: KInterval, I: nanos, z: int16(months)}
 }
+
+// vecInlineID 表示「这个向量还没有槽位」，数据在 S 里。
+//
+// 两个来源会用到它：SQL 字面量 `'[1,2]'::vector`，以及刚从文本转换来、
+// 还没被写入 .vec 的值。凡是持有存储上下文的地方（写入、投影）都应该把它
+// 换成 VectorRef；换不掉的地方会显示成 `[vector:id]` 或报错，不会静默出错。
+const vecInlineID int64 = -1
+
+// VectorRef 构造一个引用 .vec 槽位的向量值。
+//
+// Value 只有 32 字节，装不下 3 KB 的向量，所以真实数据在列文件里，
+// 这里只存槽位号与维度。dim 超过 int16 上限的类型错误由 ParseType 拦住。
+func VectorRef(id int64, dim int) Value {
+	if id < 0 {
+		id = 0
+	}
+	return Value{K: KVector, I: id, z: int16(dim)}
+}
+
+// VectorLiteral 构造一个内联向量值（尚未落盘）。text 是规范化后的文本。
+func VectorLiteral(text string, dim int) Value {
+	return Value{K: KVector, I: vecInlineID, z: int16(dim), S: text}
+}
+
+// VecDim 返回向量维度（非向量返回 0）。
+func (v Value) VecDim() int {
+	if v.K != KVector {
+		return 0
+	}
+	return int(v.z)
+}
+
+// VecID 返回 .vec 槽位号；内联字面量返回 ok=false。
+func (v Value) VecID() (int64, bool) {
+	if v.K != KVector || v.I == vecInlineID {
+		return 0, false
+	}
+	return v.I, true
+}
+
+// IsVecInline 判断这个向量是否还没落盘。
+func (v Value) IsVecInline() bool { return v.K == KVector && v.I == vecInlineID }
 
 // Months 返回 interval 的月数部分。
 func (v Value) Months() int64 {
@@ -151,6 +196,13 @@ func (v Value) TextForm() string {
 		return v.S
 	case KInterval:
 		return intervalText(v.Months(), v.I)
+	case KVector:
+		if v.I == vecInlineID {
+			return v.S
+		}
+		// 兜底：拿到这里说明某条路径没有经过存储层，看不到向量内容。
+		// 有意保留成 `[vector:id]` 这种扎眼的形状 —— 漏改的地方会立刻在结果里暴露。
+		return "[vector:" + strconv.FormatInt(v.I, 10) + "]"
 	case KText:
 		return v.S
 	}
@@ -250,6 +302,14 @@ func Compare(a, b Value) (int, error) {
 			return 0, nil
 		}
 	}
+	if a.K == KVector || b.K == KVector {
+		if a.K != b.K {
+			return 0, fmt.Errorf("operator does not exist: %s = %s", a.K, b.K)
+		}
+		// 向量的「字典序」没有任何语义，直接比大小还要把两侧 float32 都读出来。
+		// 明确拒绝，而不是给出一个看起来能用、实际毫无意义的结果。
+		return 0, fmt.Errorf("vector values cannot be compared directly; use a distance operator (<->, <=> or <#>)")
+	}
 	if a.IsNumeric() && b.IsNumeric() {
 		// 有 decimal 参与时走精确比较，避免 float 精度把 0.1+0.2 判成不等于 0.3
 		if a.K == KDecimal || b.K == KDecimal {
@@ -317,6 +377,10 @@ func Same(a, b Value) bool {
 		return a.I == b.I && a.z == b.z
 	case KDecimal:
 		return a.S == b.S
+	case KVector:
+		// 槽位号就是身份（同一槽位的内容不会被改写两次后仍指旧行），
+		// 内联字面量按文本比。
+		return a.I == b.I && a.z == b.z && (a.I != vecInlineID || a.S == b.S)
 	}
 	return false
 }
@@ -374,6 +438,16 @@ func AppendKey(b *strings.Builder, v Value) {
 		b.WriteString(strconv.FormatInt(v.I, 10))
 	case KDecimal:
 		b.WriteString(v.S)
+	case KVector:
+		// 内联字面量按文本，已落盘的按槽位号 —— 槽位号唯一标识内容，
+		// 所以同一个向量无论写几次，键都一样。
+		if v.I == vecInlineID {
+			b.WriteString("i")
+			b.WriteString(v.S)
+		} else {
+			b.WriteString("r")
+			b.WriteString(strconv.FormatInt(v.I, 10))
+		}
 	}
 	b.WriteByte('|')
 }
@@ -402,6 +476,14 @@ func (v Value) MarshalJSON() ([]byte, error) {
 	case KDecimal:
 		// 用字符串持久化：float 会丢精度，{"$n":"..."} 保证 round-trip 精确
 		return json.Marshal(map[string]string{"$n": v.S})
+	case KVector:
+		// 只存引用：向量的 float32 在 .vec 列文件里，快照里再存一份等于把
+		// 备份体积翻倍（1000 万 × 768 维是 28.6 GB）。
+		// 所以**备份/回收站必须连 .vec 文件一起拷**，否则恢复出一堆空引用。
+		if v.I == vecInlineID {
+			return json.Marshal(map[string]string{"$vl": v.S, "$d": strconv.Itoa(int(v.z))})
+		}
+		return json.Marshal(map[string]string{"$vr": strconv.FormatInt(v.I, 10), "$d": strconv.Itoa(int(v.z))})
 	}
 	return []byte("null"), nil
 }
@@ -435,6 +517,20 @@ func (v *Value) UnmarshalJSON(b []byte) error {
 		}
 		if n, ok := m["$n"]; ok {
 			*v = Decimal(n)
+			return nil
+		}
+		if r, ok := m["$vr"]; ok {
+			id, err := strconv.ParseInt(r, 10, 64)
+			if err != nil {
+				return fmt.Errorf("cannot decode vector ref %q", r)
+			}
+			dim, _ := strconv.Atoi(m["$d"])
+			*v = VectorRef(id, dim)
+			return nil
+		}
+		if l, ok := m["$vl"]; ok {
+			dim, _ := strconv.Atoi(m["$d"])
+			*v = VectorLiteral(l, dim)
 			return nil
 		}
 		return fmt.Errorf("cannot decode value %s", s)
@@ -490,6 +586,10 @@ func (v Value) Interface() interface{} {
 		return v.S
 	case KInterval:
 		return intervalText(v.Months(), v.I)
+	case KVector:
+		// 前端直出的 JSON：内联字面量有内容，已落盘的没有（Phase 1 由
+		// 投影层在存储上下文里格式化，见 Phase1 设计文档 4.4）。
+		return v.TextForm()
 	}
 	return nil
 }

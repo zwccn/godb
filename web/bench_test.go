@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,7 +9,7 @@ import (
 	"godb/lock"
 )
 
-// 基准核心逻辑的轻量单测：把规模压到 2000 行，跑通全部 7 个场景，
+// 基准核心逻辑的轻量单测：把规模压到 2000 行，跑通全部 8 个场景，
 // 只断言「不报错 + 吞吐为正 + 历史能读写」。真跑 100 万行的耗时不是单测该承担的。
 func benchTestDB(t *testing.T) *db.DB {
 	t.Helper()
@@ -47,8 +48,8 @@ func TestBenchScenariosRun(t *testing.T) {
 	if st.result == nil {
 		t.Fatal("result 为空")
 	}
-	if len(st.result.Scenarios) != 7 {
-		t.Fatalf("应跑 7 个场景，实际 %d", len(st.result.Scenarios))
+	if len(st.result.Scenarios) != 8 {
+		t.Fatalf("应跑 8 个场景，实际 %d", len(st.result.Scenarios))
 	}
 	for _, sc := range st.result.Scenarios {
 		if sc.Error != "" {
@@ -62,10 +63,17 @@ func TestBenchScenariosRun(t *testing.T) {
 	if len(st.result.Batches) != len(benchBatchSizes) {
 		t.Fatalf("批量插入档位应 %d 个，实际 %d", len(benchBatchSizes), len(st.result.Batches))
 	}
+	// 逐条提交场景必须真的报出 fsync 次数：这一项的意义就是「落盘 QPS」，
+	// 文案退化成静态字符串时，数字就悄悄失去依据了。
+	for _, sc := range st.result.Scenarios {
+		if sc.Name == "逐条提交插入" && !strings.Contains(sc.Commit, "fsync") {
+			t.Fatalf("逐条提交插入应报实测 fsync 次数，实际 commit=%q", sc.Commit)
+		}
+	}
 	// 测完即删
 	for _, tb := range d.Tables() {
-		if tb.Name == benchTable {
-			t.Fatalf("基准表应已删除，但仍存在")
+		if tb.Name == benchTable || tb.Name == benchCommitTable {
+			t.Fatalf("基准表 %s 应已删除，但仍存在", tb.Name)
 		}
 	}
 }

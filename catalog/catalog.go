@@ -23,6 +23,13 @@ type Column struct {
 	Default    string `json:"default,omitempty"`
 	// Comment 是 COMMENT ON COLUMN 写的注释（落到 pg_description.objsubid）。
 	Comment string `json:"comment,omitempty"`
+
+	// ID 是列在表内的稳定编号，用来命名磁盘上的列文件（t000123.c02.vec）。
+	//
+	// 它和 attnum 不是一回事：attnum 目前是「数组下标 + 1」，DROP COLUMN 之后
+	// 后面的列会前移、attnum 全变，用它命名文件会让向量读到别的列的数据。
+	// 这个 ID 只增不复用，删列留下空洞，和 PostgreSQL 的 attnum 语义一致。
+	ID int64 `json:"id,omitempty"`
 }
 
 // Index 是一条用户建的二级索引。
@@ -92,6 +99,26 @@ func (t *Table) Rebuild() {
 	t.colIdx = make(map[string]int, len(t.Columns))
 	for i, c := range t.Columns {
 		t.colIdx[strings.ToLower(c.Name)] = i
+	}
+	t.EnsureColumnIDs()
+}
+
+// EnsureColumnIDs 给还没有 ID 的列补一个（读旧版 catalog.json、或新建列之后调用）。
+//
+// 分配规则是「表内只增」：每次都从当前最大值往上加，删掉的号不回收 ——
+// 列文件按 ID 命名，回收号会让新列直接读到旧列留下的数据。
+func (t *Table) EnsureColumnIDs() {
+	var max int64
+	for _, c := range t.Columns {
+		if c.ID > max {
+			max = c.ID
+		}
+	}
+	for _, c := range t.Columns {
+		if c.ID == 0 {
+			max++
+			c.ID = max
+		}
 	}
 }
 

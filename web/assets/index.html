@@ -66,10 +66,9 @@ try {
          它在编辑器时是「当前」，进了监控就换成「监控」亮 —— 和页面级 Tab 同一套选中语言。 -->
     <button id="btnHome" class="btn btn-ghost on" title="回到编辑器（关掉监控 / 设置）">首页</button>
     <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
-    <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务">
-      <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span>
+    <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务 / 基准">
+      <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span><span id="benchBadge" class="badge bench-badge hidden"></span>
     </button>
-    <button id="btnBench" class="btn btn-ghost" title="基准：单条/批量插入、更新、删除、查询的吞吐，作为性能参照">基准</button>
     <button id="btnSettings" class="btn btn-ghost">设置</button>
   </div>
 </header>
@@ -219,6 +218,7 @@ try {
     <button type="button" class="mon-nav-tab" data-page="diag" role="tab" aria-selected="false">诊断</button>
     <button type="button" class="mon-nav-tab" data-page="storage" role="tab" aria-selected="false">存储</button>
     <button type="button" class="mon-nav-tab" data-page="map" role="tab" aria-selected="false">空间地图</button>
+    <button type="button" class="mon-nav-tab" data-page="bench" role="tab" aria-selected="false">基准</button>
   </div>
 
   <div class="mon-body" id="monBody">
@@ -356,6 +356,70 @@ try {
           <div class="pm-side" id="pmSide"></div>
         </div>
       </div>
+    </div>
+
+    <!-- 基准：原来是独立的第五个全屏页，和监控/设置并排；现在收进来当第 5 页。
+         理由：它跟前面四页是同一类东西（都在回答「这台库现在怎么样」），
+         只是时间尺度不同 —— 前四页是「此刻」，它是「性能基线」。
+         但它是一次几分钟的异步任务，人切走干活时得能看见进度，所以顶栏「监控」
+         按钮上挂了百分比 badge（任务跑着时点它就落到这一页）。
+         一次跑几分钟（灌 100 万行 + 7 个场景各 3 轮），结果存
+         data/bench-history.json 供「本次 vs 上次」对比。 -->
+    <div class="mon-page hidden" data-page="bench">
+      <section class="mon-card bench-card">
+        <div class="mon-card-head">
+          基准测试<span class="mon-sub">在临时表上跑 7 个场景，量「每秒多少条」</span>
+        </div>
+        <div class="bench-intro">
+          <p class="bench-note">
+            在 <code>__bench_items</code> 表（<b id="benchScale">1,000,000</b> 行）上跑 7 个场景，测「每秒多少条」，
+            作为后续版本性能的参照，也喂给执行计划做对照。测完自动删表，不污染你的库。
+            当前库 <b id="benchDB">godb</b>，每个场景 3 轮取中位数。
+          </p>
+          <p class="bench-note dim">
+            数字的可比性靠三条约定：每个场景写清提交粒度；先预热一轮不计入；3 轮取中位数
+            （后台落盘鼓包不会带偏均值）。批量插入会扫 100 / 500 / 1000 / 5000 四个档位。
+            整套通常要几分钟，中途可以点「停止」；跑着也能切走干活 ——
+            顶栏「监控」按钮上会显示百分比，点它回到这一页。
+          </p>
+          <div class="bench-actions">
+            <button id="btnBenchStart" class="btn btn-primary">开始基准</button>
+            <button id="btnBenchCancel" class="btn btn-sm hidden">停止</button>
+            <span class="bench-progress" id="benchProgress"></span>
+          </div>
+          <!-- 只有一行「正在跑 批量删除」的话，「这一秒什么都没变」和「卡死了」
+               看起来完全一样。所以给足四件事：在跑哪一步、这一步内部到哪、
+               整体到几成、已经花了多久。 -->
+          <div class="bench-run hidden" id="benchRun">
+            <div class="bench-run-head">
+              <i class="bench-pulse" aria-hidden="true"></i>
+              <b id="benchStep">准备中</b>
+              <span class="bench-run-detail" id="benchDetail"></span>
+              <span class="bench-run-pct" id="benchPct">0%</span>
+            </div>
+            <div class="bench-bar"><i id="benchBar"></i></div>
+            <div class="bench-run-foot">
+              <span id="benchElapsed"></span>
+              <span id="benchEta"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 结果：跑完才显示 -->
+      <section class="mon-card bench-result hidden" id="benchResult">
+        <div class="mon-card-head">结果<span class="mon-sub">3 轮取中位数</span></div>
+        <div class="bench-cmp" id="benchCmp"></div>
+        <table class="bench-table">
+          <thead>
+            <tr>
+              <th>场景</th><th>提交粒度</th><th>动了多少行</th><th class="num">条/秒</th><th>对比上次</th>
+            </tr>
+          </thead>
+          <tbody id="benchRows"></tbody>
+        </table>
+        <div class="bench-batch" id="benchBatch"></div>
+      </section>
     </div>
 
     <div class="mon-page hidden" data-page="diag">
@@ -616,54 +680,7 @@ try {
   </div>
 </section>
 
-<!-- 基准测试：单条/批量插入、更新、删除、点查/范围扫描/聚合的吞吐参照。
-     一次跑几分钟（灌 100 万行 + 7 个场景各 3 轮），所以异步执行：
-     点开始秒回，下面轮询进度。结果存 data/bench-history.json 供「本次 vs 上次」对比。 -->
-<section id="benchPanel" class="mon bench hidden" aria-label="基准测试">
-  <div class="mon-head">
-    <div class="mon-title">
-      基准测试
-      <span class="mon-db" id="benchDB">godb</span>
-      <span class="mon-updated">数据规模 <span id="benchScale">1,000,000</span> 行 · 每个场景 3 轮取中位数</span>
-    </div>
-    <div class="mon-head-actions">
-      <button id="btnBenchClose" class="icon-btn" title="关闭（Esc）">×</button>
-    </div>
-  </div>
-
-  <div class="bench-body">
-    <!-- 说明 + 开始按钮 + 进度：默认只显示这一块 -->
-    <div class="bench-intro">
-      <p class="bench-note">
-        在 <code>__bench_items</code> 表（100 万行）上跑 7 个场景，测「每秒多少条」，
-        作为后续版本性能的参照，也喂给执行计划做对照。测完自动删表，不污染你的库。
-      </p>
-      <p class="bench-note dim">
-        数字的可比性靠三条约定：每个场景写清提交粒度；先预热一轮不计入；3 轮取中位数
-        （后台落盘鼓包不会带偏均值）。批量插入会扫 100 / 500 / 1000 / 5000 四个档位。
-      </p>
-      <div class="bench-actions">
-        <button id="btnBenchStart" class="btn btn-primary">开始基准</button>
-        <button id="btnBenchCancel" class="btn btn-sm hidden">停止</button>
-        <span class="bench-progress" id="benchProgress"></span>
-      </div>
-    </div>
-
-    <!-- 结果：跑完才显示 -->
-    <div class="bench-result hidden" id="benchResult">
-      <div class="bench-cmp" id="benchCmp"></div>
-      <table class="bench-table">
-        <thead>
-          <tr>
-            <th>场景</th><th>提交粒度</th><th>动了多少行</th><th class="num">条/秒</th><th>对比上次</th>
-          </tr>
-        </thead>
-        <tbody id="benchRows"></tbody>
-      </table>
-      <div class="bench-batch" id="benchBatch"></div>
-    </div>
-  </div>
-</section>
+<!-- 基准测试已并入监控面板第 5 页（data-page="bench"），不再单独占一个全屏页。 -->
 
 <!-- 帮助：示例查询 / 支持的语法 / 快捷键。
      原来这些挤在侧栏底部和编辑器下面，占地方又只能看一半，挪进来一次讲清楚。 -->

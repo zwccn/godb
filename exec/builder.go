@@ -1556,6 +1556,9 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 			if idx, _, err := sc.Resolve(ref.Table, ref.Name); err == nil {
 				out[i].TableOID = sc[idx].TableOID
 				out[i].AttNum = sc[idx].AttNum
+				// 向量列还要靠这两个去列文件里取数据（槽位号本身不含列信息）
+				out[i].TableID = sc[idx].TableID
+				out[i].ColID = sc[idx].ColID
 			}
 		}
 	}
@@ -1587,7 +1590,11 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 		if !orderCovered(op, s.OrderBy) {
 			keys := make([]sortKey, 0, len(s.OrderBy))
 			for _, oi := range s.OrderBy {
-				ev, err := p.orderKey(oi, items, exprs, out, &compileCtx{sc: sc})
+				// planner 必须带上：编译距离算子时要从它拿到事务、再去读列文件。
+				// 少了它的表现是「ORDER BY e <-> '...' 报 vector search is not wired」，
+				// 而 SELECT 里同样的表达式却正常 —— 很难从报错反推。
+				ev, err := p.orderKey(oi, items, exprs, out,
+					&compileCtx{sc: sc, planner: p, outerScopes: p.outerScopes})
 				if err != nil {
 					return nil, err
 				}

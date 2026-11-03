@@ -73,6 +73,14 @@ type Store struct {
 	// 覆盖到的代次。重放时只应用代次更大的记录，避免和快照重复。
 	appliedGen  int64
 	snapshotGen int64
+
+	// 向量列文件（一列一个定长槽位文件，见 vecstore.go）。
+	// 绝大多数库一个向量列都没有，所以 vecFiles 为 nil 是常态。
+	vecMu    sync.RWMutex
+	vecFiles map[vecKey]*VecFile
+	// vecErr 记录「向量列文件打不开」的原因（不阻止启动，查询时该列按 NULL）。
+	// 由 vecMu 保护。
+	vecErr error
 	// Repaired 是启动时为对齐列结构而修复的单元格数（正常应为 0）。
 	// WAL 重放可能并发累加，所以用 atomic.Int64（兼带 32 位下的 8 字节对齐）。
 	Repaired atomic.Int64
@@ -190,6 +198,14 @@ func OpenWith(dir string, cat *catalog.Catalog, progress func(string), poolPages
 		progress("重建索引")
 	}
 	s.rebuildAll()
+	// 向量列文件跟着 catalog 打开。必须在 WAL 重放之前：重放出来的行里
+	// 是槽位引用，之后任何一次扫描都会去读这些文件。
+	//
+	// 这里不把「某列文件打不开」当致命错误（见 SyncVectorFiles 的注释）：
+	// 一个列的向量坏了不该让整个库起不来，该列按 NULL 处理。
+	if err := s.SyncVectorFiles(); err != nil {
+		return nil, err
+	}
 	// 先打开旧 WAL（不清空），写完快照后再轮转：
 	// 这样即使 Open 之后立刻崩溃，旧记录仍在，重放不会丢数据。
 	if progress != nil {
@@ -255,6 +271,7 @@ func (s *Store) closeFiles(flushPages bool) error {
 		td.closePages()
 	}
 	s.loadMu.Unlock()
+	_ = s.CloseVecFiles()
 	if s.wal != nil {
 		return s.wal.Close()
 	}
@@ -284,8 +301,15 @@ func (s *Store) Table(name string) *TableData {
 // LoadError 返回加载表文件时遇到的错误（没有则为 nil）。
 func (s *Store) LoadError() error {
 	s.loadMu.RLock()
-	defer s.loadMu.RUnlock()
-	return s.loadErr
+	err := s.loadErr
+	s.loadMu.RUnlock()
+	if err != nil {
+		return err
+	}
+	s.vecMu.RLock()
+	verr := s.vecErr
+	s.vecMu.RUnlock()
+	return verr
 }
 
 // BrokenTables 返回「表定义在、数据读不出来」的表和原因（副本）。
@@ -1819,6 +1843,27 @@ func (tx *Tx) Commit() error {
 // commitLocked 在持有 CommitMu 时完成"写日志 + 改内存"。
 // 返回本批记录的 WAL 序号（0 表示没有需要落盘的记录）。
 func (tx *Tx) commitLocked() (int64, error) {
+	// 向量物化：把内联向量写进列文件，行里只留槽位引用（见 vecmaterialize.go）。
+	//
+	// 放在这里而不是 Insert()：回滚的事务根本不该产生槽位。放在写 WAL 之前
+	// 是硬要求 —— 日志里只记 11 字节引用，不记 3 KB 的向量。
+	var vecAllocs []vecAlloc
+	if tx.st.hasVecFiles() {
+		var verr error
+		vecAllocs, verr = tx.st.materializeVectors(tx)
+		if verr != nil {
+			return 0, verr
+		}
+	}
+	// 失败路径统一回收：下面每一处 return 都可能是「槽位已分配但事务没成」。
+	// 用 defer 而不是在每个 return 前手写一遍，漏掉一处就是永久泄漏。
+	committed := false
+	defer func() {
+		if !committed && len(vecAllocs) > 0 {
+			tx.st.freeVecAllocs(vecAllocs)
+		}
+	}()
+
 	names := make([]string, 0, len(tx.ov))
 	for k := range tx.ov {
 		names = append(names, k)
@@ -2001,6 +2046,8 @@ func (tx *Tx) commitLocked() (int64, error) {
 			td.dropRow(slot)
 			td.Live--
 			td.release(slot)
+			// 行没了，它的向量槽位也没人引用了；不回收的话反复删写会一直涨文件。
+			tx.st.freeVecRow(t, old)
 		}
 		for i, slot := range c.upd {
 			old, ok := td.rowAt(slot)
@@ -2009,6 +2056,7 @@ func (tx *Tx) commitLocked() (int64, error) {
 			}
 			td.IndexUpdate(t, slot, old, c.updRows[i])
 			td.setRow(slot, c.updRows[i])
+			tx.st.freeVecReplaced(t, old, c.updRows[i])
 		}
 		for i, row := range c.ins {
 			slot := c.insSlots[i]
@@ -2054,6 +2102,11 @@ func (tx *Tx) commitLocked() (int64, error) {
 		tx.st.tableRows[key] = td.Live
 		tx.st.loadMu.Unlock()
 	}
+
+	// 走到这里行已经进内存、WAL 也已经写完 —— 事务事实上提交了。
+	// 之后再失败（比如 checkpoint 落盘失败）也不能回收向量槽位：
+	// 重放会让这些行回来，槽位一旦放回空闲位图就可能被别的行占走。
+	committed = true
 
 	tx.ov = map[string]*overlay{}
 	tx.seq = map[string]int64{}

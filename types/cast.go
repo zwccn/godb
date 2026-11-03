@@ -57,7 +57,35 @@ func Cast(v Value, t Type) (Value, error) {
 	if hasPrefixFold(t.Name, "numeric") || hasPrefixFold(t.Name, "decimal") {
 		return castDecimal(v, t)
 	}
+	// 已落盘的向量只有存储层知道内容，这里能给出正确结果的只有内联字面量。
+	// 显式拒绝比输出 `[vector:12]` 更安全：那会让一段错误文本被写进 text 列。
+	if v.K == KVector && t.Kind != KVector {
+		if v.IsVecInline() && t.Kind == KText {
+			return Text(v.S), nil
+		}
+		return Null, fmt.Errorf("cannot cast a stored vector to %s", t.String())
+	}
 	switch t.Kind {
+	case KVector:
+		switch v.K {
+		case KVector:
+			if t.Len > 0 && v.VecDim() != t.Len {
+				return Null, fmt.Errorf("vector dimension mismatch: column is %d, value has %d", t.Len, v.VecDim())
+			}
+			return v, nil
+		case KText:
+			vals, err := ParseVector(v.S)
+			if err != nil {
+				return Null, err
+			}
+			if t.Len > 0 && len(vals) != t.Len {
+				return Null, fmt.Errorf("vector dimension mismatch: column is %d, value has %d", t.Len, len(vals))
+			}
+			// 不重新格式化文本：导入 1000 万行时每行多一次 3 KB 分配就是 30 GB 垃圾。
+			// 真正落盘时由存储层解析一次并写进 .vec，之后值里只剩槽位号。
+			return VectorLiteral(v.S, len(vals)), nil
+		}
+		return Null, fmt.Errorf("cannot cast type %s to %s", v.K, t.String())
 	case KInt:
 		switch v.K {
 		case KInt:

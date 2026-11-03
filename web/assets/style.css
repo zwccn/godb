@@ -1268,6 +1268,13 @@ body {
   overflow: hidden;
   flex: 0 0 auto;
 }
+/* 多语句时的「第几条 / 共几条」。卡头和内文完全一样，只有它能把三张卡分开。 */
+.probe-idx {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+}
 .probe-head {
   display: flex;
   align-items: center;

@@ -1340,7 +1340,13 @@ function probePanel(data) {
     return box;
   }
   const stmts = splitStatements(lastSubmittedSQL || '');
-  cards.forEach((r, i) => box.appendChild(probeCard(r, i, stmts)));
+  // 执行顺序是**整块探测**的读法，不是某条语句的属性 —— 放在最前面说一次。
+  // 以前每张卡都印一遍，三条语句就是三遍一模一样的话。
+  // （「这轮读没读盘」不同，那是每条各自的实情，仍留在各自的卡里。）
+  box.appendChild(el('div', 'probe-order',
+    '执行从最内层开始，同一层的左分支跑完才轮到右分支；最上面那行最后出结果。'
+    + '左边的数字就是执行顺序，1 最先跑。'));
+  cards.forEach((r, i) => box.appendChild(probeCard(r, i, stmts, cards.length)));
   return box;
 }
 
@@ -1426,9 +1432,12 @@ function probePhaseBar(r) {
   return box;
 }
 
-function probeCard(r, idx, stmts) {
+function probeCard(r, idx, stmts, count) {
   const card = el('div', 'probe-card');
   const head = el('div', 'probe-head');
+  // 多语句时先标「第几条 / 共几条」：三张卡的标签、读法、结构全都一样，
+  // 光靠 SQL 片段区分不够 —— 它还会被截断。
+  if (count > 1) head.appendChild(el('span', 'probe-idx', (idx + 1) + ' / ' + count));
   head.appendChild(el('span', 'result-tag probe-tag', '执行探测'));
 
   const meta = [];
@@ -1437,9 +1446,11 @@ function probeCard(r, idx, stmts) {
 
   const sql = (stmts[idx] || '').trim();
   if (sql) {
-    // 探测的 SQL 是加过前缀的，展示时把 EXPLAIN ANALYZE 去掉，看的是原来那句
+    // 探测的 SQL 是加过前缀的，展示时把 EXPLAIN ANALYZE 去掉，看的是原来那句。
+    // 100 字符：70 的时候 `… GROUP BY …` 之后的 ORDER BY / LIMIT 正好看不见，
+    // 而那半句往往才是这条查询的关键。
     const shown = sql.replace(/^explain\s+(analyze\s+)?/i, '');
-    const s = el('span', 'probe-sql', shown.split('\n')[0].slice(0, 70));
+    const s = el('span', 'probe-sql', shown.split('\n')[0].slice(0, 100));
     s.title = sql;
     head.appendChild(s);
   }
@@ -1551,12 +1562,6 @@ function probeCard(r, idx, stmts) {
     card.appendChild(el('div', 'probe-empty',
       '整条查询短于本机时钟步进（' + gran + '），看不出哪个算子更贵 —— 点右上角 ? 看说明。'));
   }
-
-  // 怎么读这张表：执行顺序不是从上往下。这句话直接决定读法，所以常驻一行；
-  // 更细的两条（×N 轮、独占与累计）放在右上角的「?」里。
-  card.appendChild(el('div', 'probe-order',
-    '执行从最内层开始，同一层的左分支跑完才轮到右分支；最上面那行最后出结果。'
-    + '左边的数字就是执行顺序，1 最先跑。'));
 
   // 这轮到底读没读盘。
   //

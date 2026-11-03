@@ -2904,6 +2904,18 @@ class CDP {
       small && small.memRows === 1 && small.memBytes > 0 && small.memBytes < 256 * 1024,
       JSON.stringify(small));
 
+    /* 探测卡要说清「这轮读没读盘」。以前没读盘时界面上什么都不说，
+       于是「扫描 12 行」被当成「从磁盘读了 12 行」（真被这么问过）。
+       两种状态都算过，但两种都必须把「扫描行数」和「读盘页数」分开讲。 */
+    const ioLine = await cdp.eval(`(() => {
+      const el = document.querySelector('.probe-card .probe-order.io');
+      return el ? el.textContent : '';
+    })()`);
+    check('探测卡明确说清这轮有没有读盘，并把「扫描行数」和「读盘页数」分开',
+      (/没有磁盘读/.test(ioLine) || /从磁盘读了 [\d,]+ 页/.test(ioLine))
+      && /扫描 N 行/.test(ioLine),
+      ioLine.slice(0, 56));
+
     /* 连接算子把「规划时估多少」和「实际读到多少」并排摆出来。
        估的是**表行数**（没有列统计信息），所以「估 5 万 / 实际 19」不是算错，
        而是优化器手上只有这么多信息 —— 这正是选错连接顺序的常见原因，得让人看见。 */

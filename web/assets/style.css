@@ -1388,6 +1388,9 @@ body {
   font-size: calc(11px * var(--fs));
   line-height: 1.6;
 }
+/* 读盘总述和上面那句读法提示挨着，但它是「事实」不是「读法」——
+   提一档颜色，免得两行小字被一起略过。 */
+.probe-order.io { color: var(--text-2); }
 .probe-row {
   display: flex;
   align-items: center;

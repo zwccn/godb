@@ -1558,6 +1558,32 @@ function probeCard(r, idx, stmts) {
     '执行从最内层开始，同一层的左分支跑完才轮到右分支；最上面那行最后出结果。'
     + '左边的数字就是执行顺序，1 最先跑。'));
 
+  // 这轮到底读没读盘。
+  //
+  // 页数本来就有（时间去向的「装载表」+ 各行的 I/O 标签），但**没读盘的时候界面
+  // 上什么都不说**，于是「扫描 12 行」很容易被当成「从磁盘读了 12 行」——
+  // 真被这么问过。所以这里只在信息缺失的两种情况下补一句：
+  //   · 完全没读盘 —— 界面上一片安静，最需要说明；
+  //   · 装载表为 0 却有页读 —— 那是执行中换进来的，时间去向里没有对应段落。
+  // 装载表 > 0 时不说话：那一段自己写着「读页 6.16 ms / 449 页」，再说一遍是重复。
+  //
+  // 求和只用 selfIo*（独占），父节点的 ioPages 含着子节点的，直接加会重复计数；
+  // 装载表那一段发生在任何算子之前，单独加，不重不漏。纯前端求和，没有新增采集。
+  const disk = { pages: (r.phases && r.phases.loadPages) || 0, ns: (r.phases && r.phases.loadIoNs) || 0 };
+  for (const it of nodes) {
+    disk.pages += it.n.selfIoPages || 0;
+    disk.ns += it.n.selfIoNs || 0;
+  }
+  const loaded = (r.phases && r.phases.loadPages) || 0;
+  if (disk.pages === 0) {
+    card.appendChild(el('div', 'probe-order io',
+      '本轮没有磁盘读 —— 数据全在缓冲池里，「扫描 N 行」只是在内存里遍历，没碰盘。'));
+  } else if (loaded === 0) {
+    card.appendChild(el('div', 'probe-order io',
+      '本轮执行中从磁盘读了 ' + fmtCount(disk.pages) + ' 页，等盘 ' + fmtDur(disk.ns)
+      + '（数据当时不在缓冲池里）。上面的「扫描 N 行」是扫过的逻辑行数，和读盘页数不是一回事。'));
+  }
+
   const list = el('div', 'probe-list');
   for (const it of nodes) {
     list.appendChild(probeRow(it.n, it.depth, it.seq, total, total > 0 ? worst.n : null));

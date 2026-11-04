@@ -87,6 +87,15 @@ func (p *Planner) BuildSelect(s *sql.Select) (Operator, error) {
 	if s.SetOp != "" {
 		return p.buildSetOp(s)
 	}
+	// 逗号连接（FROM a, b WHERE a.id = b.id）里的等值条件先提升成连接条件。
+	// 不做这一步，它就只是「笛卡尔积 + 事后过滤」—— 25 亿行，先撞上 200 万行的
+	// 保护才报错。PG 两种写法给同一个计划，见 promote.go。
+	if nf, nw := p.promoteImplicitJoins(s.From, s.Where); nf != nil {
+		rewritten := *s
+		rewritten.From = nf
+		rewritten.Where = nw
+		s = &rewritten
+	}
 	// 多表连接：先把「只涉及一张表」的条件下推下去，让连接之前就把行数降下来。
 	// 不这么做的话，join 的两侧都会被完整物化，WHERE 只能在最后过滤。
 	p.planPushdown(s.From, s.Where)

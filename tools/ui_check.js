@@ -3930,6 +3930,120 @@ class CDP {
     check('模型图：加逻辑关系不会改库（外键数不变）',
       fkAfter === fkBefore, `外键 ${fkBefore} → ${fkAfter}`);
 
+    /* 逻辑层能「否认」一条外键：只影响这张图画不画，不动库。
+       开发库平时没有外键（上面刚断言 0 → 0），这里现造一对，否则没有可
+       隐藏的对象。造完立刻删掉，别把两张测试表留给下一轮。 */
+    const made = await cdp.eval(`(async () => {
+      const q = sql => fetch('/api/query', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }) }).then(r => r.json()).catch(() => null);
+      await q('DROP TABLE er_demo_child');
+      await q('DROP TABLE er_demo_parent');
+      await q('CREATE TABLE er_demo_parent (id INTEGER PRIMARY KEY)');
+      await q('CREATE TABLE er_demo_child (id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES er_demo_parent(id))');
+      await loadSchema();          // 模型图画的是 schemaCache，DDL 之后得先刷它
+      await erLoadThenRender();
+      const sch = await fetch('/api/schema').then(r => r.json());
+      return {
+        cards: document.querySelectorAll('.er-card').length,
+        fk: sch.tables.reduce((n, t) => n + (t.foreignKeys || []).length, 0),
+        lines: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
+      };
+    })()`);
+    check('模型图：为了测「否认」造出来的外键已经画成实线',
+      made.fk === fkBefore + 1 && made.lines === made.fk,
+      `${made.fk} 个外键 · ${made.lines} 条实线`);
+
+    const hid = await cdp.eval(`(() => {
+      const e = erModel.edges.find(x => x.kind === 'fk');
+      if (!e) return { ok: false };
+      const solid = () => document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length;
+      const before = solid();
+      erHideEdge(e.id);
+      return {
+        ok: true, id: e.id, name: e.child.name, before,
+        after: solid(),
+        chip: (document.querySelector('.er-hidden-chip') || {}).textContent || '',
+        stats: document.getElementById('erStats').textContent,
+        saved: erDoc.hidden.length,
+      };
+    })()`);
+    check('模型图：逻辑视图可以否认一条外键，线从图上消失',
+      hid.ok && hid.before === 1 && hid.after === 0 && hid.saved === 1,
+      hid.ok ? `${hid.before} → ${hid.after} 条实线 · 记下 ${hid.saved} 条` : '没有外键边');
+    check('模型图：隐藏之后状态栏给出「已隐藏」入口',
+      /已隐藏 1 条/.test(hid.chip || ''), hid.chip || '没有入口');
+
+    // 物理视图照画：那里问的是「库里有什么」，用户怎么看不算数。
+    await cdp.eval(`erToggleMode()`);
+    await waitFor(cdp, `erMode === 'physical'`, { label: '切到物理视图（隐藏后）', timeout: 2000 });
+    const physHid = await cdp.eval(`({
+      lines: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
+      chip: !!document.querySelector('.er-hidden-chip'),
+    })`);
+    check('模型图：隐藏只作用于逻辑视图，物理视图照旧画出这条外键',
+      physHid.lines === made.fk && !physHid.chip,
+      `${physHid.lines} 条线 / ${made.fk} 个外键 · 入口 ${physHid.chip}`);
+
+    await cdp.eval(`erToggleMode()`);
+    await waitFor(cdp, `erMode === 'logic'`, { label: '切回逻辑视图（恢复用）', timeout: 2000 });
+
+    // 恢复走真实鼠标：点状态栏入口 → 点菜单里的那条关系。
+    const chipPt = await cdp.eval(`(() => {
+      const b = document.querySelector('.er-hidden-chip');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    if (chipPt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: chipPt.x, y: chipPt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: chipPt.x, y: chipPt.y, button: 'left' });
+    }
+    const restoreOpen = await waitFor(cdp,
+      `!!document.querySelector('.er-menu .er-menu-item')`,
+      { label: '已隐藏菜单', timeout: 2000 });
+    let restored = null;
+    if (restoreOpen) {
+      const itemPt = await cdp.eval(`(() => {
+        const b = document.querySelector('.er-menu .er-menu-item');
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: itemPt.x, y: itemPt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: itemPt.x, y: itemPt.y, button: 'left' });
+      await sleep(200);
+      restored = await cdp.eval(`({
+        lines: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
+        hidden: erDoc.hidden.length,
+        chip: !!document.querySelector('.er-hidden-chip'),
+      })`);
+    }
+    check('模型图：从「已隐藏」里点回来，线恢复且记录清空',
+      !!restored && restored.lines === made.fk && restored.hidden === 0 && !restored.chip,
+      restored ? `${restored.lines} 条线 · 隐藏 ${restored.hidden}` : '菜单没打开');
+
+    // 造的表不能留：删掉再重画一次，后面的断言按真实表数走。
+    await cdp.eval(`(async () => {
+      const q = sql => fetch('/api/query', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }) }).then(r => r.json()).catch(() => null);
+      await q('DROP TABLE er_demo_child');
+      await q('DROP TABLE er_demo_parent');
+      await loadSchema();          // 模型图画的是 schemaCache，DDL 之后得先刷它
+      await erLoadThenRender();
+    })()`);
+    const cleaned = await cdp.eval(`(async () => {
+      const sch = await fetch('/api/schema').then(r => r.json());
+      return {
+        demo: sch.tables.filter(t => t.name.indexOf('er_demo') === 0).length,
+        cards: document.querySelectorAll('.er-card').length,
+        tables: sch.tables.length,
+      };
+    })()`);
+    check('模型图：临时表已删干净，卡片回到真实表数',
+      cleaned.demo === 0 && cleaned.cards === cleaned.tables,
+      `${cleaned.cards} 卡片 / ${cleaned.tables} 张表`);
+
     // 点卡片 → 回到编辑器并打开这张表（和侧栏点表名是同一个动作）。
     // 必须用真实鼠标：点开和拖动共用 pointerdown/up，直接 dispatchEvent('click')
     // 绕过了这一层，测的就不是用户实际走的那条路。

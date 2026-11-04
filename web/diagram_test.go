@@ -325,3 +325,75 @@ func TestDiagramDropsUnknownGroupRef(t *testing.T) {
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
+
+// 逻辑层可以否认一条边。这里验三件事：
+//   - 形状认得、库里对得上的键要存下来（外键边 fk|… 和折叠出来的 j|…）；
+//   - 形状不认得、或者指向已经不存在的外键/表的键，进门就清掉；
+//   - 被隐藏的那条外键真的没了（DROP 之后）时，隐藏记录跟着失效并写回文件，
+//     否则它会一直留在文件里，某天恰好和另一条边同键就开始乱隐藏。
+func TestDiagramHidesEdges(t *testing.T) {
+	s, mgr, _ := newDBServer(t)
+	d := mgr.Default()
+	ids := makeTables(t, d,
+		"CREATE TABLE a (id INTEGER PRIMARY KEY)",
+		"CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id))",
+		"CREATE TABLE t (a_id INTEGER REFERENCES a(id), b_id INTEGER REFERENCES b(id), PRIMARY KEY (a_id, b_id))",
+		"CREATE TABLE c (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id))")
+	a, b, c := itoa(ids["a"]), itoa(ids["b"]), itoa(ids["c"])
+	tid := itoa(ids["t"])
+
+	body := `{"version":2,"hidden":[
+		"fk|` + b + `|a_id",
+		"j|` + tid + `",
+		"fk|` + c + `|a_id",
+		"nope|1",
+		"fk|` + a + `|id",
+		"j|999"]}`
+	code, doc := diagramCall(t, s, http.MethodPost, body)
+	if code != http.StatusOK {
+		t.Fatalf("post code = %d", code)
+	}
+	got := map[string]bool{}
+	for _, k := range doc.Hidden {
+		got[k] = true
+	}
+	if len(got) != 3 {
+		t.Fatalf("应留下三条隐藏记录，实际 %+v", doc.Hidden)
+	}
+	for _, k := range []string{"fk|" + b + "|a_id", "j|" + tid, "fk|" + c + "|a_id"} {
+		if !got[k] {
+			t.Fatalf("合法隐藏记录被丢了: %s in %+v", k, doc.Hidden)
+		}
+	}
+	for _, k := range []string{"nope|1", "fk|" + a + "|id", "j|999"} {
+		if got[k] {
+			t.Fatalf("非法/失效的隐藏记录应被清掉: %s", k)
+		}
+	}
+
+	// 把 c 删掉：它的外键没了，那条隐藏记录也该跟着消失。
+	if _, err := d.Exec(d.Session("drop"), "DROP TABLE c"); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	_, doc = diagramCall(t, s, http.MethodGet, "")
+	if len(doc.Hidden) != 2 {
+		t.Fatalf("外键没了，隐藏记录应被剪掉: %+v", doc.Hidden)
+	}
+	for _, k := range doc.Hidden {
+		if k == "fk|"+c+"|a_id" {
+			t.Fatalf("失效的隐藏记录没剪掉: %+v", doc.Hidden)
+		}
+	}
+
+	raw, err := os.ReadFile(filepath.Join(d.Dir(), diagramFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk diagramDoc
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk.Hidden) != 2 {
+		t.Fatalf("剪枝结果没写回文件: %s", raw)
+	}
+}

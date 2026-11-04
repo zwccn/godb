@@ -564,9 +564,9 @@ try {
   <div class="er-stage" id="erStage">
     <div class="er-canvas" id="erCanvas"></div>
     <div class="er-legend" id="erLegend">
-      <span class="er-lg"><i class="er-lg-line solid"></i>外键约束</span>
-      <span class="er-lg"><i class="er-lg-line dashed"></i>逻辑关系</span>
-      <span class="er-lg"><i class="er-lg-node m2m"></i>多对多</span>
+      <span class="er-lg"><i class="er-lg-line solid"></i><span id="erLgSolid">库里有约束</span></span>
+      <span class="er-lg"><i class="er-lg-line dashed"></i><span>库里没有约束</span></span>
+      <span class="er-lg"><i class="er-lg-node m2m"></i><span>多对多</span></span>
     </div>
     <div class="er-note hidden" id="erNote"></div>
   </div>
@@ -596,8 +596,9 @@ try {
         </select>
       </div>
       <p class="er-link-note">
-        这条关系只存在模型图里，<b>不会修改数据库</b>。图上用虚线画，和真实外键（实线）区分开。
-        将来要落地成约束，应该去建表语句或表设计器里加。
+        这条关系只存在模型图里，<b>不会修改数据库</b>。图上用虚线画 ——
+        虚线就是「库里没有这条约束」，照它写 SQL 不会得到任何保护。
+        要真落地成约束，得去建表语句或表设计器里加。
       </p>
     </div>
     <div class="modal-foot">

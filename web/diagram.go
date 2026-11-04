@@ -21,11 +21,13 @@ import (
 //   - 布局坏了最多是图难看，不该影响数据库能不能用 —— 独立文件可以
 //     直接删掉重来，也不用进 WAL。
 //
-// 这份文件存两类东西，性质不同，必须分得清：
+// 这份文件存三类东西，性质不同，必须分得清：
 //   - **布局**（坐标、分组）：纯视觉，和库对不对得上都无所谓；
 //   - **逻辑关系**（links）与**基数标注**（overrides）：是用户对业务的判断，
 //     库里可能没有对应约束。前端靠实线/虚线把它们和外键区分开，
-//     绝不能混成一份「看起来像 schema」的数据。
+//     绝不能混成一份「看起来像 schema」的数据；
+//   - **隐藏的边**（hidden）：同样是判断，方向相反 —— 用户说这条关系在他的
+//     模型里不成立。只作用于逻辑视图。
 //
 // 表一律用**表 ID** 做键，不用表名：RENAME 之后布局和归属要跟着那张表走。
 // ID 只增不复用（见 catalog.Table.ID）。
@@ -105,6 +107,15 @@ type diagramDoc struct {
 	// 失败回滚；而「我认为这里业务上是 1-1」只是个标注。把标注写进
 	// 侧车，改错了删掉文件就恢复，也不会有半条约束留在库里。
 	Overrides map[string]string `json:"overrides,omitempty"`
+	// Hidden 是「用户说这条关系在我的模型里不成立」的边。
+	//
+	// 键和边本身同一套拼法：fk|<子表ID>|<列名,列名> 或 j|<关联表ID>。
+	// 只影响**逻辑视图画不画这条线**，不动库 —— 物理视图照实画，那里问的
+	// 是「库里有什么」，用户怎么看不算数。
+	//
+	// 为什么逻辑层必须能删边：模型层的判断是「这两张表业务上有没有关系」，
+	// 和外键存不存在是两句话。不许否认，就是让约束反过来管住模型。
+	Hidden []string `json:"hidden,omitempty"`
 }
 
 // diagramMu 让「读 → 剪枝 → 写回」这一串不互相踩。
@@ -124,6 +135,32 @@ func fkEdgeKey(childID int64, cols []string) string {
 	return "fk|" + strconv.FormatInt(childID, 10) + "|" + strings.Join(cols, ",")
 }
 
+// 模型图里「被隐藏的边」用同一套键：外键边用 fk|…，折叠出来的多对多用 j|<关联表ID>。
+// 手工画的逻辑关系不进这里 —— 它本来就能直接删掉，没有「隐藏」这层。
+func validHiddenKey(k string) bool {
+	if strings.HasPrefix(k, "fk|") {
+		return true
+	}
+	if strings.HasPrefix(k, "j|") {
+		id, err := strconv.ParseInt(k[2:], 10, 64)
+		return err == nil && id > 0
+	}
+	return false
+}
+
+// hiddenKeyAlive 判断一条隐藏记录还指不指得着实物。
+//
+// fk|… 要求这条外键还在（DROP / RENAME COLUMN 之后它就不在了，标注该失效）；
+// j|… 只能验到表还在 —— 折叠是前端按外键算出来的，服务端不重复实现一遍
+// 「四条件」。宁可在那边多一句判断，也不要两处逻辑各写一份、慢慢跑偏。
+func hiddenKeyAlive(k string, ids map[int64]bool, fkKeys map[string]bool) bool {
+	if strings.HasPrefix(k, "fk|") {
+		return fkKeys[k]
+	}
+	id, err := strconv.ParseInt(k[2:], 10, 64)
+	return err == nil && ids[id]
+}
+
 // diagramRaw 是磁盘上的原始形状，同时兼容 v1 和 v2。
 //
 // v1 用 cards（坐标）+ groups[].tables（组拥有表）；v2 用 tables（表拥有组）。
@@ -134,6 +171,7 @@ type diagramRaw struct {
 	Groups    []diagramGroupRaw      `json:"groups,omitempty"`
 	Links     []diagramLink          `json:"links,omitempty"`
 	Overrides map[string]string      `json:"overrides,omitempty"`
+	Hidden    []string               `json:"hidden,omitempty"`
 
 	// 以下只有 v1 才有
 	Cards map[string]struct {
@@ -157,6 +195,7 @@ func (raw *diagramRaw) toDoc() (diagramDoc, bool) {
 		Tables:    map[string]diagramCard{},
 		Links:     raw.Links,
 		Overrides: raw.Overrides,
+		Hidden:    raw.Hidden,
 	}
 	migrated := raw.Version < diagramVersion
 
@@ -292,6 +331,25 @@ func (doc *diagramDoc) normalize() {
 	if len(doc.Overrides) == 0 {
 		doc.Overrides = nil
 	}
+
+	seenHide := map[string]bool{}
+	hid := doc.Hidden[:0]
+	for _, k := range doc.Hidden {
+		k = strings.TrimSpace(k)
+		// 形状不认得的键前端永远查不到，留着只会越积越多。
+		if k == "" || seenHide[k] || !validHiddenKey(k) {
+			continue
+		}
+		seenHide[k] = true
+		hid = append(hid, k)
+		if len(hid) >= diagramMaxLinks {
+			break
+		}
+	}
+	doc.Hidden = hid
+	if len(doc.Hidden) == 0 {
+		doc.Hidden = nil
+	}
 }
 
 func trimAll(in []string) []string {
@@ -350,6 +408,19 @@ func (doc *diagramDoc) prune(ids map[int64]bool, fkKeys map[string]bool) bool {
 	}
 	if len(doc.Overrides) == 0 {
 		doc.Overrides = nil
+	}
+
+	hid := doc.Hidden[:0]
+	for _, k := range doc.Hidden {
+		if !hiddenKeyAlive(k, ids, fkKeys) {
+			changed = true
+			continue
+		}
+		hid = append(hid, k)
+	}
+	doc.Hidden = hid
+	if len(doc.Hidden) == 0 {
+		doc.Hidden = nil
 	}
 	return changed
 }

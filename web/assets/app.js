@@ -8935,8 +8935,9 @@ let erMenuEl = null;     // 当前打开的浮层菜单
 
 // 逻辑视图 / 物理视图。
 //
-// 逻辑视图是「我理解的模型」：折叠纯关联表、显示自己画的虚线关系；
-// 物理视图是「库真实长什么样」：一张表不少，一条逻辑关系不画。
+// 逻辑视图是「我理解的模型」：折叠纯关联表、显示自己画的虚线关系，
+// 也可以否认一条库里的外键（hidden）；
+// 物理视图是「库真实长什么样」：一张表不少，一条逻辑关系不画，基数只报推导值。
 // 两者不能混着看 —— 照逻辑图去写 SQL 一定会踩到库里不存在的约束。
 let erMode = 'logic';
 try {
@@ -8955,7 +8956,7 @@ function erFkId(tableID, cols) { return 'fk|' + tableID + '|' + cols.join(','); 
 // 服务端已经清洗过一遍，这里再洗一遍是因为 erDoc 也会被本地的交互改写，
 // 与其在十几处调用点各写一遍校验，不如进出口各洗一次。
 function erNormalizeDoc(d) {
-  const out = { version: 2, groups: [], tables: {}, links: [], overrides: {} };
+  const out = { version: 2, groups: [], tables: {}, links: [], overrides: {}, hidden: [] };
   if (!d) return out;
 
   if (Array.isArray(d.groups)) {
@@ -9006,6 +9007,19 @@ function erNormalizeDoc(d) {
     for (const k in d.overrides) {
       if (k.indexOf('fk|') !== 0 || !erValidCard(d.overrides[k])) continue;
       out.overrides[k] = d.overrides[k];
+    }
+  }
+
+  // 隐藏的边：只认两种键形状，和服务端 validHiddenKey 一致。
+  if (Array.isArray(d.hidden)) {
+    const seenHide = new Set();
+    for (const k of d.hidden) {
+      if (typeof k !== 'string') continue;
+      const v = k.trim();
+      if (!v || seenHide.has(v)) continue;
+      if (v.indexOf('fk|') !== 0 && v.indexOf('j|') !== 0) continue;
+      seenHide.add(v);
+      out.hidden.push(v);
     }
   }
   return out;
@@ -9116,7 +9130,9 @@ function erBuildModel(tables) {
         columns: fk.columns, refColumns: fk.refColumns || [],
         defaultCard: dflt,
         overridden: !!erDoc.overrides[id],
-        card: erDoc.overrides[id] || dflt,
+        // 物理视图只报库里推导出来的那个：用户改过的基数是他对业务的判断，
+        // 放在物理层就成了「库里明明没有这条唯一约束，图上说 1:1」。
+        card: erMode === 'logic' ? (erDoc.overrides[id] || dflt) : dflt,
       });
     }
   }
@@ -9136,11 +9152,13 @@ function erBuildModel(tables) {
   }
 
   // 逻辑视图折叠纯关联表。物理视图不折叠 —— 那里要看的是库真实长什么样。
+  // 折叠判定**只看事实**（这张表是不是纯关联表），不受隐藏影响：隐藏是判断，
+  // 允许它改变判定的话，改一条边会让关联表卡片突然冒出来，看着像 bug。
   const junctions = erMode === 'logic' ? erFindJunctions(tables, all) : new Map();
-  const hidden = new Set(junctions.keys());
+  const folded = new Set(junctions.keys());
 
-  const edges = all.filter(e => !hidden.has(e.child.id) && !hidden.has(e.parent.id));
-  const m2m = [];
+  let edges = all.filter(e => !folded.has(e.child.id) && !folded.has(e.parent.id));
+  let m2m = [];
   for (const j of junctions.values()) {
     m2m.push({
       id: 'j|' + j.table.id,
@@ -9151,7 +9169,24 @@ function erBuildModel(tables) {
     });
   }
 
-  const visible = tables.filter(t => !hidden.has(t.id));
+  // 隐藏的边：逻辑层说「这条关系在我的模型里不成立」。只是不画，不改库。
+  // 留一份清单出去，状态栏里挂个入口 —— 否则隐藏之后没人找得回来。
+  const hidSet = new Set(erDoc.hidden);
+  const hiddenEdges = [];
+  if (erMode === 'logic' && hidSet.size) {
+    edges = edges.filter(e => {
+      if (!hidSet.has(e.id)) return true;
+      hiddenEdges.push(e);
+      return false;
+    });
+    m2m = m2m.filter(m => {
+      if (!hidSet.has(m.id)) return true;
+      hiddenEdges.push(m);
+      return false;
+    });
+  }
+
+  const visible = tables.filter(t => !folded.has(t.id));
   const groups = erBuckets(visible);
   for (const g of groups) erOrderGroup(g, edges);
 
@@ -9159,7 +9194,7 @@ function erBuildModel(tables) {
   erRelayoutBoxes(groups);
 
   return {
-    groups, edges, m2m,
+    groups, edges, m2m, hidden: hiddenEdges,
     folded: visible.length !== tables.length ? tables.length - visible.length : 0,
     w: erModelW(groups), h: erModelH(groups),
   };
@@ -9549,12 +9584,19 @@ function erRender() {
     const named = model.groups.filter(g => !g.loose).length;
     let s = `${tables.length} 张表`;
     if (named) s += ` · ${named} 组`;
-    s += ` · ${fkN} 条外键`;
     if (erMode === 'logic') {
-      if (mN) s += ` · ${mN} 条逻辑关系`;
+      // 逻辑层数的是「关系」，不是「外键」：里面掺着手画的、折叠出来的。
+      s += ` · ${fkN + mN + model.m2m.length} 条关系`;
+      if (mN) s += `（${mN} 条库里没有）`;
       if (model.folded) s += ` · ${model.folded} 张关联表已折叠`;
+    } else {
+      s += ` · ${fkN} 条外键`;
     }
     stats.textContent = s;
+    // 隐藏之后那条线就没了，点不到也找不回 —— 入口只能挂在状态栏上。
+    if (erMode === 'logic' && model.hidden.length) {
+      stats.appendChild(erHiddenChip(model.hidden));
+    }
   }
 
   // 三种「图不好看」的情况各给一句话。没有外键是最常见的：
@@ -9656,6 +9698,13 @@ function erDrawEdges(svg, model, edgeEls) {
     path.dataset.child = m.a.name;
     path.dataset.parent = m.b.name;
     svg.appendChild(path);
+
+    // 折叠出来的这条线也要能点：它是从「这张表恰好长成关联表」推出来的，
+    // 最可能被用户判定为「其实没关系」，不给入口就只能忍着。
+    const hit = erSvg('path', { class: 'er-hit', d: g.d });
+    hit.dataset.edge = m.id;
+    svg.appendChild(hit);
+
     erMark(svg, g.a.x, g.a.y, g.a.dir, 'many');
     erMark(svg, g.b.x, g.b.y, g.b.dir, 'many');
 
@@ -10089,9 +10138,38 @@ function erOpenEdgeMenu(edgeId, ev) {
   for (const e of erModel.edges) {
     if (e.id === edgeId) { edge = e; break; }
   }
+  if (!edge) {
+    for (const m of erModel.m2m) {
+      if (m.id === edgeId) { edge = m; break; }
+    }
+  }
   if (!edge) return;
 
   const label = { '11': '1 : 1', '1N': '1 : N', 'NM': 'M : N' };
+
+  // 折叠出来的多对多：基数没有可改的（两边都是多个是它的定义），
+  // 能做的只有「我不同意这条关系」。
+  if (edge.kind === 'm2m') {
+    erShowMenu(x + 4, y + 4, [
+      { head: `${edge.a.name} ↔ ${edge.b.name}` },
+      { head: `经 ${edge.via.name} 折叠` },
+      { sep: true },
+      { label: '我的模型里没有这条关系', run: () => erHideEdge(edge.id) },
+    ]);
+    return;
+  }
+
+  // 物理视图只报告，不改：那里问的是「库里有什么」，改基数等于在图上写假话。
+  if (erMode === 'physical') {
+    erShowMenu(x + 4, y + 4, [
+      { head: `${edge.child.name} → ${edge.parent.name}` },
+      { head: `库里推导：${label[edge.defaultCard]}` },
+      { sep: true },
+      { label: '去逻辑视图改基数', run: () => erToggleMode() },
+    ]);
+    return;
+  }
+
   const items = [{ head: `${edge.child.name} → ${edge.parent.name}` }];
   for (const k of ['11', '1N', 'NM']) {
     items.push({
@@ -10111,8 +10189,9 @@ function erOpenEdgeMenu(edgeId, ev) {
       },
     });
   }
+  items.push({ sep: true });
   if (edge.kind === 'manual') {
-    items.push({ sep: true });
+    // 手画的关系本来就能删，不需要「隐藏」这层 —— 两条菜单项做同一件事只会让人犹豫。
     items.push({
       label: '删除这条逻辑关系',
       danger: true,
@@ -10122,8 +10201,58 @@ function erOpenEdgeMenu(edgeId, ev) {
         erSave();
       },
     });
+  } else {
+    items.push({
+      label: '我的模型里没有这条关系',
+      run: () => erHideEdge(edge.id),
+    });
   }
   erShowMenu(x + 4, y + 4, items);
+}
+
+// erHideEdge / erUnhideEdge：逻辑层否认或恢复一条边。
+//
+// 只写侧车，不动库 —— 外键还在（物理视图照画），只是这张图不再画它。
+// 「这两张表业务上有没有关系」和「库里有没有约束」是两句话，前者归模型，
+// 后者归物理；不给前者一个表达方式，就是让约束反过来管住模型。
+function erHideEdge(id) {
+  if (!erDoc) return;
+  const set = new Set(erDoc.hidden);
+  set.add(id);
+  erDoc.hidden = Array.from(set);
+  erRender();
+  erSave();
+}
+
+function erUnhideEdge(id) {
+  if (!erDoc) return;
+  erDoc.hidden = erDoc.hidden.filter(x => x !== id);
+  erRender();
+  erSave();
+}
+
+// erHiddenChip 是「已隐藏 N 条」那个入口。挂在状态栏，不挂在画布上：
+// 被隐藏的边没有线可点，画布上也就没有它的位置。
+function erHiddenChip(hidden) {
+  const b = el('button', 'er-hidden-chip', `已隐藏 ${hidden.length} 条`);
+  b.type = 'button';
+  b.title = '这些关系还在库里，只是这张图不画。点开可以恢复。';
+  b.addEventListener('click', ev => {
+    ev.stopPropagation();
+    const r = b.getBoundingClientRect();
+    const sr = erStage.getBoundingClientRect();
+    const items = [{ head: '已隐藏的关系' }];
+    for (const e of hidden) {
+      items.push({
+        label: e.kind === 'm2m'
+          ? `${e.a.name} ↔ ${e.b.name}（经 ${e.via.name}）`
+          : `${e.child.name} → ${e.parent.name}`,
+        run: () => erUnhideEdge(e.id),
+      });
+    }
+    erShowMenu(r.left - sr.left, r.bottom - sr.top + 4, items);
+  });
+  return b;
 }
 
 // erSetCard 记下用户指定的基数。
@@ -10230,10 +10359,20 @@ function erSaveLink() {
     return;
   }
   // 库里已经有这条外键了，再画一条逻辑关系就是同一件事出现两遍。
+  //
+  // 但如果这条边正好被隐藏过，那用户现在就是在说「加回来」—— 恢复它，
+  // 而不是新建一条虚线。库里确实有约束，画成虚线等于让图说假话。
   for (const fk of (child.foreignKeys || [])) {
     if (fk.refTable !== parent.name) continue;
     if (fk.columns.length !== 1) continue;
     if (fk.columns[0].toLowerCase() !== cc.toLowerCase()) continue;
+    const fid = erFkId(child.id, fk.columns);
+    if (erDoc && erDoc.hidden.indexOf(fid) >= 0) {
+      erCloseLinkModal();
+      erUnhideEdge(fid);
+      toast('这条外键本来就在库里，已经恢复显示');
+      return;
+    }
     erLinkHint.textContent = '库里已经有这条外键了，图上会自动画出来，不用再加。';
     return;
   }
@@ -10309,6 +10448,17 @@ function erSyncModeBtn() {
   b.title = erMode === 'logic'
     ? '当前：逻辑视图（折叠关联表，显示你画的关系）。点击切到物理视图'
     : '当前：物理视图（只显示库里真实存在的表和外键）。点击切回逻辑视图';
+  erSyncLegend();
+}
+
+// 图例跟着视图换词。
+//
+// 逻辑层说的是「这两张表有关系，库里管不管它」，物理层说的是「这里有一条外键」。
+// 两个视图共用「外键约束」四个字，就会让人以为逻辑层也是约束的镜像 ——
+// 而逻辑层恰恰可以否认一条约束（hidden），可以加一条库里没有的（links）。
+function erSyncLegend() {
+  const solid = document.getElementById('erLgSolid');
+  if (solid) solid.textContent = erMode === 'logic' ? '库里有约束' : '外键';
 }
 
 function erToggleMode() {

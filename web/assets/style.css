@@ -5352,6 +5352,21 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
+/* 「已隐藏 N 条」：挂在状态栏，因为被隐藏的边在画布上已经没有位置了。
+   用虚框 —— 它说的正是「这里少了一条线」。 */
+.er-hidden-chip {
+  margin-left: 7px;
+  padding: 0 6px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: calc(10.5px * var(--fs));
+  line-height: 1.6;
+  cursor: pointer;
+}
+.er-hidden-chip:hover { color: var(--text); border-color: var(--text-3); }
 .er-actions { display: flex; align-items: center; gap: 8px; }
 .er-zoom {
   display: flex;

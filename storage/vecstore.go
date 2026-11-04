@@ -199,6 +199,37 @@ func (s *Store) trashVecFile(path string) {
 	_ = os.Rename(path, dst)
 }
 
+// ReplaceVectorFile 把「表里 0 行」的向量列换成新维度。
+//
+// 维度写死在 .vec 的文件头里，OpenVecFile 看到头里的维度与列定义不一致会直接拒开
+// （ErrVecDimMismatch）。所以 ALTER TYPE 改维度之后旧文件必须换掉，否则：
+//   - 运行期仍按旧维度校验 —— 插入报 `column is 3, value has 4`；
+//   - 重启后这一列打不开，按 NULL 处理，看上去像数据全丢了。
+//
+// 调用方必须先确认表里没有行：这里不搬数据，旧文件直接删掉（0 个槽位，没有内容可救）。
+func (s *Store) ReplaceVectorFile(tableID, colID int64, dim int) error {
+	s.vecMu.Lock()
+	defer s.vecMu.Unlock()
+	if s.vecFiles == nil {
+		s.vecFiles = make(map[vecKey]*VecFile)
+	}
+	k := vecKey{tableID, colID}
+	if vf, ok := s.vecFiles[k]; ok {
+		_ = vf.Close()
+		delete(s.vecFiles, k)
+	}
+	path := vecPath(s.Dir, tableID, colID)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("重建向量列失败（旧文件删不掉）: %w", err)
+	}
+	vf, err := OpenVecFile(path, dim)
+	if err != nil {
+		return err
+	}
+	s.vecFiles[k] = vf
+	return nil
+}
+
 // CloseVecFiles 关掉所有向量列文件（Close 与测试用）。
 func (s *Store) CloseVecFiles() error {
 	s.vecMu.Lock()

@@ -615,6 +615,15 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 					"and those need a content-based identity that vector values do not have", col.Name)
 			}
 		}
+		// 维度是物理布局：.vec 里每个槽位固定 dim×4 字节，现有行没法就地「扩容」。
+		// 不专门拦的话，报错会从 Cast 里冒出来（"column is 4, value has 3"），
+		// 看着像数据坏了，其实是这条 DDL 本身不支持。
+		if newType.Kind == types.KVector && types.Kind(t.Columns[idx].Kind) == types.KVector &&
+			t.Columns[idx].Len != newType.Len && td.Live > 0 {
+			return nil, fmt.Errorf("cannot change vector dimension from %d to %d: %d existing row(s) store %d floats each; "+
+				"add a new column of the target dimension and backfill it, then drop the old one",
+				t.Columns[idx].Len, newType.Len, td.Live, t.Columns[idx].Len)
+		}
 		for i := 0; i < td.SlotCount(); i++ {
 			row, ok := td.RowAt(i)
 			if !ok {
@@ -638,9 +647,18 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		col := t.Columns[idx]
 		col.TypeName = newType.String()
 		col.Kind = int(newType.Kind)
+		oldLen := col.Len
 		col.Len, col.Prec, col.Scale = newType.Len, newType.Prec, newType.Scale
 		t.Columns[idx] = col
 		t.Rebuild()
+		// 空表改维度：.vec 的文件头写死了旧维度，必须换一个新文件。
+		// 不换的话运行期插入还按旧维度校验（column is 3, value has 4），
+		// 重启后这一列直接打不开 —— 表是空的，换文件没有任何数据要搬。
+		if newType.Kind == types.KVector && oldLen != newType.Len {
+			if err := e.Store.ReplaceVectorFile(t.ID, col.ID, newType.Len); err != nil {
+				return nil, err
+			}
+		}
 	default:
 		return nil, fmt.Errorf("unsupported ALTER TABLE action")
 	}

@@ -179,6 +179,15 @@ VALUES (1, '集合运算', '[0.12,-0.34,0.56,…]'),
 坏处：客户端拿不到 pgvector 的类型，`::vector` 在客户端侧不可用 ——
 首期接受，Phase 3 再评估自定义 OID。
 
+这个「按 text 下发」不只影响 `RowDescription`，**元数据也一样**：
+`information_schema.columns` 的 `data_type` / `udt_name` 都是 `text`，
+`pg_attribute.atttypid` 是 25，`pg_type` 里没有 `vector` 这一行（否则 OID 就对不上了）。
+所以「读元数据生成 DDL」的工具会把向量列写成 `text`。
+
+这条路的危险后果已经被挡住：把有数据的向量列 `ALTER COLUMN … TYPE text` 会报
+`cannot cast a stored vector to text`（`types.Cast` 里显式拒绝），数据不会丢也不会被
+误解成文本。真要换类型只能新建列 + 回填。等注册了类型 OID（Phase 3）再谈元数据一致。
+
 ### 2.5 不支持的用法（明确报错）
 
 向量**不参与**「等值 / 分组 / 排序 / 索引」这四件事，全部在规划期或 DDL 期报错：

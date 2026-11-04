@@ -130,4 +130,20 @@ func TestCoveringIndex(t *testing.T) {
 
 	// 结果正确性：文本列
 	assertRows(t, run(t, d, s, `SELECT a, b FROM ci WHERE a = 20`), []string{"20|y"})
+
+	// 只有 ORDER BY 命中索引、WHERE 用不上索引时，覆盖扫描必须把 WHERE 用到的列也考虑进去。
+	//
+	// 这里曾经传 nil 当 where（「WHERE 走不了索引」被当成了「没有 WHERE」），
+	// 于是 `SELECT id … ORDER BY id` 走了只含 id 的覆盖扫描，而上层的 filterOp
+	// 读到的行里没有 b —— 每行都被过滤掉，静默返回 0 行。
+	assertRows(t, run(t, d, s, `SELECT id FROM ci WHERE b = 'y' ORDER BY id`), []string{"2"})
+	plan = explainPlan(t, d, s, `SELECT id FROM ci WHERE b = 'y' ORDER BY id`)
+	if strings.Contains(plan, "Index Only Scan") {
+		t.Fatalf("过滤列 b 不在键里，不该走覆盖扫描，实际: %s", plan)
+	}
+	// 而过过滤列本身在键里时，覆盖扫描仍然有效（别为修 bug 把它关掉）。
+	plan = explainPlan(t, d, s, `SELECT a FROM ci WHERE a >= 20 ORDER BY a`)
+	if !strings.Contains(plan, "Index Only Scan") {
+		t.Fatalf("过滤与排序都落在索引列上时仍应走覆盖扫描，实际: %s", plan)
+	}
 }

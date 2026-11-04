@@ -793,7 +793,11 @@ func (p *Planner) tryIndexScanBest(bt *sql.BaseTable, where sql.Expr, orderBy []
 	// 5) 只有 ORDER BY
 	if hasOrder {
 		rs := []storage.KeyRange{{}}
-		if op, ok := p.tryCoverScan(bt, nil, orderBy, items, oName, oCols, rs, qual, false); ok {
+		// where 必须原样传进去：这一支只说明「WHERE 走不了索引」，不说明没有 WHERE。
+		// 传 nil 的后果是覆盖索引把「过滤要用的列」当成不需要，而 filterOp 是套在
+		// 索引扫描**上层**的 —— 它读到的行里没有那一列（NULL），于是每一行都被过滤掉。
+		// 实测：`SELECT id FROM t WHERE note = 'x' ORDER BY id` 返回 0 行。
+		if op, ok := p.tryCoverScan(bt, where, orderBy, items, oName, oCols, rs, qual, false); ok {
 			return op, true
 		}
 		return newIndexRangeScan(p.Tx, t, oName, oCols, oCols, rs, qual, p.Cat), true

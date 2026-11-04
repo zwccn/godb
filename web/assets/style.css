@@ -1092,7 +1092,9 @@ a[href]:focus-visible {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 0 10px;
+  /* 和下面卡片的左边距对齐（.result-pane 现在是 8px），否则 tab 文字会比
+     卡片边缘多缩进 2px，一眼看不出但会觉得"歪"。 */
+  padding: 0 8px;
   overflow-x: auto;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
@@ -1139,7 +1141,10 @@ a[href]:focus-visible {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 10px 14px 12px;
+  /* 卡片离窗格边缘的留白：以前 10/14/12 太"松"，表格像被推到画面中间，
+     一屏能看的行数也少。现在按一半收（6/8/8），卡片仍然不贴边 ——
+     它有 8px 圆角和 1px 描边，贴着边反而显得被切掉一块。 */
+  padding: 6px 8px 8px;
 }
 
 /* 当前 tab 里那张卡吃满剩余高度：头 / 表体 / 分页三段，只有中间那段滚 */

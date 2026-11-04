@@ -48,8 +48,22 @@ func TestBenchScenariosRun(t *testing.T) {
 	if st.result == nil {
 		t.Fatal("result 为空")
 	}
-	if len(st.result.Scenarios) != 8 {
-		t.Fatalf("应跑 8 个场景，实际 %d", len(st.result.Scenarios))
+	if len(st.result.Scenarios) != 9 {
+		t.Fatalf("应跑 9 个场景，实际 %d", len(st.result.Scenarios))
+	}
+	// 向量场景必须报出「几行 × 几维」：没有这个口径，数字和别的场景没法比。
+	sawVec := false
+	for _, sc := range st.result.Scenarios {
+		if sc.Name != "向量 Top-K" {
+			continue
+		}
+		sawVec = true
+		if !strings.Contains(sc.Commit, "维") || !strings.Contains(sc.Commit, "行") {
+			t.Fatalf("向量场景的 commit 应写明行数与维度，实际 %q", sc.Commit)
+		}
+	}
+	if !sawVec {
+		t.Fatal("缺少「向量 Top-K」场景")
 	}
 	for _, sc := range st.result.Scenarios {
 		if sc.Error != "" {

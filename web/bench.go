@@ -42,6 +42,43 @@ const benchTable = "__bench_items"
 // 不复用主表：多出的几千行会让后面的全表扫描 / 聚合行数基准变掉，两次结果就不可比了。
 const benchCommitTable = "__bench_commit"
 
+// 向量基准用自己的表，规模也**不跟** benchScale 走。
+//
+// 100 万行 × 64 维 = 256MB 的 .vec，灌一次要几分钟，而且「慢」的原因会变成内存带宽、
+// 不再是引擎本身。基准页是看趋势的，不是压测机：5 万行已经足够看出
+// 「全表扫 × 逐行算距离」的量级，也足够在做了近似索引之后做前后对比。
+const (
+	benchVecTable = "__bench_vec"
+	benchVecRows  = 50000
+	benchVecDim   = 64
+)
+
+// benchVecN 返回这次要灌多少行：单测把规模改小的时候跟着变小。
+func benchVecN() int {
+	if n := scale(); n < benchVecRows {
+		return n
+	}
+	return benchVecRows
+}
+
+// benchVecLiteral 生成第 seed 个确定性向量。
+//
+// 不用 math/rand：基准的数字要能横着比，两次跑的数据必须一模一样。
+// 取值都是两位小数，文本长度稳定，导入耗时不会因为格式抖动。
+func benchVecLiteral(dim, seed int) string {
+	var b strings.Builder
+	b.Grow(dim*6 + 2)
+	b.WriteByte('[')
+	for i := 0; i < dim; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "0.%02d", (seed*31+i*17)%100)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
 // 单条插入的批大小档位：批量插入吞吐对批大小极敏感，扫档位能看出「阈值在哪」。
 var benchBatchSizes = []int{100, 500, 1000, 5000}
 
@@ -178,6 +215,8 @@ func (s *Server) runBench(st *benchState) {
 		{"点查（主键）", func(x *benchSess) benchScene { return s.scenePointQuery(x) }},
 		{"范围扫描", func(x *benchSess) benchScene { return s.sceneRangeScan(x) }},
 		{"聚合", func(x *benchSess) benchScene { return s.sceneAggregate(x) }},
+		// 向量另用一张表（主表没有向量列），跑完一起删。
+		{"向量 Top-K", func(x *benchSess) benchScene { return s.sceneVectorTopK(x) }},
 		// 放最后：它用自己的小表，跑完即删，不打断前面「主表行数恒定」的那几个场景。
 		{"逐条提交插入", func(x *benchSess) benchScene { return s.sceneInsertCommit(x) }},
 	}
@@ -203,6 +242,7 @@ func (s *Server) runBench(st *benchState) {
 		sess.s.ForceRollback()
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchTable)
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchCommitTable)
+		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchVecTable)
 	}()
 
 	// 准备基准表（建表 + 灌 100 万行）。这一步耗时不小，进度按「写了多少行」走。
@@ -826,6 +866,76 @@ func (s *Server) sceneAggregate(x *benchSess) benchScene {
 		return benchScene{Name: "聚合", Commit: "GROUP BY 全表", Error: err.Error()}
 	}
 	return benchScene{Name: "聚合", Commit: "GROUP BY 全表", Rows: n, PerSec: round3(float64(n) / median(secs))}
+}
+
+// sceneVectorTopK 是「向量 Top-K」：目前没有近似索引，只能全表扫 + 逐行算距离。
+//
+// 报的口径和别的场景一致：每秒扫过多少行（墙钟）。它衡量的是「距离计算 + 扫描」
+// 的合速度，所以做近似索引（ANN）之后，这个数会成倍上涨 —— 这就是它的用途。
+// 建表 / 灌数据不计时（那是准备），和批量插入场景的口径一致。
+func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
+	name := "向量 Top-K"
+	n := benchVecN()
+	commit := fmt.Sprintf("全表扫 %s 行 × %d 维 / 次，取最近 10 条", benchComma(n), benchVecDim)
+	fail := func(err error) benchScene {
+		return benchScene{Name: name, Commit: commit, Error: err.Error()}
+	}
+
+	// 上一次取消可能留下半张表；先清掉再建。
+	if err := x.exec(`DROP TABLE IF EXISTS ` + benchVecTable); err != nil {
+		return fail(err)
+	}
+	if err := x.exec(fmt.Sprintf(`CREATE TABLE %s (id int PRIMARY KEY, v vector(%d))`, benchVecTable, benchVecDim)); err != nil {
+		return fail(err)
+	}
+
+	// 分批灌：一条 INSERT 500 行，太大只会让单条语句的解析时间喧宾夺主。
+	const batch = 500
+	for start := 1; start <= n; start += batch {
+		end := start + batch - 1
+		if end > n {
+			end = n
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "INSERT INTO %s VALUES ", benchVecTable)
+		for i := start; i <= end; i++ {
+			if i > start {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "(%d,'%s')", i, benchVecLiteral(benchVecDim, i))
+		}
+		if err := x.exec(b.String()); err != nil {
+			return fail(err)
+		}
+		if err := x.within(float64(end)/float64(n),
+			fmt.Sprintf("灌数据 %s / %s 行", benchComma(end), benchComma(n))); err != nil {
+			return fail(err)
+		}
+	}
+
+	// 每次查询取最近 10 条；每轮 5 次，够摊掉单次的抖动又不至于让场景变成几分钟。
+	const perRound = 5
+	query := fmt.Sprintf(`SELECT id FROM %s ORDER BY v <=> '%s' LIMIT 10`,
+		benchVecTable, benchVecLiteral(benchVecDim, 7))
+	p := progPart{span: 1}
+	warmup := func() error { return x.exec(query) }
+	fn := func() error {
+		for i := 0; i < perRound; i++ {
+			if err := x.exec(query); err != nil {
+				return err
+			}
+			if err := x.within(float64(i+1)/perRound, fmt.Sprintf("%s / %d 次查询", benchComma(i+1), perRound)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	secs, err := s.timed(x, p, warmup, fn)
+	if err != nil {
+		return fail(err)
+	}
+	rows := n * perRound
+	return benchScene{Name: name, Commit: commit, Rows: rows, PerSec: round3(float64(rows) / median(secs))}
 }
 
 func round3(v float64) float64 {

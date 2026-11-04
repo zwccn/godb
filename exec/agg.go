@@ -522,6 +522,13 @@ func (o *aggOp) Open() error {
 		}
 		g, exists := groups[k]
 		if !exists {
+			// 分组表只增不减：基数列上 GROUP BY 有多少个不同值就有多少组，
+			// 每组一份键 + 每个聚合一个累加器。不设上限的话，一条
+			// `GROUP BY 高基数列` 就能把内存吃光 —— 和全排序、连接输出是同一类。
+			if len(groups) >= maxGroups {
+				return fmt.Errorf("分组数超过 %d：本库不落盘，分组表只能放在内存里。"+
+					"请先用 WHERE 收窄，或改成按更高层的维度聚合", maxGroups)
+			}
 			g = &aggGroup{keys: keyVals, accs: make([]accum, len(o.aggs))}
 			for i, spec := range o.aggs {
 				g.accs[i] = newAccum(spec)

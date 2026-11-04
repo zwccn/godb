@@ -83,3 +83,44 @@ func TestTopNNotAffectedBySortLimit(t *testing.T) {
 		t.Fatalf("Top-3 缓存了 %d 行，期望 3", got)
 	}
 }
+
+// GROUP BY 的分组表也只增不减：基数列上一条查询就能建出几千万组。
+// 和全排序、连接输出一样，超了要立刻报错，而不是把内存吃光。
+func TestGroupByRefusesBeyondGroupLimit(t *testing.T) {
+	old := maxGroups
+	maxGroups = 8
+	defer func() { maxGroups = old }()
+
+	sc := Schema{{Name: "id", Type: types.Type{Kind: types.KInt, Name: "int"}}}
+	newAgg := func(n int) *aggOp {
+		return &aggOp{
+			child:      &rowSeqOp{sc: sc, n: n},
+			groupEvals: []Eval{&colEval{idx: 0, t: sc[0].Type}},
+			groupTypes: []types.Type{sc[0].Type},
+			aggs:       []*aggSpec{{Fn: "count", Star: true, Label: "count(*)", key: "count(*)"}},
+			sc: Schema{
+				{Name: "id", Type: sc[0].Type},
+				{Name: "count", Type: types.Type{Kind: types.KInt, Name: "bigint"}},
+			},
+		}
+	}
+
+	// 正好等于上限：放行（每组一个不同值）
+	ok := newAgg(int(maxGroups))
+	if err := ok.Open(); err != nil {
+		t.Fatalf("等于上限不该报错：%v", err)
+	}
+	if got := len(ok.rows); got != int(maxGroups) {
+		t.Fatalf("产出 %d 组，期望 %d", got, maxGroups)
+	}
+
+	// 多一个不同值：拒绝，且文案要说清上限与改法
+	bad := newAgg(int(maxGroups) + 1)
+	err := bad.Open()
+	if err == nil {
+		t.Fatal("超过分组上限应报错，实际成功")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "分组数超过 8") || !strings.Contains(msg, "WHERE") {
+		t.Fatalf("错误文案要给出上限与改法：%q", msg)
+	}
+}

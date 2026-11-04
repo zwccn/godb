@@ -1570,6 +1570,14 @@ a[href]:focus-visible {
   color: var(--warn-text);
 }
 
+/* 表达式求值：用强调色（和「跑了几轮」同族），它不是量、也不是错，
+   而是「这一步的时间花在哪」的注解。 */
+.probe-chip.eval {
+  border-color: var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+}
+
 .probe-bar {
   flex: 0 0 110px;
   display: flex;

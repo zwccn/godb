@@ -427,7 +427,9 @@ func (o *filterOp) Next() (types.Row, bool, error) {
 			t.done(false)
 			return nil, ok, err
 		}
+		et := o.evalTimer()
 		v, err := o.pred.Eval(row)
+		o.evalDone(et)
 		if err != nil {
 			t.done(false)
 			return nil, false, err
@@ -478,6 +480,7 @@ func (o *projectOp) Next() (types.Row, bool, error) {
 		return nil, ok, err
 	}
 	out := make(types.Row, len(o.exprs))
+	et := o.evalTimer()
 	for i, e := range o.exprs {
 		v, err := e.Eval(row)
 		if err != nil {
@@ -486,6 +489,7 @@ func (o *projectOp) Next() (types.Row, bool, error) {
 		}
 		out[i] = v
 	}
+	o.evalDone(et)
 	t.done(true)
 	return out, true, nil
 }
@@ -667,8 +671,11 @@ func (o *sortOp) Open() error {
 	o.i = 0
 	o.err = nil
 
-	// 预计算排序键：每行只 Eval 一次，比较时直接用值
+	// 预计算排序键：每行只 Eval 一次，比较时直接用值。
+	// 单独计一段 evalNs：`ORDER BY v <=> q` 的距离计算全在这里，不单列的话
+	// 会被当成「排序慢」（见 OpProfile.evalNs）。
 	makeEntry := func(row types.Row) (sortEntry, error) {
+		et := o.evalTimer()
 		ks := make([]types.Value, len(o.keys))
 		for i, k := range o.keys {
 			v, err := k.eval.Eval(row)
@@ -677,6 +684,7 @@ func (o *sortOp) Open() error {
 			}
 			ks[i] = v
 		}
+		o.evalDone(et)
 		return sortEntry{row: row, keys: ks}, nil
 	}
 

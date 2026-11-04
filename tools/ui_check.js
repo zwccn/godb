@@ -3246,6 +3246,20 @@ class CDP {
     check('全量排序显示内存占用，并说明这是下限',
       mem.has && /约 [\d.]+ MB/.test(mem.text) && /下限/.test(mem.tip),
       `${mem.text} · ${mem.tip.slice(0, 26)}`);
+    /* 表达式求值单独计时：`ORDER BY 函数(...)` / 向量距离的时间记在排序算子的
+       「独占」里，只显示「Sort 12ms」会让人以为是排序本身慢。这条钉住「求值」标签，
+       以及 tooltip 说清楚它含在独占时间里。 */
+    await cdp.eval(`cm.setValue('SELECT id FROM big_demo ORDER BY lower(v) LIMIT 20')`);
+    await cdp.eval(`document.getElementById('btnProbe').click()`);
+    await waitFor(cdp, `[...document.querySelectorAll('.probe-chip.eval')].length > 0`,
+      { label: '求值计时标签', timeout: 20000 });
+    const evalChip = await cdp.eval(`(() => {
+      const chip = document.querySelector('.probe-chip.eval');
+      return { text: chip ? chip.textContent : '', tip: chip ? chip.title : '' };
+    })()`);
+    check('排序里算表达式的时间单独标出来（不是全算成「排序慢」）',
+      /^求值 /.test(evalChip.text) && /独占/.test(evalChip.tip) && /距离|表达式/.test(evalChip.tip),
+      `${evalChip.text} · ${evalChip.tip.slice(0, 30)}`);
     /* 过滤只发生在展示层：服务端照实报（一个分组的聚合也有 56 B），前端按
        256KB 以下不显示。这条把分工钉住 —— 哪天有人把阈值挪到服务端，数据就少了。
        注意不能用 `count(*)` 探：那条会走 Fast Aggregate（直接读行数），

@@ -1623,6 +1623,10 @@ function probeCard(r, idx, stmts, count) {
       bits.push('扫描 ' + fmtCount(worst.n.scanned) + ' 行');
     }
     if (worst.n.loops) bits.push('跑了 ' + fmtCount(worst.n.loops) + ' 轮');
+    // 求值占了大头就点出来：这句是「为什么这一步贵」的答案，藏在 tooltip 里太深。
+    if (worst.n.evalNs > 0 && worst.n.evalNs * 2 >= worst.n.selfNs) {
+      bits.push('其中求值 ' + fmtDur(worst.n.evalNs) + '（算表达式，含距离）');
+    }
     line.appendChild(el('span', 'probe-verdict-text', bits.join(' · ')));
     card.appendChild(line);
   }
@@ -1704,6 +1708,14 @@ function probeRow(n, depth, seq, total, worst) {
     const c = el('span', 'probe-chip mem', '约 ' + fmtBytes(n.memBytes));
     c.title = '这一步在内存里攒着 ' + fmtCount(n.memRows) + ' 行，按每行 24 + 32×列 折算的下限。'
       + '不含排序键、哈希桶、map 的桶数组，真实占用更高。这部分内存不受页池预算约束。';
+    tags.appendChild(c);
+  }
+  // 表达式求值：`ORDER BY v <=> q` 的时间几乎全算在这里，而它记在排序算子的
+  // 「独占」时间里。不单独标出来，读者只会看到「Top-N Sort 392µs」以为是排序慢。
+  if (n.evalNs > 0) {
+    const c = el('span', 'probe-chip eval', '求值 ' + fmtDur(n.evalNs));
+    c.title = '这一步自己在算表达式（排序键 / 投影列 / 过滤条件）上花的时间，含在「独占」里。'
+      + '向量距离算子（<-> <=> <#>）就是在这里算的 —— 所以向量 Top-K 慢在求值，不在排序。';
     tags.appendChild(c);
   }
   row.appendChild(tags);
@@ -8459,7 +8471,7 @@ loadDBs().then(() => {
 });
 
 /* ---------- 基准测试 ---------- */
-// 一次跑几分钟（灌 100 万行 + 7 个场景各 3 轮），所以是异步任务：
+// 一次跑几分钟（灌 100 万行 + 9 个场景各 3 轮），所以是异步任务：
 // start 秒回，status 轮询进度。结果存 data/bench-history.json 供「本次 vs 上次」对比。
 // 它现在是监控面板的第 5 页 —— 不再单占一个全屏页，「打开」就是切 Tab。
 // 但异步任务的进度必须能跨页看见，所以顶栏「监控」按钮上挂了个百分比 badge：

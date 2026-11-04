@@ -29,6 +29,12 @@ type OpProfile struct {
 	ioNs    int64
 	ioPages int64
 	ioBytes int64
+	// evalNs 是「本算子内部做表达式求值」的累计时间（排序键 / 投影列 / 过滤条件）。
+	//
+	// 它本来就含在 ns（独占时间）里，单独再记一份是因为 `ORDER BY v <=> q` 这类查询
+	// 的时间几乎全在距离计算上，而界面上只写「Top-N Sort 392µs」会让人以为排序慢。
+	// 求值发生在算子身上，从 SelfNs 里分不出来，只能自己记。
+	evalNs int64
 }
 
 // ioStat 是「读页阻塞」的计口。exec 不关心它怎么实现，只要能在任意时刻取快照 ——
@@ -61,9 +67,26 @@ func (p *OpProfile) enableProfile(on bool) {
 	p.on = on
 	p.rows, p.loops, p.ns = 0, 0, 0
 	p.ioNs, p.ioPages, p.ioBytes = 0, 0, 0
+	p.evalNs = 0
 }
 
 func (p *OpProfile) profile() (int64, int64) { return p.rows, p.ns }
+
+// evalTimer 开始给「表达式求值」计时。统计关着时返回零值，evalDone 什么都不做 ——
+// 和 begin/done 一样，正常查询不该为观测付钱。
+func (p *OpProfile) evalTimer() hrtime.Stamp {
+	if p == nil || !p.on {
+		return hrtime.Stamp{}
+	}
+	return hrtime.Now()
+}
+
+func (p *OpProfile) evalDone(s hrtime.Stamp) {
+	if p == nil || !p.on || s == (hrtime.Stamp{}) {
+		return
+	}
+	p.evalNs += hrtime.Since(s)
+}
 
 // loop 记一次「重新启动子节点」。
 //
@@ -198,6 +221,12 @@ type PlanNode struct {
 	SelfIONs    int64 `json:"selfIoNs,omitempty"`
 	SelfIOPages int64 `json:"selfIoPages,omitempty"`
 	SelfIOBytes int64 `json:"selfIoBytes,omitempty"`
+	// EvalNs 是 SelfNs 里「花在算表达式」的那部分（排序键 / 投影列 / 过滤条件）。
+	//
+	// 单列出来是为了回答「为什么排序这么贵」：`ORDER BY v <=> q LIMIT 10` 的时间
+	// 几乎全在距离计算上，而它记在排序算子的 SelfNs 里。没有这个数，只能看到
+	// 「Top-N Sort 392µs」。
+	EvalNs int64 `json:"evalNs,omitempty"`
 
 	Children []*PlanNode `json:"children,omitempty"`
 }
@@ -207,6 +236,16 @@ type PlanNode struct {
 type scannedReporter interface {
 	ScanRows() int64
 }
+
+// evalProfiler 是「这一步有多少时间花在表达式求值上」的口子。
+//
+// 所有算子都嵌了 OpProfile，所以人人都有这个方法；没求值的算子恒为 0，
+// 序列化时被 omitempty 去掉。
+type evalProfiler interface {
+	profileEval() int64
+}
+
+func (p *OpProfile) profileEval() int64 { return p.evalNs }
 
 // memReporter 是「这一步内存里攒着多少行」的口子。
 //
@@ -260,6 +299,9 @@ func ExplainTree(op Operator) *PlanNode {
 		}
 		if sr, ok := o.(scannedReporter); ok {
 			n.Scanned = sr.ScanRows()
+		}
+		if ep, ok := o.(evalProfiler); ok {
+			n.EvalNs = ep.profileEval()
 		}
 		// 内存里攒了多少。只问「行数」，字节在这里统一折算 —— 口径放在一处，
 		// 探测面板上各行的数字才能横向比（见 memReporter / memRowBytes 的注释）。

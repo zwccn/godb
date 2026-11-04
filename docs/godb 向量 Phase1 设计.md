@@ -193,6 +193,7 @@ VALUES (1, '集合运算', '[0.12,-0.34,0.56,…]'),
 | `a JOIN b ON a.v = b.v` | `JOIN ... ON cannot be applied to vector values` | 哈希连接会拿槽位号配对 |
 | `v IN (SELECT v FROM …)` | `… cannot be used as equality or grouping keys` | 同上 |
 | `CREATE INDEX … (v)` | `data type vector has no default operator class for access method btree` | 索引键按列值编码，槽位号编出来的键没有语义 |
+| `lower(v)` / `concat(v)` / `v \|\| '…'` / `length(v)` / `string_agg(v, ',')` / `v::text` | `… has no text form` | 存盘向量没有文本形式，硬转会漏出 `[vector:0]`（`length(v)` 会返回 10） |
 | `v vector PRIMARY KEY / UNIQUE` | `PRIMARY KEY / UNIQUE cannot be applied to vector column` | 唯一性检查同样要内容身份 |
 | `ALTER COLUMN v TYPE vector`（该列已有索引/约束） | `cannot change … to vector` | 会把已有索引变成错的东西 |
 

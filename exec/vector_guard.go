@@ -35,6 +35,19 @@ func checkVectorKey(what string, ty types.Type) error {
 		"so there is no content-based identity to compare; use a distance operator (<->, <=> or <#>) instead", what)
 }
 
+// checkVectorText 挡住「把向量当文本用」的地方（lower / concat / || / length / string_agg …）。
+//
+// 这些函数的工作方式就是把参数转成文本，而存盘的向量**没有**文本形式（`v::text` 在
+// types.Cast 里也被拒）。跑到 TextForm() 会拿到 `[vector:0]` 这种内部引用：
+// 结果看起来像字符串，其实是槽位号 —— lower(v) 返回 "[vector:0]"、length(v) 返回 10。
+func checkVectorText(what string, ty types.Type) error {
+	if ty.Kind != types.KVector {
+		return nil
+	}
+	return fmt.Errorf("%s cannot be applied to vector values: a stored vector has no text form "+
+		"(the row only holds a .vec slot reference); select the vector column on its own to get '[0.1,0.2,…]' text", what)
+}
+
 // checkSortKeys 检查一组排序键里没有向量列。
 func checkSortKeys(what string, keys []sortKey) error {
 	for _, k := range keys {

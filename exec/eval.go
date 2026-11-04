@@ -210,6 +210,14 @@ func compile(e sql.Expr, c *compileCtx) (Eval, error) {
 		if err != nil {
 			return nil, err
 		}
+		if n.Op == "||" {
+			// 拼接靠文本形式，而存盘的向量没有文本形式（见 checkVectorText）。
+			for _, side := range []Eval{l, r} {
+				if err := checkVectorText("||", side.Type()); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return &binEval{op: n.Op, l: l, r: r, t: binType(n.Op, l.Type(), r.Type())}, nil
 
 	case *sql.Unary:
@@ -1372,6 +1380,18 @@ func compileScalar(n *sql.FuncCall, c *compileCtx) (Eval, error) {
 			fe.dbName = c.planner.Info.Name
 		}
 		fe.user = c.planner.User
+	}
+	switch name {
+	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring",
+		"concat", "text", "array", "regexp_matches", "lpad", "rpad",
+		"length", "char_length", "character_length", "position", "strpos":
+		// 这一组都是「先把参数转成文本再处理」。存盘的向量没有文本形式，
+		// 真转出来是 `[vector:0]`（lower(v) 会返回这串、length(v) 返回 10）。
+		for _, a := range args {
+			if err := checkVectorText(name+"()", a.Type()); err != nil {
+				return nil, err
+			}
+		}
 	}
 	switch name {
 	case "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "replace", "substr", "substring",

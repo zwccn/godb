@@ -889,14 +889,16 @@ ORDER BY id;</pre>
             <b>向量既没有「相等」也没有「大小」</b>，下面这些写法会直接报错 —— 不是没做好，而是没有正确的答案：
             <code>v = '[…]'</code>、<code>ORDER BY v</code>、<code>SELECT DISTINCT v</code>、
             <code>GROUP BY v</code>、<code>COUNT(DISTINCT v)</code>、<code>MIN / MAX(v)</code>、
-            <code>JOIN … ON a.v = b.v</code>、<code>UNION</code> / <code>INTERSECT</code> / <code>EXCEPT</code>
+            <code>JOIN … ON a.v = b.v</code>、<code>UNION</code> / <code>INTERSECT</code> / <code>EXCEPT</code>、
+            以及任何「把向量当文本」的写法（<code>v || '…'</code>、<code>lower(v)</code>、<code>concat(v)</code>、
+            <code>length(v)</code>、<code>string_agg(v, ',')</code>、<code>v::text</code>）
             （<b><code>UNION ALL</code> 不受限</b>），以及向量列上的 <code>CREATE INDEX</code> /
             <code>PRIMARY KEY</code> / <code>UNIQUE</code>。<br>
             原因很实在：向量的真实数据在表的 <code>.vec</code> 文件里，行内只留一个槽位引用，而槽位每次写入、
             每次更新都会换。拿它判重，内容相同的两行会被算成两行、内容不同的两行可能被算成一行，
             而且结果看上去是正常的 —— 宁可直接报错，也不给这种答案。<br>
-            要按内容去重只能在应用侧做：<code>SELECT v</code> 出来就是 <code>'[0.1,0.2,…]'</code> 文本，
-            自己比字符串即可（库内 <code>v::text</code> 同样不支持，理由相同）。
+            要按内容去重只能在应用侧做：单独 <code>SELECT v</code> 出来就是 <code>'[0.1,0.2,…]'</code> 文本，
+            自己比字符串即可 —— 但也只有这一条路，库内没有把向量转成文本的函数。
           </div>
         </div>
       </div>

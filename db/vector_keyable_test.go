@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -38,6 +39,12 @@ func TestVectorCannotBeUsedAsKey(t *testing.T) {
 		{`SELECT id FROM vk ORDER BY v`, "ORDER BY"},
 		{`SELECT MIN(v) FROM vk`, "MIN()"},
 		{`SELECT MAX(v) FROM vk`, "MAX()"},
+		// 文本化：存盘的向量没有文本形式，硬转会漏出 [vector:0]
+		{`SELECT lower(v) FROM vk`, "lower()"},
+		{`SELECT length(v) FROM vk`, "length()"},
+		{`SELECT concat(v) FROM vk`, "concat()"},
+		{`SELECT v || 'x' FROM vk`, "||"},
+		{`SELECT string_agg(v, ',') FROM vk`, "STRING_AGG()"},
 		// 空表也必须在规划期报错，不能等第一行出现
 		{`SELECT id FROM vk_empty ORDER BY v`, "ORDER BY"},
 		{`SELECT DISTINCT v FROM vk_empty`, "SELECT DISTINCT"},
@@ -58,6 +65,16 @@ func TestVectorCannotBeUsedAsKey(t *testing.T) {
 	res = run(t, d, s, `SELECT id FROM vk ORDER BY v <-> '[1,2,3]' LIMIT 1`)
 	if got := len(rowsOf(t, res)); got != 1 {
 		t.Fatalf("ORDER BY 距离应返回 1 行，实际 %d", got)
+	}
+	// count(v) 只数非 NULL，不涉及顺序/文本，必须照常可用。
+	res = run(t, d, s, `SELECT count(v) FROM vk`)
+	if got := fmt.Sprint(rowsOf(t, res)[0][0]); got != "3" {
+		t.Fatalf("count(v) 应为 3，实际 %s", got)
+	}
+	// 单独取列能拿到文本（这是「要文本」时的正确做法）。
+	res = run(t, d, s, `SELECT v FROM vk ORDER BY id LIMIT 1`)
+	if got := fmt.Sprint(rowsOf(t, res)[0][0]); got != "[1,2,3]" {
+		t.Fatalf("SELECT v 应为 [1,2,3]，实际 %s", got)
 	}
 }
 

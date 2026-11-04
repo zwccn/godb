@@ -2009,6 +2009,12 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, er
 		// min/max 要一个顺序，DISTINCT 要一个内容身份，向量两样都没有（见
 		// vector_guard.go）。count / sum / avg 不在此列：count 只数非 NULL，
 		// sum/avg 后面会按数值类型报错。
+		if name == "string_agg" {
+			// 拼接要先转文本，存盘的向量没有文本形式（否则拼出来是 [vector:0],…）。
+			if err := checkVectorText("STRING_AGG()", arg.Type()); err != nil {
+				return nil, err
+			}
+		}
 		if name == "min" || name == "max" {
 			if err := checkVectorOrder(fmt.Sprintf("%s()", strings.ToUpper(name)), arg.Type()); err != nil {
 				return nil, err

@@ -73,6 +73,16 @@ func (e *Engine) CopyOutText(tx *storage.Tx, c *sql.Copy) ([]string, int64, erro
 		}
 	}
 
+	// 向量列的行内值只是槽位引用，直接 TextForm() 会导出成 `[vector:0]`（再灌回来
+	// 就报 invalid input syntax）。用投影层同一套 vecCellFixer 换成 `[1,2,3]`。
+	sc := tableScopeOf(e.Cat, t, "")
+	colMeta := make([]Column, len(sc))
+	for i, ci := range sc {
+		colMeta[i] = Column{Name: ci.Name, Type: ci.Type.String(), TableOID: ci.TableOID,
+			AttNum: ci.AttNum, TableID: ci.TableID, ColID: ci.ColID}
+	}
+	vecFix := vecCellFixer(tx, colMeta)
+
 	var out []string
 	var n int64
 	err := tx.Scan(t.Name, func(ref storage.Ref, row types.Row) error {
@@ -82,7 +92,11 @@ func (e *Engine) CopyOutText(tx *storage.Tx, c *sql.Copy) ([]string, int64, erro
 				parts[i] = `\N`
 				continue
 			}
-			parts[i] = escapeCopy(row[ci].TextForm())
+			v := row[ci]
+			if vecFix != nil {
+				v = vecFix(ci, v)
+			}
+			parts[i] = escapeCopy(v.TextForm())
 		}
 		out = append(out, strings.Join(parts, "\t"))
 		n++

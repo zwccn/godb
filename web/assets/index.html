@@ -223,16 +223,19 @@ try {
 
   <div class="mon-body" id="monBody">
     <div class="mon-page" data-page="overview">
-      <!-- 0. 结论：一句话 + 三个数字 + 一句建议。
-           下面的水位条是给「知道自己在看什么」的人看的；第一次打开的人需要先知道
-           「有没有事、要不要动手」，所以结论放最上面，明细往下沉。 -->
-      <section class="mon-card mon-verdict" id="monVerdict" aria-live="polite"></section>
-
-      <!-- 1. 水位条：一排数字 + 健康灯。绿灯不用往下看。 -->
-      <div class="mon-water" id="monWater"></div>
-
-      <!-- 2. 三层状态：执行 / 等锁 / 排队各一张，合成一个数就没法归因 -->
-      <div class="mon-layers" id="monLayers"></div>
+      <!-- 0. 结论 + 三层：合成一张卡。
+           以前这里是三块 —— 结论卡（三个数）/ 水位条（同样三个数 + 灯）/ 三层卡
+           （还是这三个数 + p50/p95/max），同一个 0 在一屏里出现三次，而「113.1 ms」
+           和「113 ms」还是同一个字段的两种写法。现在只有一份：
+             头部 = 有没有事（灯 + 一句话）
+             中间 = 卡在哪一层（排队 / 等锁 / 执行，带上限与分位值）
+             尾部 = 要不要动手（有才出现的建议）+ 累计次数（原来只在水位条上） -->
+      <section class="mon-card mon-verdict" id="monVerdict" aria-live="polite">
+        <div class="vd-head" id="monVerdictHead"></div>
+        <!-- 2. 三层状态：执行 / 等锁 / 排队各一列，合成一个数就没法归因 -->
+        <div class="mon-layers" id="monLayers"></div>
+        <div class="vd-foot" id="monVerdictFoot"></div>
+      </section>
 
       <!-- 存储摘要：排障时先看这一行（fsync 就是提交的实际等待），
            要看 WAL / 快照 / 缓冲池与逐表空间，再切「存储」页。 -->

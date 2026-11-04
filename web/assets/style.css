@@ -2092,59 +2092,36 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 }
 #btnMonitor:hover .mon-dot { transform: scale(1.25); }
 
-/* ---- 1. 水位条 ---- */
-.mon-water {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 9px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-1);
-}
-.w-item {
-  display: flex;
-  align-items: baseline;
-  padding-right: 12px;
-  border-right: 1px solid var(--border-soft);
-}
-/* 数字和 /32 之间不留缝：留了会变成「3 /32」，读起来像两个数 */
-.w-k { font-size: calc(11.5px * var(--fs)); color: var(--text-3); margin-right: 5px; }
-.w-v { font-family: var(--mono); font-size: calc(17px * var(--fs)); font-weight: 600; color: var(--text); }
-.w-max { font-family: var(--mono); font-size: calc(12px * var(--fs)); color: var(--text-3); }
-.w-item.warn .w-v { color: var(--warn-text); }
-.w-item.bad .w-v { color: var(--danger-text); }
-.w-lamp { display: flex; align-items: center; gap: 6px; padding-right: 12px; }
-.w-lamp-text { font-size: calc(12px * var(--fs)); color: var(--text-2); }
-.w-note {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: calc(11px * var(--fs));
-  color: var(--text-3);
-}
-
-/* ---- 2. 三层状态卡 ---- */
+/* ---- 1. 三层状态：结论卡中间那一排 ----
+   以前这是独立的三张卡，和水位条、结论卡各摆一份同样的数字。现在三列住在结论卡里，
+   整页只有这一份：左起「排队 → 等锁 → 执行」，正好是一个请求要跑起来的三道关。 */
 .mon-layers {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
 }
 .mon-layer {
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-1);
-  /* 这三张卡只是「归因用的一行摘要」，高度要让给下面的诊断表 */
-  padding: 7px 11px;
   min-width: 0;
+  padding: 0 12px;
+  border-left: 1px solid var(--border-soft);
 }
-.lv-run { border-left-color: var(--accent); }
-.lv-wait { border-left-color: var(--warn); }
-.lv-queue { border-left-color: var(--danger); }
-.lv-head { display: flex; align-items: baseline; gap: 8px; }
+.mon-layer:first-child { padding-left: 0; border-left: 0; }
+.mon-layer:last-child { padding-right: 0; }
+
+.lv-head { display: flex; align-items: center; gap: 6px; }
+/* 色块替掉原来卡片左边那条 3px 彩条：进了卡以后彩条会跟列分隔线打架 */
+.lv-dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
+.lv-dot.lv-run { background: var(--accent); }
+.lv-dot.lv-wait { background: var(--warn); }
+.lv-dot.lv-queue { background: var(--danger); }
 .lv-name { font-size: calc(12px * var(--fs)); color: var(--text-2); letter-spacing: .5px; }
-.lv-count { font-family: var(--mono); font-size: calc(18px * var(--fs)); line-height: 1.15; }
+.lv-count { font-family: var(--mono); font-size: calc(18px * var(--fs)); line-height: 1.15; color: var(--text); }
+/* 上限跟在大数字后面，小一档、不留缝 —— 留了会读成「3 /32」 */
+.lv-cap { font-style: normal; font-size: .72em; color: var(--text-3); }
+.mon-layer.is-warn .lv-count { color: var(--warn-text); }
+.mon-layer.is-bad .lv-count { color: var(--danger-text); }
 .lv-stat {
   display: flex;
   gap: 10px;
@@ -2794,6 +2771,9 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 
 @media (max-width: 1000px) {
   .mon-layers, .mon-two, .mon-timeouts { grid-template-columns: 1fr; }
+  /* 三列竖排以后，列分隔线要跟着从「竖」改成「横」，否则会变成左边一条孤零零的线 */
+  .mon-layer { padding: 8px 0 0; border-left: 0; border-top: 1px solid var(--border-soft); }
+  .mon-layer:first-child { padding-top: 0; border-top: 0; }
   .proc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
   /* 诊断卡头部：Tab（慢SQL/慢事务/锁明细）+ 排序（按累计/按单次）在 390px 下
@@ -4777,8 +4757,9 @@ html[data-theme="steel"] .mon-dot.red {
 }
 
 /* 水位和速率上的大数字：等宽 + 同色微光，像仪表读数。
-   只给这两处，不给正文 —— 满屏发光的数字读久了眼睛累。 */
-html[data-theme="steel"] .w-v,
+   只给这两处，不给正文 —— 满屏发光的数字读久了眼睛累。
+   水位条已并进结论卡，对应的是三层那排的数字（.lv-count）。 */
+html[data-theme="steel"] .lv-count,
 html[data-theme="steel"] .pc-value {
   text-shadow: 0 0 16px var(--fx-glow);
 }
@@ -4919,8 +4900,9 @@ html[data-theme="steel"] .ctx-menu {
 }
 
 /* ---------- 概览：结论卡 ----------
-   概览页最上面那块。它只回答三件事：有没有事、现在多忙、要不要动手。
-   下面的水位条 / 三层 / 曲线一个都不删 —— 它们是「详情」，结论卡负责让人不用先读懂它们。 */
+   概览页最上面那块，也是唯一一块报数字的地方。它回答三件事：
+   有没有事（头）、卡在哪一层（中间三层）、要不要动手（尾）。
+   以前这三件事分住在结论卡 / 水位条 / 三层卡里，同一组 0 在一屏出现三遍，已合并。 */
 .mon-verdict { padding: 12px 14px; }
 .vd-head { display: flex; align-items: center; gap: 10px; }
 .vd-dot {
@@ -4939,30 +4921,18 @@ html[data-theme="steel"] .ctx-menu {
 .vd-title { font-size: calc(14px * var(--fs)); font-weight: 600; color: var(--text); }
 .vd-sub { margin-top: 1px; font-size: calc(11.5px * var(--fs)); color: var(--text-3); }
 
-/* 三个数字：一眼扫完就够，不必再往下看 */
-.vd-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-}
-.vd-stat {
-  padding: 8px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: 7px;
-  background: var(--bg-2);
-}
-.vd-v {
+/* 结论卡里不再有「三个大数字格子」（.vd-stats）—— 那三个数现在由三层那排承担，
+   整页只有一份。这里只剩头（灯 + 一句话）和尾（建议 + 累计次数）。 */
+.vd-foot { margin-top: 10px; }
+.vd-counts {
+  margin-top: 9px;
   font-family: var(--mono);
-  font-size: calc(17px * var(--fs));
-  line-height: 1.2;
-  color: var(--text);
+  font-size: calc(11px * var(--fs));
+  color: var(--text-3);
 }
-.vd-k { margin-top: 1px; font-size: calc(11px * var(--fs)); color: var(--text-2); }
-.vd-n { margin-top: 1px; font-size: calc(10.5px * var(--fs)); color: var(--text-3); }
 
 /* 建议动作：正常的时候一条都没有，所以它出现就说明「确实有事」 */
-.vd-advice { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.vd-advice { display: flex; flex-direction: column; gap: 6px; }
 .vd-adv {
   display: flex;
   align-items: center;
@@ -4974,13 +4944,6 @@ html[data-theme="steel"] .ctx-menu {
   background: var(--bg-2);
 }
 .vd-advtext { flex: 1 1 auto; min-width: 0; font-size: calc(11.5px * var(--fs)); color: var(--text-2); }
-
-@media (max-width: 720px) {
-  /* 窄屏三列会挤成一根竖条，改成两行 */
-  .vd-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-  .vd-v { font-size: calc(15px * var(--fs)); }
-  .vd-stat { padding: 6px 8px; }
-}
 
 /* ---------- 基准测试（监控面板第 5 页） ---------- */
 /* 原来是个独立全屏页，自带 .bench-body 负责滚。收进 Tab 后滚动交给 .mon-body，

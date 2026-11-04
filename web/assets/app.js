@@ -2259,7 +2259,8 @@ function renderSchema(tables) {
 const monPanel = document.getElementById('monPanel');
 const monEls = {
   verdict: document.getElementById('monVerdict'),
-  water: document.getElementById('monWater'),
+  verdictHead: document.getElementById('monVerdictHead'),
+  verdictFoot: document.getElementById('monVerdictFoot'),
   layers: document.getElementById('monLayers'),
   lockBody: document.getElementById('monLockBody'),
   lockOk: document.getElementById('monLockOk'),
@@ -2688,8 +2689,7 @@ function renderMonitor(m) {
   monEls.db.textContent = m.water.db || '';
   monEls.updated.textContent = new Date(m.nowMs || Date.now()).toLocaleTimeString('zh-CN', { hour12: false });
   renderVerdict(m);
-  renderWater(m.water || {});
-  renderLayers(m.layers || {});
+  renderLayers(m.layers || {}, m.water || {});
   renderRates(m);
   renderProc(m);
   renderIO(m);
@@ -2716,12 +2716,7 @@ function renderVerdict(m) {
   const box = monEls.verdict;
   if (!box) return;
   const w = m.water || {};
-  const run = (m.layers || {}).running || {};
-  const exec = w.exec || 0;
-  const execMax = w.execMax > 0 ? w.execMax : 0;
-  const waiting = (w.wait || 0) + (w.queue || 0);
   const slowN = (m.slowSql || []).reduce((s, x) => s + (x.n || 0), 0);
-  const longest = run.maxNs || 0;
 
   // 结论只跟健康灯走：yellow = 有排队/等锁，red = 已经顶到上限。
   const lvl = w.level === 'red' ? 'red' : (w.level === 'yellow' ? 'yellow' : 'green');
@@ -2730,29 +2725,19 @@ function renderVerdict(m) {
     ? '没人排队、没人在等锁，下面这些数字可以不用管'
     : '先看「诊断」——那里能回答「谁在挡谁」';
 
-  box.innerHTML = '';
-  const head = el('div', 'vd-head');
+  // 头（有没有事）和尾（要不要动手）各自填自己那块容器：
+  // 中间那排数字由 renderLayers 写进 #monLayers，三者同在一张卡里。
+  const head = monEls.verdictHead;
+  const foot = monEls.verdictFoot;
+  if (!head || !foot) return;
+
+  head.innerHTML = '';
   head.appendChild(el('span', 'vd-dot ' + lvl));
   const ht = el('div', 'vd-headtext');
   ht.appendChild(el('div', 'vd-title', title));
   ht.appendChild(el('div', 'vd-sub', sub));
   head.appendChild(ht);
-  box.appendChild(head);
-
-  const stats = el('div', 'vd-stats');
-  const stat = (label, value, note) => {
-    const c = el('div', 'vd-stat');
-    c.appendChild(el('div', 'vd-v', value));
-    c.appendChild(el('div', 'vd-k', label));
-    c.appendChild(el('div', 'vd-n', note));
-    stats.appendChild(c);
-  };
-  stat('正在执行', String(exec), execMax ? `上限 ${execMax}` : '不限并发');
-  stat('等锁 / 排队', String(waiting), waiting ? '有人被挡住了' : '没人等');
-  // 「最久一条」比 P95 更直白：它回答的是「有没有一条已经跑很久了」
-  stat('最久一条', longest > 0 ? fmtTook(longest) : '—',
-    run.count ? `在跑 ${run.count} 条` : '现在没有语句在跑');
-  box.appendChild(stats);
+  foot.innerHTML = '';
 
   // 建议动作：最多两条，没有就不出现 —— 正常的时候不该有按钮在勾人去点
   const advice = [];
@@ -2778,70 +2763,60 @@ function renderVerdict(m) {
       row.appendChild(b);
       wrap.appendChild(row);
     }
-    box.appendChild(wrap);
+    foot.appendChild(wrap);
   }
+
+  // 累计次数原来只在水位条上。它是「自启动以来」的背景值，跟结论放一起，
+  // 比夹在两张卡中间合适（也顺手让这个数只剩一处）。
+  const c = m.counters || {};
+  foot.appendChild(el('div', 'vd-counts',
+    `Kill ${c.kills || 0} · 慢SQL回滚 ${c.slowSqlAborts || 0} · 慢事务回滚 ${c.slowTxAborts || 0}`));
+
   box.dataset.level = lvl;
-}
-
-/* ---- 1. 水位条 ---- */
-
-function renderWater(w) {
-  monEls.water.innerHTML = '';
-  const lvl = w.level || 'green';
-  const execMax = w.execMax > 0 ? String(w.execMax) : '不限';
-  const queueMax = w.queueMax > 0 ? String(w.queueMax) : '不限';
-
-  const item = (key, val, max, tip, cls) => {
-    const box = el('div', 'w-item' + (cls ? ' ' + cls : ''));
-    box.title = tip || '';
-    box.appendChild(el('span', 'w-k', key));
-    box.appendChild(el('b', 'w-v', val));
-    if (max !== undefined) box.appendChild(el('span', 'w-max', '/' + max));
-    return box;
-  };
-
-  // 从外到内排：排队（等槽位）→ 等锁（拿到槽位但卡在锁）→ 执行（真正在跑）。
-  // 从左往右读正好是「一个请求怎么才能跑起来」的顺序。
-  monEls.water.appendChild(item('排队', w.queue, queueMax,
-    '等执行槽位的请求数；触顶会被快速拒绝（背压）',
-    w.queueMax > 0 && w.queue >= w.queueMax ? 'bad' : (w.queue > 0 ? 'warn' : '')));
-  monEls.water.appendChild(item('等锁', w.wait, undefined,
-    '正在等表锁的事务数；多于执行数说明瓶颈在锁，不在算力',
-    w.exec > 0 && w.wait > w.exec ? 'bad' : ''));
-  monEls.water.appendChild(item('执行', w.exec, execMax,
-    '并发执行槽位：事务持有（空闲事务也占位），不是「正在跑 SQL 的条数」'));
-
-  const lamp = el('div', 'w-lamp');
-  lamp.appendChild(el('span', 'mon-dot ' + lvl));
-  lamp.appendChild(el('span', 'w-lamp-text',
-    lvl === 'green' ? '健康' : (lvl === 'yellow' ? '有压力' : '需处理')));
-  monEls.water.appendChild(lamp);
-
-  const c = monData && monData.counters ? monData.counters : {};
-  const note = el('div', 'w-note');
-  note.title = '自启动以来的累计次数';
-  note.textContent = `Kill ${c.kills || 0} · 慢SQL回滚 ${c.slowSqlAborts || 0} · 慢事务回滚 ${c.slowTxAborts || 0}`;
-  monEls.water.appendChild(note);
 }
 
 /* ---- 2. 三层状态 ---- */
 
-function renderLayers(layers) {
+function renderLayers(layers, water) {
   monEls.layers.innerHTML = '';
-  // 顺序与水位条一致：排队 → 等锁 → 执行，眼睛不用在两处来回换算位置。
+  const w = water || {};
+  // 顺序与一个请求怎么才跑得起来一致：排队（等槽位）→ 等锁 → 执行。
+  // max 是「这一层的并发上限」，只有排队和执行有；等锁没有上限，由锁自己决定。
   const cards = [
-    { key: 'queued', name: '排队', lv: 'lv-queue', tip: '等执行槽位的请求' },
-    { key: 'waiting', name: '等锁', lv: 'lv-wait', tip: '卡在表锁上的会话' },
-    { key: 'running', name: '执行', lv: 'lv-run', tip: '正在跑语句的会话' },
+    {
+      key: 'queued', name: '排队', lv: 'lv-queue', max: w.queueMax > 0 ? w.queueMax : 0,
+      tip: '等执行槽位的请求数；触顶会被快速拒绝（背压）',
+      bad: w.queueMax > 0 && (w.queue || 0) >= w.queueMax, warn: (w.queue || 0) > 0,
+      none: '没有',
+    },
+    {
+      key: 'waiting', name: '等锁', lv: 'lv-wait', max: 0,
+      tip: '正在等表锁的事务数；多于执行数说明瓶颈在锁，不在算力',
+      bad: (w.exec || 0) > 0 && (w.wait || 0) > (w.exec || 0), warn: false,
+      none: '没有',
+    },
+    {
+      key: 'running', name: '执行', lv: 'lv-run', max: w.execMax > 0 ? w.execMax : 0,
+      tip: '并发执行槽位：事务持有（空闲事务也占位），不是「正在跑 SQL 的条数」',
+      bad: false, warn: false,
+      // 这条和上面「max 113 ms」并不矛盾：max 是窗口内的历史样本，
+      // 这一行说的是「此刻」。所以措辞要带上「此刻」，别写成「没有」。
+      none: '此刻没有在跑的语句',
+    },
   ];
   for (const c of cards) {
     const d = layers[c.key] || {};
-    const box = el('div', 'mon-layer ' + c.lv);
+    const box = el('div', 'mon-layer');
     box.title = c.tip;
+    if (c.bad) box.classList.add('is-bad');
+    else if (c.warn) box.classList.add('is-warn');
 
     const head = el('div', 'lv-head');
+    head.appendChild(el('i', 'lv-dot ' + c.lv));
     head.appendChild(el('span', 'lv-name', c.name));
-    head.appendChild(el('b', 'lv-count', String(d.count || 0)));
+    const num = el('b', 'lv-count', String(d.count || 0));
+    if (c.max) num.appendChild(el('i', 'lv-cap', '/' + c.max));
+    head.appendChild(num);
     box.appendChild(head);
 
     const stat = el('div', 'lv-stat');
@@ -2860,7 +2835,7 @@ function renderLayers(layers) {
       prev.title = lg.sql || '';
       lastRow.appendChild(prev);
     } else {
-      lastRow.appendChild(el('span', 'lv-none', '没有'));
+      lastRow.appendChild(el('span', 'lv-none', c.none));
     }
     box.appendChild(lastRow);
     monEls.layers.appendChild(box);

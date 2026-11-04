@@ -612,20 +612,30 @@ class CDP {
     const vdOk = await cdp.eval(`(() => {
       const b = document.getElementById('monVerdict');
       const page = document.querySelector('.mon-page[data-page="overview"]');
+      const layers = [...b.querySelectorAll('.mon-layer')];
       return {
         first: page.firstElementChild === b,
         title: (b.querySelector('.vd-title') || {}).textContent || '',
-        stats: b.querySelectorAll('.vd-stat').length,
+        layers: layers.length,
+        caps: layers.map(l => (l.querySelector('.lv-cap') || {}).textContent || ''),
+        counts: (b.querySelector('.vd-counts') || {}).textContent || '',
         advice: b.querySelectorAll('.vd-adv').length,
         level: b.dataset.level,
+        water: !!document.getElementById('monWater'),
       };
     })()`);
     // 建议行不是「正常就一定没有」：跑过测试之后慢查询记录里总会有几条，
     // 所以这里只断言「最多两条」和结构，具体文案在下面那条里造数据验。
-    check('概览第一块是结论卡：一句结论 + 三个数字（建议最多两条）',
-      vdOk.first && /运行正常|有点忙|有点撑不住/.test(vdOk.title) && vdOk.stats === 3
-      && vdOk.advice <= 2 && vdOk.level === 'green',
-      `${vdOk.title} · ${vdOk.stats} 个数字 · 建议 ${vdOk.advice} 条 · ${vdOk.level}`);
+    check('概览第一块是结论卡：一句话 + 三层数字都在同一张卡里（建议最多两条）',
+      vdOk.first && /运行正常|有点忙|有点撑不住/.test(vdOk.title) && vdOk.layers === 3
+      && vdOk.advice <= 2 && vdOk.level === 'green' && !vdOk.water,
+      `${vdOk.title} · ${vdOk.layers} 列 · 建议 ${vdOk.advice} 条 · ${vdOk.level}`);
+    /* 这三个数以前在结论卡、水位条、三层卡各来一遍，同一个 0 一屏三份，
+       「113.1 ms」和「113 ms」还是同一个字段的两种写法。现在只剩一份，这条钉住它。 */
+    check('水位条已并入三列：容量跟各自的层走，累计次数回到结论卡',
+      vdOk.caps.filter(Boolean).length === 2 && vdOk.caps.includes('/256')
+      && vdOk.caps.includes('/32') && /Kill \d+/.test(vdOk.counts),
+      `${vdOk.caps.join(' ')} · ${vdOk.counts.slice(0, 36)}`);
 
     // 造一个「有排队 + 有慢查询」的状态：建议行必须出现，且按钮真的能跳到对应 Tab
     const vdBusy = await cdp.eval(`(() => {

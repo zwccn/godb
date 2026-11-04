@@ -338,7 +338,7 @@ func (o *oneRowOp) Open() error {
 	t.done(false)
 	return nil
 }
-func (o *oneRowOp) Close() error   { return nil }
+func (o *oneRowOp) Close() error         { return nil }
 func (o *oneRowOp) Describe() string     { return "Result (no FROM)" }
 func (o *oneRowOp) Children() []Operator { return nil }
 func (o *oneRowOp) Next() (types.Row, bool, error) {

@@ -420,7 +420,7 @@ try {
         <table class="bench-table">
           <thead>
             <tr>
-              <th>场景</th><th>提交粒度</th><th>动了多少行</th><th class="num">条/秒</th><th>对比上次</th>
+              <th>场景</th><th>提交粒度</th><th class="num" title="这一轮处理过的行数（点查=次数 × 1 行，范围扫描=区间数 × 每段行数，聚合=次数 × 表行数）">处理行数</th><th class="num">行/秒</th><th>对比上次</th>
             </tr>
           </thead>
           <tbody id="benchRows"></tbody>
@@ -901,6 +901,14 @@ ORDER BY id;</pre>
             向量没归一化时它和余弦给出的排序会不一样。<br>
             · <code>&lt;#&gt;</code> <b>负内积</b> = −(a·b)（所以是负数）。只想按「热度 × 相似」排序、
             不希望被长度开方削平的时候用它；要看真实内积写 <code>-(v &lt;#&gt; '[…]')</code>。
+          </div>
+          <div class="help-lv-desc">
+            <b>灌数据</b>：一条 <code>INSERT … VALUES</code> 写多行最快 —— 每条约 1000 行（≈700KB）
+            是甜点，再大单条语句的解析时间喧宾夺主，再小全是往返开销。10 万行 × 128 维灌完几秒、
+            占 51MB 的 <code>.vec</code>。<br>
+            查询向量的维度必须与列定义一致，差一个数就报
+            <code>vector dimension mismatch: column is 128, value has 127</code>。
+            批量导入时先 <code>CREATE TABLE … vector(128)</code> 定好维度，再按同一维度生成文本。
           </div>
           <div class="help-note">
             <b>向量既没有「相等」也没有「大小」</b>，下面这些写法会直接报错 —— 不是没做好，而是没有正确的答案：

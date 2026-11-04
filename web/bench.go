@@ -850,13 +850,18 @@ func (s *Server) scenePointQuery(x *benchSess) benchScene {
 
 // sceneRangeScan 范围扫描：一次扫一个 id 区间并聚合，测顺序/索引范围扫描。
 func (s *Server) sceneRangeScan(x *benchSess) benchScene {
-	const n = 2000 // 每轮扫 2000 个区间
+	const n = 2000    // 每轮扫 2000 个区间
+	const width = 100 // 每个区间 100 行（闭区间，所以是 lo+99）
+	// 报「处理过多少行」而不是「跑了几次」：表头那一列是行数，2000 个区间实际
+	// 命中 20 万行，只写 2000 会让人以为一次只碰一行。
+	rows := n * width
+	commit := fmt.Sprintf("区间 SELECT + count · 每段 %d 行", width)
 	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`SELECT count(*) FROM ` + benchTable + ` WHERE id BETWEEN 1 AND 100`) }
 	fn := func() error {
 		for i := 0; i < n; i++ {
-			lo := (i*100)%(scale()-100) + 1
-			if err := x.exec(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id BETWEEN %d AND %d`, benchTable, lo, lo+99)); err != nil {
+			lo := (i*width)%(scale()-width) + 1
+			if err := x.exec(fmt.Sprintf(`SELECT count(*) FROM %s WHERE id BETWEEN %d AND %d`, benchTable, lo, lo+width-1)); err != nil {
 				return err
 			}
 			if i%250 == 249 {
@@ -869,24 +874,31 @@ func (s *Server) sceneRangeScan(x *benchSess) benchScene {
 	}
 	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
-		return benchScene{Name: "范围扫描", Commit: "区间 SELECT + count", Error: err.Error()}
+		return benchScene{Name: "范围扫描", Commit: commit, Error: err.Error()}
 	}
-	return benchScene{Name: "范围扫描", Commit: "区间 SELECT + count", Rows: n, PerSec: round3(float64(n) / median(secs))}
+	return benchScene{Name: "范围扫描", Commit: commit, Rows: rows, PerSec: round3(float64(rows) / median(secs))}
 }
 
 // sceneAggregate 聚合：全表 count + group by，测物化内存与哈希聚合。
+//
+// 口径和别的场景一致，报「处理过多少行 / 秒」：每次 GROUP BY 都要把整张表扫一遍，
+// 跑 20 次就是 20 × 表行数。以前这里报的是「20 次查询 / 秒」，于是结果表里
+// 「动了多少行」那一列显示 20、「条/秒」显示 61.8 —— 同一张表里两种单位，
+// 看的人只能猜。现在换成行，和批量更新、向量 Top-K 这些能直接比。
 func (s *Server) sceneAggregate(x *benchSess) benchScene {
-	const n = 20
+	const times = 20
+	rows := times * scale()
+	commit := fmt.Sprintf("GROUP BY 全表 × %d 次", times)
 	p := progPart{span: 1}
 	warmup := func() error { return x.exec(`SELECT count(*) FROM ` + benchTable) }
 	fn := func() error {
-		for i := 0; i < n; i++ {
+		for i := 0; i < times; i++ {
 			if err := x.exec(`SELECT grp, count(*) FROM ` + benchTable + ` GROUP BY grp`); err != nil {
 				return err
 			}
-			// 一次全表 group by 要一秒上下，每两次报一下
+			// 每次都要扫全表，每两次报一下
 			if i%2 == 1 {
-				if err := x.within(segPart(i+1, n), fmt.Sprintf("%s / %s 次", benchComma(i+1), benchComma(n))); err != nil {
+				if err := x.within(segPart(i+1, times), fmt.Sprintf("%s / %s 次", benchComma(i+1), benchComma(times))); err != nil {
 					return err
 				}
 			}
@@ -895,9 +907,9 @@ func (s *Server) sceneAggregate(x *benchSess) benchScene {
 	}
 	secs, err := s.timed(x, p, warmup, fn)
 	if err != nil {
-		return benchScene{Name: "聚合", Commit: "GROUP BY 全表", Error: err.Error()}
+		return benchScene{Name: "聚合", Commit: commit, Error: err.Error()}
 	}
-	return benchScene{Name: "聚合", Commit: "GROUP BY 全表", Rows: n, PerSec: round3(float64(n) / median(secs))}
+	return benchScene{Name: "聚合", Commit: commit, Rows: rows, PerSec: round3(float64(rows) / median(secs))}
 }
 
 // sceneVectorTopK 是「向量 Top-K」：目前没有近似索引，只能全表扫 + 逐行算距离。

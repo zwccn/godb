@@ -236,6 +236,79 @@ html[data-theme="mint"] {
   --shadow-color: rgba(20, 60, 50, .18);
 }
 
+/* 极光：深夜藏青底 + 薄荷青绿强调，参照 DbSchema 官网那套观感。
+   两处刻意的选择：
+     1. 底色带紫（#0a0e24 的色相在 240° 附近，不是中性灰）—— 中性深灰是「暗」，
+        偏紫的深蓝才是「夜」；面板越靠上越亮的同时色相略往紫移，看起来像有天光从
+        上面漏下来。
+     2. 强调色取偏青的薄荷（#7fe3cc，色相 165°），和底色差 75°，落在深底上够亮；
+        它和已有的「薄荷绿」只共用色相，那套是浅底深绿字，这套是深底亮青，
+        同屏出现也不会认错。
+   accent 与 accent-strong 照既有约定分两档：accent 只做前景（链接、下划线、焦点环），
+   实心按钮走 accent-strong（#0f8873，白字对比 4.6:1）—— 亮薄荷直接当按钮底
+   配白字只有 1.8:1，是看不清的。 */
+html[data-theme="aurora"] {
+  --bg: #0a0e24;
+  --bg-1: #101636;
+  --bg-2: #151d44;
+  --bg-3: #1c2454;
+  --border: #262f60;
+  --border-soft: #1c2148;
+  --text: #e8eaff;
+  --text-2: #a4abd6;
+  --text-3: #7b83b2;
+  --accent: #7fe3cc;
+  --accent-dim: #13303a;
+  --ok: #4fd6a8;
+  --warn: #e0b160;
+  --danger: #ff7b8e;
+
+  --on-accent: #fff;
+  --on-accent-dim: #d9fff6;
+  --accent-strong: #0f8873;
+  --accent-strong-hover: #12a086;
+  --accent-border: #1fa58d;
+  --accent-border-hover: #2bbfa4;
+  --accent-soft-bg: #102e35;
+  --accent-soft-border: #1d4d54;
+  --accent-soft-text: #93ecda;
+  --hint-active-bg: #1b4a54;
+  --ok-bg: #103426;
+  --ok-bg-hover: #164a34;
+  --ok-border: #1f6b4c;
+  --ok-text: #8ce9c2;
+  --warn-bg: #2a2113;
+  --warn-bg-hover: #453620;
+  --warn-border: #66502a;
+  --warn-text: #f2d18f;
+  --danger-bg: #2c1524;
+  --danger-strong: #7d2b44;
+  --danger-border: #5f2338;
+  --danger-text: #ffa5b6;
+  --danger-text-dim: #d4879a;
+  --border-hover: #38447e;
+  --row-hover: #18214c;
+  --scroll-thumb: #29335f;
+  --scroll-thumb-hover: #38447a;
+  --code-bg: #080b1e;
+  --code-text: #b6c2e8;
+  --tint-strong: rgba(255, 255, 255, .14);
+  --tint-hover: rgba(127, 227, 204, .06);
+  --tint-sel: rgba(127, 227, 204, .14);
+  --tint-danger: rgba(255, 123, 142, .12);
+  --overlay: rgba(4, 6, 20, .65);
+  --shadow-color: rgba(0, 0, 0, .6);
+
+  /* 探测六段：底色偏紫，蓝段照搬 #6bb6ff 会显得发灰，换成更亮的 #8fb8ff；
+     执行段用主题自己的薄荷，一根条读完像「紫 → 青」的过渡。 */
+  --ph-load: #ffca7a;
+  --ph-lock: #ff9db0;
+  --ph-plan: #b79bff;
+  --ph-exec: #7fe3cc;
+  --ph-explain: #8fb8ff;
+  --ph-end: #9aa3c8;
+}
+
 /* 科技灰：冷调深灰（蓝灰），参照 VS Code / Catppuccin Mocha 那一类配色 ——
    底色几乎无彩，只有主色和几个语义色带一点点蓝紫，久看不刺眼。
    主色用 #89b4fa（浅天蓝）做链接/图标；实心按钮仍用更深的 #3a6bcc，保证白字可读。 */
@@ -394,6 +467,7 @@ html[data-theme="steel"] {
 .theme-dot-taro { background: linear-gradient(135deg, #ded0f5 45%, #7a5bd6 45%); }
 .theme-dot-mint { background: linear-gradient(135deg, #cfeade 45%, #1f9c72 45%); }
 .theme-dot-steel { background: linear-gradient(135deg, #262735 45%, #89b4fa 45%); }
+.theme-dot-aurora { background: linear-gradient(135deg, #1c2454 45%, #7fe3cc 45%); }
 
 * { box-sizing: border-box; }
 
@@ -1929,6 +2003,9 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
      藏掉「库」标签和「管理」（库管理还能点侧栏里的库名） */
   .topbar { padding: 0 10px; }
   .top-actions { gap: 6px; }
+  /* 四个入口在 390px 上放不下（多出 35px）。首页让位：左上角的 logo
+     点的就是同一个动作，而监控/关系图/设置没有第二个入口。 */
+  #btnHome { display: none; }
   .brand { gap: 0; }
   .brand-text { display: none; }
   .db-pick-label { display: none; }
@@ -4867,6 +4944,52 @@ html[data-theme="steel"] .map-grid.panning .pm-c,
 html[data-theme="steel"] .map-tree.panning,
 html[data-theme="steel"] .map-tree.panning .tv-cell { cursor: grabbing; }
 
+/* ================= 「极光」专属增强 =================
+   和科技灰那节同一个原则：静态只加「几乎看不见」的层次，动效只发生在交互态。
+   但方向相反 —— 科技灰的质感来自「精密」（细网格、准星、扫描线），极光的质感
+   来自「天幕」（大块柔光、几乎不可见的点阵），所以这里一条直线都没有，全是
+   径向渐变：一块紫光从左上斜下来，一块更淡的青光贴右上，底下铺 24px 点阵。
+
+   光加在 body 的 background-image 上，不用伪元素：body 是 flex 列容器，插
+   ::before 得额外管 z-index 才不会盖住内容；background-image 天然在内容之下，
+   而且 attachment:fixed 让它不随滚动跑。 */
+
+html[data-theme="aurora"] body {
+  background-color: var(--bg);
+  background-image:
+    /* 左上：紫蓝天光，最亮的一块。圆心放在 18% / -8%（视口外面），只露出下缘的扩散
+       —— 圆心落在屏幕里就会变成一个看得见的圆，而不是「光」。 */
+    radial-gradient(1200px 620px at 18% -8%, rgba(112, 94, 232, .30), transparent 70%),
+    /* 右上：一层更淡的薄荷，压到 .15。两块光一样亮就分不出主次，界面会发闷。 */
+    radial-gradient(900px 520px at 92% 2%, rgba(47, 208, 176, .15), transparent 72%),
+    /* 点阵：24px 一格、.05 的白。铺在纯色区域勉强看得见，压到面板和卡片上就被
+       面板底色盖住了 —— 所以它只从结果区、编辑器外围这些空白处透出来。 */
+    radial-gradient(rgba(180, 196, 255, .05) 1px, transparent 1px);
+  background-size: auto, auto, 24px 24px;
+  background-attachment: fixed, fixed, fixed;
+  background-repeat: no-repeat, no-repeat, repeat;
+}
+
+/* 顶栏底边：紫 → 薄荷的一段渐变，比科技灰那条更长也更淡。
+   用两个色相而不是一个，是为了让「上紫下青」这套过渡在界面唯一的一条硬边上
+   也讲得通 —— 否则顶栏是紫的、强调色是青的，中间那条线归谁都不像。 */
+html[data-theme="aurora"] .topbar { position: relative; }
+html[data-theme="aurora"] .topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0,
+    rgba(140, 120, 240, .55) 22%,
+    rgba(127, 227, 204, .72) 52%,
+    rgba(127, 227, 204, .24) 78%,
+    transparent 100%);
+  pointer-events: none;
+}
+
 /* ---------- 编辑器右键菜单 ---------- */
 /* 自己画的原因：浏览器原生菜单在深色界面上是块灰白色板子，而且它给的「剪切/复制/粘贴」
    我们本来就能做（选区在 CodeMirror 手里）。这里把常用的几项按本项目的语言重排一遍。 */
@@ -5164,4 +5287,242 @@ html[data-theme="steel"] .ctx-menu {
 @media (max-width: 720px) {
   .bench-table th:nth-child(2), .bench-table td:nth-child(2) { display: none; }
   .bench-batch-row { grid-template-columns: 74px minmax(0, 1fr) 96px; gap: 8px; }
+}
+
+/* ---------- 关系图 ---------- */
+
+/* 分组色只固定「色相」，明度和饱和度交给皮肤。
+   8 个色相 × 6 套皮肤如果各写一遍就是 48 个值，调一次得改一整天；
+   这里只留 8 行色相，深浅由 --er-tint / --er-line 两个变量控制 ——
+   深色皮肤要更浓（暗底上 alpha 小就看不见），浅色皮肤要更淡
+   （同样的 alpha 扑在白底上会变成一块脏色）。 */
+.er-card.g0, .er-group.g0 { --g-h: 262; --g-s: 62%; }
+.er-card.g1, .er-group.g1 { --g-h: 168; --g-s: 58%; }
+.er-card.g2, .er-group.g2 { --g-h: 20;  --g-s: 70%; }
+.er-card.g3, .er-group.g3 { --g-h: 330; --g-s: 65%; }
+.er-card.g4, .er-group.g4 { --g-h: 212; --g-s: 70%; }
+.er-card.g5, .er-group.g5 { --g-h: 92;  --g-s: 52%; }
+.er-card.g6, .er-group.g6 { --g-h: 38;  --g-s: 82%; }
+.er-card.g7, .er-group.g7 { --g-h: 220; --g-s: 12%; }
+
+:root {
+  --er-tint: .20;      /* 卡片标题栏 / 组底色的不透明度 */
+  --er-line: .45;      /* 组框描边的不透明度 */
+}
+
+html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
+  --er-tint: .13;
+  --er-line: .52;
+}
+
+.er {
+  position: fixed;
+  top: 52px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.er-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+.er-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: calc(13px * var(--fs));
+  color: var(--text);
+  white-space: nowrap;   /* 窄屏上「关系图」会被挤成一列竖排字，必须锁住 */
+}
+.er-stats {
+  font-size: calc(11.5px * var(--fs));
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.er-actions { display: flex; align-items: center; gap: 8px; }
+.er-zoom {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.er-zoom-val {
+  min-width: 46px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.er-zoom-val:hover { color: var(--text); }
+.er-stage {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+  cursor: grab;
+  /* 点阵底：空画布上如果什么都没有，平移时完全看不出在动 */
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.er-stage.panning { cursor: grabbing; }
+.er-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.er-edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.er-edge,
+.er-crow,
+.er-tick {
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1.4;
+  stroke-opacity: .6;
+  stroke-linejoin: round;
+  transition: stroke .12s, stroke-opacity .12s, stroke-width .12s;
+}
+.er-edge.hot {
+  stroke: var(--accent);
+  stroke-opacity: 1;
+  stroke-width: 2;
+}
+.er-group {
+  position: absolute;
+  border: 1px solid hsl(var(--g-h) var(--g-s) 55% / var(--er-line));
+  background: hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-tint) * .32));
+  border-radius: 12px;
+}
+.er-group-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: calc(11.5px * var(--fs));
+  white-space: nowrap;
+}
+.er-group-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: hsl(var(--g-h) var(--g-s) 55%);
+}
+.er-group-name { overflow: hidden; text-overflow: ellipsis; }
+.er-card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  box-shadow: 0 1px 3px var(--shadow-color, rgba(0, 0, 0, .22));
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s;
+}
+.er-card:hover,
+.er-card.hot {
+  border-color: hsl(var(--g-h) var(--g-s) 55% / .95);
+  box-shadow: 0 3px 12px var(--shadow-color, rgba(0, 0, 0, .3));
+}
+.er-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px;
+  background: hsl(var(--g-h) var(--g-s) 55% / var(--er-tint));
+  border-bottom: 1px solid hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-line) * .6));
+}
+.er-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: calc(12.5px * var(--fs));
+  font-weight: 500;
+}
+.er-card-rows {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  font-variant-numeric: tabular-nums;
+}
+.er-card-cols { padding: 2px 8px 6px; }
+.er-col {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  font-size: calc(11.5px * var(--fs));
+}
+.er-mark {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: transparent;
+}
+.er-mark.pk { background: hsl(38 90% 56%); }
+.er-mark.fk { background: hsl(212 85% 60%); }
+.er-col-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.er-col-type {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+}
+.er-more {
+  justify-content: flex-start;
+  padding-left: 11px;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs));
+}
+.er-note {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  max-width: min(640px, 90%);
+  padding: 7px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: calc(12px * var(--fs));
+  text-align: center;
+}
+
+/* 关系图顶栏在 390px 上放不下「6 张表 · 2 组 · 4 条外键」，先撤统计文字 ——
+   张数和连线数在图上直接数得出来，适应画布和缩放按钮撤了就没得替代了。 */
+@media (max-width: 720px) {
+  .er-head { padding: 8px 10px; gap: 8px; }
+  .er-stats { display: none; }
 }

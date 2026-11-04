@@ -68,6 +68,12 @@ try {
     <!-- 首页 = 回到编辑器：监控面板和设置弹窗都收掉。顶栏三个入口里，
          它在编辑器时是「当前」，进了监控就换成「监控」亮 —— 和页面级 Tab 同一套选中语言。 -->
     <button id="btnHome" class="btn btn-ghost on" title="回到编辑器（关掉监控 / 设置）">首页</button>
+    <!-- 关系图：把外键关系摊开成一张图。和监控同级（页面级视图），
+         因为它回答的是 schema 的结构问题，不是运行时指标。 -->
+    <button id="btnEr" class="btn btn-ghost" title="关系图：表之间的外键关系（自动分组）"
+            aria-label="关系图">
+      <span class="lbl-full">关系图</span><span class="lbl-short">关系</span>
+    </button>
     <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
     <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务 / 基准">
       <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span><span id="benchBadge" class="badge bench-badge hidden"></span>
@@ -519,6 +525,34 @@ try {
         </div>
       </section>
     </div>
+  </div>
+</section>
+
+<!-- 关系图：把「谁引用谁」摊开成一张图。
+     全屏而不是侧栏里的一棵树：关系要看的是整体形状（几组、谁连谁、谁孤立），
+     一步步展开的表树恰好看不到这个。 -->
+<section id="erPanel" class="er hidden" aria-label="关系图">
+  <div class="er-head">
+    <div class="er-title">
+      关系图
+      <span class="er-stats" id="erStats"></span>
+    </div>
+    <div class="er-actions">
+      <button id="btnErFit" class="btn btn-ghost btn-sm" type="button"
+              title="缩放到刚好放下整张图">适应画布</button>
+      <div class="er-zoom">
+        <button id="btnErOut" class="icon-btn" type="button" title="缩小">−</button>
+        <button id="btnErZoom" class="er-zoom-val" type="button" title="点击回到 100%">100%</button>
+        <button id="btnErIn" class="icon-btn" type="button" title="放大">+</button>
+      </div>
+      <button id="btnErClose" class="icon-btn" type="button" title="关闭（Esc）">×</button>
+    </div>
+  </div>
+  <!-- 画布：拖动空白处平移，滚轮缩放。卡片和连线都由 JS 摆绝对坐标 ——
+       关系图不用网格布局，任何「左一个右一个」的流式排法都会把连线拧成麻花。 -->
+  <div class="er-stage" id="erStage">
+    <div class="er-canvas" id="erCanvas"></div>
+    <div class="er-note hidden" id="erNote"></div>
   </div>
 </section>
 

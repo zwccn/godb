@@ -284,13 +284,28 @@ type ColumnInfo struct {
 	Comment string `json:"comment,omitempty"`
 }
 
+// FKInfo 是前端展示用的外键信息（关系图的连线就是它）。
+type FKInfo struct {
+	Name       string   `json:"name,omitempty"`
+	Columns    []string `json:"columns"`
+	RefTable   string   `json:"refTable"`
+	RefColumns []string `json:"refColumns"`
+	OnDelete   string   `json:"onDelete,omitempty"`
+	OnUpdate   string   `json:"onUpdate,omitempty"`
+}
+
 // TableInfo 是前端展示用的表信息。
 type TableInfo struct {
 	Name    string       `json:"name"`
 	Rows    int          `json:"rows"`
 	Columns []ColumnInfo `json:"columns"`
+	// ID 是建表时分配的稳定编号。关系图要记住「哪张表摆在哪个位置」，
+	// 用名字做键的话 RENAME 一次布局就散了；ID 不随改名变化，只增不复用。
+	ID int64 `json:"id,omitempty"`
 	// Comment 是 COMMENT ON TABLE 写的一句话说明，侧栏会在表名下面显示。
 	Comment string `json:"comment,omitempty"`
+	// ForeignKeys 是出边（本表引用别人）。关系图靠它连线和分组。
+	ForeignKeys []FKInfo `json:"foreignKeys,omitempty"`
 }
 
 // Open 打开（或初始化）数据目录。
@@ -1131,7 +1146,7 @@ func (d *DB) Tables() []TableInfo {
 	defer d.Store.SchemaMu.RUnlock()
 	out := make([]TableInfo, 0, len(d.Cat.Tables))
 	for _, t := range d.Cat.Tables {
-		ti := TableInfo{Name: t.Name, Rows: d.Store.RowCount(t.Name), Comment: t.Comment}
+		ti := TableInfo{Name: t.Name, ID: t.ID, Rows: d.Store.RowCount(t.Name), Comment: t.Comment}
 		for _, c := range t.Columns {
 			ti.Columns = append(ti.Columns, ColumnInfo{
 				Name:       c.Name,
@@ -1142,6 +1157,19 @@ func (d *DB) Tables() []TableInfo {
 				Serial:     c.Serial,
 				Default:    c.Default,
 				Comment:    c.Comment,
+			})
+		}
+		// 外键整条带出去：关系图要画连线和分组，没有它就只能看一堆孤立卡片。
+		// 只带出边（本表引用了谁），入边由前端从各表的出边汇总 —— 同一份事实
+		// 只在一处表达，少一处不一致的机会。
+		for _, fk := range t.ForeignKeys {
+			ti.ForeignKeys = append(ti.ForeignKeys, FKInfo{
+				Name:       fk.Name,
+				Columns:    fk.Columns,
+				RefTable:   fk.RefTable,
+				RefColumns: fk.RefColumns,
+				OnDelete:   fk.OnDelete,
+				OnUpdate:   fk.OnUpdate,
 			})
 		}
 		out = append(out, ti)

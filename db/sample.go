@@ -8,8 +8,11 @@ import (
 	"godb/txn"
 )
 
-// SampleSQL 是演示数据集：部门/员工两张表（JOIN、聚合、事务），
-// 外加一张 articles（文档 + 8 维向量），让「按相似度取前 K 条」打开就能试。
+// SampleSQL 是演示数据集：部门/员工（JOIN、聚合、事务）、订单/订单行（三级外键链）、
+// 文章 + 标签（8 维向量），让「按相似度取前 K 条」打开就能试。
+//
+// 外键不是摆设：关系图靠它连线和分组。示例库如果一条外键都没有，
+// 打开关系图只能看到几张孤立卡片，看不出这个视图的意义。
 const SampleSQL = `
 CREATE TABLE departments (
     id      SERIAL PRIMARY KEY,
@@ -21,7 +24,7 @@ CREATE TABLE departments (
 CREATE TABLE employees (
     id       SERIAL PRIMARY KEY,
     name     TEXT NOT NULL,
-    dept_id  INTEGER,
+    dept_id  INTEGER REFERENCES departments(id),
     title    TEXT,
     salary   NUMERIC(10,2) NOT NULL DEFAULT 0,
     hired    TIMESTAMP,
@@ -47,6 +50,48 @@ INSERT INTO employees (name, dept_id, title, salary, hired, active) VALUES
     ('郑凯',   4, '会计',     14000, '2021-06-18', TRUE),
     ('冯雪',   NULL, '实习生',  8000, '2024-07-01', TRUE),
     ('蒋楠',   NULL, '顾问',   50000, '2024-01-09', FALSE);
+
+-- 订单 / 订单行：多一层「一对多再一对多」。
+--
+-- 原来示例只有「部门-员工」一条外键，关系图打开就是两张表一根线，
+-- 看不出分组和层级；补上这条链之后，员工→订单→订单行是一条能看懂的
+-- 三级结构，也顺带给帮助里的 JOIN 例子多一个现成的对象。
+CREATE TABLE orders (
+    id          SERIAL PRIMARY KEY,
+    employee_id INTEGER REFERENCES employees(id),
+    total       NUMERIC(12,2) NOT NULL DEFAULT 0,
+    status      TEXT,
+    created     DATE
+);
+
+INSERT INTO orders (employee_id, total, status, created) VALUES
+    (1,  12800.00, 'paid',    '2026-09-02'),
+    (2,   3400.00, 'paid',    '2026-09-05'),
+    (3,    860.00, 'paid',    '2026-09-11'),
+    (4,   3600.00, 'paid',    '2026-09-18'),
+    (6,  21000.00, 'pending', '2026-10-02'),
+    (7,   1250.00, 'paid',    '2026-10-09'),
+    (9,   1200.00, 'paid',    '2026-10-15'),
+    (10,  7600.00, 'pending', '2026-10-21');
+
+CREATE TABLE order_items (
+    id       SERIAL PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product  TEXT NOT NULL,
+    qty      INTEGER NOT NULL DEFAULT 1,
+    price    NUMERIC(10,2)
+);
+
+INSERT INTO order_items (order_id, product, qty, price) VALUES
+    (1, '服务器托管',   1, 11800.00),
+    (1, 'IP 地址',      4,   250.00),
+    (2, '对象存储 1TB', 1,  3400.00),
+    (3, '短信包',       1,   860.00),
+    (4, '域名续费',     3,  1200.00),
+    (5, '专线带宽',     1, 18000.00),
+    (5, '机柜租用',     2,  1500.00),
+    (6, '短信包',       1,  1250.00),
+    (7, '域名续费',     1,  1200.00);
 
 -- 向量示例：一小组「文档 + 8 维 embedding」，四个主题各占一个方向。
 --
@@ -89,6 +134,22 @@ INSERT INTO articles (title, topic, embedding) VALUES
 COMMENT ON TABLE articles IS '示例：9 篇文档 + 8 维向量，演示按相似度取前 K 条';
 COMMENT ON COLUMN articles.topic IS 'tech / prod / mkt / fin';
 COMMENT ON COLUMN articles.embedding IS '8 维向量（四类主题各占一个方向），用 <=> 算余弦距离';
+
+-- 标签：让 articles 也有一个子表。关系图里「一个分组至少要有两个节点」，
+-- 否则每张表各成一组，看不出分组本身的意义。
+CREATE TABLE tags (
+    id         SERIAL PRIMARY KEY,
+    article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL
+);
+
+INSERT INTO tags (article_id, name) VALUES
+    (1, 'vector'), (1, 'index'), (2, 'vector'), (4, 'prd'),
+    (5, 'design'), (6, 'growth'), (8, 'finance');
+
+COMMENT ON TABLE orders IS '示例：订单，employee_id 指向 employees';
+COMMENT ON TABLE order_items IS '示例：订单行，order_id 指向 orders（级联删除）';
+COMMENT ON TABLE tags IS '示例：文章标签，article_id 指向 articles';
 `
 
 // LoadSample 载入示例数据（会先清空所有表）。

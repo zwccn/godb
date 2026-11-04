@@ -54,10 +54,13 @@ const THEME_KEY = 'godb.theme';
 // 第一次打开用哪套皮肤。深色是 CSS 里的 :root（不加属性），所以「默认」和
 // 「无属性」不是一回事：选深色会主动清掉属性，首次访问则要先写上 data-theme="steel"。
 const DEFAULT_THEME = 'steel';
-// 顺序即设置页里的展示顺序；默认的那套排第一
+// 顺序即设置页里的展示顺序；默认的那套排第一。
+// 深色系三套在前（科技灰 / 深色 / 极光），浅色系三套在后，色点那排看过去是
+// 从暗到亮的一条渐变，比按加入时间乱排好找。
 const THEME_LIST = [
   { id: 'steel', name: '科技灰' },
   { id: 'dark', name: '深色' },
+  { id: 'aurora', name: '极光' },
   { id: 'sky', name: '淡蓝' },
   { id: 'taro', name: '芋紫' },
   { id: 'mint', name: '薄荷绿' },
@@ -2394,13 +2397,19 @@ if (monEls.sort) {
 // 顶栏三个入口反映「当前在哪」：在编辑器亮「首页」，看监控亮「监控」，开设置亮「设置」。
 // 和页面级 Tab 用的是同一个选中底色，不另造一套视觉语言。
 // 基准从顶栏挪进监控第 5 页后，这里就没有它的事了 —— 它靠「监控」按钮上的百分比 badge 露头。
+// 关系图面板是否打开。声明在这里而不是文件末尾的「关系图」一节里：
+// syncTopNav 在启动阶段就会被调到，那时末尾的 let 还在 TDZ 里，读到就抛错。
+let erOpen = false;
+
 function syncTopNav() {
   const home = document.getElementById('btnHome');
   const mon = document.getElementById('btnMonitor');
+  const er = document.getElementById('btnEr');
   const set = document.getElementById('btnSettings');
   const setOpen = !settingsPanel.classList.contains('hidden');
-  if (home) home.classList.toggle('on', !monOpen && !setOpen);
+  if (home) home.classList.toggle('on', !monOpen && !setOpen && !erOpen);
   if (mon) mon.classList.toggle('on', monOpen);
+  if (er) er.classList.toggle('on', erOpen);
   if (set) set.classList.toggle('on', setOpen);
 }
 
@@ -5980,6 +5989,7 @@ document.getElementById('btnMonitor').addEventListener('click', () => {
 // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
 function goHome() {
   toggleMonitor(false);
+  toggleER(false);
   if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
     return;
@@ -6961,6 +6971,8 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Escape' && monOpen) toggleMonitor(false);
+  // 关系图是独立页面，Esc 直接退回编辑器。它没有下级浮层，不用分层退。
+  if (e.key === 'Escape' && erOpen) toggleER(false);
 });
 
 /* ---------- 编辑器右键菜单 ---------- */
@@ -8745,3 +8757,502 @@ api('/api/bench/status').then(d => {
     startBenchBadgePoll();
   }
 }).catch(() => {});
+
+/* ---------------- 关系图 ---------------- */
+
+// 布局常量集中在一处：卡片宽高直接决定连线的锚点位置，
+// 散在三处改一个数字就要跟着改另外两处。
+const ER = {
+  cardW: 236,          // 卡片宽：刚好放下「employee_benefits」+「NUMERIC(12,2)」
+  headH: 28,           // 标题栏高
+  rowH: 20,            // 每行字段高
+  cardPad: 8,          // 卡片底部留白
+  gap: 26,             // 组内卡片间距（也是竖直连线的长度）：留够「一」和鸦爪的位置
+  groupPad: 18,        // 组框内边距
+  groupHead: 26,       // 组标题占的高度
+  groupGap: 40,        // 组与组之间的水平间距
+  chanW: 18,           // 组内左侧的走线通道：连线从这里绕过卡片
+  rowMax: 1480,        // 一行最多摆多宽，超了换行
+  maxRows: 14,         // 卡片最多显示多少行字段，多了折成「还有 N 列」
+};
+
+// 关系图的视图状态（缩放 / 平移），和面板开合分开存：关了再开，
+// 上次怎么看的位置还在会让人以为「图没刷新」，所以除非手动缩放否则每次重新适应画布。
+let erView = { zoom: 1, panX: 0, panY: 0 };
+let erModel = null;      // 当前渲染出来的分组 / 边 / 画布尺寸
+let erPan = null;        // 拖动画布的临时状态
+
+const erPanel = document.getElementById('erPanel');
+const erStage = document.getElementById('erStage');
+const erCanvas = document.getElementById('erCanvas');
+const erNote = document.getElementById('erNote');
+
+function erRowsOf(t) {
+  return Math.min(t.columns.length, ER.maxRows);
+}
+
+function erCardHeight(t) {
+  const extra = t.columns.length > ER.maxRows ? 1 : 0;
+  return ER.headH + (erRowsOf(t) + extra) * ER.rowH + ER.cardPad;
+}
+
+// erBuildModel 把「表 + 外键」整理成「分组 + 连线」。
+//
+// 分组用的是外键图的连通分量（并查集）：A 引用 B，B 引用 C，那三张表就是一组。
+// 这比让用户先分组再摆表省一步 —— 用户什么都不用做，打开就是一张有组织的图；
+// 手工分组留到后面做覆盖（想改哪组的名字/颜色再说）。
+function erBuildModel(tables) {
+  const byName = new Map();
+  for (const t of tables) byName.set(t.name, t);
+
+  const edges = [];
+  for (const t of tables) {
+    for (const fk of (t.foreignKeys || [])) {
+      const parent = byName.get(fk.refTable);
+      // 自引用也画（org.manager_id → org.id 这种很常见），但不参与分组 ——
+      // 它连的是自己，不会把两张表并成一组。
+      if (!parent) continue;
+      if (!fk.columns || !fk.columns.length) continue;
+      edges.push({ child: t, parent, fk });
+    }
+  }
+
+  const up = new Map();
+  for (const t of tables) up.set(t.name, t.name);
+  const find = n => {
+    let r = n;
+    while (up.get(r) !== r) r = up.get(r);
+    while (up.get(n) !== r) { const nx = up.get(n); up.set(n, r); n = nx; }
+    return r;
+  };
+  for (const e of edges) {
+    if (e.child.name === e.parent.name) continue;
+    const a = find(e.child.name), b = find(e.parent.name);
+    if (a !== b) up.set(a, b);
+  }
+
+  const buckets = new Map();
+  for (const t of tables) {
+    const r = find(t.name);
+    if (!buckets.has(r)) buckets.set(r, []);
+    buckets.get(r).push(t);
+  }
+
+  const groups = [];
+  const loose = [];
+  let idx = 0;
+  for (const list of buckets.values()) {
+    if (list.length > 1) groups.push({ idx: idx++, tables: list, loose: false });
+    else loose.push(list[0]);
+  }
+  // 孤立表单独成一组放最后：它们没有连线，混在关联组里只会让图更乱。
+  if (loose.length) groups.push({ idx: idx++, tables: loose, loose: true });
+
+  // 大的组排前面 —— 一眼先看到主体，边角的小组往右推。
+  groups.sort((a, b) => {
+    if (a.loose !== b.loose) return a.loose ? 1 : -1;
+    return b.tables.length - a.tables.length || a.tables[0].name.localeCompare(b.tables[0].name);
+  });
+
+  for (const g of groups) erOrderGroup(g, edges);
+  erPlaceGroups(groups);
+  return { groups, edges, w: erModelW(groups), h: erModelH(groups) };
+}
+
+// erOrderGroup 决定组内上下顺序：被引用的表在上，引用别人的在下。
+//
+// 用「松弛」而不是拓扑排序：外键成环（a 引用 b、b 又引用 a）在真实库里
+// 是存在的，拓扑排序会失败，松弛只要给个上限就能收敛到「尽量分层」。
+function erOrderGroup(g, edges) {
+  const names = new Set(g.tables.map(t => t.name));
+  const parents = new Map();
+  for (const e of edges) {
+    if (!names.has(e.child.name) || !names.has(e.parent.name)) continue;
+    if (e.child.name === e.parent.name) continue;
+    if (!parents.has(e.child.name)) parents.set(e.child.name, []);
+    parents.get(e.child.name).push(e.parent.name);
+  }
+  const depth = new Map();
+  for (const t of g.tables) depth.set(t.name, 0);
+  for (let round = 0; round < g.tables.length; round++) {
+    let changed = false;
+    for (const [child, ps] of parents) {
+      let want = 0;
+      for (const p of ps) want = Math.max(want, (depth.get(p) || 0) + 1);
+      if (want > (depth.get(child) || 0) && want < g.tables.length) {
+        depth.set(child, want);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  g.tables.sort((a, b) =>
+    (depth.get(a.name) || 0) - (depth.get(b.name) || 0) || a.name.localeCompare(b.name));
+}
+
+function erPlaceGroups(groups) {
+  let rowX = 0, rowY = 0, rowH = 0;
+  for (const g of groups) {
+    const n = g.tables.length;
+    const sum = g.tables.reduce((s, t) => s + erCardHeight(t), 0);
+    const boxH = ER.groupHead + ER.groupPad * 2 + sum + (n - 1) * ER.gap;
+    const boxW = ER.groupPad * 2 + ER.chanW + ER.cardW;
+    if (rowX > 0 && rowX + boxW > ER.rowMax) {
+      rowX = 0;
+      rowY += rowH + ER.groupGap;
+      rowH = 0;
+    }
+    g.box = { x: rowX, y: rowY, w: boxW, h: boxH };
+    let y = rowY + ER.groupHead + ER.groupPad;
+    const x = rowX + ER.groupPad + ER.chanW;
+    for (const t of g.tables) {
+      const h = erCardHeight(t);
+      t._er = { x, y, w: ER.cardW, h };
+      y += h + ER.gap;
+    }
+    rowX += boxW + ER.groupGap;
+    rowH = Math.max(rowH, boxH);
+  }
+}
+
+function erModelW(groups) {
+  let w = 0;
+  for (const g of groups) w = Math.max(w, g.box.x + g.box.w);
+  return w;
+}
+
+function erModelH(groups) {
+  let h = 0;
+  for (const g of groups) h = Math.max(h, g.box.y + g.box.h);
+  return h;
+}
+
+// 组标题用「组里的表名」拼，不自己起名字。
+// 自动分组没有语义信息，硬起一个「人事域」只会猜错；等手工分组做出来，
+// 名字才是用户给的，那时再显示用户起的名字。
+function erGroupTitle(g) {
+  if (g.loose) return `未分组 · ${g.tables.length} 张表`;
+  const names = g.tables.map(t => t.name);
+  const head = names.slice(0, 2).join(' · ');
+  return names.length > 2 ? `${head} +${names.length - 2}` : head;
+}
+
+function erColY(card, t, colName) {
+  let i = -1;
+  const want = String(colName || '').toLowerCase();
+  for (let k = 0; k < t.columns.length; k++) {
+    if (t.columns[k].name.toLowerCase() === want) { i = k; break; }
+  }
+  if (i < 0) i = 0;
+  if (i >= ER.maxRows) i = ER.maxRows - 1;
+  return card.y + ER.headH + i * ER.rowH + ER.rowH / 2;
+}
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+
+function erSvg(tag, attrs) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+function erRender() {
+  const tables = schemaCache || [];
+  const model = erBuildModel(tables);
+  erModel = model;
+
+  erCanvas.innerHTML = '';
+  erCanvas.style.width = model.w + 'px';
+  erCanvas.style.height = model.h + 'px';
+
+  const stats = document.getElementById('erStats');
+  if (stats) {
+    const fkCount = model.edges.length;
+    stats.textContent = `${tables.length} 张表 · ${model.groups.length} 组 · ${fkCount} 条外键`;
+  }
+
+  // 空库 / 没有外键两种「图不好看」的情况各给一句话。
+  // 没有外键是最常见的：用户建表时大多不写 REFERENCES，不给提示
+  // 会以为关系图坏了。
+  if (!tables.length) {
+    erNote.textContent = '这个库还没有表。建几张带外键的表，这里就会连成一张图。';
+    erNote.classList.remove('hidden');
+    document.getElementById('btnErFit').disabled = true;
+    return;
+  }
+  if (!model.edges.length) {
+    erNote.textContent = '当前库没有外键，图里只有孤立的表。建表时写 REFERENCES（或 FOREIGN KEY）之后再来看。';
+    erNote.classList.remove('hidden');
+  } else {
+    erNote.classList.add('hidden');
+  }
+  document.getElementById('btnErFit').disabled = false;
+
+  const frag = document.createDocumentFragment();
+
+  // 组框在最底层：它只是「这一块是一组」的视觉容器，不该盖住任何东西。
+  for (const g of model.groups) {
+    const box = el('div', 'er-group g' + (g.idx % 8));
+    box.style.left = g.box.x + 'px';
+    box.style.top = g.box.y + 'px';
+    box.style.width = g.box.w + 'px';
+    box.style.height = g.box.h + 'px';
+    const label = el('div', 'er-group-label');
+    label.appendChild(el('span', 'er-group-dot'));
+    label.appendChild(el('span', 'er-group-name', erGroupTitle(g)));
+    box.appendChild(label);
+    frag.appendChild(box);
+  }
+
+  // 连线层夹在组框和卡片之间：线不能压住卡片（压住会看不清字段名），
+  // 但要在组框底色之上（否则浅色皮肤下白线看不见）。
+  const svg = erSvg('svg', {
+    class: 'er-edges',
+    width: model.w,
+    height: model.h,
+    viewBox: `0 0 ${model.w} ${model.h}`,
+  });
+  const edgeEls = new Map();     // 表名 -> [连线元素]，悬停高亮用
+
+  for (const g of model.groups) {
+    let chan = 0;
+    for (const e of model.edges) {
+      if (!g.tables.includes(e.child) || !g.tables.includes(e.parent)) continue;
+      const c = e.child._er, p = e.parent._er;
+      if (!c || !p) continue;
+
+      const cy = erColY(c, e.child, e.fk.columns[0]);
+      const py = erColY(p, e.parent, e.fk.refColumns && e.fk.refColumns[0]);
+
+      // 上下相邻就连一条直线：这是最常见的情况（父在上、子在下），
+      // 拐弯反而看不出它们是直接相连的。
+      const vertical = c.x === p.x && (c.y - (p.y + p.h)) === ER.gap;
+      let d, crow;
+      if (vertical) {
+        const cx = c.x + ER.cardW / 2;
+        d = `M ${cx} ${p.y + p.h} L ${cx} ${c.y}`;
+        crow = `M ${cx - 4} ${c.y} L ${cx} ${c.y - 7} L ${cx + 4} ${c.y}`;
+      } else {
+        // 隔着卡片就连不上直线了：走组框左侧的通道绕过去。
+        // 通道有多条边时依次错开 5px，否则它们会重叠成一条。
+        const chx = g.box.x + ER.groupPad + 4 + (chan % 3) * 5;
+        chan++;
+        d = `M ${c.x} ${cy} L ${chx} ${cy} L ${chx} ${py} L ${p.x} ${py}`;
+        crow = `M ${c.x} ${cy - 4} L ${c.x - 7} ${cy} L ${c.x} ${cy + 4}`;
+      }
+
+      const path = erSvg('path', { class: 'er-edge', d });
+      path.dataset.child = e.child.name;
+      path.dataset.parent = e.parent.name;
+      svg.appendChild(path);
+
+      const foot = erSvg('path', { class: 'er-crow', d: crow });
+      svg.appendChild(foot);
+
+      // 父端画一条短横线（鸦爪的「一」）：主键侧通常是「一」，
+      // 不画的话两个端点看起来一样，分不出哪边是多的那边。
+      // 画在卡片外面 3px 处 —— 压在卡片里会被卡片盖掉（连线层在卡片下面）。
+      const tick = vertical
+        ? `M ${p.x + ER.cardW / 2 - 6} ${p.y + p.h + 3} L ${p.x + ER.cardW / 2 + 6} ${p.y + p.h + 3}`
+        : `M ${p.x - 6} ${py - 5} L ${p.x - 6} ${py + 5}`;
+      svg.appendChild(erSvg('path', { class: 'er-tick', d: tick }));
+
+      for (const name of [e.child.name, e.parent.name]) {
+        if (!edgeEls.has(name)) edgeEls.set(name, []);
+        edgeEls.get(name).push(path);
+      }
+    }
+  }
+  frag.appendChild(svg);
+
+  // 卡片最后放：DOM 顺序就是层级顺序，卡片永远压在线上面。
+  for (const g of model.groups) {
+    for (const t of g.tables) {
+      frag.appendChild(erCardEl(t, g));
+    }
+  }
+
+  erCanvas.appendChild(frag);
+  erCanvas._edgeEls = edgeEls;
+}
+
+function erCardEl(t, g) {
+  const r = t._er;
+  const card = el('div', 'er-card g' + (g.idx % 8));
+  card.style.left = r.x + 'px';
+  card.style.top = r.y + 'px';
+  card.style.width = r.w + 'px';
+  card.style.height = r.h + 'px';
+  card.dataset.table = t.name;
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
+  card.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 列`
+    + (t.comment ? `\n${t.comment}` : '')
+    + '\n点一下打开这张表';
+
+  const head = el('div', 'er-card-head');
+  head.appendChild(el('span', 'er-card-name', t.name));
+  head.appendChild(el('span', 'er-card-rows', String(t.rows)));
+  card.appendChild(head);
+
+  const cols = el('div', 'er-card-cols');
+  const fkCols = new Set();
+  for (const fk of (t.foreignKeys || [])) {
+    for (const c of fk.columns || []) fkCols.add(c.toLowerCase());
+  }
+  const shown = erRowsOf(t);
+  for (let i = 0; i < shown; i++) {
+    const c = t.columns[i];
+    const row = el('div', 'er-col');
+    const isFk = fkCols.has(c.name.toLowerCase());
+    const mark = el('span', 'er-mark' + (c.primaryKey ? ' pk' : (isFk ? ' fk' : '')));
+    mark.title = c.primaryKey ? '主键' : (isFk ? '外键' : '');
+    row.appendChild(mark);
+    row.appendChild(el('span', 'er-col-name', c.name));
+    row.appendChild(el('span', 'er-col-type', c.type));
+    row.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}`
+      + (c.primaryKey ? ' · 主键' : '') + (isFk ? ' · 外键' : '');
+    cols.appendChild(row);
+  }
+  if (t.columns.length > shown) {
+    cols.appendChild(el('div', 'er-col er-more', `还有 ${t.columns.length - shown} 列`));
+  }
+  card.appendChild(cols);
+
+  // 悬停高亮：把「这张表参与的连线」和「另一端的卡片」一起点亮。
+  // 表一多，光靠颜色找一条线比找一根针还难。
+  card.addEventListener('mouseenter', () => erHighlight(t.name, true));
+  card.addEventListener('mouseleave', () => erHighlight(t.name, false));
+
+  card.addEventListener('click', () => {
+    toggleER(false);
+    openTable(t.name);
+  });
+  card.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      toggleER(false);
+      openTable(t.name);
+    }
+  });
+  return card;
+}
+
+function erHighlight(table, on) {
+  const list = erCanvas._edgeEls && erCanvas._edgeEls.get(table);
+  if (!list) return;
+  for (const p of list) p.classList.toggle('hot', on);
+  for (const p of list) {
+    for (const name of [p.dataset.child, p.dataset.parent]) {
+      const card = erCanvas.querySelector(`.er-card[data-table="${CSS.escape(name)}"]`);
+      if (card) card.classList.toggle('hot', on);
+    }
+  }
+}
+
+function erApplyView() {
+  erCanvas.style.transform = `translate(${erView.panX}px, ${erView.panY}px) scale(${erView.zoom})`;
+  const val = document.getElementById('btnErZoom');
+  if (val) val.textContent = Math.round(erView.zoom * 100) + '%';
+}
+
+// erFit 把整张图缩到刚好放下。
+//
+// 上限设成 1.15 而不是 1：表少的时候放得很大反而显得空，
+// 但小屏上不放大又看不清字段，所以只允许轻微超出 100%。
+function erFit() {
+  if (!erModel || !erModel.w) return;
+  // 提示条浮在画布底部，占掉约 56px。不减掉它，图一高就会被提示条压住最后一张卡片
+  // —— 用户看到的是「卡片缺了一条边」，而不是「下面还有内容」。
+  const noteH = erNote.classList.contains('hidden') ? 0 : 56;
+  const sw = erStage.clientWidth - 56;
+  const sh = erStage.clientHeight - 56 - noteH;
+  if (sw <= 0 || sh <= 0) return;
+  const z = Math.min(1.15, sw / erModel.w, sh / erModel.h);
+  erView.zoom = Math.max(0.2, Math.round(z * 100) / 100);
+  erView.panX = Math.round((erStage.clientWidth - erModel.w * erView.zoom) / 2);
+  erView.panY = Math.max(20, Math.round((erStage.clientHeight - noteH - erModel.h * erView.zoom) / 2));
+  erApplyView();
+}
+
+function erZoomAt(factor, cx, cy) {
+  const z = Math.min(2.5, Math.max(0.15, erView.zoom * factor));
+  const k = z / erView.zoom;
+  erView.panX = cx - (cx - erView.panX) * k;
+  erView.panY = cy - (cy - erView.panY) * k;
+  erView.zoom = z;
+  erApplyView();
+}
+
+function toggleER(force) {
+  const want = force === undefined ? !erOpen : force;
+  if (want === erOpen) return;
+  // 三个页面级视图互斥：叠在一起时后开的那个会盖住前一个，看着像卡住了。
+  if (want) {
+    if (!settingsPanel.classList.contains('hidden')) {
+      closeSettings();
+      if (!settingsPanel.classList.contains('hidden')) return;
+    }
+    if (monOpen) toggleMonitor(false);
+  }
+  erOpen = want;
+  erPanel.classList.toggle('hidden', !erOpen);
+  if (erOpen) {
+    erRender();
+    // 面板从 hidden 变可见后才有尺寸；同步读 clientWidth 拿到的还是 0，
+    // 所以放到下一帧再适应画布。
+    requestAnimationFrame(erFit);
+  }
+  syncTopNav();
+}
+
+document.getElementById('btnEr').addEventListener('click', () => toggleER());
+document.getElementById('btnErClose').addEventListener('click', () => toggleER(false));
+document.getElementById('btnErFit').addEventListener('click', erFit);
+document.getElementById('btnErIn').addEventListener('click', () => {
+  erZoomAt(1.2, erStage.clientWidth / 2, erStage.clientHeight / 2);
+});
+document.getElementById('btnErOut').addEventListener('click', () => {
+  erZoomAt(1 / 1.2, erStage.clientWidth / 2, erStage.clientHeight / 2);
+});
+document.getElementById('btnErZoom').addEventListener('click', () => {
+  erView.zoom = 1;
+  erView.panX = 24;
+  erView.panY = 24;
+  erApplyView();
+});
+
+// 滚轮缩放：以光标为锚点，这样「放大看这个角落」才跟手。
+erStage.addEventListener('wheel', ev => {
+  if (!erOpen) return;
+  ev.preventDefault();
+  const r = erStage.getBoundingClientRect();
+  const k = Math.exp(-ev.deltaY * 0.0015);
+  erZoomAt(k, ev.clientX - r.left, ev.clientY - r.top);
+}, { passive: false });
+
+// 空白处拖动平移。卡片自己不接 pointerdown —— 现在点卡片是「打开这张表」，
+// 等手工摆位做出来，拖卡片才是移动卡片，那时再加。
+erStage.addEventListener('pointerdown', ev => {
+  if (!erOpen || ev.button !== 0) return;
+  if (ev.target.closest('.er-card')) return;
+  erPan = { x: ev.clientX, y: ev.clientY, px: erView.panX, py: erView.panY };
+  erStage.setPointerCapture(ev.pointerId);
+  erStage.classList.add('panning');
+});
+erStage.addEventListener('pointermove', ev => {
+  if (!erPan) return;
+  erView.panX = erPan.px + (ev.clientX - erPan.x);
+  erView.panY = erPan.py + (ev.clientY - erPan.y);
+  erApplyView();
+});
+function erEndPan(ev) {
+  if (!erPan) return;
+  erPan = null;
+  erStage.classList.remove('panning');
+  if (ev && erStage.hasPointerCapture(ev.pointerId)) erStage.releasePointerCapture(ev.pointerId);
+}
+erStage.addEventListener('pointerup', erEndPan);
+erStage.addEventListener('pointercancel', erEndPan);
+
+erApplyView();

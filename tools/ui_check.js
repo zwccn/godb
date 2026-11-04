@@ -1758,19 +1758,22 @@ class CDP {
       hintLook ? `命中「${hintLook.hit}」，字重 ${hintLook.weight}` : '');
     check('候选弹层没被长签名撑破', !!(hintLook && hintLook.fits));
 
-    // 换皮肤不能把选中色弄丢（五套都要有 --hint-active-bg，否则退回透明 = 又看不见了）
+    // 换皮肤不能把选中色弄丢（每套都要有 --hint-active-bg，否则退回透明 = 又看不见了）。
+    // 列表从 app.js 的 THEMES 取，不写死：原来写死五套，后来加「极光」时这条断言
+    // 仍然全绿，但新皮肤其实一次都没测过。
     const themeVars = await cdp.eval(`(() => {
       const out = {};
       const html = document.documentElement;
       const keep = html.getAttribute('data-theme');
-      for (const t of ['dark', 'steel', 'sky', 'taro', 'mint']) {
+      const list = (typeof THEMES !== 'undefined' && THEMES.length) ? THEMES : ['dark', 'steel'];
+      for (const t of list) {
         html.setAttribute('data-theme', t);
         out[t] = getComputedStyle(html).getPropertyValue('--hint-active-bg').trim();
       }
       html.setAttribute('data-theme', keep || 'sky');
       return out;
     })()`);
-    check('五套皮肤都定义了候选选中色',
+    check('每套皮肤都定义了候选选中色',
       Object.keys(themeVars).every(k => themeVars[k]), JSON.stringify(themeVars));
     await cdp.eval(`cm.setValue('')`);
 
@@ -2123,8 +2126,15 @@ class CDP {
         brandHome.afterKey.hidden && brandHome.afterKey.mon === false &&
         brandHome.role === 'button' && brandHome.cursor === 'pointer',
       `点击 ${brandHome.afterClick.mon === false} · Enter ${brandHome.afterKey.mon === false} · ${brandHome.role}/${brandHome.cursor}`);
-    check('设置页有 5 个带名字的皮肤卡片',
-      setUi.picks === 5 && setUi.pickNames.join('/') === '科技灰/深色/淡蓝/芋紫/薄荷绿',
+    // 卡片数量与顺序都以 app.js 的 THEME_LIST 为准。原来这里写死「5 个」和五个名字，
+    // 加「极光」时它直接红了 —— 但反过来更糟的情况是只改数量不改名字，那就会变成
+    // 一条「新皮肤其实没被检查过」的假绿。
+    const themeExpect = await cdp.eval(`(() => {
+      const l = (typeof THEME_LIST !== 'undefined') ? THEME_LIST : [];
+      return { n: l.length, names: l.map(x => x.name).join('/') };
+    })()`);
+    check('设置页的皮肤卡片与 THEME_LIST 完全一致',
+      setUi.picks === themeExpect.n && setUi.pickNames.join('/') === themeExpect.names,
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);
 
     // 科技灰：深色系但底色偏冷、主色是浅天蓝；顺手确认它真的生效（不是只加了个名字）
@@ -2280,11 +2290,13 @@ class CDP {
         btn: b.textContent.trim(),
         mode: b.dataset.mode,
         picks: pane.querySelectorAll('.theme-pick').length,
+        // 期望值也从 THEME_LIST 取，不写死 5：加皮肤时这条断言自动跟上
+        expect: (typeof THEME_LIST !== 'undefined') ? THEME_LIST.length : -1,
         fs: pane.querySelectorAll('.fs-btn').length,
       };
     })()`);
     check('外观组：皮肤/字号都在这一组，无改动时按钮变成「关闭」',
-      look.mode === 'close' && look.btn === '关闭' && look.picks === 5 && look.fs === 2,
+      look.mode === 'close' && look.btn === '关闭' && look.picks > 0 && look.picks === look.expect && look.fs === 2,
       `${look.btn} / ${look.picks} 皮肤 / ${look.fs} 字号按钮`);
 
     // 数据组：危险操作独处红框，不和普通配置混排
@@ -3024,6 +3036,26 @@ class CDP {
       !/gradient/.test(fxSky.scan || 'none') && !/^url/.test(fxSky.cursor),
       `光带 ${(fxSky.scan || 'none').slice(0, 12)} · 光标 ${fxSky.cursor}`);
 
+    // 极光是另一套语言：天幕柔光（径向）+ 顶栏紫青渐变，没有扫描线也没有准星。
+    // 三条都要在，缺一条就退化成「普通深色皮肤」，而这个退化不会报错。
+    await cdp.eval(`applyTheme('aurora', false)`);
+    await sleep(300);
+    const fxAurora = await cdp.eval(`(() => {
+      const cs = getComputedStyle(document.body);
+      return {
+        scan: getComputedStyle(document.querySelector('.topbar'), '::after').backgroundImage,
+        glow: cs.backgroundImage,
+        size: cs.backgroundSize,
+      };
+    })()`);
+    const glowLayers = (fxAurora.glow || '').match(/radial-gradient/g) || [];
+    check('极光：顶栏光带 + 两层天幕柔光 + 点阵都在',
+      /gradient/.test(fxAurora.scan || 'none') && glowLayers.length >= 2
+        && /24px 24px/.test(fxAurora.size || ''),
+      `光带 ${/gradient/.test(fxAurora.scan || 'none') ? '有' : '无'} · 柔光 ${glowLayers.length} 层 · 点阵 ${fxAurora.size}`);
+    await cdp.eval(`applyTheme('sky', false)`);
+    await sleep(150);
+
     /* 编辑器右键：自己画菜单（浏览器那张在深色界面上是块灰白板子）。
        顺便测「有选区只跑选区」—— 改一条语句再试，不用把整段删掉重写。 */
     // 换行用 fromCharCode(10) 拼：这段在模板字符串里，写 \n 会被解成真换行，
@@ -3586,6 +3618,68 @@ class CDP {
     })`);
     check('普通执行不会串到执行探测视图',
       noProbe.rows === 0 && !noProbe.tab.includes('探测结果'), `tab=${noProbe.tab}`);
+
+    /* 关系图：把外键摊开成一张图。这里断言的是「图和 schema 对得上」，
+       不写死张数 —— 库里有没有外键、有几张表都是运行时才知道的。 */
+    await cdp.eval(`document.getElementById('btnEr').click()`);
+    await waitFor(cdp, `!document.getElementById('erPanel').classList.contains('hidden')
+      && document.querySelectorAll('.er-card').length > 0`, { label: '关系图渲染', timeout: 6000 });
+    const erUi = await cdp.eval(`(async () => {
+      const sch = await fetch('/api/schema').then(r => r.json());
+      const fkCount = sch.tables.reduce((n, t) => n + ((t.foreignKeys || []).length), 0);
+      const stage = document.getElementById('erStage').getBoundingClientRect();
+      const cards = [...document.querySelectorAll('.er-card')];
+      const outside = cards.filter(c => {
+        const r = c.getBoundingClientRect();
+        return r.left < stage.left - 1 || r.right > stage.right + 1
+          || r.top < stage.top - 1 || r.bottom > stage.bottom + 1;
+      }).length;
+      return {
+        tables: sch.tables.length,
+        cards: cards.length,
+        groups: document.querySelectorAll('.er-group').length,
+        edges: document.querySelectorAll('.er-edge').length,
+        fkCount,
+        outside,
+        note: document.getElementById('erNote').classList.contains('hidden')
+          ? '' : document.getElementById('erNote').textContent,
+        stats: document.getElementById('erStats').textContent,
+        active: document.getElementById('btnEr').classList.contains('on'),
+      };
+    })()`);
+    check('关系图：每张表一张卡片，组数不超表数',
+      erUi.cards === erUi.tables && erUi.groups >= 1 && erUi.groups <= erUi.tables,
+      `${erUi.cards} 卡片 / ${erUi.groups} 组 / ${erUi.stats}`);
+    check('关系图：连线数等于外键总数',
+      erUi.edges === erUi.fkCount, `${erUi.edges} 条线 · schema 里 ${erUi.fkCount} 个外键`);
+    check('关系图：没有外键时明确说一句，有外键时不占位',
+      erUi.fkCount === 0 ? /没有外键/.test(erUi.note) : erUi.note === '',
+      erUi.note.slice(0, 24) || '（无提示）');
+    check('关系图：打开时自适应缩放，卡片不出画布',
+      erUi.outside === 0, `${erUi.outside} 张卡片越界`);
+    check('关系图：顶栏入口跟着亮', erUi.active === true);
+
+    // 点卡片 → 回到编辑器并打开这张表（和侧栏点表名是同一个动作）
+    const firstTable = await cdp.eval(`document.querySelector('.er-card').dataset.table`);
+    await cdp.eval(`document.querySelector('.er-card').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+    await waitFor(cdp, `document.getElementById('erPanel').classList.contains('hidden')`,
+      { label: '关系图关闭', timeout: 4000 });
+    const afterCard = await cdp.eval(`({
+      closed: document.getElementById('erPanel').classList.contains('hidden'),
+      sql: editor.value,
+      home: document.getElementById('btnHome').classList.contains('on'),
+    })`);
+    check('关系图：点卡片回到编辑器并查询这张表',
+      afterCard.closed && afterCard.sql.includes(firstTable) && afterCard.home,
+      `${firstTable} · 面板关 ${afterCard.closed}`);
+
+    // Esc 关闭：和监控/设置一样，一层一层退
+    await cdp.eval(`document.getElementById('btnEr').click()`);
+    await sleep(300);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(200);
+    check('关系图：Esc 关闭',
+      await cdp.eval(`document.getElementById('erPanel').classList.contains('hidden')`));
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

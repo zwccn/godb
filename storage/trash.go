@@ -24,6 +24,13 @@ const (
 	// trashKeep 是保留的备份份数（按时间从新到旧）。一次 DROP 一张表算一份，
 	// 一次清空库也只算一份。
 	trashKeep = 20
+	// vecTrashDir 是向量文件的回收子目录名（DROP 时 trashVecFile 往这里移）。
+	vecTrashDir = "vec"
+	// trashVecKeep / trashVecMaxBytes 是 .trash/vec 的保留策略：最多留这么多份，
+	// 且合计不超过这个字节数，超了从最旧的删。数量管「小文件攒太多」，字节管
+	// 「一个文件就几个 GB」。20 份 × 大向量表本来能撑爆盘，所以两道都要。
+	trashVecKeep     = 20
+	trashVecMaxBytes = int64(512 << 20) // 512 MB
 	// TrashReasonDropTable / DropAll / Sample 是写进 manifest 的原因标签。
 	TrashReasonDropTable = "drop-table"
 	TrashReasonDropAll   = "drop-all"
@@ -181,7 +188,7 @@ func (s *Store) copyVecFilesInto(trashDir string, tableID int64) (int, error) {
 	if err != nil || len(files) == 0 {
 		return 0, nil
 	}
-	dstDir := filepath.Join(trashDir, "vec")
+	dstDir := filepath.Join(trashDir, vecTrashDir)
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return 0, err
 	}
@@ -206,7 +213,7 @@ func (s *Store) copyVecFilesInto(trashDir string, tableID int64) (int, error) {
 // 所以这里要把 t<旧ID>.c<列>.vec 改名成 t<新ID>.c<列>.vec。列 ID 不变 ——
 // 备份里的列定义和恢复后的列定义是同一套。
 func InstallVecFiles(root, trashDir string, oldID, newID int64) (int, error) {
-	pat := filepath.Join(trashDir, "vec", fmt.Sprintf("t%06d.c*.vec", oldID))
+	pat := filepath.Join(trashDir, vecTrashDir, fmt.Sprintf("t%06d.c*.vec", oldID))
 	files, err := filepath.Glob(pat)
 	if err != nil || len(files) == 0 {
 		return 0, nil
@@ -293,16 +300,68 @@ func (s *Store) pruneTrash() {
 	}
 	dirs := make([]string, 0, len(ents))
 	for _, e := range ents {
-		if e.IsDir() {
-			dirs = append(dirs, e.Name())
+		if !e.IsDir() {
+			continue
+		}
+		// vec 是向量文件的回收目录，不是一次备份：既不该占 trashKeep 的名额
+		// （否则备份实际只留 19 份），也不该被这里按「最旧」删掉 —— 它有自己的
+		// 保留策略，见 pruneTrashVec。
+		if e.Name() == vecTrashDir {
+			continue
+		}
+		dirs = append(dirs, e.Name())
+	}
+	if len(dirs) > trashKeep {
+		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+		for _, name := range dirs[trashKeep:] {
+			_ = os.RemoveAll(filepath.Join(root, name))
 		}
 	}
-	if len(dirs) <= trashKeep {
+	s.pruneTrashVec()
+}
+
+// pruneTrashVec 清理 .trash/vec 里的孤儿向量文件。
+//
+// 这个目录收的是 DROP TABLE / DROP COLUMN 时从 tables/ 移出来的 .vec 文件
+// （trashVecFile 做的）。它**不在** trashKeep 的计数里，而且因为 'v' > '2'，
+// 降序后永远排在最前面，所以 pruneTrash 永远轮不到它 —— 实测跑几轮 DROP
+// 就攒了 9.8 MB 且只增不减；表越大越严重（100 万 × 768 维一次 DROP 是 3 GB）。
+//
+// 保留策略：最近 trashVecKeep 个，且合计不超过 trashVecMaxBytes，超了从最旧删。
+// 删的是纯冗余 —— 表的备份里另有一份（TrashTables 拷的），恢复走备份那份；
+// 这里只是「文件最后已知位置」的残留，丢了不影响恢复。
+func (s *Store) pruneTrashVec() {
+	dir := filepath.Join(s.Dir, trashDirName, vecTrashDir)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
 		return
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
-	for _, name := range dirs[trashKeep:] {
-		_ = os.RemoveAll(filepath.Join(root, name))
+	type vecFile struct {
+		name string
+		mod  time.Time
+		size int64
+	}
+	files := make([]vecFile, 0, len(ents))
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, vecFile{name: e.Name(), mod: info.ModTime(), size: info.Size()})
+	}
+	// 新的在前：Rename 不改 mtime，所以这里排的是「文件本身的年龄」，
+	// 对清理来说够用（越老的越先删）。
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	var total int64
+	for i, f := range files {
+		total += f.size
+		if i < trashVecKeep && total <= trashVecMaxBytes {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, f.name))
 	}
 }
 

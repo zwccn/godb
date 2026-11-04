@@ -187,7 +187,7 @@ func (s *Store) SyncVectorFiles() error {
 // 移不动（文件被占用 / 权限）就留在原地：留个孤儿文件浪费空间，
 // 总比「DROP 报错但数据其实已经没了」强。启动时的 SyncVectorFiles 会再试一次。
 func (s *Store) trashVecFile(path string) {
-	dir := filepath.Join(s.Dir, ".trash", "vec")
+	dir := filepath.Join(s.Dir, trashDirName, vecTrashDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}

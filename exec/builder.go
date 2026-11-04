@@ -43,6 +43,22 @@ type cteData struct {
 	cols  []string
 	types []types.Type
 	rows  [][]types.Value
+	// src 保留来源列的 TableID / ColID。
+	//
+	// 只有向量列需要：Value 里存的是「某张表某个 .vec 文件的第 N 个槽位」，
+	// 行本身不含数据。CTE 物化只是拷贝了 Value，槽位依然指向同一个文件，
+	// 所以只要知道它来自哪张表的哪一列，投影层就能把 `[vector:7]` 读成 `[1,2,3]`。
+	// 不透传的话，WITH 里的向量列会原样漏出内部占位符（实测过）。
+	//
+	// 只透这两个：TableOID / AttNum 保持 0 —— 那些是给 PG 客户端判断
+	// 「结果集能不能回写」用的，而 CTE 的列本来就不该是可回写的表列。
+	src []cteSrcCol
+}
+
+// cteSrcCol 是 CTE 输出列的来源（0 表示这一列不是表列，读不到向量）。
+type cteSrcCol struct {
+	tableID int64
+	colID   int64
 }
 
 // BuildSelect 构建查询计划。
@@ -2033,6 +2049,7 @@ func (p *Planner) materializeCTEs(list []*sql.CTE) error {
 		d := &cteData{
 			cols:  make([]string, len(sc)),
 			types: make([]types.Type, len(sc)),
+			src:   make([]cteSrcCol, len(sc)),
 		}
 		for i, ci := range sc {
 			// WITH x(a,b) 里给的名字优先，否则用查询的输出列名
@@ -2042,6 +2059,8 @@ func (p *Planner) materializeCTEs(list []*sql.CTE) error {
 				d.cols[i] = strings.ToLower(ci.Name)
 			}
 			d.types[i] = ci.Type
+			// 来源透传下去：向量列在行里只是槽位号，投影层要靠它定位 .vec 文件
+			d.src[i] = cteSrcCol{tableID: ci.TableID, colID: ci.ColID}
 		}
 		// Describe 阶段只关心输出列，跑一遍 CTE 既慢又会崩（那时没有事务）。
 		if p.compileOnly {
@@ -2089,7 +2108,13 @@ type cteScan struct {
 func newCTEScan(d *cteData, qual string) *cteScan {
 	sc := make(Schema, len(d.cols))
 	for i := range d.cols {
-		sc[i] = ColInfo{Qualifier: strings.ToLower(qual), Name: d.cols[i], Type: d.types[i]}
+		ci := ColInfo{Qualifier: strings.ToLower(qual), Name: d.cols[i], Type: d.types[i]}
+		// 把来源的 TableID/ColID 接上：向量列要靠它把槽位号读成真实数据。
+		// TableOID/AttNum 故意不填（见 cteData.src 的注释）。
+		if d.src != nil && i < len(d.src) {
+			ci.TableID, ci.ColID = d.src[i].tableID, d.src[i].colID
+		}
+		sc[i] = ci
 	}
 	rows := make([]types.Row, len(d.rows))
 	for i, r := range d.rows {

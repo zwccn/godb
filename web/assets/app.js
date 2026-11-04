@@ -3432,8 +3432,13 @@ function renderIO(m) {
   const top = tables.slice(0, 3).map(t => `${t.name} ${fmtBytes(t.bytes)}`).join(' · ');
   box.appendChild(row('数据',
     `${tables.length} 表 / ${fmtBytes(io.totalBytes)}`,
-    (top || '还没有表') + (sp.lobBytes ? ` · 大字段 ${fmtBytes(sp.lobBytes)}` : ''),
-    '各表页文件（tables/tXXXXXX.dat）的大小；行内超过 2KB 的文本另存进 .lob，单独算'));
+    (top || '还没有表')
+      + (sp.lobBytes ? ` · 大字段 ${fmtBytes(sp.lobBytes)}` : '')
+      // 向量必须单独报：它不写进 .dat，不加这一句「总占用」会漏掉整块，
+      // 一张纯向量表在 top 里还会显示成 0 B。
+      + (sp.vecBytes ? ` · 向量 ${fmtBytes(sp.vecBytes)}` : ''),
+    '各表页文件（tables/tXXXXXX.dat）的大小；行内超过 2KB 的文本另存进 .lob、'
+    + '向量列另存进 .vec，这两块都不在 .dat 里，单独列出来'));
 }
 
 // 概览页的存储摘要：一行三个数（fsync / 缓冲池 / 页密度）。
@@ -3763,17 +3768,20 @@ function renderSpace() {
   if (!spaceData || !monEls.spaceBody) return;
   const sp = spaceData.space || {};
   const tables = spaceData.tables || [];
-  const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0) + (sp.walBytes || 0);
+  const total = (sp.dataBytes || 0) + (sp.indexBytes || 0) + (sp.lobBytes || 0)
+    + (sp.vecBytes || 0) + (sp.walBytes || 0);
 
-  // 占比条：四块按字节比例分宽度；总和为 0 时留一条空槽。
-  // 顺序是「索引 → 数据 → 大字段 → WAL」：这个库里索引经常比数据还大
+  // 占比条：五块按字节比例分宽度；总和为 0 时留一条空槽。
+  // 顺序是「索引 → 数据 → 大字段 → 向量 → WAL」：这个库里索引经常比数据还大
   // （主键 + 每张二级索引各一份），先看索引才容易发现「六成空间是索引」这种事。
+  // 向量单列一格：它不进堆页，也不算页池预算，混进「数据」里会让两边的账都对不上。
   monEls.spaceBar.innerHTML = '';
   monEls.spaceLegend.innerHTML = '';
   const parts = [
     ['index', '索引', sp.indexBytes || 0],
     ['data', '数据', sp.dataBytes || 0],
     ['lob', '大字段', sp.lobBytes || 0],
+    ['vec', '向量', sp.vecBytes || 0],
     ['wal', 'WAL', sp.walBytes || 0],
   ];
   for (const [cls, label, bytes] of parts) {
@@ -3800,6 +3808,14 @@ function renderSpace() {
     tr.appendChild(el('td', 'c-num', fmtBytes(t.indexBytes || 0)));
     tr.appendChild(el('td', 'c-num', fmtBytes(t.bytes || 0)));
     tr.appendChild(el('td', 'c-num', fmtBytes(t.lobBytes || 0)));
+    // 向量列要带列数提示：一个 128 维的向量列和 4 个 4 维的，字节数可能一样，
+    // 但「这张表到底靠什么占地方」是两回事。
+    const vecCell = el('td', 'c-num', fmtBytes(t.vecBytes || 0));
+    if (t.vecBytes > 0) {
+      vecCell.title = `${t.vecCols || 1} 个向量列文件（t<表ID>.c<列>.vec）`
+        + '\n向量不进堆页、不占页池预算，也不在这张表的「数据」里';
+    }
+    tr.appendChild(vecCell);
     tr.appendChild(el('td', 'c-num', fmtCount(t.rows || 0)));
     tr.appendChild(el('td', 'c-num', String(t.pages || 0)));
     // 太小的表（<8 页）不显示密度：最后一页天然不满，1 页的表永远是 4% 这种数，
@@ -4033,10 +4049,15 @@ function treemapItems() {
     }
   } else {
     for (const t of tables) {
-      const value = (t.bytes || 0) + (t.indexBytes || 0) + (t.lobBytes || 0);
+      // 向量也算进面积：一张纯向量表的 .dat 是 0 字节，不加上它在这张图上
+      // 根本没有位置 —— 而它恰恰是占盘最多的那个。
+      const value = (t.bytes || 0) + (t.indexBytes || 0) + (t.lobBytes || 0) + (t.vecBytes || 0);
       if (value <= 0) continue;      // 还没落过盘的表在树图上没有位置，底栏会说明
-      out.push({ name: t.name, value, parts: { data: t.bytes, index: t.indexBytes, lob: t.lobBytes },
-        kind: 'table', table: t.name, target: { kind: 'data', index: '' } });
+      out.push({
+        name: t.name, value,
+        parts: { data: t.bytes, index: t.indexBytes, lob: t.lobBytes, vec: t.vecBytes },
+        kind: 'table', table: t.name, target: { kind: 'data', index: '' },
+      });
     }
   }
   // WAL 也占地方，不给它一块的话「各块之和 ≠ 全库占用」，看的人会怀疑数字错了
@@ -4072,6 +4093,7 @@ function treeTip(it) {
   if (p.data) bits.push(`数据 ${fmtBytes(p.data)}`);
   if (p.index) bits.push(`索引 ${fmtBytes(p.index)}`);
   if (p.lob) bits.push(`大字段 ${fmtBytes(p.lob)}`);
+  if (p.vec) bits.push(`向量 ${fmtBytes(p.vec)}`);
   return `${it.name} · ${fmtBytes(it.value)}` + (bits.length ? `（${bits.join(' / ')}）` : '')
     + '\n单击看详情，双击进页地图';
 }
@@ -4295,7 +4317,8 @@ function makeTreeCell(box, it) {
   const d = el('div', 'tv-cell' + (it.kind === 'other' ? ' other' : ''));
   d.title = treeTip(it);
   const p = it.parts || {};
-  const segs = [['data', p.data], ['index', p.index], ['lob', p.lob], ['wal', p.wal]].filter(x => x[1] > 0);
+  const segs = [['data', p.data], ['index', p.index], ['lob', p.lob], ['vec', p.vec], ['wal', p.wal]]
+    .filter(x => x[1] > 0);
   if (segs.length) {
     // 主导类别决定整块淡色底：面积大的块一眼能看出「主要是索引」还是「主要是数据」
     const top = segs.slice().sort((a, b) => b[1] - a[1])[0][0];
@@ -4439,6 +4462,7 @@ function renderRailDb() {
   add('数据', fmtBytes(sp.dataBytes || 0));
   add('索引', fmtBytes(sp.indexBytes || 0));
   add('大字段', fmtBytes(sp.lobBytes || 0));
+  add('向量', fmtBytes(sp.vecBytes || 0) + (sp.vecCols ? ` · ${sp.vecCols} 列` : ''));
   add('WAL', fmtBytes(sp.walBytes || 0));
   add('表数', `${tables.length}`);
   add('页数', `${sp.pages || 0}`);
@@ -4458,6 +4482,7 @@ function drawTableCard(side, t) {
   add('数据', `${fmtBytes(t.bytes || 0)} · ${t.pages || 0} 页`);
   add('索引', `${fmtBytes(t.indexBytes || 0)} · ${(t.indexes || []).length} 棵`);
   if (t.lobBytes) add('大字段', fmtBytes(t.lobBytes));
+  if (t.vecBytes) add('向量', `${fmtBytes(t.vecBytes)} · ${t.vecCols || 1} 列`);
   add('行数', fmtCount(t.rows || 0));
   const fillOk = t.fillKnown && (t.pages || 0) >= 8;
   add('页密度', fillOk ? `${((t.fill || 0) * 100).toFixed(0)}%` : `${t.pages || 0} 页太小，密度没意义`);

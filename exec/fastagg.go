@@ -82,6 +82,17 @@ func (p *Planner) tryFastAgg(s *sql.Select, items []*sql.SelectItem, sc Schema) 
 		if !found {
 			return nil, false
 		}
+		// 向量列不能走「索引端点」这条快路径。
+		//
+		// 索引键存的是**槽位号**，取端点等于「按插入顺序挑一行」，和 MIN/MAX 的
+		// 语义毫无关系；返回的值还是投影层没修过的内部引用，直接漏出 `[vector:0]`。
+		// 实测：不带索引时 MIN(v) 会走通用聚合、被 types.Compare 明确拒绝（正确），
+		// 一建索引反而"成功"了并给出这个假答案 —— 有索引比没索引更容易错。
+		//
+		// 退回通用聚合：那边会走 Compare，对向量给出「请用距离算子」的报错。
+		if types.Kind(t.Columns[cIdx].Kind) == types.KVector {
+			return nil, false
+		}
 		ixName, ok := endpointIndex(t, cIdx)
 		if !ok {
 			return nil, false

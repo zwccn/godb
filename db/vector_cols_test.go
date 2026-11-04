@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,64 @@ func TestConstraintIndexVectorColumns(t *testing.T) {
 	res = run(t, d, s, `SELECT opcname FROM pg_opclass WHERE oid = 1978`)
 	if len(res[0].Rows) != 1 || fmt.Sprint(res[0].Rows[0][0]) != "int4_ops" {
 		t.Fatalf("pg_opclass 里没有 int4_ops：%v", res[0].Rows)
+	}
+}
+
+// CTE 里的向量列要能读回真实数据。
+//
+// Value 里只有槽位号，投影层靠列上的 TableID/ColID 才能定位 .vec 文件。
+// CTE 物化时如果不透传这两个，`WITH c AS (SELECT v FROM t) SELECT v FROM c`
+// 会原样漏出内部占位 `[vector:0]`（实测过 —— 看着像有值，其实是引用）。
+func TestVectorColumnThroughCTE(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE t_ctevec (id INTEGER, v vector(3))`)
+	run(t, d, s, `INSERT INTO t_ctevec VALUES (1,'[1,2,3]'),(2,'[4,5,6]')`)
+
+	res := run(t, d, s, `WITH c AS (SELECT id, v FROM t_ctevec) SELECT v FROM c ORDER BY id`)
+	if len(res) == 0 || len(res[0].Rows) != 2 {
+		t.Fatalf("CTE 应返回 2 行: %+v", res)
+	}
+	got := res[0].Rows
+	if fmt.Sprint(got[0][0]) != "[1,2,3]" || fmt.Sprint(got[1][0]) != "[4,5,6]" {
+		t.Fatalf("CTE 里的向量 = %v / %v，期望 [1,2,3] / [4,5,6]", got[0][0], got[1][0])
+	}
+
+	// 列改名也要能读回（WITH c(x) AS ...）
+	res = run(t, d, s, `WITH c(i, x) AS (SELECT id, v FROM t_ctevec) SELECT x FROM c ORDER BY i`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "[1,2,3]" {
+		t.Fatalf("改名后的向量 = %s，期望 [1,2,3]", got)
+	}
+	if strings.Contains(fmt.Sprint(res[0].Rows[0][0]), "vector:") {
+		t.Fatalf("向量列漏出了内部引用: %v", res[0].Rows[0][0])
+	}
+}
+
+// MIN/MAX 不能走「索引端点」快路径。
+//
+// 索引键存的是槽位号，取端点 = 按插入顺序挑一行，和 min/max 的语义无关。
+// 实测：不建索引时 MIN(v) 会被 types.Compare 拒绝（正确），一建索引反而
+// "成功"并返回 [vector:0] —— 有索引比没索引更容易给出错答案。
+func TestVectorMinMaxRefusedWithIndex(t *testing.T) {
+	d := newTestDB(t)
+	s := "s"
+	run(t, d, s, `CREATE TABLE t_mmvec (id INTEGER, v vector(3))`)
+	run(t, d, s, `INSERT INTO t_mmvec VALUES (1,'[1,2,3]'),(2,'[4,5,6]')`)
+	run(t, d, s, `CREATE INDEX t_mmvec_v ON t_mmvec (v)`)
+
+	for _, fn := range []string{"MIN", "MAX"} {
+		err := runErr(t, d, s, `SELECT `+fn+`(v) FROM t_mmvec`)
+		if err == nil {
+			t.Fatalf("%s(v) 应该报错（向量不能直接比较），却成功了", fn)
+		}
+		if !strings.Contains(err.Error(), "cannot be compared") {
+			t.Fatalf("%s(v) 的报错不对: %v", fn, err)
+		}
+	}
+
+	// 数字列的 min/max 仍然走快路径（别为了修向量把正常的也关了）
+	res := run(t, d, s, `SELECT MIN(id) FROM t_mmvec`)
+	if got := fmt.Sprint(res[0].Rows[0][0]); got != "1" {
+		t.Fatalf("MIN(id) = %s，期望 1", got)
 	}
 }

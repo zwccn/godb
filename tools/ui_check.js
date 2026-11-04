@@ -751,8 +751,10 @@ class CDP {
         diagHidden: document.querySelector('.mon-page[data-page="diag"]').classList.contains('hidden'),
       };
     })()`);
-    check('存储页：空间四块占比 + 四段图例 + 明细行（诊断页已隐藏）',
-      spUi.segs === 4 && spUi.legend === 4 && spUi.rows > 0 && spUi.diagHidden,
+    // 五块：索引 / 数据 / 大字段 / 向量 / WAL。向量是后加的 —— 它不进堆页，
+    // 混进「数据」里会让「数据 0 B 却有 2.4MB 向量」这种表彻底看不见。
+    check('存储页：空间五块占比 + 五段图例 + 明细行（诊断页已隐藏）',
+      spUi.segs === 5 && spUi.legend === 5 && spUi.rows > 0 && spUi.diagHidden,
       `${spUi.segs} 段 / 图例 ${spUi.legend} / ${spUi.rows} 行 / 诊断页隐藏 ${spUi.diagHidden}`);
     // 「上次整理」是这轮的驱动信号：密度 + 多久没整理，才知道该不该动手
     // 末列的数是「多久以前」，三位数以上一定是单位/时间戳搞错了
@@ -762,10 +764,32 @@ class CDP {
     check('空间表前两列是「索引」「数据」（和占比条同序）',
       spUi.heads[1] === '索引' && spUi.heads[2] === '数据',
       `第 2/3 列：${spUi.heads[1]} / ${spUi.heads[2]}`);
+    // 向量列必须单列一列：它不进堆页，所以「数据」那列永远是 0 B，
+    // 不单独显示的话，一张 2.4MB 的向量表在存储页上就是一张空表。
+    check('空间表有「向量」列，且排在「大字段」和「行数」之间',
+      spUi.heads[3] === '大字段' && spUi.heads[4] === '向量' && spUi.heads[5] === '行数',
+      `第 4/5/6 列：${spUi.heads[3]} / ${spUi.heads[4]} / ${spUi.heads[5]}`);
+    const vecStat = await cdp.eval(`(async () => {
+      const q = (sql) => fetch('/api/query', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }) }).then(r => r.json());
+      await q('DROP TABLE IF EXISTS t_uivec');
+      await q('CREATE TABLE t_uivec (id int, v vector(8))');
+      await q("INSERT INTO t_uivec VALUES (1,'[1,2,3,4,5,6,7,8]'),(2,'[8,7,6,5,4,3,2,1]')");
+      const sp = await fetch('/api/space').then(r => r.json());
+      const t = (sp.tables || []).find(x => x.name === 't_uivec');
+      await q('DROP TABLE t_uivec');
+      return t ? { bytes: t.bytes || 0, vecBytes: t.vecBytes || 0, vecCols: t.vecCols || 0,
+        totalVec: (sp.space && sp.space.vecBytes) || 0 } : null;
+    })()`);
+    check('向量字节进空间统计（.dat 为 0 也要报出 .vec 的实际占用）',
+      vecStat && vecStat.bytes === 0 && vecStat.vecBytes > 0 && vecStat.vecCols === 1
+        && vecStat.totalVec >= vecStat.vecBytes,
+      vecStat ? `数据 ${vecStat.bytes} / 向量 ${vecStat.vecBytes} / ${vecStat.vecCols} 列 / 全库 ${vecStat.totalVec}`
+        : '没查到 t_uivec');
 
     check('空间表有「上次整理」列（表头与单元格对齐，值是「从未 / N 分钟前」这类相对时间）',
-      spUi.heads.length === 8 && spUi.heads[7] === '上次整理' &&
-      spUi.cells.length === 8 &&
+      spUi.heads.length === 9 && spUi.heads[8] === '上次整理' &&
+      spUi.cells.length === 9 &&
       /^(从未|刚刚|\d+ (秒|分钟|小时|天|个月)前)$/.test(vacText) &&
       spUi.vacAll.every(v => /^(从未|刚刚|\d+ (秒|分钟|小时|天|个月)前)$/.test(v)),
       `${spUi.heads.length} 列 · 末列「${vacText}」· 全部 ${JSON.stringify(spUi.vacAll)}`);

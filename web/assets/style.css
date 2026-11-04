@@ -4037,6 +4037,9 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .space-seg.s-data { background: var(--accent); }
 .space-seg.s-index { background: var(--ok); }
 .space-seg.s-lob { background: var(--warn); }
+/* 向量用和信息色不同的一档：它和「大字段」一样是「不进页池的旁路数据」，
+   但两者的处置方式完全不同（大字段能 VACUUM FULL 回收，向量要删列/DROP）。 */
+.space-seg.s-vec { background: var(--danger, #e06c75); }
 .space-seg.s-wal { background: var(--text-3); }
 .space-legend {
   display: flex;
@@ -4113,6 +4116,7 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .space-dot.s-data { background: var(--accent); }
 .space-dot.s-index { background: var(--ok); }
 .space-dot.s-lob { background: var(--warn); }
+.space-dot.s-vec { background: var(--danger, #e06c75); }
 .space-dot.s-wal { background: var(--text-3); }
 .space-dot.s-used { background: var(--accent); }
 .space-dot.s-free { background: var(--ok); }
@@ -4396,6 +4400,7 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .tv-cell[data-tint="data"]::before { background: var(--accent); }
 .tv-cell[data-tint="index"]::before { background: var(--ok); }
 .tv-cell[data-tint="lob"]::before { background: var(--warn); }
+.tv-cell[data-tint="vec"]::before { background: var(--danger, #e06c75); }
 .tv-cell[data-tint="wal"]::before { background: var(--text-3); }
 .tv-name, .tv-size { position: relative; }
 .tv-cell:hover { border-color: var(--border-hover); }
@@ -4440,6 +4445,7 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
 .tv-parts .p-data { background: var(--accent); }
 .tv-parts .p-index { background: var(--ok); }
 .tv-parts .p-lob { background: var(--warn); }
+.tv-parts .p-vec { background: var(--danger, #e06c75); }
 .tv-parts .p-wal { background: var(--text-3); }
 .map-empty {
   position: absolute;

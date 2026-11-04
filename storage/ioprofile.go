@@ -2,7 +2,10 @@ package storage
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // 本文件收集「存储层自己的 IO 画像」：WAL fsync 延迟、checkpoint 耗时与触发原因、
@@ -109,7 +112,12 @@ type TableSize struct {
 	Bytes      int64   `json:"bytes"`      // 堆页文件 t<ID>.dat
 	IndexBytes int64   `json:"indexBytes"` // 该表所有索引文件合计
 	LobBytes   int64   `json:"lobBytes"`   // 大字段文件 t<ID>.lob
-	Rows       int     `json:"rows"`       // 存活行数
+	// VecBytes 是该表所有向量列文件（t<ID>.c<列>.vec）合计。
+	// 向量不进堆页，所以这块钱既不体现在 Bytes 里、也不占页池预算 ——
+	// 不单列出来，一张纯向量表会显示成 0 字节。
+	VecBytes int64 `json:"vecBytes"`
+	VecCols  int   `json:"vecCols,omitempty"`
+	Rows     int   `json:"rows"` // 存活行数
 	Pages      int     `json:"pages"`
 	IndexPages int     `json:"indexPages"`
 	FreeBytes  int64   `json:"freeBytes"` // 页里还能用的字节（按 64B 档位估算）
@@ -352,6 +360,7 @@ func (s *Store) TableSizes() []TableSize {
 	}
 
 	// 3) 文件（无锁）
+	vecByTable := vecBytesByTable(s.Dir)
 	out := make([]TableSize, 0, len(tables))
 	for i, t := range tables {
 		ts := TableSize{Name: t.Name}
@@ -360,6 +369,9 @@ func (s *Store) TableSizes() []TableSize {
 		}
 		if st, err := os.Stat(lobPathOf(tablePagePath(s.Dir, t.ID))); err == nil {
 			ts.LobBytes = st.Size()
+		}
+		if v, ok := vecByTable[t.ID]; ok {
+			ts.VecBytes, ts.VecCols = v.bytes, v.cols
 		}
 		// 索引文件按「该表的所有索引定义」去 stat：DROP 过的索引文件已经不在了，
 		// 这样也不会把孤儿文件算进来。
@@ -420,14 +432,70 @@ type SpaceProfile struct {
 	DataBytes  int64 `json:"dataBytes"`
 	IndexBytes int64 `json:"indexBytes"`
 	LobBytes   int64 `json:"lobBytes"`
-	WalBytes   int64 `json:"walBytes"`
-	Pages      int   `json:"pages"`
-	IndexPages int   `json:"indexPages"`
+	// VecBytes 是向量列文件（tables/t<ID>.c<列>.vec）合计。
+	// 必须单独算：向量不进堆页，一张 2 万行 × 128 维的表 .dat 是 0 字节、
+	// .vec 是 9.8 MB —— 不加这一项，存储页会把它显示成一张空表。
+	VecBytes int64 `json:"vecBytes"`
+	WalBytes int64 `json:"walBytes"`
+	Pages    int   `json:"pages"`
+	// VecCols / VecPages 是向量列数与折算页数（按 8KB/页 折算，好和页数放一起看）。
+	VecCols    int `json:"vecCols"`
+	VecPages   int `json:"vecPages"`
+	IndexPages int `json:"indexPages"`
 	FreeBytes  int64 `json:"freeBytes"` // 已知表里可复用的空闲字节
 	// FillPages 是「算得出密度的那些表的页数」：刚升级、还没落过盘的表没记空闲，
 	// 把它们按 0 空闲算进分母会把全库密度虚报高。
 	FillPages int     `json:"fillPages"`
 	Fill      float64 `json:"fill"` // 全库页密度：1 - Σfree/(Σpages×8KB)
+}
+
+// vecBytesByTable 扫一次 tables/ 目录，按文件名里的表 ID 汇总向量文件占用。
+//
+// 用一次目录扫描而不是「逐表 os.Stat/Glob」：一个向量表可能有多个向量列，
+// 逐表 glob 是 N 次目录遍历，而监控每 2 秒就会问一次；扫一次按名字分组只要一次。
+//
+// 只看磁盘上的真实文件，不看 Store.vecFiles（那里面只有**已打开**的列：
+// 从没被查过的向量表根本不在里面，空间统计会漏掉它 —— 而这张表恰恰是最
+// 需要被看见的那类：占着几百 MB 却没人查过）。
+func vecBytesByTable(dir string) map[int64]vecTableBytes {
+	ents, err := os.ReadDir(filepath.Join(dir, "tables"))
+	if err != nil {
+		return nil
+	}
+	out := make(map[int64]vecTableBytes)
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// 命名规则见 vecPath：t%06d.c%03d.vec
+		if !strings.HasSuffix(name, ".vec") || !strings.HasPrefix(name, "t") {
+			continue
+		}
+		dot := strings.IndexByte(name, '.')
+		if dot <= 1 {
+			continue
+		}
+		id, err := strconv.ParseInt(name[1:dot], 10, 64)
+		if err != nil {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		v := out[id]
+		v.bytes += info.Size()
+		v.cols++
+		out[id] = v
+	}
+	return out
+}
+
+// vecTableBytes 是一张表的向量文件汇总。
+type vecTableBytes struct {
+	bytes int64
+	cols  int
 }
 
 // Space 汇总全库空间构成（会重新 stat 一遍表文件）。
@@ -449,6 +517,12 @@ func SumSpace(tables []TableSize, walBytes int64) SpaceProfile {
 		p.DataBytes += t.Bytes
 		p.IndexBytes += t.IndexBytes
 		p.LobBytes += t.LobBytes
+		p.VecBytes += t.VecBytes
+		if t.VecBytes > 0 {
+			// 按 8KB/页 折算，好和堆页数放一起比（向量不是页，只是换算口径）
+			p.VecPages += int((t.VecBytes + PageSize - 1) / PageSize)
+			p.VecCols += t.VecCols
+		}
 		p.Pages += t.Pages
 		p.IndexPages += t.IndexPages
 		// 太小的表不参与全库密度：每张表的最后一页本来就装不满，页数只有一两页时

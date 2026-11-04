@@ -268,6 +268,57 @@ func TrashEntries(dir string) ([]string, error) {
 	return out, nil
 }
 
+// PurgeTrashForBench 清掉「只包含 __bench_ 前缀表」的备份目录及其向量文件。
+//
+// 基准每次都会灌 100 万行 × 128 维（约 512MB 的 .vec）。DROP 会按常规路径把它
+// 备份进回收站 —— 那是给用户误删兜底的，不该为一次基准留下 1GB（实测：一份
+// 备份里 .dat + .vec 两份拷贝，合计 1002MB）。
+//
+// 判定条件很窄：manifest 里**全部**表名都以 __bench_ 开头才删。用户的备份
+// 一条都不动 —— 这条函数只服务于工具表，别拿它清回收站。
+func (s *Store) PurgeTrashForBench() {
+	root := filepath.Join(s.Dir, trashDirName)
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	var ids []int64
+	for _, e := range ents {
+		if !e.IsDir() || e.Name() == vecTrashDir {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+		if err != nil {
+			continue
+		}
+		var m TrashManifest
+		if json.Unmarshal(b, &m) != nil || len(m.Tables) == 0 {
+			continue
+		}
+		allBench := true
+		for _, t := range m.Tables {
+			if !strings.HasPrefix(t.Name, "__bench_") {
+				allBench = false
+				break
+			}
+			ids = append(ids, t.ID)
+		}
+		if allBench {
+			_ = os.RemoveAll(dir)
+		}
+	}
+	// 这些表的 .vec 会被 trashVecFile 挪到 .trash/vec/tXXXXXX.c*.vec。
+	for _, id := range ids {
+		pat := filepath.Join(root, vecTrashDir, fmt.Sprintf("t%06d.c*.vec*", id))
+		if hits, err := filepath.Glob(pat); err == nil {
+			for _, p := range hits {
+				_ = os.Remove(p)
+			}
+		}
+	}
+}
+
 // TrashDirName 是对外暴露的回收站目录名（web / 命令行提示要用）。
 func TrashDirName() string { return trashDirName }
 

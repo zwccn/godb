@@ -42,38 +42,46 @@ const benchTable = "__bench_items"
 // 不复用主表：多出的几千行会让后面的全表扫描 / 聚合行数基准变掉，两次结果就不可比了。
 const benchCommitTable = "__bench_commit"
 
-// 向量基准用自己的表，规模也**不跟** benchScale 走。
+// 向量基准用独立的表，规模跟主表一致（默认 100 万行 × 128 维）。
 //
-// 100 万行 × 64 维 = 256MB 的 .vec，灌一次要几分钟，而且「慢」的原因会变成内存带宽、
-// 不再是引擎本身。基准页是看趋势的，不是压测机：5 万行已经足够看出
-// 「全表扫 × 逐行算距离」的量级，也足够在做了近似索引之后做前后对比。
+// 128 维是常见的轻量 embedding 尺寸（OpenAI 的 ada-002/text-embedding-3-small 的
+// 短维度档也在这个量级），100 万行是「精确扫描开始难受」的门槛。这组数字是
+// **ANN 索引的对照基线**：将来做近似索引，拿它比快了多少、召回掉了多少。
+//
+// 代价要提前知道：100 万 × 128 维 = 512MB 的 .vec，灌一次约 1 分钟。
 const (
 	benchVecTable = "__bench_vec"
-	benchVecRows  = 50000
-	benchVecDim   = 64
+	benchVecDim   = 128
 )
 
 // benchVecN 返回这次要灌多少行：单测把规模改小的时候跟着变小。
-func benchVecN() int {
-	if n := scale(); n < benchVecRows {
-		return n
+func benchVecN() int { return scale() }
+
+// benchVecFrac 是 "0.00"…"0.99" 的查表。
+//
+// 100 万行 × 128 维 = 1.28 亿次格式化，每次走一遍 fmt 会把灌数据拖成几分钟；
+// 查表写字符串只要一次 append。
+var benchVecFrac = func() [100]string {
+	var t [100]string
+	for i := range t {
+		t[i] = fmt.Sprintf("0.%02d", i)
 	}
-	return benchVecRows
-}
+	return t
+}()
 
 // benchVecLiteral 生成第 seed 个确定性向量。
 //
 // 不用 math/rand：基准的数字要能横着比，两次跑的数据必须一模一样。
-// 取值都是两位小数，文本长度稳定，导入耗时不会因为格式抖动。
+// 取值固定两位小数，文本长度稳定，导入耗时不会因为格式抖动。
 func benchVecLiteral(dim, seed int) string {
 	var b strings.Builder
-	b.Grow(dim*6 + 2)
+	b.Grow(dim*5 + 2)
 	b.WriteByte('[')
 	for i := 0; i < dim; i++ {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, "0.%02d", (seed*31+i*17)%100)
+		b.WriteString(benchVecFrac[(seed*31+i*17)%100])
 	}
 	b.WriteByte(']')
 	return b.String()
@@ -243,6 +251,10 @@ func (s *Server) runBench(st *benchState) {
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchTable)
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchCommitTable)
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchVecTable)
+		// 向量基准是 512MB 的表，DROP 会按常规路径备份进回收站（.dat + .vec
+		// 两份拷贝，实测 1002MB）。那是给用户误删兜底的，不该为一次基准留着。
+		// 这里只删「全部是 __bench_ 表」的备份，用户的备份一条不动。
+		d.Store.PurgeTrashForBench()
 	}()
 
 	// 准备基准表（建表 + 灌 100 万行）。这一步耗时不小，进度按「写了多少行」走。
@@ -873,6 +885,9 @@ func (s *Server) sceneAggregate(x *benchSess) benchScene {
 // 报的口径和别的场景一致：每秒扫过多少行（墙钟）。它衡量的是「距离计算 + 扫描」
 // 的合速度，所以做近似索引（ANN）之后，这个数会成倍上涨 —— 这就是它的用途。
 // 建表 / 灌数据不计时（那是准备），和批量插入场景的口径一致。
+//
+// 默认规模就是 100 万行 × 128 维（512MB 的 .vec，灌一次约一分钟）。这是刻意
+// 选在「精确扫描开始难受」的门槛上：再小看不出问题，再大就把机器内存带宽当瓶颈。
 func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
 	name := "向量 Top-K"
 	n := benchVecN()
@@ -889,8 +904,15 @@ func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
 		return fail(err)
 	}
 
-	// 分批灌：一条 INSERT 500 行，太大只会让单条语句的解析时间喧宾夺主。
-	const batch = 500
+	// 分批灌：一条 INSERT 1000 行（约 700KB）。再大只会让单条语句的解析时间
+	// 喧宾夺主，再小则是把往返开销算进准备时间。
+	//
+	// 进度前缀要自己设：x.pre 还留着上一个场景的「第 3/3 轮」，灌数据时会出现
+	// 「第 3/3 轮 · 灌数据 81,000 / 1,000,000 行」这种自相矛盾的说明。
+	x.part = progPart{span: 1}
+	x.round = -1
+	x.pre = "准备向量表"
+	const batch = 1000
 	for start := 1; start <= n; start += batch {
 		end := start + batch - 1
 		if end > n {

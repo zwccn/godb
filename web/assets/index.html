@@ -870,7 +870,8 @@ SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">向量检索（VECTOR）</div>
           <div class="help-lv-desc">存 embedding、按相似度取前 K 条。维度必须写死（<code>vector(3)</code>），值写成 <code>'[0.1,0.2,…]'</code>；检索只有一种写法：<b>按距离排序 + <code>LIMIT</code></b>。<br>
-            没有近似索引，距离是逐行算的 —— 但会分给多个核：100 万行 × 128 维取最近 10 条约 <b>0.1 秒</b>（单核约 0.4 秒）。</div>
+            没有近似索引，距离是逐行算的（会分给多个核）：100 万行 × 128 维取最近 10 条约 <b>0.35 秒</b>；
+            刚导入、行还在内存里时约 0.12 秒 —— 落盘后主要花在逐行取数上，不在算距离。</div>
           <div class="help-lv-syn"><span><code>VECTOR(n)</code>（1 ≤ n ≤ 4096，省略维度会报错）</span><span><code>&lt;-&gt;</code> 欧氏距离</span><span><code>&lt;=&gt;</code> 余弦距离</span><span><code>&lt;#&gt;</code> 负内积</span><span>距离可出现在 <code>SELECT</code> / <code>WHERE</code> / <code>ORDER BY</code></span></div>
           <pre class="help-code">DROP TABLE IF EXISTS demo_vec;
 CREATE TABLE demo_vec (id int PRIMARY KEY, title text, v vector(3));

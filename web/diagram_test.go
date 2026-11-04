@@ -46,30 +46,45 @@ func makeTables(t *testing.T, d *db.DB, stmts ...string) map[string]int64 {
 	return ids
 }
 
-// 没有任何布局时，接口要返回一份空文档而不是 404 —— 前端打开关系图
-// 第一件事就是拉它，404 会被当成「关系图坏了」。
+func coordOf(c diagramCard) (float64, float64, bool) {
+	if c.X == nil || c.Y == nil {
+		return 0, 0, false
+	}
+	return *c.X, *c.Y, true
+}
+
+// 没有任何布局时，接口要返回一份空文档而不是 404 —— 前端打开模型图
+// 第一件事就是拉它，404 会被当成「模型图坏了」。
 func TestDiagramEmpty(t *testing.T) {
 	s, _, _ := newDBServer(t)
 	code, doc := diagramCall(t, s, http.MethodGet, "")
 	if code != http.StatusOK {
 		t.Fatalf("code = %d", code)
 	}
-	if doc.Version != diagramVersion || len(doc.Cards) != 0 || len(doc.Groups) != 0 {
+	if doc.Version != diagramVersion {
+		t.Fatalf("version = %d, want %d", doc.Version, diagramVersion)
+	}
+	if len(doc.Tables) != 0 || len(doc.Groups) != 0 || len(doc.Links) != 0 {
 		t.Fatalf("unexpected doc: %+v", doc)
 	}
 }
 
 // 存进去再读回来要一模一样，并且真的落在数据目录里。
+// 这里同时覆盖「有归属没坐标」（移到分组但没拖过）—— 坐标必须能是空的，
+// 用 0 代替会把卡片摞到画布左上角。
 func TestDiagramRoundTrip(t *testing.T) {
 	s, mgr, _ := newDBServer(t)
 	ids := makeTables(t, mgr.Default(), "CREATE TABLE a (id INTEGER PRIMARY KEY)",
 		"CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id))")
+	a, b := itoa(ids["a"]), itoa(ids["b"])
 
-	body := `{"version":1,
-		"cards":{"` + itoa(ids["a"]) + `":{"x":100,"y":60},
-		          "` + itoa(ids["b"]) + `":{"x":100,"y":300}},
-		"groups":[{"id":"g1","name":"主链","color":3,
-		            "tables":[` + itoa(ids["a"]) + `,` + itoa(ids["b"]) + `]}]}`
+	body := `{"version":2,
+		"groups":[{"id":"g1","name":"主链","color":3},{"id":"g2","name":"空组","color":-1}],
+		"tables":{"` + a + `":{"group":"g1","x":100,"y":60},
+		          "` + b + `":{"group":"g1"}},
+		"links":[{"id":"m1","child":` + b + `,"columns":["a_id"],
+		          "parent":` + a + `,"refColumns":["id"],"card":"11"}],
+		"overrides":{"fk|` + b + `|a_id":"NM"}}`
 	if code, _ := diagramCall(t, s, http.MethodPost, body); code != http.StatusOK {
 		t.Fatalf("post code = %d", code)
 	}
@@ -78,25 +93,90 @@ func TestDiagramRoundTrip(t *testing.T) {
 	}
 
 	_, doc := diagramCall(t, s, http.MethodGet, "")
-	if doc.Cards[itoa(ids["a"])].X != 100 || doc.Cards[itoa(ids["b"])].Y != 300 {
-		t.Fatalf("坐标没读回来: %+v", doc.Cards)
+	x, y, ok := coordOf(doc.Tables[a])
+	if !ok || x != 100 || y != 60 {
+		t.Fatalf("a 的坐标没读回来: %+v", doc.Tables[a])
 	}
-	if len(doc.Groups) != 1 || doc.Groups[0].Name != "主链" || doc.Groups[0].Color != 3 {
+	if _, _, ok := coordOf(doc.Tables[b]); ok {
+		t.Fatalf("b 没有坐标，不该读出一个位置: %+v", doc.Tables[b])
+	}
+	if doc.Tables[b].Group != "g1" {
+		t.Fatalf("b 的归属没读回来: %+v", doc.Tables[b])
+	}
+	if len(doc.Groups) != 2 || doc.Groups[0].Name != "主链" || doc.Groups[0].Color != 3 {
 		t.Fatalf("分组没读回来: %+v", doc.Groups)
+	}
+	if len(doc.Links) != 1 || doc.Links[0].Card != "11" || doc.Links[0].Columns[0] != "a_id" {
+		t.Fatalf("逻辑关系没读回来: %+v", doc.Links)
+	}
+	if doc.Overrides["fk|"+b+"|a_id"] != "NM" {
+		t.Fatalf("基数标注没读回来: %+v", doc.Overrides)
 	}
 }
 
-// 生命周期剪枝：表被 DROP 之后，布局里对应那张表的坐标和成员都要消失，
-// 成员被剪空的组整组删掉，而且改动要写回文件（不能每次打开都重算一遍）。
-func TestDiagramPrunesDroppedTables(t *testing.T) {
+// v1 的「组拥有表」要能读成 v2 的「表拥有组」，而且迁移结果要写回文件 ——
+// 不然每次打开都要重新折腾一遍旧格式。
+func TestDiagramMigratesV1(t *testing.T) {
 	s, mgr, _ := newDBServer(t)
 	d := mgr.Default()
 	ids := makeTables(t, d, "CREATE TABLE a (id INTEGER PRIMARY KEY)",
 		"CREATE TABLE b (id INTEGER PRIMARY KEY)")
-	body := `{"version":1,
-		"cards":{"` + itoa(ids["a"]) + `":{"x":10,"y":20},"` + itoa(ids["b"]) + `":{"x":30,"y":40}},
-		"groups":[{"id":"g1","color":1,"tables":[` + itoa(ids["a"]) + `,` + itoa(ids["b"]) + `]},
-		          {"id":"g2","color":2,"tables":[` + itoa(ids["b"]) + `]}]}`
+	a, b := itoa(ids["a"]), itoa(ids["b"])
+
+	v1 := `{"version":1,
+		"cards":{"` + a + `":{"x":10,"y":20},"` + b + `":{"x":10,"y":260}},
+		"groups":[{"id":"g1","name":"主链","color":3,"tables":[` + a + `,` + b + `]}]}`
+	path := filepath.Join(d.Dir(), diagramFile)
+	if err := os.WriteFile(path, []byte(v1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, doc := diagramCall(t, s, http.MethodGet, "")
+	if doc.Version != 2 {
+		t.Fatalf("version = %d, want 2", doc.Version)
+	}
+	for _, k := range []string{a, b} {
+		if doc.Tables[k].Group != "g1" {
+			t.Fatalf("表 %s 没迁到 g1: %+v", k, doc.Tables[k])
+		}
+		if _, _, ok := coordOf(doc.Tables[k]); !ok {
+			t.Fatalf("表 %s 的坐标在迁移中丢了: %+v", k, doc.Tables[k])
+		}
+	}
+
+	// 写回过了：文件里应该已经是 v2 的 tables 字段。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk map[string]any
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := onDisk["tables"]; !ok {
+		t.Fatalf("迁移没写回，文件里还是旧字段: %s", raw)
+	}
+	if v, _ := onDisk["version"].(float64); int(v) != 2 {
+		t.Fatalf("文件版本没更新: %s", raw)
+	}
+}
+
+// 生命周期剪枝：表被 DROP 之后，它的布局、它参与的逻辑关系、它的基数标注
+// 都要消失，而且改动要写回文件。空分组保留 —— 用户建了组还没放表，那也是设计意图。
+func TestDiagramPrunesDroppedTables(t *testing.T) {
+	s, mgr, _ := newDBServer(t)
+	d := mgr.Default()
+	ids := makeTables(t, d, "CREATE TABLE a (id INTEGER PRIMARY KEY)",
+		"CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id))")
+	a, b := itoa(ids["a"]), itoa(ids["b"])
+
+	body := `{"version":2,
+		"groups":[{"id":"g1","color":1},{"id":"g2","color":2}],
+		"tables":{"` + a + `":{"group":"g1","x":10,"y":20},
+		          "` + b + `":{"group":"g1","x":30,"y":400}},
+		"links":[{"id":"m1","child":` + b + `,"columns":["a_id"],
+		          "parent":` + a + `,"refColumns":["id"],"card":"1N"}],
+		"overrides":{"fk|` + b + `|a_id":"11"}}`
 	if code, _ := diagramCall(t, s, http.MethodPost, body); code != http.StatusOK {
 		t.Fatalf("post code = %d", code)
 	}
@@ -106,63 +186,139 @@ func TestDiagramPrunesDroppedTables(t *testing.T) {
 	}
 
 	_, doc := diagramCall(t, s, http.MethodGet, "")
-	if len(doc.Cards) != 1 {
-		t.Fatalf("应只剩 a 的坐标，实际 %+v", doc.Cards)
+	if len(doc.Tables) != 1 {
+		t.Fatalf("应只剩 a 的布局，实际 %+v", doc.Tables)
 	}
-	if _, ok := doc.Cards[itoa(ids["b"])]; ok {
-		t.Fatalf("b 已 DROP，坐标还在")
+	if _, ok := doc.Tables[b]; ok {
+		t.Fatalf("b 已 DROP，布局还在")
 	}
-	// g1 只剩 a；g2 的成员全没了，整组应被删掉。
-	if len(doc.Groups) != 1 || len(doc.Groups[0].Tables) != 1 {
-		t.Fatalf("剪枝结果不对: %+v", doc.Groups)
+	if len(doc.Links) != 0 {
+		t.Fatalf("b 参与了那条逻辑关系，应被剪掉: %+v", doc.Links)
+	}
+	if len(doc.Overrides) != 0 {
+		t.Fatalf("b 的外键没了，基数标注应被剪掉: %+v", doc.Overrides)
+	}
+	// 两个组都还在：g1 只剩 a，g2 本来就是空的。
+	if len(doc.Groups) != 2 {
+		t.Fatalf("分组不该因为空掉就消失: %+v", doc.Groups)
 	}
 
-	// 写回过了：直接读文件也应该是剪过的样子。
-	b, err := os.ReadFile(filepath.Join(d.Dir(), diagramFile))
+	raw, err := os.ReadFile(filepath.Join(d.Dir(), diagramFile))
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatal(err)
 	}
 	var onDisk diagramDoc
-	if err := json.Unmarshal(b, &onDisk); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
 	}
-	if len(onDisk.Cards) != 1 || len(onDisk.Groups) != 1 {
-		t.Fatalf("文件里没剪: %+v", onDisk)
+	if len(onDisk.Tables) != 1 || len(onDisk.Links) != 0 || len(onDisk.Groups) != 2 {
+		t.Fatalf("文件里没剪干净: %+v", onDisk)
 	}
 }
 
-// 坏数据进门就归一化：NaN/超范围坐标丢掉、重复认领的表只留第一个、色号夹回 0..7。
+// 坏数据进门就归一化：超范围坐标丢掉、半个坐标（只有 x）整条丢掉、
+// 重复的 link id 只留第一条、非法基数退回 1N、非法的基数标注清掉。
 // 这些数据直接决定 DOM 的 left/top，放进去就是白屏。
 func TestDiagramNormalizesInput(t *testing.T) {
 	s, mgr, _ := newDBServer(t)
 	ids := makeTables(t, mgr.Default(), "CREATE TABLE a (id INTEGER PRIMARY KEY)",
-		"CREATE TABLE b (id INTEGER PRIMARY KEY)")
-	body := `{"version":1,
-		"cards":{"` + itoa(ids["a"]) + `":{"x":1e12,"y":0},
-		          "` + itoa(ids["b"]) + `":{"x":50.4,"y":60.6},
+		"CREATE TABLE b (id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id))",
+		"CREATE TABLE c (id INTEGER PRIMARY KEY)")
+	a, b, c := itoa(ids["a"]), itoa(ids["b"]), itoa(ids["c"])
+
+	body := `{"version":2,
+		"groups":[{"id":"g1","color":9},{"id":"g1","color":1}],
+		"tables":{"` + a + `":{"x":1e12,"y":0},
+		          "` + b + `":{"x":50.4,"y":60.6},
+		          "` + c + `":{"group":"nope"},
 		          "abc":{"x":1,"y":2},
 		          "999":{"x":1,"y":2}},
-		"groups":[{"id":"g1","color":9,"tables":[` + itoa(ids["a"]) + `,` + itoa(ids["b"]) + `]},
-		          {"id":"g2","color":1,"tables":[` + itoa(ids["b"]) + `]},
-		          {"id":"g1","color":1,"tables":[` + itoa(ids["a"]) + `]}]}`
+		"links":[{"id":"m1","child":` + b + `,"columns":["a_id"],"parent":` + a + `,"refColumns":["id"],"card":"xx"},
+		         {"id":"m1","child":` + b + `,"columns":["a_id"],"parent":` + a + `,"refColumns":["id"],"card":"1N"},
+		         {"id":"m2","child":` + b + `,"columns":["a_id","z"],"parent":` + a + `,"refColumns":["id"],"card":"1N"},
+		         {"id":"m3","child":0,"columns":["x"],"parent":` + a + `,"refColumns":["id"],"card":"1N"}],
+		"overrides":{"fk|` + b + `|a_id":"zz","nope":"1N","fk|` + a + `|id":"11"}}`
 	code, doc := diagramCall(t, s, http.MethodPost, body)
 	if code != http.StatusOK {
 		t.Fatalf("code = %d", code)
 	}
-	if len(doc.Cards) != 1 {
-		t.Fatalf("只该留下 b 的坐标: %+v", doc.Cards)
-	}
-	if c := doc.Cards[itoa(ids["b"])]; c.X != 50 || c.Y != 61 {
-		t.Fatalf("坐标没四舍五入: %+v", c)
-	}
+
 	if len(doc.Groups) != 1 {
-		t.Fatalf("重复 id / 重复认领的组应被丢掉: %+v", doc.Groups)
+		t.Fatalf("重复 id 的组应被丢掉: %+v", doc.Groups)
 	}
 	if doc.Groups[0].Color != -1 {
 		t.Fatalf("越界色号应归成 -1: %+v", doc.Groups[0])
 	}
-	if len(doc.Groups[0].Tables) != 2 {
-		t.Fatalf("第一个组应保留两张表: %+v", doc.Groups[0])
+
+	if _, _, ok := coordOf(doc.Tables[a]); ok {
+		t.Fatalf("超范围坐标应被丢掉: %+v", doc.Tables[a])
+	}
+	x, y, ok := coordOf(doc.Tables[b])
+	if !ok || x != 50 || y != 61 {
+		t.Fatalf("坐标没四舍五入: %+v", doc.Tables[b])
+	}
+	if _, _, ok := coordOf(doc.Tables[c]); ok {
+		t.Fatalf("没写过坐标的表不该有位置: %+v", doc.Tables[c])
+	}
+	if doc.Tables[c].Group != "" {
+		t.Fatalf("指向不存在的组应归成未分组: %+v", doc.Tables[c])
+	}
+	if _, ok := doc.Tables["abc"]; ok {
+		t.Fatalf("非数字键应被丢掉")
+	}
+	if _, ok := doc.Tables["999"]; ok {
+		t.Fatalf("不存在的表 ID 应被剪掉")
+	}
+
+	if len(doc.Links) != 1 {
+		t.Fatalf("重复 id / 列数不匹配 / child=0 的关系都该被丢掉: %+v", doc.Links)
+	}
+	if doc.Links[0].Card != "1N" {
+		t.Fatalf("非法基数应退回 1N: %+v", doc.Links[0])
+	}
+
+	// 非法值、非法键、以及「键形状对但库里没有这条外键」全部清掉。
+	if len(doc.Overrides) != 0 {
+		t.Fatalf("非法标注应被清空: %+v", doc.Overrides)
+	}
+}
+
+// 表只能属于一个组，归属由 tables[].group 决定，不由组里列了谁决定。
+// 空组必须保留 —— 用户建了组还没放表，那也是设计意图。
+func TestDiagramKeepsEmptyGroups(t *testing.T) {
+	s, mgr, _ := newDBServer(t)
+	ids := makeTables(t, mgr.Default(), "CREATE TABLE a (id INTEGER PRIMARY KEY)")
+	a := itoa(ids["a"])
+	body := `{"version":2,
+		"groups":[{"id":"g1","color":1},{"id":"g2","color":2}],
+		"tables":{"` + a + `":{"group":"g2","x":1,"y":2}}}`
+	if code, _ := diagramCall(t, s, http.MethodPost, body); code != http.StatusOK {
+		t.Fatalf("post code = %d", code)
+	}
+	_, doc := diagramCall(t, s, http.MethodGet, "")
+	if doc.Tables[a].Group != "g2" {
+		t.Fatalf("归属应听 tables[].group: %+v", doc.Tables[a])
+	}
+	if len(doc.Groups) != 2 {
+		t.Fatalf("两个组都该保留（空组不删）: %+v", doc.Groups)
+	}
+}
+
+// 指向不存在的组：表保留，归属归零（不能凭空造出一个组）。
+func TestDiagramDropsUnknownGroupRef(t *testing.T) {
+	s, mgr, _ := newDBServer(t)
+	ids := makeTables(t, mgr.Default(), "CREATE TABLE a (id INTEGER PRIMARY KEY)")
+	a := itoa(ids["a"])
+	body := `{"version":2,"tables":{"` + a + `":{"group":"ghost","x":1,"y":2}}}`
+	if code, _ := diagramCall(t, s, http.MethodPost, body); code != http.StatusOK {
+		t.Fatalf("post code = %d", code)
+	}
+	_, doc := diagramCall(t, s, http.MethodGet, "")
+	if doc.Tables[a].Group != "" {
+		t.Fatalf("不存在的组应归成未分组: %+v", doc.Tables[a])
+	}
+	if len(doc.Groups) != 0 {
+		t.Fatalf("不该凭空造出一个组: %+v", doc.Groups)
 	}
 }
 

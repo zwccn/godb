@@ -304,8 +304,15 @@ type TableInfo struct {
 	ID int64 `json:"id,omitempty"`
 	// Comment 是 COMMENT ON TABLE 写的一句话说明，侧栏会在表名下面显示。
 	Comment string `json:"comment,omitempty"`
-	// ForeignKeys 是出边（本表引用别人）。关系图靠它连线和分组。
+	// ForeignKeys 是出边（本表引用别人）。模型图靠它连线和分组。
 	ForeignKeys []FKInfo `json:"foreignKeys,omitempty"`
+	// UniqueKeys 是「哪些列组合能唯一确定一行」：主键、列上的 UNIQUE、
+	// 用户建的唯一索引，三处折算成列名组合一起带出去。
+	//
+	// 模型图要靠它区分 1-1 和 1-N：子表的外键列如果本身唯一，一个父行
+	// 最多对应一个子行。关联表的两条外键列合起来唯一，那是 M-N。
+	// 少带一处就会把「有唯一索引的 1-1」误判成 1-N。
+	UniqueKeys [][]string `json:"uniqueKeys,omitempty"`
 }
 
 // Open 打开（或初始化）数据目录。
@@ -1172,7 +1179,36 @@ func (d *DB) Tables() []TableInfo {
 				OnUpdate:   fk.OnUpdate,
 			})
 		}
+		ti.UniqueKeys = uniqueKeysOf(t)
 		out = append(out, ti)
+	}
+	return out
+}
+
+// uniqueKeysOf 收集表上的全部唯一键，按列名组合给出。
+//
+// 顺序不重要（前端按集合比较），但去重重要：单列主键往往同时带着
+// PrimaryKey 和 Unique 两个标记，不去重就会让同一件事出现两遍。
+func uniqueKeysOf(t *catalog.Table) [][]string {
+	var out [][]string
+	var pk []string
+	for _, c := range t.Columns {
+		if c.PrimaryKey {
+			pk = append(pk, c.Name)
+		}
+	}
+	if len(pk) > 0 {
+		out = append(out, pk)
+	}
+	for _, c := range t.Columns {
+		if c.Unique && !c.PrimaryKey {
+			out = append(out, []string{c.Name})
+		}
+	}
+	for _, ix := range t.Indexes {
+		if ix.Unique && len(ix.Columns) > 0 {
+			out = append(out, ix.Columns)
+		}
 	}
 	return out
 }

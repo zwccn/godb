@@ -68,11 +68,13 @@ try {
     <!-- 首页 = 回到编辑器：监控面板和设置弹窗都收掉。顶栏三个入口里，
          它在编辑器时是「当前」，进了监控就换成「监控」亮 —— 和页面级 Tab 同一套选中语言。 -->
     <button id="btnHome" class="btn btn-ghost on" title="回到编辑器（关掉监控 / 设置）">首页</button>
-    <!-- 关系图：把外键关系摊开成一张图。和监控同级（页面级视图），
-         因为它回答的是 schema 的结构问题，不是运行时指标。 -->
-    <button id="btnEr" class="btn btn-ghost" title="关系图：表之间的外键关系（自动分组）"
-            aria-label="关系图">
-      <span class="lbl-full">关系图</span><span class="lbl-short">关系</span>
+    <!-- 模型图：把表和关系摊开成一张图。和监控同级（页面级视图），
+         因为它回答的是 schema 的结构问题，不是运行时指标。
+         名字叫「模型图」而不是「关系图」：它现在表达的不只是外键，
+         还有你划的分组、标注的基数和库里还没建的关系。 -->
+    <button id="btnEr" class="btn btn-ghost" title="模型图：分组、关系与基数（逻辑视图 + 物理视图）"
+            aria-label="模型图">
+      <span class="lbl-full">模型图</span><span class="lbl-short">模型</span>
     </button>
     <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
     <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务 / 基准">
@@ -528,19 +530,26 @@ try {
   </div>
 </section>
 
-<!-- 关系图：把「谁引用谁」摊开成一张图。
-     全屏而不是侧栏里的一棵树：关系要看的是整体形状（几组、谁连谁、谁孤立），
-     一步步展开的表树恰好看不到这个。 -->
-<section id="erPanel" class="er hidden" aria-label="关系图">
+<!-- 模型图：把「表怎么归类、谁和谁有关」摊开成一张图。
+     全屏而不是侧栏里的一棵树：模型要看的是整体形状（几组、谁连谁、谁孤立），
+     一步步展开的表树恰好看不到这个。
+     逻辑视图折叠纯关联表（文章 ↔ 标签那种），物理视图只画库里真实存在的约束。 -->
+<section id="erPanel" class="er hidden" aria-label="模型图">
   <div class="er-head">
     <div class="er-title">
-      关系图
+      模型图
       <span class="er-stats" id="erStats"></span>
     </div>
     <div class="er-actions">
-      <button id="btnErAuto" class="btn btn-ghost btn-sm" type="button"
-              title="按外键关系重新摆放所有卡片（分组名和颜色保留）">自动排列</button>
-      <button id="btnErFit" class="btn btn-ghost btn-sm" type="button"
+      <button id="btnErMode" class="er-mode-btn" type="button"
+              title="当前：逻辑视图（折叠关联表，显示你标注的关系）。点击切到物理视图">逻辑</button>
+      <button id="btnErGroup" class="btn btn-ghost btn-sm" type="button"
+              title="新建一个空分组">+ 分组</button>
+      <button id="btnErLink" class="btn btn-ghost btn-sm" type="button"
+              title="在两列之间画一条逻辑关系（只进模型，不改库）">+ 关系</button>
+      <button id="btnErAuto" class="btn btn-ghost btn-sm er-wide" type="button"
+              title="按关系重新摆放所有卡片（分组和颜色保留）">自动排列</button>
+      <button id="btnErFit" class="btn btn-ghost btn-sm er-wide" type="button"
               title="缩放到刚好放下整张图">适应画布</button>
       <div class="er-zoom">
         <button id="btnErOut" class="icon-btn" type="button" title="缩小">−</button>
@@ -551,12 +560,55 @@ try {
     </div>
   </div>
   <!-- 画布：拖动空白处平移，滚轮缩放。卡片和连线都由 JS 摆绝对坐标 ——
-       关系图不用网格布局，任何「左一个右一个」的流式排法都会把连线拧成麻花。 -->
+       模型图不用网格布局，任何「左一个右一个」的流式排法都会把连线拧成麻花。 -->
   <div class="er-stage" id="erStage">
     <div class="er-canvas" id="erCanvas"></div>
+    <div class="er-legend" id="erLegend">
+      <span class="er-lg"><i class="er-lg-line solid"></i>外键约束</span>
+      <span class="er-lg"><i class="er-lg-line dashed"></i>逻辑关系</span>
+      <span class="er-lg"><i class="er-lg-node m2m"></i>多对多</span>
+    </div>
     <div class="er-note hidden" id="erNote"></div>
   </div>
 </section>
+
+<!-- 新增逻辑关系：只写模型，不改库。所以这里不校验类型能不能对上 ——
+     逻辑层允许「我认为他们有关系」，真正的约束留给物理层去加。 -->
+<div id="erLinkModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="新增逻辑关系">
+  <div class="modal-card mid">
+    <div class="modal-head">
+      <span>新增逻辑关系</span>
+      <button id="btnErLinkClose" class="icon-btn" type="button" title="关闭">×</button>
+    </div>
+    <div class="modal-body er-link-body">
+      <div class="er-link-grid">
+        <label for="erLinkChild">子表</label>
+        <select id="erLinkChild"></select>
+        <select id="erLinkChildCol" title="子表的关联列"></select>
+        <label for="erLinkParent">父表</label>
+        <select id="erLinkParent"></select>
+        <select id="erLinkParentCol" title="父表被引用的列"></select>
+        <label for="erLinkCard">基数</label>
+        <select id="erLinkCard" class="er-link-span2">
+          <option value="1N">1 : N —— 一个父行对应多个子行</option>
+          <option value="11">1 : 1 —— 一个父行最多一个子行</option>
+          <option value="NM">M : N —— 两边都是多个（逻辑上的多对多）</option>
+        </select>
+      </div>
+      <p class="er-link-note">
+        这条关系只存在模型图里，<b>不会修改数据库</b>。图上用虚线画，和真实外键（实线）区分开。
+        将来要落地成约束，应该去建表语句或表设计器里加。
+      </p>
+    </div>
+    <div class="modal-foot">
+      <span id="erLinkHint" class="modal-hint"></span>
+      <div class="foot-actions">
+        <button id="btnErLinkCancel" class="btn btn-sm" type="button">取消</button>
+        <button id="btnErLinkSave" class="btn btn-primary btn-sm" type="button">添加</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="dbModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="数据库">
   <div class="modal-card mid">

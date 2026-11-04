@@ -8537,7 +8537,13 @@ function syncBenchBadge(st) {
 }
 
 // 把毫秒说成人话：45 秒 / 1:20 / 12:05
-function fmtDur(ms) {
+//
+// 名字里必须带 Ms。原来这里也叫 fmtDur，和上面那个「纳秒 → ns/µs/ms」的同名 ——
+// 函数声明会提升、后声明的覆盖先声明的，于是整个文件（包括探测卡）都改用这个
+// 秒级版本：`等锁 12 000 ns` 被当成 12 000 毫秒 → 显示成「12 秒」，
+// 服务端 115 µs 显示成「1:55」。所有耗时被放大了 1000 倍且完全看不出来。
+// 现在拆成两个名字：fmtDur(ns) 管测量，fmtDurMs(ms) 管基准页的「已用/预计」。
+function fmtDurMs(ms) {
   const s = Math.max(0, Math.round((ms || 0) / 1000));
   if (s < 60) return s + ' 秒';
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
@@ -8563,8 +8569,8 @@ function renderBenchRun(d) {
   benchEls.pct.textContent = pct > 0 && pct < 1 ? pct.toFixed(1) + '%' : Math.round(pct) + '%';
   // 只要有进展就先给 1%：宽度从 0 起步看着像「压根没开始」
   benchEls.bar.style.width = Math.max(1, pct) + '%';
-  benchEls.elapsed.textContent = '已用 ' + fmtDur(d.elapsedMs);
-  benchEls.eta.textContent = d.etaMs > 0 ? '预计还需 ' + fmtDur(d.etaMs) : '';
+  benchEls.elapsed.textContent = '已用 ' + fmtDurMs(d.elapsedMs);
+  benchEls.eta.textContent = d.etaMs > 0 ? '预计还需 ' + fmtDurMs(d.etaMs) : '';
 }
 
 // 不在基准页时的慢轮询：任务要跑几分钟，切走以后进度不能就此消失。

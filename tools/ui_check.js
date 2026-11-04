@@ -134,6 +134,25 @@ class CDP {
       console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`);
     };
 
+    /* 静态检查：app.js 里不许有重名的顶层函数声明。
+       JS 不报错，后声明的会安静地覆盖先声明的 —— 这正是「探测卡把纳秒当毫秒」
+       那次事故的成因：基准页加了个 fmtDur(ms)，把原来那个 fmtDur(ns) 顶掉了，
+       于是等锁 12 000 ns 显示成「12 秒」、服务端 115 µs 显示成「1:55」。
+       数字被放大 1000 倍，而且读起来完全合理，肉眼和截图都看不出来。 */
+    {
+      const declLines = new Map();
+      const dupes = [];
+      const src = fs.readFileSync(__dirname + '/../web/assets/app.js', 'utf8').split('\n');
+      src.forEach((ln, i) => {
+        const m = /^function\s+([A-Za-z_$][\w$]*)\s*\(/.exec(ln);
+        if (!m) return;
+        if (declLines.has(m[1])) dupes.push(`${m[1]}（${declLines.get(m[1])} 与 ${i + 1} 行）`);
+        else declLines.set(m[1], i + 1);
+      });
+      check('app.js 没有重名的顶层函数（后声明会静默覆盖先声明）',
+        dupes.length === 0, dupes.join(' · '));
+    }
+
     /* 空间地图有几条断言要一张「几百页」的表。库里随时可能被清空（设置页就摆着
        「清空当前库」），所以这里先确保 big_demo 在：没有就现造 5 万行 + 落盘，
        已有就一步不动。以前这条链靠「库里正好有演示数据」，别人清一次库测试就红。
@@ -3212,6 +3231,22 @@ class CDP {
       `${probe.rows} 行 · tab=${probe.tab}`);
     check('探测里每一步都有行数，不只最底下那行',
       probe.chips >= 4, `${probe.chips} 行带计数标签`);
+    /* 时长单位：探测卡上的每一段都是「纳秒 → ns/µs/ms」。上面那个重名事故就是
+       从这里露头的，所以直接断言「不许出现秒」——「12 秒」读起来太合理，只看截图
+       根本不会怀疑，只能靠断言把这个口子封住。 */
+    const units = await cdp.eval(`(() => {
+      const legend = document.querySelector('.probe-phase-legend');
+      const times = [...document.querySelectorAll('.probe-row')]
+        .map(r => { const c = r.querySelector('.probe-chip'); return c ? c.textContent : ''; })
+        .filter(Boolean);
+      return { legend: legend ? legend.textContent : '', times };
+    })()`);
+    {
+      const all = units.legend + ' ' + units.times.join(' ');
+      check('探测卡的时长用 ns/µs/ms，没有把纳秒当毫秒显示成「秒」',
+        !/秒|\d+:\d+/.test(all) && /(ns|µs|ms)/.test(all), units.legend.slice(0, 64));
+    }
+
     check('最贵的一步被标出来，并有一句结论',
       /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
       `${probe.worst} · ${probe.verdict.slice(0, 40)}`);

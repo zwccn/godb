@@ -695,6 +695,40 @@ class CDP {
     check('刻度文字是 HTML 覆盖层，SVG 里一个 text 都没有（否则会被拉伸变形）',
       axUi.every(a => a.textInSvg === 0), axUi.map(a => a.textInSvg).join(','));
 
+    /* 吞吐卡里叠着两张曲线（QPS/TPS 与 连接数），图例必须贴着各自那张图。
+       以前图例在图**下面**：上一张的「QPS / TPS（虚线）」就夹在两张图中间，
+       离下一张的纵轴刻度只有十来像素，读的人分不清那行小字是谁的标签。
+       现在图例移到图的上方、与绘图区左对齐，两张图之间再加一条分隔线。
+       这三条一起钉住排版 —— 光看截图看不出来，只能量。 */
+    const stackUi = await cdp.eval(`(() => {
+      return [...document.querySelectorAll('#monPanel .mon-page[data-page="overview"] .mon-spark')].map(s => {
+        const tip = s.querySelector('.spark-tip');
+        const plot = s.querySelector('.spark-plot');
+        const tr = tip.getBoundingClientRect();
+        const pr = plot.getBoundingClientRect();
+        const sr = s.getBoundingClientRect();
+        return {
+          tipTop: Math.round(tr.top), tipLeft: Math.round(tr.left),
+          plotTop: Math.round(pr.top), plotLeft: Math.round(pr.left),
+          boxTop: Math.round(sr.top),
+          borderTop: parseFloat(getComputedStyle(s).borderTopWidth) || 0,
+          text: tip.textContent.replace(/\\s+/g, ''),
+        };
+      });
+    })()`);
+    check('两张曲线各带图例，且图例在图的上方（不再夹在两张图之间）',
+      stackUi.length === 2 && stackUi.every(s => s.tipTop < s.plotTop),
+      stackUi.map(s => `${s.text} ${s.tipTop}<${s.plotTop}`).join(' ‖ '));
+    check('图例与绘图区左对齐（不挤进纵轴刻度那一列）',
+      stackUi.length === 2 && stackUi.every(s => Math.abs(s.tipLeft - s.plotLeft) <= 2),
+      stackUi.map(s => `${s.tipLeft}/${s.plotLeft}`).join(' '));
+    check('两张图之间有分隔线，图例离上一张图 ≥24px',
+      stackUi.length === 2 && stackUi[1].borderTop > 0 &&
+        stackUi[1].tipTop - (stackUi[0].plotTop + 64) >= 24,
+      stackUi.length === 2
+        ? `border=${stackUi[1].borderTop}px gap=${stackUi[1].tipTop - stackUi[0].plotTop - 64}px`
+        : `${stackUi.length} 张图`);
+
     // 悬浮：鼠标落在绘图区 70% 处。headless 下第一次 mouseMoved 只算「进入页面」，
     // 同一个点要再发一次才落到元素上（所以上面那几条不要照抄这个发两次的写法）。
     await cdp.eval(`document.querySelector('#monPanel .proc-spark .spark-plot').scrollIntoView({ block: 'center' })`);

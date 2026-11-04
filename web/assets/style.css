@@ -2572,8 +2572,22 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 
 /* 吞吐与连接：两行小图叠在一张卡里（QPS/TPS 一行、连接数一行）。
    每行 64px：比进程资源那块矮一点，因为它是两行，加起来反而更高。 */
-.mon-spark { padding: 2px 12px 8px; }
+.mon-spark { display: flex; flex-direction: column; padding: 2px 12px 8px; }
 .mon-spark .spark-plot svg { height: 64px; }
+
+/* 两张小图之间必须有界线，图例也要挪到各自那张图的上面。
+   以前图例在图的下面：上一张的图例（QPS / TPS（虚线））就夹在两张图中间，
+   离下一张的纵轴刻度（6.5 / 4.5 / 2.6）只有十来像素，读的人分不清那行小字是谁的。
+   现在每张图自己的排法是「图例 → 曲线 → 时间轴」，图例只跟下面那张图挨着；
+   两张图之间再补一条淡分隔线，块的起点在哪里一眼就能看出来。 */
+.mon-spark + .mon-spark {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+/* 图例跟绘图区左边缘对齐（42px 就是纵轴刻度栏的宽度）。
+   顶着卡片左缘时，这行小字正好挤在「纵轴刻度」那一列里，和刻度数字混成一片。 */
+.mon-spark .spark-tip { order: -1; margin: 0 0 2px 42px; }
 
 /* 绘图区：左侧留 42px 给纵轴刻度，文字全部在 SVG 外面 ——
    图是 preserveAspectRatio="none" 拉伸铺满卡片的，里面画 <text> 会被横向拉扁。 */

@@ -42,6 +42,11 @@ func TableIntents(st sql.Statement) (map[string]lock.Mode, error) {
 		}
 	case *sql.AlterTable:
 		addIntent(out, s.Table, lock.Exclusive)
+		// ADD FOREIGN KEY 要扫被引用表确认没有孤儿行，父表也要锁住 ——
+		// 只加 S 就够了（不改它），但必须锁，否则校验通过之后父行可能被删掉。
+		if s.Action != nil && s.Action.Kind == "add_fk" && s.Action.FK != nil {
+			addIntent(out, s.Action.FK.RefTable, lock.Shared)
+		}
 	case *sql.CreateIndex:
 		addIntent(out, s.Table, lock.Exclusive)
 	case *sql.CommentOn:

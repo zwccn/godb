@@ -111,10 +111,16 @@ type AlterTable struct {
 
 // AlterAction 是 ALTER TABLE 的具体动作。
 type AlterAction struct {
-	Kind     string // add_column | drop_column | rename_column | rename_table | alter_type
-	Col      *ColumnDef
-	Name     string // drop/rename_column: 旧列名
-	NewName  string // rename_column: 新列名；rename_table: 新表名
+	// Kind 取值：add_column | drop_column | rename_column | rename_table |
+	// alter_type | add_fk | drop_constraint
+	Kind string
+	Col  *ColumnDef
+	// Name 是 drop_column / rename_column 的旧列名，add_fk / drop_constraint 的约束名，
+	// rename_table 没有用到它的语义。
+	Name    string
+	NewName string // rename_column: 新列名；rename_table: 新表名
+	// FK 是 add_fk 的外键定义（Name 为空表示由引擎自动命名）。
+	FK       *FKDef
 	TypeName string
 	TypeArgs []int
 }

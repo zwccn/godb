@@ -869,23 +869,12 @@ func (p *parser) parseTableConstraint(ct *CreateTable) error {
 		col.Unique = true
 		return nil
 	}
-	if p.acceptKw("foreign") {
-		if err := p.expectKw("key"); err != nil {
-			return err
-		}
-		cols, err := p.parseIdentList()
+	if p.atKw("foreign") {
+		fk, err := p.parseForeignKey()
 		if err != nil {
 			return err
 		}
-		if err := p.expectKw("references"); err != nil {
-			return err
-		}
-		ref, err := p.parseReferences()
-		if err != nil {
-			return err
-		}
-		ref.Cols = cols
-		ct.FKs = append(ct.FKs, ref)
+		ct.FKs = append(ct.FKs, fk)
 		return nil
 	}
 	if p.acceptKw("check") {
@@ -904,6 +893,32 @@ func (p *parser) parseTableConstraint(ct *CreateTable) error {
 		return nil
 	}
 	return p.errAt(p.peek(), "unsupported table constraint")
+}
+
+// parseForeignKey 解析 FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE ...]。
+//
+// 建表和 ALTER TABLE ADD CONSTRAINT 共用同一段：两处语法完全一样，
+// 分成两份迟早会走得不一样（比如只在一处支持 ON UPDATE）。
+func (p *parser) parseForeignKey() (*FKDef, error) {
+	if err := p.expectKw("foreign"); err != nil {
+		return nil, err
+	}
+	if err := p.expectKw("key"); err != nil {
+		return nil, err
+	}
+	cols, err := p.parseIdentList()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectKw("references"); err != nil {
+		return nil, err
+	}
+	ref, err := p.parseReferences()
+	if err != nil {
+		return nil, err
+	}
+	ref.Cols = cols
+	return ref, nil
 }
 
 func findColDef(cols []*ColumnDef, name string) *ColumnDef {
@@ -1262,8 +1277,33 @@ func (p *parser) parseAlter() (Statement, error) {
 	switch {
 	case p.acceptKw("add"):
 		p.acceptKw("column")
-		// ADD CONSTRAINT / ADD PRIMARY KEY / ADD UNIQUE … 是给已有表补约束，
-		// 引擎只支持在建表时声明。不认的话它会掉进 parseColumnDef，报出
+		// ADD FOREIGN KEY / ADD CONSTRAINT ... FOREIGN KEY 是唯一支持补加的约束：
+		// 外键只影响写入校验，不改行宽也不改列序，已有数据只要满足就能加。
+		// 主键 / UNIQUE / CHECK 仍然只能建表时声明 —— 它们的错误信息下面单独给。
+		if p.atKw("foreign") || p.atKw("constraint") {
+			cname := ""
+			if p.acceptKw("constraint") {
+				n, err := p.ident()
+				if err != nil {
+					return nil, err
+				}
+				cname = n
+			}
+			if !p.atKw("foreign") {
+				return nil, p.errAt(p.peek(),
+					"ALTER TABLE ... ADD %s is not supported: declare constraints in CREATE TABLE instead",
+					p.addConstraintLabel())
+			}
+			fk, err := p.parseForeignKey()
+			if err != nil {
+				return nil, err
+			}
+			act.Kind = "add_fk"
+			act.Name = cname
+			act.FK = fk
+			break
+		}
+		// 不认的话它会掉进 parseColumnDef，报出
 		// 「syntax error at or near "CONSTRAINT"」—— 那句话不说明「不支持」，
 		// 用户只会以为是自己写错了。这里明确说清楚。
 		if label := p.addConstraintLabel(); label != "" {
@@ -1278,6 +1318,23 @@ func (p *parser) parseAlter() (Statement, error) {
 		act.Kind = "add_column"
 		act.Col = col
 	case p.acceptKw("drop"):
+		// DROP CONSTRAINT 只用于外键：主键 / UNIQUE 是列上的标记，删掉它们
+		// 要让列结构一起变，那是另一件事（引擎不支持）。
+		if p.acceptKw("constraint") {
+			if p.atKw("if") {
+				p.pos++
+				if err := p.expectKw("exists"); err != nil {
+					return nil, err
+				}
+			}
+			n, err := p.ident()
+			if err != nil {
+				return nil, err
+			}
+			act.Kind = "drop_constraint"
+			act.Name = n
+			break
+		}
 		p.acceptKw("column")
 		if p.atKw("if") {
 			p.pos++

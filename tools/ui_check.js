@@ -2640,6 +2640,60 @@ class CDP {
     await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
     await sleep(300);
 
+    /* 表设计器的「引用（外键）」列。
+       外键以前只能在 SQL 里写，界面上完全看不到 —— 关系图能画出连线之后
+       这个缺口就特别明显（图上有、设计器里没有）。这里盯三件事：
+       列在、能选到父表主键、选完预览里真的生成了 ALTER ... ADD FOREIGN KEY。 */
+    await cdp.eval(`(async () => {
+      const q = sql => fetch('/api/query', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }),
+      }).then(r => r.json());
+      await q('DROP TABLE IF EXISTS ui_fk_c');
+      await q('DROP TABLE IF EXISTS ui_fk_p');
+      await q('CREATE TABLE ui_fk_p (id int4 PRIMARY KEY)');
+      await q('CREATE TABLE ui_fk_c (id int4 PRIMARY KEY, p_id int4)');
+      await loadSchema();
+    })()`);
+    await cdp.eval(`openDesigner('ui_fk_c')`);
+    await sleep(400);
+    const fkCol = await cdp.eval(`(() => {
+      const th = [...document.querySelectorAll('#designerGrid thead th')].map(x => x.textContent.trim());
+      const tr = [...document.querySelectorAll('#designerRows tr')]
+        .find(t => t.querySelector('.c-name input').value === 'p_id');
+      const sel = tr ? tr.querySelector('.c-ref select') : null;
+      return {
+        th,
+        hasSel: !!sel,
+        canPickParent: !!sel && [...sel.options].some(o => o.value === 'ui_fk_p.id'),
+        empty: !!sel && sel.value === '',
+      };
+    })()`);
+    check('表设计器有「引用（外键）」列', fkCol.th.some(x => x.indexOf('引用') >= 0) && fkCol.hasSel, fkCol.th.join(' | '));
+    check('引用下拉能选到父表主键、没设置时为空', fkCol.canPickParent && fkCol.empty,
+      `可选项 ${fkCol.canPickParent} / 初始为空 ${fkCol.empty}`);
+
+    const fkSql = await cdp.eval(`(() => {
+      const tr = [...document.querySelectorAll('#designerRows tr')]
+        .find(t => t.querySelector('.c-name input').value === 'p_id');
+      const sel = tr.querySelector('.c-ref select');
+      sel.value = 'ui_fk_p.id';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return buildDesignerSql().sql;
+    })()`);
+    check('选完引用后预览里有 ALTER ... ADD FOREIGN KEY',
+      /ALTER TABLE ui_fk_c ADD FOREIGN KEY \(p_id\) REFERENCES ui_fk_p \(id\);/.test(fkSql), fkSql);
+
+    await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
+    await sleep(250);
+    await cdp.eval(`(async () => {
+      const q = sql => fetch('/api/query', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql }),
+      }).then(r => r.json());
+      await q('DROP TABLE IF EXISTS ui_fk_c');
+      await q('DROP TABLE IF EXISTS ui_fk_p');
+      await loadSchema();
+    })()`);
+
     // 5) 窄屏：左侧表结构默认收起成抽屉，点 ☰ 拉开
     //    注意 headless 的 --window-size 会把宽度钳到 500，所以这里显式设视口
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 1, mobile: true });

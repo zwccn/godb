@@ -7743,7 +7743,44 @@ let designer = null;
 function designerModalEl() { return document.getElementById('designerModal'); }
 
 function newDesignerRow() {
-  return { orig: null, name: '', type: 'int4', len: 0, scale: 0, notNull: false, pk: false, uniq: false, def: '' };
+  return {
+    orig: null, name: '', type: 'int4', len: 0, scale: 0, notNull: false, pk: false, uniq: false, def: '',
+    // ref 是 "表.列"，空串表示没有外键；origRef 是打开设计器时的值，
+    // 两者不同才生成 ALTER ... DROP/ADD CONSTRAINT。
+    ref: '', origRef: '', origFk: '',
+  };
+}
+
+// fkTargets 列出可以做外键目标的「表.列」。
+//
+// 只收有唯一约束的列：外键要求「至多一行」，被引用列没有主键/唯一约束时
+// 引擎会直接拒（there is no unique constraint matching given keys）。
+// 把它们放进下拉里只会在保存时才报错，等于让用户白填一遍。
+function fkTargets() {
+  const out = [];
+  for (const t of schemaCache) {
+    for (const c of t.columns) {
+      if (!c.primaryKey && !c.unique) continue;
+      if (/^vector/i.test(c.type || '')) continue;
+      out.push({ key: t.name + '.' + c.name, table: t.name, col: c.name, type: c.type });
+    }
+  }
+  return out;
+}
+
+// typeGroup 把类型归成「能互相做外键」的几类，用于在下拉里提示类型不一致。
+// 引擎按 Kind 比较（int2/4/8 都是 KInt，text/varchar/char 都是 KText），
+// 这里的分组和它对齐；只用来提示，真正的判定仍由引擎做。
+function typeGroup(t) {
+  const b = String(t || '').toLowerCase().replace(/\(.*$/, '');
+  if (b === 'serial' || b === 'bigserial' || b === 'smallserial') return 'int';
+  if (/^(int|int2|int4|int8|integer|bigint|smallint)$/.test(b)) return 'int';
+  if (/^(text|varchar|char|character|bpchar)$/.test(b)) return 'text';
+  if (/^(numeric|decimal)$/.test(b)) return 'num';
+  if (/^(float4|float8|real|double)/.test(b)) return 'float';
+  if (/^(bool|boolean)$/.test(b)) return 'bool';
+  if (/^(timestamp|timestamptz|date|time)/.test(b)) return 'time';
+  return b;
 }
 
 function openDesigner(name) {
@@ -7756,18 +7793,34 @@ function openDesigner(name) {
       name: c.name, type: c.type, notNull: !!c.notNull, def: c.default || '',
       pk: !!c.primaryKey, uniq: !!c.unique,
     }));
+    // 单列外键才能在「一行一个引用」的界面上编辑；复合外键记下来，
+    // 保存时给一句说明，别让人以为设计器把它们弄丢了。
+    const fkByCol = {};
+    designer.compositeFks = [];
+    for (const fk of (t.foreignKeys || [])) {
+      const cols = fk.columns || [];
+      if (cols.length !== 1) { designer.compositeFks.push(fk.name || '?'); continue; }
+      const rc = (fk.refColumns && fk.refColumns[0]) || '';
+      fkByCol[cols[0].toLowerCase()] = {
+        ref: rc ? fk.refTable + '.' + rc : '',
+        name: fk.name || '',
+      };
+    }
     designer.rows = t.columns.map(c => {
       const p = parseType(c.type);
       // serial 列在 catalog 里存的是 integer + Serial 标记，这里还原成 serial，
       // 否则设计器会显示成 int4，改动别处保存时看不出它是自增列。
       const base = c.serial ? 'serial' : p.base;
+      const fk = fkByCol[c.name.toLowerCase()] || null;
       return {
         orig: c.name, name: c.name, type: base, len: p.len, scale: p.scale,
         notNull: !!c.notNull, pk: !!c.primaryKey, uniq: !!c.unique, def: c.default || '',
         origType: typeSql({ type: base, len: p.len, scale: p.scale }),
+        ref: fk ? fk.ref : '', origRef: fk ? fk.ref : '', origFk: fk ? fk.name : '',
       };
     });
   } else {
+    designer.compositeFks = [];
     designer.rows = [newDesignerRow()];
   }
 
@@ -7890,6 +7943,59 @@ function renderDesigner() {
     tdUniq.appendChild(checkEl(r.uniq, v => { r.uniq = v; refreshDesignerSql(); }));
     tr.appendChild(tdUniq);
 
+    const tdRef = el('td', 'c-ref');
+    const refSel = document.createElement('select');
+    const mkOpt = (val, text) => {
+      const o = document.createElement('option');
+      o.value = val;
+      o.textContent = text;
+      return o;
+    };
+    refSel.appendChild(mkOpt('', '—'));
+    const targets = fkTargets();
+    // 当前值不在候选里（目标列后来没了唯一约束）也要能显示出来，
+    // 否则下拉会默默跳到「—」，一保存就把外键删了。
+    const cur = r.ref || '';
+    if (cur && !targets.some(x => x.key === cur)) {
+      const parts = cur.split('.');
+      targets.push({ key: cur, table: parts[0], col: parts[1], type: '' });
+    }
+    const byTable = new Map();
+    for (const x of targets) {
+      if (!byTable.has(x.table)) byTable.set(x.table, []);
+      byTable.get(x.table).push(x);
+    }
+    for (const [tbl, list] of byTable) {
+      const g = document.createElement('optgroup');
+      g.label = tbl;
+      for (const x of list) {
+        // 显示「表.列」而不是只有列名：下拉收起时只显示选中项的文字，
+        // 只写「id · integer」的话，一列到底指向哪张表的 id 就看不出来了。
+        g.appendChild(mkOpt(x.key, x.key));
+      }
+      refSel.appendChild(g);
+    }
+    refSel.value = cur;
+    refSel.title = '外键：这一列引用哪张表的哪一列（只列主键 / 唯一列）';
+    // 类型不一致时只提示、不拦：引擎会给出确定的报错，这里提前让人看见。
+    const syncRefHint = () => {
+      const hit = targets.find(x => x.key === refSel.value);
+      const bad = !!hit && !!hit.type && typeGroup(hit.type) !== typeGroup(r.type);
+      refSel.classList.toggle('warn', bad);
+      refSel.title = bad
+        ? `类型不一致：这一列是 ${r.type}，${hit.key} 是 ${hit.type}，保存时会被拒`
+        : '外键：这一列引用哪张表的哪一列（只列主键 / 唯一列）';
+    };
+    sel.addEventListener('change', syncRefHint);
+    refSel.addEventListener('change', () => {
+      r.ref = refSel.value;
+      syncRefHint();
+      refreshDesignerSql();
+    });
+    syncRefHint();
+    tdRef.appendChild(refSel);
+    tr.appendChild(tdRef);
+
     const tdDef = el('td', 'c-def');
     const defIn = document.createElement('input');
     defIn.type = 'text';
@@ -7951,6 +8057,13 @@ function buildDesignerSql() {
       if (r.def.trim()) s += ' DEFAULT ' + r.def.trim();
       return s;
     });
+    // 外键写成表级约束：列级 REFERENCES 也行，但表级能一眼看全哪几列在引谁，
+    // 而且复合外键以后要支持时不用换写法。
+    for (const r of rows) {
+      if (!r.ref) continue;
+      const parts = r.ref.split('.');
+      lines.push(`  FOREIGN KEY (${qi(r.name.trim())}) REFERENCES ${qi(parts[0])} (${qi(parts[1])})`);
+    }
     stmts.push(`CREATE TABLE ${qi(name)} (\n${lines.join(',\n')}\n);`);
   } else {
     const old = designer.origName;
@@ -7982,6 +8095,22 @@ function buildDesignerSql() {
       if (r.def.trim()) s += ' DEFAULT ' + r.def.trim();
       stmts.push(s + ';');
     }
+    // 3.5) 外键的增删改。放在加列之后：新建的列要先存在才能挂约束。
+    //      不给约束起名，让引擎按「表_列_fkey」自动命名 —— 自己拼名字要处理
+    //      重名，而且和 CREATE TABLE 那条路径的命名规则容易走岔。
+    for (const r of rows) {
+      const now = r.ref || '';
+      const before = r.origRef || '';
+      if (now === before) continue;
+      if (before && r.origFk) {
+        stmts.push(`ALTER TABLE ${tbl} DROP CONSTRAINT ${qi(r.origFk)};`);
+      }
+      if (now) {
+        const parts = now.split('.');
+        stmts.push(`ALTER TABLE ${tbl} ADD FOREIGN KEY (${qi(r.name.trim())}) ` +
+          `REFERENCES ${qi(parts[0])} (${qi(parts[1])});`);
+      }
+    }
     // 4) 删列（原来有、现在列表里没有）
     const kept = new Set(rows.filter(r => r.orig).map(r => r.orig.toLowerCase()));
     for (const o of designer.origCols) {
@@ -7999,6 +8128,17 @@ function buildDesignerSql() {
       if (!!o.uniq !== !!r.uniq) warns.push(`${r.name}: 引擎不支持给已有列加/去 UNIQUE，已忽略`);
       if (!!o.pk !== !!r.pk && !r.pk) warns.push(`${r.name}: 引擎不支持取消已有列的主键，已忽略`);
       if (!!o.pk !== !!r.pk && r.pk) warns.push(`${r.name}: 引擎不支持给已有表新增主键，已忽略`);
+    }
+    // 外键类型不一致：引擎会拒，提前说清楚是哪两列不一致
+    for (const r of rows) {
+      if (!r.ref) continue;
+      const hit = fkTargets().find(x => x.key === r.ref);
+      if (hit && hit.type && typeGroup(hit.type) !== typeGroup(r.type)) {
+        warns.push(`${r.name}: 引用的 ${r.ref} 是 ${hit.type}，这一列是 ${r.type}，类型不一致会被拒`);
+      }
+    }
+    if (designer.compositeFks && designer.compositeFks.length) {
+      warns.push(`复合外键（${designer.compositeFks.join(', ')}）不在设计器里编辑，会保持原样`);
     }
   }
 

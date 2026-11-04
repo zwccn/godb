@@ -344,6 +344,25 @@ func shapeStmt(st Statement) string {
 				typ += "(" + shapeInts(a.TypeArgs) + ")"
 			}
 			return "ALTER TABLE " + n.Table + " ALTER COLUMN " + a.Name + " TYPE " + typ
+		case "add_fk":
+			ref := a.FK.RefTable
+			if len(a.FK.RefCols) > 0 {
+				ref += "(" + joinStrs(a.FK.RefCols, ", ") + ")"
+			}
+			s := "ALTER TABLE " + n.Table + " ADD "
+			if a.Name != "" {
+				s += "CONSTRAINT " + a.Name + " "
+			}
+			s += "FOREIGN KEY (" + joinStrs(a.FK.Cols, ", ") + ") REFERENCES " + ref
+			if a.FK.OnDelete != "" {
+				s += " ON DELETE " + a.FK.OnDelete
+			}
+			if a.FK.OnUpdate != "" {
+				s += " ON UPDATE " + a.FK.OnUpdate
+			}
+			return s
+		case "drop_constraint":
+			return "ALTER TABLE " + n.Table + " DROP CONSTRAINT " + a.Name
 		}
 		return "ALTER TABLE " + n.Table + " <" + a.Kind + ">"
 
@@ -589,6 +608,15 @@ func TestParseStatements(t *testing.T) {
 		{`ALTER TABLE t RENAME TO t2`, `ALTER TABLE t RENAME TO t2`},
 		{`ALTER TABLE t ALTER COLUMN c SET DATA TYPE varchar(64)`,
 			`ALTER TABLE t ALTER COLUMN c TYPE varchar(64)`},
+		// 给已有表补外键（表设计器的「引用」列走这条）：带名与不带名都要能解析
+		{`ALTER TABLE c ADD CONSTRAINT fk_c_p FOREIGN KEY (p_id) REFERENCES p(id)`,
+			`ALTER TABLE c ADD CONSTRAINT fk_c_p FOREIGN KEY (p_id) REFERENCES p(id)`},
+		{`ALTER TABLE c ADD FOREIGN KEY (p_id) REFERENCES p (id) ON DELETE CASCADE`,
+			`ALTER TABLE c ADD FOREIGN KEY (p_id) REFERENCES p(id) ON DELETE cascade`},
+		{`ALTER TABLE c ADD CONSTRAINT fk2 FOREIGN KEY (a, b) REFERENCES p (x, y)`,
+			`ALTER TABLE c ADD CONSTRAINT fk2 FOREIGN KEY (a, b) REFERENCES p(x, y)`},
+		{`ALTER TABLE c DROP CONSTRAINT IF EXISTS fk_c_p`,
+			`ALTER TABLE c DROP CONSTRAINT fk_c_p`},
 		{`TRUNCATE TABLE t`, `TRUNCATE t`},
 		{`COMMENT ON TABLE t IS '用户表'`, `COMMENT ON table t IS '用户表'`},
 		{`COMMENT ON COLUMN t.c IS NULL`, `COMMENT ON column t.c IS NULL`},
@@ -863,8 +891,9 @@ func TestParseErrors(t *testing.T) {
 		{`SELECT * FROM a CROSS JOIN b ON a.id = b.id`, `CROSS JOIN cannot have an ON clause`},
 		{`CREATE VIEW v AS SELECT 1`, `only CREATE TABLE is supported`},
 		{`DROP VIEW v`, `only DROP TABLE is supported`},
-		// 给已有表补约束不支持：错误信息要明说，不能是「syntax error at or near CONSTRAINT」
-		{`ALTER TABLE t ADD CONSTRAINT x UNIQUE (a)`, `ADD CONSTRAINT is not supported`},
+		// 给已有表补约束：只有外键支持，其它要明说「不支持」，
+		// 不能是「syntax error at or near CONSTRAINT」
+		{`ALTER TABLE t ADD CONSTRAINT x UNIQUE (a)`, `ADD UNIQUE is not supported`},
 		{`ALTER TABLE t ADD PRIMARY KEY (a)`, `ADD PRIMARY KEY is not supported`},
 		{`SELECT 1 SELECT 2`, `syntax error`}, // 少分号
 		{`SELECT (1`, `syntax error`},         // 括号没闭合

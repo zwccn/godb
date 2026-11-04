@@ -57,7 +57,7 @@ go build -o godb.exe .
 |---|---|
 | 持久化 | `CHECKPOINT` / `FLUSH`（刷脏页 + 记代次 + 轮转 WAL，返回代次与统计）；`VACUUM [表]`（整理页内空洞 + 回收尾部空页，返回整理/回收的页数）；`ANALYZE`（识别并成功，暂无统计信息） |
 | 索引 | `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t (cols)` / `DROP INDEX`——内存 B+Tree，**完整键等值、首列区间（`> < BETWEEN`、`LIKE 'x%'`）、`IN` 列表、`OR` 合并、`ORDER BY` 免排序都走它**（`SELECT`/`UPDATE`/`DELETE` 都走）；主键也走树，`UNIQUE` 索引参与唯一性校验；**`ORDER BY` 命中 PK/NOT NULL 索引前缀时可免排序，带 `LIMIT` 还能提前停（Top-N 分页）** |
-| 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`（`ADD CONSTRAINT` / `ADD PRIMARY KEY` 不支持，报错会直说「请在建表时声明」）、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
+| 表管理 | `CREATE TABLE`（`SERIAL`、`GENERATED … AS IDENTITY`、`PRIMARY KEY`（含复合）、`UNIQUE`、`NOT NULL`、`DEFAULT`、`CHECK`、`COMMENT ON COLUMN`）、`DROP TABLE [IF EXISTS]`、`ALTER TABLE ADD/DROP/RENAME COLUMN`、`ALTER TABLE RENAME TO`、`ALTER COLUMN TYPE`、`ALTER TABLE ADD [CONSTRAINT x] FOREIGN KEY … REFERENCES`、`ALTER TABLE DROP CONSTRAINT`（`ADD PRIMARY KEY` / `ADD UNIQUE` / `ADD CHECK` 不支持，报错会直说「请在建表时声明」）、`TRUNCATE`、`COMMENT ON TABLE/COLUMN` |
 | 批量传输 | `COPY t [(列)] FROM STDIN` / `TO STDOUT`（文本格式，`\N` 为 NULL；不支持服务器文件名） |
 | 写入 | `INSERT ... VALUES`、`INSERT ... SELECT`、`UPDATE`、`DELETE`；`INSERT`/`UPDATE`/`DELETE` 都支持 `RETURNING`（含 `RETURNING *`、表达式与别名）；`ON CONFLICT [(cols)] DO NOTHING / DO UPDATE SET …`（含 `EXCLUDED`）；`UPDATE … FROM`、`DELETE … USING`（数据源同 `SELECT` 的 `FROM`：多表 / `JOIN` / 派生表 / `(VALUES …)`）；`WHERE` / `SET` / `VALUES` 里可以用子查询（`IN (SELECT …)`、标量、`EXISTS`） |
 | 查询 | `SELECT [DISTINCT]`、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY`（`ASC/DESC/NULLS FIRST/LAST`、别名、序号）、`LIMIT/OFFSET`、`EXPLAIN` / `EXPLAIN ANALYZE` |
@@ -187,16 +187,23 @@ Web 控制台左侧的表树支持右键菜单，照着 Navicat 的习惯做的�
 
 ### 表设计器
 
-表格化的列编辑器：名 / 类型 / 长度 / 小数点 / 不是 null / 主键 / 唯一 / 默认值，
+表格化的列编辑器：名 / 类型 / 长度 / 小数点 / 不是 null / 主键 / 唯一 / 引用（外键）/ 默认值，
 顶部有「添加字段、删除字段、设为主键」，右侧「SQL 预览」实时显示将要执行的语句（Ctrl+Enter 保存）。
 
-保存时按原结构与当前编辑的差异生成语句，顺序是：改表名 → 改列名 → 改类型 → 加列 → 删列。
-因为 `ALTER COLUMN TYPE` 认的是当前列名，所以改名必须排在改类型之前。
+保存时按原结构与当前编辑的差异生成语句，顺序是：改表名 → 改列名 → 改类型 → 加列 →
+外键增删改 → 删列。因为 `ALTER COLUMN TYPE` 认的是当前列名，所以改名必须排在改类型之前；
+外键要排在新列建好之后。
+
+「引用（外键）」列的下拉只列**主键 / 唯一列**（引擎要求被引用列唯一，否则「至多一行」
+无法保证），按表分组，显示成 `表.列`。选中的目标类型和这一列不一致时下拉变黄并在提示里
+写明，保存时引擎也会拒绝。新建表时外键写成表级 `FOREIGN KEY (...) REFERENCES ...`；
+改已有表时按差异生成 `ALTER TABLE ... ADD FOREIGN KEY` / `DROP CONSTRAINT`。
 
 **能力边界**（引擎限制，设计器里会以注释形式提示「已忽略」，不会静默丢改动）：
 
 - 已有列的 `NOT NULL` / `DEFAULT` / `UNIQUE` 改不了（引擎没有 `ALTER COLUMN SET ...`）。
 - 主键不能给已有表后加，也不能取消；新建表时可以设，且只支持单列主键。
+- 复合外键（多列）不在设计器里编辑，会保持原样；要改就写 SQL。
 - 事务未结束时禁止 DDL（`DDL 不能在事务里执行`），设计器保存前会先拦一下。
 
 ## 控制台的其他能力
@@ -2232,7 +2239,7 @@ go test ./db -run XXX -bench . -benchtime=300x   # 锁开销与并发吞吐
   一行「AST 形状」再逐字比对，读失败信息就能看出解析成了什么；30+ 条表达式做「解析 → 打印」
   往返，盯的是优先级与结合性（`1 + 2 * 3`、`a = 1 AND b = 2 OR c = 3`、`NOT a = 1`、
   `a BETWEEN 1 AND 5 AND b = 2`）；20 条错误用例断言错误信息里该有的字 —— 包括
-  「不是语法错，而是不支持」（`ALTER TABLE … ADD CONSTRAINT`、`FULL JOIN`、`WITH RECURSIVE`）。
+  「不是语法错，而是不支持」（`ALTER TABLE … ADD PRIMARY KEY`、`FULL JOIN`、`WITH RECURSIVE`）。
   这个包原先一条测试都没有，全靠 `db` 的端到端用例间接覆盖。
 - `storage/`：B+Tree 插入/查找/范围扫描、重复键、删空后复用、反向游标；保序键编码的序与 `types.Compare` 一致（多列、NUL 字节、`-0.0` 归一）。
 - `lock/`：S-S 相容、S-X / X-X 冲突、批量申请原子性、释放唤醒、S→X 升级、等待图死锁（只让年轻者放弃）、快照。

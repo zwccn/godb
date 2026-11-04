@@ -550,6 +550,53 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 			t.Indexes = kept
 			note = fmt.Sprintf("同时删除了依赖该列的索引：%s", strings.Join(dropped, ", "))
 		}
+		// 外键也按列名引用列。删列之前先处理，否则留下一条指向不存在列的约束，
+		// 之后这张表的每一次写入都会报「column X does not exist」，而且看不出
+		// 是删列留下的 —— 约束在 catalog 里，SQL 里查不到。
+		//
+		// 本表的外键跟着删（和索引一样，PostgreSQL 也是连带删除）；别的表指向
+		// 这一列的外键不能悄悄删：那会让子表失去约束、还可能留下孤儿行，
+		// 只能报错让用户先删约束。
+		for _, other := range e.Cat.Tables {
+			if strings.EqualFold(other.Name, t.Name) {
+				continue
+			}
+			for _, fk := range other.ForeignKeys {
+				if !strings.EqualFold(fk.RefTable, t.Name) {
+					continue
+				}
+				for _, cn := range fk.RefColumns {
+					if strings.EqualFold(cn, act.Name) {
+						return nil, fmt.Errorf("cannot drop column %q of relation %q: foreign key constraint %q "+
+							"on table %q depends on it; drop that constraint first",
+							act.Name, t.Name, fk.Name, other.Name)
+					}
+				}
+			}
+		}
+		var keptFKs []*catalog.ForeignKey
+		var droppedFKs []string
+		for _, fk := range t.ForeignKeys {
+			uses := false
+			for _, cn := range fk.Columns {
+				if strings.EqualFold(cn, act.Name) {
+					uses = true
+					break
+				}
+			}
+			if uses {
+				droppedFKs = append(droppedFKs, fk.Name)
+				continue
+			}
+			keptFKs = append(keptFKs, fk)
+		}
+		if len(droppedFKs) > 0 {
+			t.ForeignKeys = keptFKs
+			if note != "" {
+				note += "；"
+			}
+			note += fmt.Sprintf("同时删除了依赖该列的外键：%s", strings.Join(droppedFKs, ", "))
+		}
 		for i := 0; i < td.SlotCount(); i++ {
 			row, ok := td.RowAt(i)
 			if !ok {
@@ -582,6 +629,28 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 				}
 			}
 		}
+		// 外键同样按列名引用：本表的列改名要改 Columns，别的表指向这一列的
+		// 要改 RefColumns。不同步的话，改完名第一次写入就报「column X does not
+		// exist」—— 而那个名字在表结构里已经搜不到了，很难联想到是改名的事。
+		for _, fk := range t.ForeignKeys {
+			for j, cn := range fk.Columns {
+				if strings.EqualFold(cn, act.Name) {
+					fk.Columns[j] = act.NewName
+				}
+			}
+		}
+		for _, other := range e.Cat.Tables {
+			for _, fk := range other.ForeignKeys {
+				if !strings.EqualFold(fk.RefTable, t.Name) {
+					continue
+				}
+				for j, cn := range fk.RefColumns {
+					if strings.EqualFold(cn, act.Name) {
+						fk.RefColumns[j] = act.NewName
+					}
+				}
+			}
+		}
 		t.Rebuild()
 	case "rename_table":
 		oldName := t.Name
@@ -589,6 +658,15 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 			return nil, err
 		}
 		e.Store.RenameTable(oldName, act.NewName)
+		// 别的表的外键记的是被引用表的名字，改名要一起改，否则约束指向一张
+		// 不存在的表（插入时报 referenced relation does not exist）。
+		for _, other := range e.Cat.Tables {
+			for _, fk := range other.ForeignKeys {
+				if strings.EqualFold(fk.RefTable, oldName) {
+					fk.RefTable = act.NewName
+				}
+			}
+		}
 	case "alter_type":
 		idx, ok := t.ColumnIdx(act.Name)
 		if !ok {
@@ -659,6 +737,31 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 				return nil, err
 			}
 		}
+	case "add_fk":
+		fk, err := e.fkFromDef(t, act.Name, act.FK)
+		if err != nil {
+			return nil, err
+		}
+		// 已有数据要能通过这条约束，否则加完立刻「插入也不行、删父行也不行」。
+		if err := e.checkFKExistingRows(t, fk); err != nil {
+			return nil, err
+		}
+		t.ForeignKeys = append(t.ForeignKeys, fk)
+		note = fmt.Sprintf("已添加外键 %s", fk.Name)
+	case "drop_constraint":
+		idx := -1
+		for i, fk := range t.ForeignKeys {
+			if strings.EqualFold(fk.Name, act.Name) {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, fmt.Errorf("constraint %q of relation %q does not exist "+
+				"(only foreign keys can be dropped here)", act.Name, t.Name)
+		}
+		t.ForeignKeys = append(t.ForeignKeys[:idx], t.ForeignKeys[idx+1:]...)
+		note = fmt.Sprintf("已删除外键 %s", act.Name)
 	default:
 		return nil, fmt.Errorf("unsupported ALTER TABLE action")
 	}

@@ -3495,11 +3495,14 @@ table.dgrid td {
 table.dgrid tbody tr:hover td { background: var(--tint-hover); }
 table.dgrid tbody tr.sel td { background: var(--tint-sel); }
 table.dgrid .c-idx { width: calc(34px * var(--fs)); color: var(--text-3); font-family: var(--mono); text-align: center; }
-table.dgrid .c-name { width: 18%; }
+table.dgrid .c-name { width: 12%; }
 table.dgrid .c-type { width: calc(150px * var(--fs)); }
 table.dgrid .c-len { width: calc(62px * var(--fs)); }
-table.dgrid .c-flag { width: calc(66px * var(--fs)); text-align: center; }
-table.dgrid .c-def { width: 18%; }
+table.dgrid .c-flag { width: calc(60px * var(--fs)); text-align: center; }
+/* 外键列：放「表.列 · 类型」需要比勾选列宽得多，但仍要能一眼扫完一列 */
+table.dgrid .c-ref { width: calc(150px * var(--fs)); }
+table.dgrid select.warn { color: var(--warn); }
+table.dgrid .c-def { width: 12%; }
 table.dgrid .c-del { width: calc(30px * var(--fs)); }
 
 table.dgrid input[type="text"],

@@ -368,25 +368,25 @@ try {
     <!-- 基准：原来是独立的第五个全屏页，和监控/设置并排；现在收进来当第 5 页。
          理由：它跟前面四页是同一类东西（都在回答「这台库现在怎么样」），
          只是时间尺度不同 —— 前四页是「此刻」，它是「性能基线」。
-         但它是一次几分钟的异步任务，人切走干活时得能看见进度，所以顶栏「监控」
+         但它是一次一分钟级的异步任务，人切走干活时得能看见进度，所以顶栏「监控」
          按钮上挂了百分比 badge（任务跑着时点它就落到这一页）。
-         一次跑几分钟（灌 100 万行 + 7 个场景各 3 轮），结果存
+         一次跑一分钟上下（灌 10 万行 + 9 个场景各 3 轮），结果存
          data/bench-history.json 供「本次 vs 上次」对比。 -->
     <div class="mon-page hidden" data-page="bench">
       <section class="mon-card bench-card">
         <div class="mon-card-head">
-          基准测试<span class="mon-sub">在临时表上跑 7 个场景，量「每秒多少条」</span>
+          基准测试<span class="mon-sub">在临时表上跑 9 个场景，量「每秒多少条」</span>
         </div>
         <div class="bench-intro">
           <p class="bench-note">
-            在 <code>__bench_items</code> 表（<b id="benchScale">1,000,000</b> 行）上跑 7 个场景，测「每秒多少条」，
+            在 <code>__bench_items</code> 表（<b id="benchScale">100,000</b> 行）上跑 9 个场景，测「每秒多少条」，
             作为后续版本性能的参照，也喂给执行计划做对照。测完自动删表，不污染你的库。
             当前库 <b id="benchDB">godb</b>，每个场景 3 轮取中位数。
           </p>
           <p class="bench-note dim">
             数字的可比性靠三条约定：每个场景写清提交粒度；先预热一轮不计入；3 轮取中位数
             （后台落盘鼓包不会带偏均值）。批量插入会扫 100 / 500 / 1000 / 5000 四个档位。
-            整套通常要几分钟，中途可以点「停止」；跑着也能切走干活 ——
+            整套通常一分钟上下，中途可以点「停止」；跑着也能切走干活 ——
             顶栏「监控」按钮上会显示百分比，点它回到这一页。
           </p>
           <div class="bench-actions">
@@ -876,8 +876,8 @@ SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">向量检索（VECTOR）</div>
           <div class="help-lv-desc">存 embedding、按相似度取前 K 条。维度必须写死（<code>vector(3)</code>），值写成 <code>'[0.1,0.2,…]'</code>；检索只有一种写法：<b>按距离排序 + <code>LIMIT</code></b>。<br>
-            没有近似索引，距离是逐行算的（会分给多个核）：100 万行 × 128 维取最近 10 条约 <b>0.35 秒</b>；
-            刚导入、行还在内存里时约 0.12 秒 —— 落盘后主要花在逐行取数上，不在算距离。</div>
+            没有近似索引，距离是逐行算的（会分给多个核）：10 万行 × 128 维取最近 10 条约 <b>15 毫秒</b>，
+            100 万行约 <b>0.35 秒</b> —— 时间花在逐行取数和算距离上，不在排序。</div>
           <div class="help-lv-syn"><span><code>VECTOR(n)</code>（1 ≤ n ≤ 4096，省略维度会报错）</span><span><code>&lt;-&gt;</code> 欧氏距离</span><span><code>&lt;=&gt;</code> 余弦距离</span><span><code>&lt;#&gt;</code> 负内积</span><span>距离可出现在 <code>SELECT</code> / <code>WHERE</code> / <code>ORDER BY</code></span></div>
           <pre class="help-code">DROP TABLE IF EXISTS demo_vec;
 CREATE TABLE demo_vec (id int PRIMARY KEY, title text, v vector(3));
@@ -893,6 +893,15 @@ LIMIT 3;
 SELECT id, title FROM demo_vec
 WHERE v &lt;-&gt; '[1,0,0]' &lt; 0.5
 ORDER BY id;</pre>
+          <div class="help-lv-desc">
+            <b>三个算子怎么选</b>（都满足「越小越像」，所以 <code>ORDER BY</code> 一律升序）：<br>
+            · <code>&lt;=&gt;</code> <b>余弦距离</b> = 1 − cos，只看方向、不看长度。embedding 基本都用它；
+            模型输出已归一化时，<code>1 - (v &lt;=&gt; q)</code> 就是余弦相似度（0～1，越大越像）。<br>
+            · <code>&lt;-&gt;</code> <b>欧氏距离</b>，看绝对位置。数值尺度差别大（如图像特征）时更合适；
+            向量没归一化时它和余弦给出的排序会不一样。<br>
+            · <code>&lt;#&gt;</code> <b>负内积</b> = −(a·b)（所以是负数）。只想按「热度 × 相似」排序、
+            不希望被长度开方削平的时候用它；要看真实内积写 <code>-(v &lt;#&gt; '[…]')</code>。
+          </div>
           <div class="help-note">
             <b>向量既没有「相等」也没有「大小」</b>，下面这些写法会直接报错 —— 不是没做好，而是没有正确的答案：
             <code>v = '[…]'</code>、<code>ORDER BY v</code>、<code>SELECT DISTINCT v</code>、

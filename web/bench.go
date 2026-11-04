@@ -32,8 +32,16 @@ import (
 //     能看出瓶颈在引擎还是网络往返。
 //  5. 基准表 __bench_items 测完即删（用户选了「下次现建」），不污染真实数据。
 
-// benchScale 是基准数据规模（用户定 100 万）。
-const benchScale = 1000000
+// benchScale 是基准数据规模，默认 10 万行。
+//
+// 曾经是 100 万：那个量级能看出「精确扫描开始难受」，但整套跑一次要四五分钟，
+// 其中一多半时间花在灌数据和 DROP 512MB 的 .vec 上 —— 改一行代码想验一次性能，
+// 等不起。10 万行的量级关系与 100 万一致（都是线性放大的区间），整轮约一分钟。
+//
+// 真要出对外数字时把这里改回 1000000 再跑一次即可：所有场景的规模都走 scale()，
+// 没有第二处写死行数。对比历史数据时记得确认两次的规模相同 —— 吞吐是按行算的，
+// 但「独占时间的绝对值」会随规模线性变化。
+const benchScale = 100000
 
 // benchTable 是专用的基准表，前缀 __ 表示「工具表，测完删」。
 const benchTable = "__bench_items"
@@ -42,13 +50,15 @@ const benchTable = "__bench_items"
 // 不复用主表：多出的几千行会让后面的全表扫描 / 聚合行数基准变掉，两次结果就不可比了。
 const benchCommitTable = "__bench_commit"
 
-// 向量基准用独立的表，规模跟主表一致（默认 100 万行 × 128 维）。
+// 向量基准用独立的表，规模跟主表一致（默认 10 万行 × 128 维）。
 //
 // 128 维是常见的轻量 embedding 尺寸（OpenAI 的 ada-002/text-embedding-3-small 的
-// 短维度档也在这个量级），100 万行是「精确扫描开始难受」的门槛。这组数字是
-// **ANN 索引的对照基线**：将来做近似索引，拿它比快了多少、召回掉了多少。
+// 短维度档也在这个量级）。这组数字是 **ANN 索引的对照基线**：将来做近似索引，
+// 拿它比快了多少、召回掉了多少。
 //
-// 代价要提前知道：100 万 × 128 维 = 512MB 的 .vec，灌一次约 1 分钟。
+// 规模降到 10 万后：.vec 约 51MB，灌一次几秒，Top-K 单次几十毫秒 —— 仍然能看出
+// 「全表扫 × 逐行算距离」的形状，但整套基准回到一分钟级。
+// 要对外报 100 万档的数字时改 benchScale 即可（改完记得两边的 .vec 都删掉重建）。
 const (
 	benchVecTable = "__bench_vec"
 	benchVecDim   = 128
@@ -59,7 +69,7 @@ func benchVecN() int { return scale() }
 
 // benchVecFrac 是 "0.00"…"0.99" 的查表。
 //
-// 100 万行 × 128 维 = 1.28 亿次格式化，每次走一遍 fmt 会把灌数据拖成几分钟；
+// 10 万行 × 128 维 = 1280 万次格式化，每次走一遍 fmt 会把灌数据拖成十几秒；
 // 查表写字符串只要一次 append。
 var benchVecFrac = func() [100]string {
 	var t [100]string
@@ -90,7 +100,7 @@ func benchVecLiteral(dim, seed int) string {
 // 单条插入的批大小档位：批量插入吞吐对批大小极敏感，扫档位能看出「阈值在哪」。
 var benchBatchSizes = []int{100, 500, 1000, 5000}
 
-// benchScaleOverride 只在测试里改小，避免真灌 100 万行；生产恒为 0（走默认）。
+// benchScaleOverride 只在测试里改小，避免真灌满整表；生产恒为 0（走默认）。
 var benchScaleOverride int
 
 // scale 返回本次要用的规模。
@@ -108,7 +118,7 @@ func scale() int {
 //   - detail ：场景内部到哪了（预热、第 2/3 轮、灌数据 62%、删除 4/10 段）
 //   - frac   ：场景内部的比例 0~1，和 done/total 一起算出整体百分比
 //
-// 只报 done/total 是不够的：批量删除光一个场景就要重灌 5 次一百万行的表 + 删 4 次，
+// 只报 done/total 是不够的：批量删除光一个场景就要重灌 5 次整张表 + 删 4 次，
 // 三分钟里数字一动不动，看着就像卡死了。
 type benchState struct {
 	mu        sync.Mutex
@@ -230,7 +240,7 @@ func (s *Server) runBench(st *benchState) {
 	}
 
 	st.mu.Lock()
-	// 「准备数据」也算一步：灌一百万行本身就要几十秒，不算进去的话进度条
+	// 「准备数据」也算一步：灌满整表本身就要十几秒，不算进去的话进度条
 	// 会在 0% 上杵着，最容易被当成卡死。
 	st.total = len(scenes) + 1
 	st.result.Scale = scale()
@@ -239,14 +249,14 @@ func (s *Server) runBench(st *benchState) {
 	sess := &benchSess{d: d, st: st}
 
 	// 无论正常跑完、取消、还是中途出错，基准表都要清掉（用户选了「测完即删」）。
-	// defer 保证取消路径也不会留一张 100 万行的 __bench_items 在库里。
+	// defer 保证取消路径也不会留一张灌满的 __bench_items 在库里。
 	defer func() {
 		if sess.s == nil {
 			return
 		}
 		// 取消时可能正卡在 BEGIN … COMMIT 中间：事务还没结束，表上的 X 锁还在，
 		// DROP 会被自己挡住 —— 而这里的错误是被忽略的，结果就是「取消了，但库里
-		// 多出一张一百万行的表」。先强制回滚把锁放掉。
+		// 多出一张灌满的表」。先强制回滚把锁放掉。
 		sess.s.ForceRollback()
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchTable)
 		_, _ = d.Exec(sess.s, "DROP TABLE IF EXISTS "+benchCommitTable)
@@ -257,7 +267,7 @@ func (s *Server) runBench(st *benchState) {
 		d.Store.PurgeTrashForBench()
 	}()
 
-	// 准备基准表（建表 + 灌 100 万行）。这一步耗时不小，进度按「写了多少行」走。
+	// 准备基准表（建表 + 灌满 scale() 行）。这一步耗时不小，进度按「写了多少行」走。
 	st.setStep("准备数据")
 	if err := s.benchSeed(d, sess, progPart{span: 1, label: "建表并写入"}); err != nil {
 		if errors.Is(err, errBenchCancel) {
@@ -388,7 +398,7 @@ func (s *Server) currentBenchDB() *db.DB {
 var errBenchCancel = errors.New("bench: canceled")
 
 // progPart 是「这一趟占整个场景多大比例」。一个场景里常跑好几趟（批量插入扫
-// 4 个批大小档位、批量删除每轮都要先重灌一次一百万行的表），各趟各占一段，
+// 4 个批大小档位、批量删除每轮都要先重灌一次整张表），各趟各占一段，
 // 进度条才走得匀，不会一趟顶到底。
 type progPart struct {
 	base, span float64
@@ -459,7 +469,7 @@ func segPart(done, total int) float64 {
 	return float64(done) / float64(total)
 }
 
-// benchComma 给数字加千分位：进度里「620,000 / 1,000,000 行」比一长串 0 好读。
+// benchComma 给数字加千分位：进度里「62,000 / 100,000 行」比一长串 0 好读。
 func benchComma(n int) string {
 	s := strconv.Itoa(n)
 	neg := false
@@ -488,7 +498,7 @@ func benchCap(v, hi int) int {
 }
 
 // benchSeed 建基准表并灌满 benchScale 行。用多行 VALUES 分批写入（一条 5000 行），
-// 这样 100 万行也只要 200 条语句；逐条 INSERT 在这里纯属浪费。
+// 这样 10 万行只要 20 条语句；逐条 INSERT 在这里纯属浪费。
 //
 // p 是这一趟在整个场景里占的比例：批量删除每轮都要重灌，不能让它把进度条
 // 一次顶到底。进度按「已完成行数」报，长表上也能几秒动一下。
@@ -567,13 +577,23 @@ func (s *Server) timed(x *benchSess, p progPart, warmup, fn func() error) ([]flo
 }
 
 // insertPerRound 是「单条插入 / 批量插入」每个档位/每轮要写的行数。
-// 生产 100 万行时取 2 万（够让逐条路径稳定）；测试规模小就跟着缩小，
-// 否则单测里「单事务逐条插 8 万行」会跑一分钟。
+//
+// 跟着规模按比例走（约 1/20，夹在 [5000, 20000] 之间）：10 万行时 5000 行、
+// 100 万行时 2 万行。写死 2 万在 10 万行的库里就是「每轮重写五分之一张表」，
+// 单条插入这一项会从几秒变成十几秒，而它测的是「每秒多少条」，和写多少行无关 ——
+// 5000 行已经足够把首次编译、连接建立这些一次性开销摊掉。
 func insertPerRound() int {
-	if benchScaleOverride > 0 && benchScaleOverride < 20000 {
+	n := scale() / 20
+	if n < 5000 {
+		n = 5000
+	}
+	if n > 20000 {
+		n = 20000
+	}
+	if benchScaleOverride > 0 && benchScaleOverride < n {
 		return benchScaleOverride
 	}
-	return 20000
+	return n
 }
 
 // commitPerRound 是「逐条提交插入」每轮的行数。
@@ -715,7 +735,7 @@ func (s *Server) sceneInsertCommit(x *benchSess) benchScene {
 	}
 }
 
-// sceneUpdate 批量更新：整表 100 万行都 UPDATE 一次，按 id 区间分几段跑，
+// sceneUpdate 批量更新：整表每行都 UPDATE 一次，按 id 区间分几段跑，
 // 避免一条 UPDATE 锁住整张表太久。固定「每行 +1」，各轮可重复。
 func (s *Server) sceneUpdate(x *benchSess) benchScene {
 	rowsV := scale()
@@ -752,7 +772,7 @@ func (s *Server) sceneDelete(x *benchSess) benchScene {
 	rowsV := scale()
 
 	// 这个场景一共 9 趟：预热（重灌 + 删）、3 轮（重灌 + 删）、收尾重灌。
-	// 每趟各占九分之一 —— 重灌一百万行就要十几秒，不分段的话这个场景
+	// 每趟各占九分之一 —— 重灌整张表就要几秒，不分段的话这个场景
 	// 三分钟里进度条一动不动，正是「看着像卡死」的元凶。
 	const phases = 9
 	phase := 0
@@ -886,8 +906,8 @@ func (s *Server) sceneAggregate(x *benchSess) benchScene {
 // 的合速度，所以做近似索引（ANN）之后，这个数会成倍上涨 —— 这就是它的用途。
 // 建表 / 灌数据不计时（那是准备），和批量插入场景的口径一致。
 //
-// 默认规模就是 100 万行 × 128 维（512MB 的 .vec，灌一次约一分钟）。这是刻意
-// 选在「精确扫描开始难受」的门槛上：再小看不出问题，再大就把机器内存带宽当瓶颈。
+// 默认 10 万行 × 128 维（约 51MB 的 .vec，灌一次几秒）。规模跟主表一致；要对外报
+// 100 万档的数字时改 benchScale —— 见上面 benchVecTable 的注释。
 func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
 	name := "向量 Top-K"
 	n := benchVecN()
@@ -908,7 +928,7 @@ func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
 	// 喧宾夺主，再小则是把往返开销算进准备时间。
 	//
 	// 进度前缀要自己设：x.pre 还留着上一个场景的「第 3/3 轮」，灌数据时会出现
-	// 「第 3/3 轮 · 灌数据 81,000 / 1,000,000 行」这种自相矛盾的说明。
+	// 「第 3/3 轮 · 灌数据 8,100 / 100,000 行」这种自相矛盾的说明。
 	x.part = progPart{span: 1}
 	x.round = -1
 	x.pre = "准备向量表"
@@ -937,8 +957,8 @@ func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
 
 	// 每次查询取最近 10 条；每轮 5 次，够摊掉单次的抖动又不至于让场景变成几分钟。
 	//
-	// 计时前先 CHECKPOINT：刚落盘前所有行还在 memtable 里（`td.rows` 直接命中），
-	// 扫一遍只要 ~70ms；落盘后走「页 → 解码」这条路，同样的查询要 ~270ms。
+	// 计时前先 CHECKPOINT：没落盘时所有行还在 memtable 里（`td.rows` 直接命中），
+	// 落盘后走「页 → 解码」这条路，同样的查询要慢好几倍（100 万行时 118ms vs 350ms）。
 	// 基准要测的是**稳态**（真实使用里数据早就在页里），不是刚导入时的假快。
 	if err := x.exec(`CHECKPOINT`); err != nil {
 		return fail(err)

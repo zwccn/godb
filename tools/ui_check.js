@@ -2372,7 +2372,7 @@ class CDP {
     check('设置：点 × 能关掉', await cdp.eval(`document.getElementById('settingsPanel').classList.contains('hidden')`));
 
     // 基准：从独立全屏页收进监控第 5 页，顶栏那颗按钮去掉了。
-    // 轻量冒烟 —— 只验证入口位置、切页、接口返回空（不真跑 100 万行，
+    // 轻量冒烟 —— 只验证入口位置、切页、接口返回空（不真跑整套基准，
     // 那是 web/bench_test.go 的 Go 单测用 2000 行小规模在跑的）。
     const benchEntry = await cdp.eval(`({
       topBtn: !!document.getElementById('btnBench'),
@@ -2397,13 +2397,13 @@ class CDP {
       pauseHidden: document.getElementById('btnMonPause').classList.contains('hidden'),
       refreshHidden: document.getElementById('btnMonRefresh').classList.contains('hidden'),
     })`);
-    check('基准页能打开：开始按钮、规模 1,000,000、Tab 高亮、其它页收起',
-      benchUi.shown && benchUi.hasStart && /1,?000,?000/.test(benchUi.scale) && benchUi.navOn
+    check('基准页能打开：开始按钮、规模 100,000、Tab 高亮、其它页收起',
+      benchUi.shown && benchUi.hasStart && /100,?000/.test(benchUi.scale) && benchUi.navOn
         && benchUi.overviewHidden, JSON.stringify(benchUi));
     check('基准页收起「暂停刷新 / 立即刷新」（它不跟每秒水位轮询）',
       benchUi.pauseHidden && benchUi.refreshHidden, JSON.stringify(benchUi));
 
-    // 接口无任务时返回空 result（冒烟，不发 start 以免真灌 100 万行）
+    // 接口无任务时返回空 result（冒烟，不发 start 以免真灌整表）
     const benchStatus = await cdp.eval(`fetch('/api/bench/status').then(r => r.json())`);
     // 没在跑：result 要么是 null（本次进程还没跑过），要么是上一轮跑完的结果。
     // 别写死 null —— 跑过一次基准之后再回归，这条就会红，而那是正常状态。
@@ -2419,7 +2419,7 @@ class CDP {
       await cdp.eval(`!document.getElementById('btnMonPause').classList.contains('hidden') &&
         !document.getElementById('btnMonRefresh').classList.contains('hidden')`));
 
-    // 顶栏进度 badge：不真灌 100 万行，把「正在跑」的状态直接灌进去看反应。
+    // 顶栏进度 badge：不真灌整表，把「正在跑」的状态直接灌进去看反应。
     // 这几条守的是「异步任务跨页可见」—— 它原来是独立全屏页，点了开始切回去干活就
     // 彻底看不见了，只能凭感觉等。
     const badgeOn = await cdp.eval(`(() => {
@@ -2450,11 +2450,11 @@ class CDP {
     })()`);
     check('任务结束后 badge 收起，不留 100% 挂在顶栏', badgeOff === true);
 
-    // 进度块：一次基准要好几分钟，而「批量删除」一个场景就要重灌 5 次一百万行的表。
+    // 进度块：一次基准要一分钟上下，而「批量删除」一个场景就要重灌 5 次整张表。
     // 只显示「正在跑 批量删除」的话，「这一秒没变化」和「卡死了」看起来一模一样。
     const runUi = await cdp.eval(`(() => {
       renderBenchRun({ running: true, step: '批量删除',
-        detail: '第 2/3 轮 · 重灌 · 灌数据 500,000 / 1,000,000 行',
+        detail: '第 2/3 轮 · 重灌 · 灌数据 50,000 / 100,000 行',
         percent: 57.3, elapsedMs: 83000, etaMs: 45000 });
       const q = id => document.getElementById(id).textContent.trim();
       return {
@@ -2469,7 +2469,7 @@ class CDP {
       };
     })()`);
     check('基准进度块：步骤 + 场景内细分 + 百分比 + 进度条 + 已用/预计剩余',
-      runUi.shown && runUi.step === '批量删除' && /灌数据 500,000/.test(runUi.detail)
+      runUi.shown && runUi.step === '批量删除' && /灌数据 50,000/.test(runUi.detail)
         && runUi.pct === '57%' && parseFloat(runUi.barW) > 50
         && runUi.elapsed === '已用 1:23' && runUi.eta === '预计还需 45 秒',
       JSON.stringify(runUi));

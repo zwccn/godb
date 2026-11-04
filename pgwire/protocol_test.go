@@ -11,6 +11,7 @@ import (
 
 	"godb/db"
 	"godb/lock"
+	"godb/txn"
 )
 
 // ---------- 测试用的极简 PG 客户端 ----------
@@ -566,6 +567,30 @@ func TestSessionCleanupOverWire(t *testing.T) {
 		}
 		if got := cmdTag(msgs); got != tc.tag {
 			t.Fatalf("%s 的 CommandComplete = %q, want %q", tc.sql, got, tc.tag)
+		}
+	}
+}
+
+// 语句超时 / 被 Kill 必须是 57014（query_canceled）。
+//
+// 为什么单测这个映射：码值决定客户端行为 —— psql 显示「canceling statement
+// due to statement timeout」、JDBC 抛 SQLTimeoutException、连接池可能重试。
+// 落回 42000（语法错）的话，这些行为全都不会发生。
+func TestMapErrorStatementTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"超时", &txn.StatementTimeoutError{Limit: 30 * time.Second}, "57014"},
+		{"面板 Kill（执行中）", txn.ErrCanceled, "57014"},
+		{"面板 Kill（排队中）", db.ErrCanceled, "57014"},
+		{"普通错误不该变成 57014", fmt.Errorf("syntax error at or near"), "42601"},
+	}
+	for _, c := range cases {
+		code, _ := mapError(c.err)
+		if code != c.want {
+			t.Errorf("%s: SQLSTATE = %s，期望 %s", c.name, code, c.want)
 		}
 	}
 }

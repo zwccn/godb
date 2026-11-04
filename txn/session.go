@@ -17,6 +17,22 @@ import (
 // ErrNoTx 表示当前没有活动事务。
 var ErrNoTx = errors.New("there is no transaction in progress")
 
+// ErrCanceled 表示语句被面板 Kill 打断（SQLSTATE 57014）。
+// 和 db 层的同名错误文本一致：用户看到的都是「canceling statement due to user request」。
+var ErrCanceled = errors.New("canceling statement due to user request")
+
+// StatementTimeoutError 是一条语句跑过 statement_timeout 被中断（SQLSTATE 57014）。
+//
+// 和「慢 SQL 超时」的区别：那个是**跑完再判定**（事后回滚事务），这个是**到点就停**。
+// 一条 5 分钟的笛卡尔积，慢 SQL 超时要等它跑完才告诉你；这个 30 秒就返回。
+type StatementTimeoutError struct {
+	Limit time.Duration
+}
+
+func (e *StatementTimeoutError) Error() string {
+	return fmt.Sprintf("canceling statement due to statement timeout (%s)", e.Limit)
+}
+
 // ErrNothingToCommit 表示提交时没有事务。
 var ErrNothingToCommit = errors.New("there is no transaction in progress")
 
@@ -68,10 +84,10 @@ type Session struct {
 	locks *lock.Manager
 	opts  lock.Options
 
-	tx         *storage.Tx
-	lockTx     int64
-	age        int64
-	global bool // serial 模式下是否持全局锁
+	tx      *storage.Tx
+	lockTx  int64
+	age     int64
+	global  bool // serial 模式下是否持全局锁
 	aborted bool
 	// lastUnix / lastWaitNs 存纳秒时间戳，用 atomic 而不是裸字段：
 	// 巡检 goroutine（sweepSessions）每秒读它们判断事务是否空闲，
@@ -103,6 +119,12 @@ type Session struct {
 	// 走 s.mu 会自己锁自己。
 	txStartUnix atomic.Int64
 	txStmts     atomic.Int64
+
+	// stmtTimeout 是 SET statement_timeout 设下的上限（纳秒，0 = 不限）；
+	// stmtDeadline 是当前这条语句的绝对截止时刻（UnixNano，0 = 不限）。
+	// 两个都用 atomic：执行线程每 1024 行读一次，设置与清除发生在另一条路径上。
+	stmtTimeout  atomic.Int64
+	stmtDeadline atomic.Int64
 }
 
 // 观测钩子报告的状态。
@@ -244,6 +266,51 @@ func (s *Session) ClearCancel() {
 	}
 	ch := make(chan struct{})
 	s.cancelCh.Store(&ch)
+}
+
+// ---- 语句超时（statement_timeout）----
+
+// SetStatementTimeout 设会话级上限（0 = 不限）。只影响**之后开始**的语句，
+// 和 PG 一致：SET 这一条自己仍按旧值跑。
+func (s *Session) SetStatementTimeout(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.stmtTimeout.Store(int64(d))
+}
+
+// StatementTimeout 返回当前会话的上限（0 = 不限）。
+func (s *Session) StatementTimeout() time.Duration {
+	return time.Duration(s.stmtTimeout.Load())
+}
+
+// BeginStatementDeadline 在每条语句开始时算一次截止时刻。
+// 放在语句边界而不是 Exec 边界：一个 Exec 里可能有多条语句，各自算各自的。
+func (s *Session) BeginStatementDeadline() {
+	d := s.StatementTimeout()
+	if d <= 0 {
+		s.stmtDeadline.Store(0)
+		return
+	}
+	s.stmtDeadline.Store(time.Now().Add(d).UnixNano())
+}
+
+// ClearStatementDeadline 在语句结束时清掉（defer 调用）。
+// 必须清：否则一条语句设的截止时刻会一直挂着，把后面每条语句都判成超时。
+func (s *Session) ClearStatementDeadline() { s.stmtDeadline.Store(0) }
+
+// interrupt 是注入给存储层游标的中断检查（见 storage.Tx.SetInterrupt）。
+//
+// 顺序有讲究：先看 Kill。Kill 是用户明确要求停下，能立刻停就立刻停，
+// 不该因为「还没到超时」多跑几秒。
+func (s *Session) interrupt() error {
+	if s.cancel.Load() {
+		return ErrCanceled
+	}
+	if dl := s.stmtDeadline.Load(); dl > 0 && time.Now().UnixNano() > dl {
+		return &StatementTimeoutError{Limit: s.StatementTimeout()}
+	}
+	return nil
 }
 
 // ---- 观测 ----
@@ -476,6 +543,9 @@ func (s *Session) BeginStatement(intents map[string]lock.Mode) (*Stmt, error) {
 	}
 	s.Touch()
 	// 锁到位、语句即将交给执行引擎：从「等锁」切到「执行」。
+	// 顺便把中断检查挂到事务上 —— 存储层的游标每 1024 行问一次，
+	// 这就是「执行中能被打断」的唯一入口（超时和 Kill 共用它）。
+	s.tx.SetInterrupt(s.interrupt)
 	s.notify(ObsRunning, modeNames(intents))
 	return &Stmt{s: s, auto: auto, mark: s.tx.Mark()}, nil
 }

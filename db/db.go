@@ -4,9 +4,11 @@ package db
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -594,6 +596,127 @@ func (d *DB) Exec(sess *txn.Session, text string) (out []*exec.Result, err error
 	return out, nil
 }
 
+// formatTimeout 把时长写回用户能读的形式：30s / 1min / 2h / 500ms。
+//
+// 不直接用 Duration.String()：它会给 "1m0s"、"1h0m0s" 这种带零尾巴的写法，
+// 用户设的是 1min，回显却变成 1m0s，会怀疑自己设错了。
+func formatTimeout(d time.Duration) string {
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int64(d/time.Hour))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dmin", int64(d/time.Minute))
+	case d%time.Second == 0:
+		return fmt.Sprintf("%ds", int64(d/time.Second))
+	case d%time.Millisecond == 0:
+		return fmt.Sprintf("%dms", int64(d/time.Millisecond))
+	}
+	return d.String()
+}
+
+// showStatementTimeout 回显当前会话的语句超时。
+//
+// 单位跟进 SQL 的写法走（`30s` / `0`）：显示成 "30s" 比 "30000000000" 好读，
+// 也能让用户一眼看出「我刚才设的到底是不是 30 秒」。
+func showStatementTimeout(sess *txn.Session) *exec.Result {
+	v := sess.StatementTimeout()
+	text := "0"
+	if v > 0 {
+		text = formatTimeout(v)
+	}
+	return &exec.Result{
+		Command:  "SHOW",
+		Tag:      "SHOW",
+		Columns:  []exec.Column{{Name: "statement_timeout", Type: "text"}},
+		Rows:     [][]interface{}{{text}},
+		RowCount: 1,
+	}
+}
+
+// execSet 处理 SET。目前真的会生效的只有 statement_timeout，
+// 其余参数（client_encoding、TimeZone…）照旧只回一个确认。
+func (d *DB) execSet(sess *txn.Session, st *sql.SetStmt) (*exec.Result, error) {
+	if st.Name == "statement_timeout" {
+		limit, err := parseStatementTimeout(st.Value)
+		if err != nil {
+			return nil, err
+		}
+		sess.SetStatementTimeout(limit)
+	}
+	return exec.SetResult(), nil
+}
+
+// resetSessionParams 处理 RESET / DISCARD 里「真的要恢复默认」的参数。
+func (d *DB) resetSessionParams(sess *txn.Session, sc *sql.SessionCleanup) {
+	switch sc.Command {
+	case "RESET":
+		if sc.Arg == "" || sc.Arg == "ALL" || sc.Arg == "STATEMENT_TIMEOUT" {
+			sess.SetStatementTimeout(0)
+		}
+	case "DISCARD":
+		if sc.Arg == "ALL" {
+			sess.SetStatementTimeout(0)
+		}
+	}
+}
+
+// parseStatementTimeout 解析 SET statement_timeout 的值。
+//
+// 认这些写法：30s / 500ms / 1min / 2h / 1d，以及**裸数字按秒**（30 = 30 秒）。
+//
+// 裸数字按秒是我们和 PostgreSQL 唯一的不一致：PG 里裸数字是**毫秒**。
+// 选秒是因为这个库的使用场景是「人手在控制台里敲」，写 30 的意思就是 30 秒。
+// 客户端库要毫秒就走带单位写法（30000ms）。这条差异写进了帮助文档。
+//
+// 0 表示不限（与 PG 同义）。
+func parseStatementTimeout(v string) (time.Duration, error) {
+	bad := func() (time.Duration, error) {
+		return 0, fmt.Errorf(`invalid value for parameter "statement_timeout": %q`+
+			` (use 30s, 500ms, 1min, 0 for unlimited)`, v)
+	}
+	s := strings.TrimSpace(v)
+	s = strings.Trim(s, `'"`) // '30s' → 30s
+	if s == "" {
+		return bad()
+	}
+	// 数字前缀 + 单位后缀。不直接用 time.ParseDuration：它不认 min / day，
+	// 而且我们要对「裸数字」给出和 PG 不同的解释（秒，不是毫秒）。
+	i := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+		i++
+	}
+	if i == 0 {
+		return bad()
+	}
+	num, err := strconv.ParseFloat(s[:i], 64)
+	if err != nil || num < 0 || math.IsNaN(num) || math.IsInf(num, 0) {
+		return bad()
+	}
+	var unit time.Duration
+	switch strings.ToLower(strings.TrimSpace(s[i:])) {
+	case "": // 裸数字 = 秒
+		unit = time.Second
+	case "ms", "msec", "millisecond", "milliseconds":
+		unit = time.Millisecond
+	case "s", "sec", "secs", "second", "seconds":
+		unit = time.Second
+	case "m", "min", "mins", "minute", "minutes":
+		unit = time.Minute
+	case "h", "hour", "hours":
+		unit = time.Hour
+	case "d", "day", "days":
+		unit = 24 * time.Hour
+	default:
+		return bad()
+	}
+	dur := time.Duration(num * float64(unit))
+	// 上限一年：再大等于没设，而 time.Duration 是 int64 纳秒，会溢出成负数。
+	if dur > 365*24*time.Hour {
+		return 0, fmt.Errorf(`invalid value for parameter "statement_timeout": %q (too large)`, v)
+	}
+	return dur, nil
+}
+
 // finishExec 是一次 Exec 结束后的监控收尾：同步事务元信息、处理取消与慢 SQL 超时。
 // 调用方必须持着会话锁。
 func (d *DB) finishExec(sess *txn.Session, totalTook int64) {
@@ -653,6 +776,13 @@ func (d *DB) noteSlow(text string, start hrtime.Stamp, stmts int) {
 }
 
 func (d *DB) execOne(sess *txn.Session, st sql.Statement, pre map[string]lock.Mode) (*exec.Result, error) {
+	// 语句边界：算截止时刻，跑完清掉。
+	//
+	// 为什么必须在每条语句上都重算：一个 Exec 里可能有多条语句（多语句批次），
+	// 每条各自计时才符合「statement」的语义；也只有这样「SET statement_timeout」
+	// 之后的下一条才会拿到新值（SET 自己按旧值跑，和 PG 一致）。
+	sess.BeginStatementDeadline()
+	defer sess.ClearStatementDeadline()
 	start := hrtime.Now()
 	res, err := d.execOneInner(sess, st, pre)
 	if res != nil {
@@ -680,14 +810,23 @@ func (d *DB) execOneInner(sess *txn.Session, st sql.Statement, pre map[string]lo
 	// SHOW / SET 是会话参数，不碰表、不需要锁，也不受中毒事务影响
 	// （真 PG 里 SET 在 aborted 事务里也能执行）。
 	if sh, ok := st.(*sql.Show); ok {
+		// statement_timeout 是唯一真正保存在会话里的参数，得能回显 ——
+		// 否则用户设完没法确认到底生效没有（「SET 了但没效果」是最难受的状态）。
+		if strings.EqualFold(strings.TrimSpace(sh.Name), "statement_timeout") {
+			return showStatementTimeout(sess), nil
+		}
 		return exec.ShowResult(sh.Name), nil
 	}
-	if _, ok := st.(*sql.SetStmt); ok {
-		return exec.SetResult(), nil
+	if ss, ok := st.(*sql.SetStmt); ok {
+		return d.execSet(sess, ss)
 	}
 	// DISCARD / RESET / DEALLOCATE：同样是会话级清理，不碰表、不需要锁。
 	// 放在中毒事务检查之前，跟 SHOW / SET 一个待遇（客户端断开或还池时会发）。
 	if sc, ok := st.(*sql.SessionCleanup); ok {
+		// 唯一「真的会清掉东西」的一条：把语句超时恢复成不限。
+		// RESET ALL 和 DISCARD ALL 都算 —— 后者是连接回池前的标准动作，
+		// 不重置的话一个客户端设的超时会跟着连接传染给下一个使用者。
+		d.resetSessionParams(sess, sc)
 		return exec.CleanupResult(sc), nil
 	}
 

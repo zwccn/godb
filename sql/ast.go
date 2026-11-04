@@ -143,9 +143,16 @@ type Analyze struct{}
 // "time zone"），由执行层去查表。
 type Show struct{ Name string }
 
-// SetStmt 对应 SET ...：会话参数设置。godb 不保存任何会话状态，
-// 整条语句识别出来直接确认（客户端连上来时几乎都会先发 SET）。
-type SetStmt struct{ Raw string }
+// SetStmt 对应 SET ...：会话参数设置。
+//
+// godb 只真正保存一个参数：statement_timeout。其余（client_encoding、TimeZone、
+// extra_float_digits…）识别出来直接回确认 —— 客户端连上来几乎都会先发一串 SET，
+// 这里报错就没法用了。
+type SetStmt struct {
+	Raw   string // 原样的整句（回显 / 日志用）
+	Name  string // 小写参数名；解析不出「name = value」的形状时为空
+	Value string // 值，原样保留（可能带引号，如 '30s'）
+}
 
 // SessionCleanup 对应 DISCARD / RESET / DEALLOCATE 这三类「清理会话」的语句。
 // godb 没有计划缓存、临时表、sequence 和会话参数，所以识别出来直接确认（no-op）——
@@ -153,6 +160,7 @@ type SetStmt struct{ Raw string }
 // 连接池就用不了（只能 Pooling=false 或 No Reset On Close=true 绕）。
 type SessionCleanup struct {
 	Command string // DISCARD / RESET / DEALLOCATE
+	Arg     string // 大写参数名（RESET statement_timeout 的 STATEMENT_TIMEOUT）；可能为空
 	Tag     string // CommandComplete 里回给客户端的标签，如 "DISCARD ALL"
 }
 

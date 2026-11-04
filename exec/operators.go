@@ -252,6 +252,10 @@ type indexRangeScanOp struct {
 	sc      Schema
 	scanner *storage.IndexScanner
 	ixNames []string // 同上，换成列名
+	// tick：每 1024 行查一次「还要不要继续」（语句超时 / Kill）。
+	// 索引扫描不走 RowIter，中断必须在这里自己挂 —— 否则 `WHERE id > 0` 这种
+	// 走主键范围扫描的查询设了超时也不会停。
+	tick uint32
 }
 
 func newIndexRangeScan(tx *storage.Tx, t *catalog.Table, ixName string, cols, ixCols []int, rs []storage.KeyRange, qual string, cat *catalog.Catalog) *indexRangeScanOp {
@@ -278,6 +282,10 @@ func (o *indexRangeScanOp) Next() (types.Row, bool, error) {
 		t.done(false)
 		return nil, false, nil
 	}
+	if err := interruptEvery(&o.tick, o.tx); err != nil {
+		t.done(false)
+		return nil, false, err
+	}
 	h, ok := o.scanner.Next()
 	if !ok {
 		t.done(false)
@@ -286,6 +294,18 @@ func (o *indexRangeScanOp) Next() (types.Row, bool, error) {
 	o.tx.NoteScan()
 	t.done(true)
 	return h.Row, true, nil
+}
+
+// interruptEvery 每 1024 行查一次中断（语句超时 / Kill）。
+//
+// 不逐行查：time.Now 一次几十纳秒，百万行就是几十毫秒的纯开销；
+// 1024 行一次，最坏延迟是「扫 1024 行」的时间，百万级表约 0.1ms。
+func interruptEvery(tick *uint32, tx *storage.Tx) error {
+	*tick++
+	if *tick&1023 != 0 {
+		return nil
+	}
+	return tx.CheckInterrupt()
 }
 
 func (o *indexRangeScanOp) Close() error {

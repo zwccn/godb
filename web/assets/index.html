@@ -939,14 +939,27 @@ ORDER BY id;</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">诊断与维护</div>
           <div class="help-lv-desc">看计划、看落盘、看系统目录；<code>EXPLAIN ANALYZE</code> 会真的执行并给出每步行数与耗时。</div>
-          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>VACUUM [表]</code></span><span><code>VACUUM FULL [表]</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span><span>监控 <code>pg_stat_database</code> / <code>pg_stat_user_tables</code> / <code>pg_stat_user_indexes</code> / <code>pg_stats</code></span></div>
+          <div class="help-lv-syn"><span><code>EXPLAIN</code></span><span><code>EXPLAIN ANALYZE</code></span><span><code>CHECKPOINT</code> / <code>FLUSH</code></span><span><code>VACUUM [表]</code></span><span><code>VACUUM FULL [表]</code></span><span><code>ANALYZE</code></span><span><code>SHOW</code> / <code>SET statement_timeout</code></span><span><code>COPY … FROM STDIN</code> / <code>TO STDOUT</code></span><span>系统目录 <code>pg_catalog</code> / <code>information_schema</code></span><span><code>pg_database_size</code> / <code>pg_size_pretty</code></span><span>监控 <code>pg_stat_database</code> / <code>pg_stat_user_tables</code> / <code>pg_stat_user_indexes</code> / <code>pg_stats</code></span></div>
           <pre class="help-code">EXPLAIN ANALYZE SELECT * FROM employees WHERE dept_id = 1;
+SET statement_timeout = 30s;   -- 每条语句最多跑 30 秒（0 = 不限）
+SHOW statement_timeout;       -- 回显当前值：30s / 1min / 0
 SHOW server_version;
 ANALYZE;
 CHECKPOINT;
 VACUUM employees;        -- 整理页内空洞、回收尾部空页（不动大字段）
 VACUUM FULL employees;   -- 整份重写：连大字段里 UPDATE 留下的旧正文一起收掉
 SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
+          <div class="help-lv-desc">
+            <b>让跑飞的查询自己停下来</b>：<code>SET statement_timeout = 30s</code> 之后，每条语句跑到
+            30 秒就被中断（SQLSTATE <code>57014</code>，事务按普通错误回滚）。没有它，一个写错的连接条件
+            能占着 CPU 好几分钟，只能等人去 Kill —— 现在 Kill 也会在下一个检查点（每 1024 行）立刻停，
+            不用等整条跑完。<br>
+            写法：<code>SET statement_timeout = 500ms</code> / <code>30s</code> / <code>2min</code>；
+            <code>0</code> 关掉；<code>SHOW statement_timeout</code> 回显当前值；<code>RESET</code> 恢复默认（不限）。<br>
+            <b>裸数字按秒</b>（<code>30</code> = 30 秒），这一点和 PostgreSQL 不同 —— PG 的裸数字是毫秒，
+            要毫秒在这里写 <code>30000ms</code>。设置只对<b>当前连接</b>有效：客户端重连、或连接池还池时
+            发 <code>DISCARD ALL</code>，都会回到「不限」。
+          </div>
         </div>
       </div>
 

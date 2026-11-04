@@ -732,10 +732,34 @@ type Tx struct {
 	// lastSeq / hasLastSeq 记录本事务最后一次 nextval 分配的值（lastval() 用）。
 	lastSeq    int64
 	hasLastSeq bool
+
+	// interrupt 是「还要不要继续跑」的外面注入检查（语句超时 / 面板 Kill）。
+	//
+	// 为什么要放在存储层的游标里：执行是「算子一层层往上拉行」，拉行的源头就是
+	// 这里。挂在这一层，全表扫描 / 索引扫描 / 排序 / 聚合 / 连接全都自动带上中断点，
+	// 不用逐个算子改。之前只有「排队」和「等锁」能被打断，语句一旦开跑就只能
+	// 等它自己结束 —— Kill 要等跑完、超时也只是事后判定。
+	//
+	// 由 txn.Session 在开事务时注入（见 BeginStatement）；nil 表示不限。
+	interrupt func() error
 }
 
 // Changes 返回事务内已修改的行数。
 func (tx *Tx) Changes() int { return tx.n }
+
+// SetInterrupt 注入「还要不要继续跑」的检查函数（语句超时 / 面板 Kill）。
+// nil 或返回 nil 表示继续；返回错误则当前语句立即失败。
+func (tx *Tx) SetInterrupt(f func() error) { tx.interrupt = f }
+
+// CheckInterrupt 主动查一次中断标志。给「不在 RowIter 上取行」的长循环用
+// （索引扫描、物化构建）。每行都调它太贵（time.Now 一次几十纳秒），
+// 调用方应当自己按批（比如 1024 行）调一次。
+func (tx *Tx) CheckInterrupt() error {
+	if tx.interrupt == nil {
+		return nil
+	}
+	return tx.interrupt()
+}
 
 // Store 返回底层存储。
 func (tx *Tx) Store() *Store { return tx.st }
@@ -773,12 +797,17 @@ type RowIter struct {
 	ins  int // overlay 插入部分的游标；-1 表示还没开始 / 已结束
 	done bool
 	err  error
+	// interrupt / tick：每 1024 行问一次「还要不要继续」。
+	// 不逐行问是因为 time.Now 一次要几十纳秒，100 万行就是几十毫秒的纯开销；
+	// 1024 行问一次，中断的最坏延迟是「扫 1024 行」的时间（百万级表约 0.1ms）。
+	interrupt func() error
+	tick      uint32
 }
 
 // ScanIter 打开一个流式扫描游标。
 func (tx *Tx) ScanIter(table string) *RowIter {
 	td := tx.st.Table(table)
-	it := &RowIter{td: td, ins: -1}
+	it := &RowIter{td: td, ins: -1, interrupt: tx.interrupt}
 	if td == nil {
 		it.err = fmt.Errorf("relation %q does not exist", table)
 		it.done = true
@@ -795,6 +824,18 @@ func (it *RowIter) Err() error { return it.err }
 func (it *RowIter) Next() (Ref, types.Row, bool) {
 	if it.done || it.err != nil {
 		return Ref{}, nil, false
+	}
+	// 语句超时 / Kill：每 1024 行问一次，命中就停在这里。
+	// 用 Err() 把错误交给上层 —— 所有调用方在 !ok 时都会读它。
+	if it.interrupt != nil {
+		it.tick++
+		if it.tick&1023 == 0 {
+			if err := it.interrupt(); err != nil {
+				it.err = err
+				it.done = true
+				return Ref{}, nil, false
+			}
+		}
 	}
 	// 1) 已提交的槽位数组
 	for it.td != nil && it.slot < it.td.SlotCount() {

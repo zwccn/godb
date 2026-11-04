@@ -969,6 +969,16 @@ func textValue(v interface{}) []byte {
 
 func mapError(err error) (string, string) {
 	msg := err.Error()
+	// 语句超时 / 被 Kill：PG 用 57014（query_canceled）。
+	// 客户端认这个码 —— psql 显示成「canceling statement due to statement timeout」，
+	// JDBC 抛 SQLTimeoutException；落到 42000 的话只能当普通语法错处理。
+	var ste *txn.StatementTimeoutError
+	if errors.As(err, &ste) {
+		return "57014", msg
+	}
+	if errors.Is(err, txn.ErrCanceled) || errors.Is(err, db.ErrCanceled) {
+		return "57014", msg
+	}
 	// 背压错误：用标准 SQLSTATE，客户端能识别为「暂时不可用」并重试
 	var tq *db.TooManyQueuedError
 	var qt *db.QueueTimeoutError

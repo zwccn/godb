@@ -320,12 +320,13 @@ func (p *parser) parseStatement() (Statement, error) {
 		return &Show{Name: strings.Join(parts, " ")}, nil
 	case "SET":
 		p.pos++
-		// SET 只是会话参数，引擎不保存状态：整条吃掉，执行层回一个确认。
+		// SET 只影响会话参数。整条吃掉，同时尽力拆出「参数名 = 值」，
+		// 让执行层能认出 statement_timeout（见 parseSet）。
 		var parts []string
 		for p.peek().Kind != EOF && !p.peek().IsPunct(";") {
 			parts = append(parts, p.advance().Text)
 		}
-		return &SetStmt{Raw: "SET " + strings.Join(parts, " ")}, nil
+		return parseSet(parts), nil
 	case "DISCARD", "RESET", "DEALLOCATE", "CLOSE", "UNLISTEN", "LISTEN":
 		// DISCARD { ALL | PLANS | SEQUENCES | TEMPORARY | TEMP }
 		// RESET   { ALL | 参数名 }
@@ -356,9 +357,37 @@ func (p *parser) parseStatement() (Statement, error) {
 		case "CLOSE":
 			tag = "CLOSE CURSOR"
 		}
-		return &SessionCleanup{Command: cmd, Tag: tag}, nil
+		return &SessionCleanup{Command: cmd, Arg: arg, Tag: tag}, nil
 	}
 	return nil, p.errAt(t, "syntax error at or near %q", t.String())
+}
+
+// parseSet 把 SET 后面的 token 拆成「参数名 + 值」，拆不出来就只留原文。
+//
+// 认这几种形状（PG 的常用写法）：
+//
+//	SET statement_timeout = 30s
+//	SET statement_timeout TO 30
+//	SET SESSION statement_timeout = '1min'
+//
+// 别的一律只留原文：SET TIME ZONE 'UTC'、SET ROLE x、SET search_path = a, b
+// 都不是「name = 单个值」的形状，而引擎本来也不保存它们（确认即可）。
+// 关键原则是**永远不要因为 SET 报语法错**：客户端连上来会先发一串。
+func parseSet(parts []string) *SetStmt {
+	st := &SetStmt{Raw: "SET " + strings.Join(parts, " ")}
+	p := parts
+	if len(p) > 0 && (strings.EqualFold(p[0], "SESSION") || strings.EqualFold(p[0], "LOCAL")) {
+		p = p[1:]
+	}
+	if len(p) < 3 {
+		return st
+	}
+	if p[1] != "=" && !strings.EqualFold(p[1], "TO") {
+		return st
+	}
+	st.Name = strings.ToLower(p[0])
+	st.Value = strings.Join(p[2:], " ")
+	return st
 }
 
 // parseCommentOn 解析 COMMENT ON <对象> <名字> IS {'文本' | NULL}。

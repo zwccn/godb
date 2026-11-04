@@ -36,7 +36,10 @@ try {
   <!-- 只有窄屏（≤720px）才显示：把左边表结构栏当抽屉拉开 -->
   <button id="btnSidebar" class="icon-btn sidebar-toggle" type="button"
           aria-label="表结构" aria-expanded="false" aria-controls="sidebar">☰</button>
-  <div class="brand">
+  <!-- 品牌区也是「回首页」的入口：用户的直觉是「点左上角那个名字就回到开头」。
+       用 div+role 而不是 <button>：里面装着 h1 字标，button 里放块级元素是非法嵌套。 -->
+  <div class="brand" id="btnBrand" role="button" tabindex="0"
+       title="回到编辑器（首页）" aria-label="GoDB，回到首页">
     <span class="logo" aria-hidden="true">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
         <ellipse cx="12" cy="6" rx="7" ry="3"></ellipse>

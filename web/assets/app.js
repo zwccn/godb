@@ -5964,16 +5964,29 @@ document.getElementById('btnMonitor').addEventListener('click', () => {
   // 直接落到基准页，省得进去再找一个 Tab。
   if (!wasOpen && monOpen && benchRunning) setMonPage('bench');
 });
-document.getElementById('btnHome').addEventListener('click', () => {
-  // 「首页」= 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
-  // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
+// 回首页 = 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
+// 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
+function goHome() {
   toggleMonitor(false);
   if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
     return;
   }
   editor.focus();
-});
+}
+document.getElementById('btnHome').addEventListener('click', goHome);
+
+// 左上角的 logo + 字标也回首页。做成 role=button 的 div 是因为里面装着 h1 字标
+// （button 里放块级元素是非法嵌套），所以键盘那两个键要自己接。
+const btnBrand = document.getElementById('btnBrand');
+if (btnBrand) {
+  btnBrand.addEventListener('click', goHome);
+  btnBrand.addEventListener('keydown', ev => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault(); // 空格默认会滚页面
+    goHome();
+  });
+}
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));
 document.getElementById('btnMonRefresh').addEventListener('click', () => {
   if (monPaused) setMonPaused(false); // 手动刷新 = 隐含继续

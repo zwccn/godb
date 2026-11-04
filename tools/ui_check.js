@@ -2080,6 +2080,49 @@ class CDP {
       brand.text === 'GoDB' && brand.dbColor === brand.accent &&
         brand.shadow === 'none' && brand.bgImage === 'none' && /^GoDB/.test(brand.title),
       `${brand.text} · DB 色 ${brand.dbColor} · title ${brand.title}`);
+
+    /* 品牌区（logo + 字标）也是「回首页」的入口 —— 用户的直觉就是点左上角那个名字。
+       它是个 role=button 的 div（里装着 h1，换成 <button> 是非法嵌套），所以
+       光标、role、以及 Enter 键都得自己写，也就都得测。
+
+       注意：这条会**关掉设置面板**（回首页的语义就是连设置一起收），而后面几条
+       要量设置页的尺寸。所以进来先把设置收干净、跑完再按原样打开，否则后面那些
+       getBoundingClientRect 全是 0 —— 这不是回归，是测试自己把状态改了。 */
+    const brandHome = await cdp.eval(`(async () => {
+      const panel = document.getElementById('monPanel');
+      const setPanel = document.getElementById('settingsPanel');
+      const wait = () => new Promise(r => setTimeout(r, 350));
+      const setWasOpen = !setPanel.classList.contains('hidden');
+      if (setWasOpen) { closeSettings(true); await wait(); }
+
+      document.getElementById('btnMonitor').click();
+      await wait();
+      const opened = !panel.classList.contains('hidden');
+      document.getElementById('btnBrand').click();
+      await wait();
+      const afterClick = { hidden: panel.classList.contains('hidden'), mon: monOpen };
+
+      document.getElementById('btnMonitor').click();
+      await wait();
+      const b = document.getElementById('btnBrand');
+      b.focus();
+      b.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await wait();
+      const afterKey = { hidden: panel.classList.contains('hidden'), mon: monOpen };
+
+      const out = {
+        opened, afterClick, afterKey, setWasOpen,
+        role: b.getAttribute('role'),
+        cursor: getComputedStyle(b).cursor,
+      };
+      if (setWasOpen) { document.getElementById('btnSettings').click(); await wait(); await wait(); }
+      return out;
+    })()`);
+    check('点左上角 logo / GoDB 字标回首页（鼠标和 Enter 都行）',
+      brandHome.opened && brandHome.afterClick.hidden && brandHome.afterClick.mon === false &&
+        brandHome.afterKey.hidden && brandHome.afterKey.mon === false &&
+        brandHome.role === 'button' && brandHome.cursor === 'pointer',
+      `点击 ${brandHome.afterClick.mon === false} · Enter ${brandHome.afterKey.mon === false} · ${brandHome.role}/${brandHome.cursor}`);
     check('设置页有 5 个带名字的皮肤卡片',
       setUi.picks === 5 && setUi.pickNames.join('/') === '科技灰/深色/淡蓝/芋紫/薄荷绿',
       setUi.pickNames.join('/') + '，选中 ' + setUi.activeTheme);

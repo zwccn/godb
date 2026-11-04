@@ -429,7 +429,21 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.brand { display: flex; align-items: center; gap: 10px; }
+/* 品牌区可点：回首页（和右上角「首页」按钮同一个动作）。
+   负外边距把点击区撑大一圈，但不改变它在顶栏里的位置（不然整行会跟着挪）。
+   光标 / hover / 焦点环都要自己给 —— 它是个 div，浏览器不会替你画。 */
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color .12s ease;
+}
+.brand:hover { background: var(--bg-2); }
+.brand:active { background: var(--bg-3); }
+.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .logo {
   width: 26px; height: 26px;

@@ -1109,6 +1109,15 @@ a[href]:focus-visible {
      卡片边缘多缩进，一眼看不出但会觉得"歪"。 */
   padding: 0 4px;
   overflow-x: auto;
+  /* 只许横向滚，纵向必须裁掉。
+     原因有两层：
+       1. 只写 overflow-x:auto 时，overflow-y 会被规范提升成 auto（一个轴
+          不是 visible，另一个就不能留 visible）；
+       2. tab 的 margin-bottom:-1px 是为了让 2px 选中下划线压住容器那 1px
+          边框 —— 它的 border box 本来就比容器内容高 1px。这 1px 是故意的
+          越界，但在 auto 的眼里就是「内容溢出」，于是每条查询都在 tab 栏
+          最右边冒出一根竖向滚动条（滚动条还占 10px，把「往返 xx ms」挤左）。 */
+  overflow-y: hidden;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
 }
@@ -3169,6 +3178,9 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   padding: 0 12px;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+  /* 同 .result-tabs：横向滚动的 tab 条不该有纵向滚动。这里滚动条本来就
+     scrollbar-width:none 不显示，但 1px 溢出仍在，会把 tab 的底边裁掉半个像素。 */
+  overflow-y: hidden;
   scrollbar-width: none;
 }
 .set-tabs::-webkit-scrollbar { height: 0; }
@@ -4210,6 +4222,8 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   border-bottom: 1px solid var(--border-soft);
   flex: 0 0 auto;
   overflow-x: auto;
+  /* 同 .result-tabs：只许横向滚 */
+  overflow-y: hidden;
 }
 .mon-nav-tab {
   font: inherit;
@@ -4348,6 +4362,8 @@ li.CodeMirror-hint-active .cm-hint-note { color: var(--text-2); }
   padding: 6px 14px;
   border-bottom: 1px solid var(--border-soft);
   overflow-x: auto;
+  /* 同 .result-tabs：只许横向滚 */
+  overflow-y: hidden;
   white-space: nowrap;
 }
 .map-file {

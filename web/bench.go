@@ -936,6 +936,13 @@ func (s *Server) sceneVectorTopK(x *benchSess) benchScene {
 	}
 
 	// 每次查询取最近 10 条；每轮 5 次，够摊掉单次的抖动又不至于让场景变成几分钟。
+	//
+	// 计时前先 CHECKPOINT：刚落盘前所有行还在 memtable 里（`td.rows` 直接命中），
+	// 扫一遍只要 ~70ms；落盘后走「页 → 解码」这条路，同样的查询要 ~270ms。
+	// 基准要测的是**稳态**（真实使用里数据早就在页里），不是刚导入时的假快。
+	if err := x.exec(`CHECKPOINT`); err != nil {
+		return fail(err)
+	}
 	const perRound = 5
 	query := fmt.Sprintf(`SELECT id FROM %s ORDER BY v <=> '%s' LIMIT 10`,
 		benchVecTable, benchVecLiteral(benchVecDim, 7))

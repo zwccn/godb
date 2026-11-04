@@ -1,7 +1,6 @@
 package exec
 
 import (
-	"container/heap"
 	"fmt"
 	"runtime"
 	"sort"
@@ -583,6 +582,18 @@ type sortOp struct {
 	// topN > 0 时用「大小为 N 的最大堆」只保留前 N 行（含 OFFSET），
 	// 不把整段结果物化下来再全排。分页 `ORDER BY … LIMIT n` 靠它。
 	topN int
+	// fastKey 表示「只有一个排序键，且类型是 double precision」。
+	//
+	// 向量 Top-K 正是这个形状：`ORDER BY v <=> q LIMIT k` 的键是 double。
+	// 每一行都要比一次，省掉 types.Compare 里的类型分支与 NULL 检查，
+	// 100 万行能少一次函数调用 + 一次 switch。
+	fastKey bool
+	// scratch 是 topN 路径求值排序键的暂存区。
+	//
+	// 关键点：被淘汰的行不该为「用不上的键数组」分配内存。原来的写法每行都
+	// make([]types.Value)，100 万行就是 100 万次小分配 —— 稳态下这里改成
+	// 「先算进 scratch，只有进堆/换入时才复用一条已存在的键数组」。
+	scratch []types.Value
 }
 
 func (o *sortOp) Schema() Schema       { return o.sc }
@@ -622,6 +633,21 @@ func (o *sortOp) ExplainDetail() []string {
 
 // lessEntry 按排序键比较两行：true 表示 a 应该排在 b 前面。
 func (o *sortOp) lessEntry(a, b sortEntry) bool {
+	// 单键 double 的快路径：向量距离、时间差这类排序都落在这里。
+	// 两边都是非 NULL 浮点时直接比，绕开 types.Compare 的类型 switch。
+	if o.fastKey {
+		ak, bk := a.keys[0], b.keys[0]
+		if ak.K == types.KFloat && bk.K == types.KFloat {
+			af, bf := ak.Float(), bk.Float()
+			if af == bf {
+				return false
+			}
+			if o.keys[0].desc {
+				return af > bf
+			}
+			return af < bf
+		}
+	}
 	for i, k := range o.keys {
 		av, bv := a.keys[i], b.keys[i]
 		c := 0
@@ -652,25 +678,79 @@ func (o *sortOp) lessEntry(a, b sortEntry) bool {
 	return false
 }
 
-// topNHeap 是「保留最好的 N 个」用的最大堆：堆顶是当前最差的那行（要被淘汰的）。
-// container/heap 是小顶堆，所以 Less 表示「更差、更该丢」。
+// beatsWorst 判断新行的键是否优于堆顶（当前最差）。
+//
+// 单独抽出来是为了避开 sortEntry 的 40 字节按值传递：Top-N 里每行都要问一次
+// 这个问题，而绝大多数答案都是「不优」。单键 double 时直接比浮点。
+func (o *sortOp) beatsWorst(cand, worst []types.Value) bool {
+	if o.fastKey {
+		ak, bk := cand[0], worst[0]
+		if ak.K == types.KFloat && bk.K == types.KFloat {
+			if o.keys[0].desc {
+				return ak.Float() > bk.Float()
+			}
+			return ak.Float() < bk.Float()
+		}
+	}
+	return o.lessEntry(sortEntry{keys: cand}, sortEntry{keys: worst})
+}
+
+// topNHeap 是「保留最好的 N 个」用的大顶堆：堆顶是当前最差的那行（要被淘汰的）。
 type topNHeap struct {
 	op    *sortOp
 	items []sortEntry
 }
 
-func (h *topNHeap) Len() int { return len(h.items) }
-func (h *topNHeap) Less(i, j int) bool {
-	// 堆顶 = 最差 = 排序序里最大（ASC 时键值最大）
+// 下面三个方法手写，不用 container/heap：
+//
+// 那个每步都要经 any 装箱 + 接口调用（Push/Pop/Less/Swap 四次断言），100 万行
+// 的 Top-K 里这层开销能测出来。堆只用到两种操作 —— 追加、替换堆顶，
+// 所以只需要 siftUp / siftDown。
+//
+// 这里是「堆顶最差」的大顶堆：比较用的是排序序（worse 表示在结果里更靠后）。
+func (h *topNHeap) worse(i, j int) bool {
 	return h.op.lessEntry(h.items[j], h.items[i])
 }
-func (h *topNHeap) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
-func (h *topNHeap) Push(x any)    { h.items = append(h.items, x.(sortEntry)) }
-func (h *topNHeap) Pop() any {
+
+func (h *topNHeap) siftUp(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if !h.worse(i, p) {
+			return
+		}
+		h.items[i], h.items[p] = h.items[p], h.items[i]
+		i = p
+	}
+}
+
+func (h *topNHeap) siftDown(i int) {
 	n := len(h.items)
-	it := h.items[n-1]
-	h.items = h.items[:n-1]
-	return it
+	for {
+		l := i*2 + 1
+		if l >= n {
+			return
+		}
+		pick := l
+		if r := l + 1; r < n && h.worse(r, l) {
+			pick = r
+		}
+		if !h.worse(pick, i) {
+			return
+		}
+		h.items[i], h.items[pick] = h.items[pick], h.items[i]
+		i = pick
+	}
+}
+
+func (h *topNHeap) push(e sortEntry) {
+	h.items = append(h.items, e)
+	h.siftUp(len(h.items) - 1)
+}
+
+// replaceWorst 换掉堆顶（当前最差）并重新下沉。
+func (h *topNHeap) replaceWorst(e sortEntry) {
+	h.items[0] = e
+	h.siftDown(0)
 }
 
 func (o *sortOp) Open() error {
@@ -684,6 +764,8 @@ func (o *sortOp) Open() error {
 	o.rows = o.rows[:0]
 	o.i = 0
 	o.err = nil
+	// 单键 double 的排序（向量距离的典型形状）走比较快路径。
+	o.fastKey = len(o.keys) == 1 && o.keys[0].eval.Type().Kind == types.KFloat
 
 	// 预计算排序键：每行只 Eval 一次，比较时直接用值。
 	// 单独计一段 evalNs：`ORDER BY v <=> q` 的距离计算全在这里，不单列的话
@@ -727,23 +809,41 @@ func (o *sortOp) Open() error {
 }
 
 // entry 算一行的排序键（含求值计时）。
+//
+// 全量排序用：每一行都要留在结果里，键必须各自持有一份。
 func (o *sortOp) entry(row types.Row) (sortEntry, error) {
-	et := o.evalTimer()
 	ks := make([]types.Value, len(o.keys))
-	for i, k := range o.keys {
-		v, err := k.eval.Eval(row)
-		if err != nil {
-			return sortEntry{}, err
-		}
-		ks[i] = v
+	if err := o.entryInto(row, ks); err != nil {
+		return sortEntry{}, err
 	}
-	o.evalDone(et)
 	return sortEntry{row: row, keys: ks}, nil
 }
 
+// entryInto 把排序键算进调用方给的数组（不分配）。Top-N 路径用它写 scratch。
+func (o *sortOp) entryInto(row types.Row, dst []types.Value) error {
+	et := o.evalTimer()
+	for i, k := range o.keys {
+		v, err := k.eval.Eval(row)
+		if err != nil {
+			o.evalDone(et)
+			return err
+		}
+		dst[i] = v
+	}
+	o.evalDone(et)
+	return nil
+}
+
 // topNSerial 是 Top-N 的串行版本（不并行的所有情形都走这里）。
+//
+// 分配策略：先算进 scratch，只有真的进堆或换入时才动键数组。
+// 稳态下被淘汰的行一次分配都不做，换入时复用被换掉那条的数组。
 func (o *sortOp) topNSerial() error {
 	h := &topNHeap{op: o}
+	if cap(o.scratch) < len(o.keys) {
+		o.scratch = make([]types.Value, len(o.keys))
+	}
+	scratch := o.scratch[:len(o.keys)]
 	for {
 		row, ok, err := o.child.Next()
 		if err != nil {
@@ -752,23 +852,27 @@ func (o *sortOp) topNSerial() error {
 		if !ok {
 			break
 		}
-		e, err := o.entry(row)
-		if err != nil {
+		if err := o.entryInto(row, scratch); err != nil {
 			return err
 		}
-		if h.Len() < o.topN {
-			heap.Push(h, e)
-		} else if o.lessEntry(e, h.items[0]) {
-			// e 比堆顶（当前最差）更好 → 换掉堆顶
-			h.items[0] = e
-			heap.Fix(h, 0)
+		if len(h.items) < o.topN {
+			keys := make([]types.Value, len(scratch))
+			copy(keys, scratch)
+			h.push(sortEntry{row: row, keys: keys})
+			continue
 		}
+		if !o.beatsWorst(scratch, h.items[0].keys) {
+			continue // 没挤进前 N：行和键都不要了，零分配
+		}
+		keys := h.items[0].keys // 复用被换掉那一条的键数组
+		copy(keys, scratch)
+		h.replaceWorst(sortEntry{row: row, keys: keys})
 		if o.err != nil {
 			return o.err
 		}
 	}
 	o.rows = h.items
-	return nil
+	return o.err
 }
 
 // parKeyEval 是「可以把求值复制给多个 goroutine」的排序键。
@@ -888,12 +992,11 @@ func (o *sortOp) topNParallel(nw int) error {
 			}
 			// keys[i:i+1] 共享这一批的键数组：整批只分配一次，
 			// 只有留在堆里的那几个 entry 会把这个数组留在内存里。
-			e := sortEntry{row: rows[i], keys: keys[i : i+1]}
-			if h.Len() < o.topN {
-				heap.Push(h, e)
-			} else if o.lessEntry(e, h.items[0]) {
-				h.items[0] = e
-				heap.Fix(h, 0)
+			k := keys[i : i+1]
+			if len(h.items) < o.topN {
+				h.push(sortEntry{row: rows[i], keys: k})
+			} else if o.beatsWorst(k, h.items[0].keys) {
+				h.replaceWorst(sortEntry{row: rows[i], keys: k})
 			}
 			rows[i] = nil
 		}

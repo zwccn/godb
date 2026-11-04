@@ -1749,16 +1749,27 @@ class CDP {
         toc: m.querySelectorAll('.help-toc button').length,
         keys: m.querySelectorAll('.help-keys kbd').length,
         fits: m.querySelector('.modal-body').scrollWidth <= m.querySelector('.modal-body').clientWidth + 1,
+        // 向量那一节要同时说到「支持什么」和「不支持什么」，只写一半等于没写
+        vectorNote: (() => {
+          const n = m.querySelector('#h10 .help-note');
+          if (!n) return false;
+          const t = n.textContent;
+          return t.indexOf('DISTINCT') >= 0 && t.indexOf('CREATE INDEX') >= 0 && t.indexOf('PRIMARY KEY') >= 0;
+        })(),
       };
     })()`);
     check('帮助里有 8 个示例、每个都带一句说明',
       helpUi.ex === 8 && helpUi.allHaveNote, `${helpUi.ex} 个，第一个是「${helpUi.first}」`);
     // 手册由浅入深：第 1 级是增删改查，最后一级必须是「明确不支持」
-    check('语法手册按由浅入深分了 10 级 + 不支持',
-      helpUi.levels.length === 11 &&
+    check('语法手册按由浅入深分了 11 级 + 不支持',
+      helpUi.levels.length === 12 &&
         helpUi.levels[0].indexOf('建表') >= 0 &&
-        helpUi.levels[10] === '明确不支持',
+        helpUi.levels[11] === '明确不支持',
       helpUi.levels.join(' / '));
+    // 向量的限制必须写在帮助里：报错只解释了「这一句」，用户还需要知道「整类写法都不行」
+    check('帮助里讲清了向量只支持距离检索、不支持等值/分组/索引',
+      helpUi.levels[9].indexOf('向量') >= 0 && helpUi.vectorNote,
+      `第 10 级「${helpUi.levels[9]}」· 注意事项 ${helpUi.vectorNote ? '有' : '缺失'}`);
     check('每个支持性章节都带可执行的示例代码', helpUi.noCode === 0, `${helpUi.noCode} 级没有代码`);
     check('写类示例只落在 demo 临时表上（不碰示例数据）', helpUi.writeHitsSample === 0,
       `${helpUi.writeHitsSample} 段写到示例表上`);

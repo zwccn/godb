@@ -711,8 +711,9 @@ try {
         <button type="button" data-goto="h7">7 结构与索引</button>
         <button type="button" data-goto="h8">8 事务与并发</button>
         <button type="button" data-goto="h9">9 函数与类型</button>
-        <button type="button" data-goto="h10">10 诊断与维护</button>
-        <button type="button" data-goto="h11">11 不支持</button>
+        <button type="button" data-goto="h10">10 向量检索</button>
+        <button type="button" data-goto="h11">11 诊断与维护</button>
+        <button type="button" data-goto="h12">12 不支持</button>
       </div>
 
       <div class="help-lv" id="h1">
@@ -849,7 +850,7 @@ SELECT * FROM demo_tx ORDER BY id;</pre>
         <div class="help-lv-body">
           <div class="help-lv-title">常用函数与类型</div>
           <div class="help-lv-desc">够覆盖大部分报表写法；序列函数只在 <code>SERIAL</code> 建出的序列上有效。<code>interval</code> 支持时间加减（月/年按日历精确计算）。</div>
-          <div class="help-lv-syn"><span>字符串 <code>lower / upper / length / trim / lpad / rpad / replace / substring / position / concat / string_agg</code></span><span>日期 <code>extract</code> / <code>date_part</code> / <code>date_trunc</code> / <code>now</code> · <code>INTERVAL '1 day'</code> 与时间加减</span><span>序列 <code>nextval / currval / lastval</code></span><span>其他 <code>coalesce / nullif / greatest / least / random / regexp_matches / unnest</code></span><span>类型 <code>int / bigint / serial / numeric(p,s) / real / double precision / text / varchar(n) / boolean / date / timestamp / interval</code></span></div>
+          <div class="help-lv-syn"><span>字符串 <code>lower / upper / length / trim / lpad / rpad / replace / substring / position / concat / string_agg</code></span><span>日期 <code>extract</code> / <code>date_part</code> / <code>date_trunc</code> / <code>now</code> · <code>INTERVAL '1 day'</code> 与时间加减</span><span>序列 <code>nextval / currval / lastval</code></span><span>其他 <code>coalesce / nullif / greatest / least / random / regexp_matches / unnest</code></span><span>类型 <code>int / bigint / serial / numeric(p,s) / real / double precision / text / varchar(n) / boolean / date / timestamp / interval / vector(n)</code></span></div>
           <pre class="help-code">SELECT extract(year FROM now()) AS y,
        date_trunc('month', now()) AS m,
        lpad('1', 6, '0') AS code,
@@ -862,8 +863,46 @@ SELECT unnest(array[10, 20, 30]) AS n;   -- 数组展开成多行</pre>
         </div>
       </div>
 
+      <!-- 向量检索：Phase 1 只做「距离排序 + Top-K」。等值/分组/索引一律明确报错，
+           所以这一节把「为什么不能」写清楚 —— 否则用户会以为是没做好的 bug。 -->
       <div class="help-lv" id="h10">
         <div class="help-lv-no">10</div>
+        <div class="help-lv-body">
+          <div class="help-lv-title">向量检索（VECTOR）</div>
+          <div class="help-lv-desc">存 embedding、按相似度取前 K 条。维度必须写死（<code>vector(3)</code>），值写成 <code>'[0.1,0.2,…]'</code>；检索只有一种写法：<b>按距离排序 + <code>LIMIT</code></b>。</div>
+          <div class="help-lv-syn"><span><code>VECTOR(n)</code>（1 ≤ n ≤ 4096，省略维度会报错）</span><span><code>&lt;-&gt;</code> 欧氏距离</span><span><code>&lt;=&gt;</code> 余弦距离</span><span><code>&lt;#&gt;</code> 负内积</span><span>距离可出现在 <code>SELECT</code> / <code>WHERE</code> / <code>ORDER BY</code></span></div>
+          <pre class="help-code">DROP TABLE IF EXISTS demo_vec;
+CREATE TABLE demo_vec (id int PRIMARY KEY, title text, v vector(3));
+INSERT INTO demo_vec VALUES (1,'甲','[1,0,0]'), (2,'乙','[0,1,0]'), (3,'丙','[0.9,0.1,0]');
+
+-- Top-K：距离越小越像；1 - 余弦距离 就是相似度分数
+SELECT id, title, 1 - (v &lt;=&gt; '[1,0,0]') AS score
+FROM demo_vec
+ORDER BY v &lt;=&gt; '[1,0,0]'
+LIMIT 3;
+
+-- 也可以先按距离筛一遍，再按别的列排序
+SELECT id, title FROM demo_vec
+WHERE v &lt;-&gt; '[1,0,0]' &lt; 0.5
+ORDER BY id;</pre>
+          <div class="help-note">
+            <b>向量既没有「相等」也没有「大小」</b>，下面这些写法会直接报错 —— 不是没做好，而是没有正确的答案：
+            <code>v = '[…]'</code>、<code>ORDER BY v</code>、<code>SELECT DISTINCT v</code>、
+            <code>GROUP BY v</code>、<code>COUNT(DISTINCT v)</code>、<code>MIN / MAX(v)</code>、
+            <code>JOIN … ON a.v = b.v</code>、<code>UNION</code> / <code>INTERSECT</code> / <code>EXCEPT</code>
+            （<b><code>UNION ALL</code> 不受限</b>），以及向量列上的 <code>CREATE INDEX</code> /
+            <code>PRIMARY KEY</code> / <code>UNIQUE</code>。<br>
+            原因很实在：向量的真实数据在表的 <code>.vec</code> 文件里，行内只留一个槽位引用，而槽位每次写入、
+            每次更新都会换。拿它判重，内容相同的两行会被算成两行、内容不同的两行可能被算成一行，
+            而且结果看上去是正常的 —— 宁可直接报错，也不给这种答案。<br>
+            要按内容去重只能在应用侧做：<code>SELECT v</code> 出来就是 <code>'[0.1,0.2,…]'</code> 文本，
+            自己比字符串即可（库内 <code>v::text</code> 同样不支持，理由相同）。
+          </div>
+        </div>
+      </div>
+
+      <div class="help-lv" id="h11">
+        <div class="help-lv-no">11</div>
         <div class="help-lv-body">
           <div class="help-lv-title">诊断与维护</div>
           <div class="help-lv-desc">看计划、看落盘、看系统目录；<code>EXPLAIN ANALYZE</code> 会真的执行并给出每步行数与耗时。</div>
@@ -878,12 +917,12 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
         </div>
       </div>
 
-      <div class="help-lv is-muted" id="h11">
-        <div class="help-lv-no">11</div>
+      <div class="help-lv is-muted" id="h12">
+        <div class="help-lv-no">12</div>
         <div class="help-lv-body">
           <div class="help-lv-title">明确不支持</div>
           <div class="help-lv-desc">这些会报清晰的错误，不会静默算错 —— 与其试半天，不如先看这一条。</div>
-          <div class="help-lv-syn"><span>递归 CTE <code>WITH RECURSIVE</code></span><span>窗口函数 <code>OVER (…)</code></span><span><code>FULL JOIN</code> / <code>NATURAL JOIN</code></span><span>行级锁 <code>SELECT … FOR UPDATE</code></span><span><code>LATERAL</code></span></div>
+          <div class="help-lv-syn"><span>递归 CTE <code>WITH RECURSIVE</code></span><span>窗口函数 <code>OVER (…)</code></span><span><code>FULL JOIN</code> / <code>NATURAL JOIN</code></span><span>行级锁 <code>SELECT … FOR UPDATE</code></span><span><code>LATERAL</code></span><span>向量的等值 / 排序 / 分组 / 索引（见上一节「向量检索」）</span></div>
         </div>
       </div>
 

@@ -941,6 +941,33 @@ a[href]:focus-visible {
   }
 }
 
+/* 帮助里的「注意事项」：一段需要被读到、但不该抢代码块注意力的解释。
+   左侧竖线比整块底色更轻，也不会和 is-muted 的灰底叠成两层。 */
+.help-note {
+  margin-top: 7px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--border);
+  border-radius: 0 5px 5px 0;
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: calc(11px * var(--fs));
+  line-height: 1.62;
+}
+
+.help-note b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.help-note code {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--code-text);
+  background: var(--code-bg);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
 /* 「明确不支持」整段弱化，一眼能看出不是可用清单 */
 .help-lv.is-muted .help-lv-no {
   border-color: var(--border);

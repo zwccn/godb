@@ -631,10 +631,10 @@ class CDP {
       && vdOk.advice <= 2 && vdOk.level === 'green' && !vdOk.water,
       `${vdOk.title} · ${vdOk.layers} 列 · 建议 ${vdOk.advice} 条 · ${vdOk.level}`);
     /* 这三个数以前在结论卡、水位条、三层卡各来一遍，同一个 0 一屏三份，
-       「113.1 ms」和「113 ms」还是同一个字段的两种写法。现在只剩一份，这条钉住它。 */
+       「113.1 ms」和「113 ms」还是同一个字段的两种写法。现在只剩一份，这条钉住它。
+       容量写「/数字」而不钉死 256：排队上限是可配的（出厂已改成 1 万）。 */
     check('水位条已并入三列：容量跟各自的层走，累计次数回到结论卡',
-      vdOk.caps.filter(Boolean).length === 2 && vdOk.caps.includes('/256')
-      && vdOk.caps.includes('/32') && /Kill \d+/.test(vdOk.counts),
+      vdOk.caps.filter(c => /^\/\d+$/.test(c)).length === 2 && /Kill \d+/.test(vdOk.counts),
       `${vdOk.caps.join(' ')} · ${vdOk.counts.slice(0, 36)}`);
 
     // 造一个「有排队 + 有慢查询」的状态：建议行必须出现，且按钮真的能跳到对应 Tab

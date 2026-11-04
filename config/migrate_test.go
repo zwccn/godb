@@ -2,8 +2,10 @@ package config
 
 import "testing"
 
-// v1 配置文件（早期版本生成）升级到最新版时：并发上限要补齐成 32/256，
-// 但等锁 / 排队超时不能再被固化回 3 秒 —— v3 起出厂默认是「不限」。
+// v1 配置文件（早期版本生成）升级到最新版时：并发上限要补齐成出厂默认
+// （比的是 Default()，不是写死的数字 —— 默认值调过一次，钉死会让这条测试变成
+// 「改默认值就要改测试」的负担），但等锁 / 排队超时不能再被固化回 3 秒
+// —— v3 起出厂默认是「不限」。
 func TestMigrateV1ToLatest(t *testing.T) {
 	// 这是真实生产文件的形状：有 version=1、没有 performance、没有 timeouts。
 	c := Config{
@@ -23,9 +25,11 @@ func TestMigrateV1ToLatest(t *testing.T) {
 	if c.Timeouts.QueueWaitSec != 0 {
 		t.Errorf("排队超时 = %d，期望 0（v3 起默认不限）", c.Timeouts.QueueWaitSec)
 	}
-	if c.Performance.MaxConcurrent != 32 || c.Performance.MaxQueued != 256 {
-		t.Errorf("并发上限 = %d/%d，期望 32/256",
-			c.Performance.MaxConcurrent, c.Performance.MaxQueued)
+	if def := Default().Performance; c.Performance.MaxConcurrent != def.MaxConcurrent ||
+		c.Performance.MaxQueued != def.MaxQueued {
+		t.Errorf("并发上限 = %d/%d，期望跟出厂默认一致（%d/%d）",
+			c.Performance.MaxConcurrent, c.Performance.MaxQueued,
+			def.MaxConcurrent, def.MaxQueued)
 	}
 	// 慢 SQL / 慢事务是新增的保护，默认不限
 	if c.Timeouts.SlowSQLSec != 0 || c.Timeouts.SlowTxIdleSec != 0 {

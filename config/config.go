@@ -170,8 +170,12 @@ func Default() Config {
 		},
 		Performance: Performance{
 			MaxConcurrent: 32,
-			MaxQueued:     256,
-			HighResTimer:  Bool(true),
+			// 排队上限给到 1 万：这一层的作用是**削峰**，不是「防止有人排队」。
+			// 256 在高并发入口（几百个客户端同时打）下等于没有缓冲 —— 稍微一抖就
+			// 开始返 53300。真正防雪崩的是排队超时（Timeouts.QueueWaitSec）和
+			// 「0 = 不限」两档，上限只负责挡住明显的异常流量。
+			MaxQueued:    10000,
+			HighResTimer: Bool(true),
 		},
 		Timeouts: Timeouts{
 			// 四个超时出厂全部「不限」：它们都是「主动回滚别人事务」或

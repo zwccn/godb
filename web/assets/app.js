@@ -6603,10 +6603,10 @@ function renderPerfPane(box, d, rt) {
   box.appendChild(el('div', 'set-sec', '并发'));
   const pf = d.performance || {};
   box.appendChild(setRow('最大并发数', numInput('setPerfMaxConc', pf.maxConcurrent ?? 32, 0, 10000)));
-  box.appendChild(setRow('排队上限', numInput('setPerfMaxQueued', pf.maxQueued ?? 256, 0, 100000)));
+  box.appendChild(setRow('排队上限', numInput('setPerfMaxQueued', pf.maxQueued ?? 10000, 0, 100000)));
   box.appendChild(el('div', 'set-hint',
     '同时执行 SQL 的上限（0 = 不限），超出的排队；排队超过上限快速失败（SQLSTATE 53300）。' +
-    '排队超时在「监控」面板的超时开关里设。'));
+    '这一层是削峰用的，出厂 1 万；真正防雪崩的是排队超时（在「监控」面板设）。'));
 
   box.appendChild(el('div', 'set-sec', '计时'));
   box.appendChild(setRow('高精度计时（TSC）', checkInput('setHighRes', pf.highResTimer !== false)));

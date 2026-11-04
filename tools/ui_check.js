@@ -3673,22 +3673,36 @@ class CDP {
     check('普通执行不会串到执行探测视图',
       noProbe.rows === 0 && !noProbe.tab.includes('探测结果'), `tab=${noProbe.tab}`);
 
-    /* 模型图：分组是用户划的，关系有两种来源（外键实线 / 逻辑关系虚线）。
-       这里断言的是「图和 schema 对得上」和「分组能自己建、表能移进去」，
-       不写死张数 —— 库里有多少表、有没有外键都是运行时才知道的。
+    /* 模型图：逻辑模型，不是库的镜像。
+       这一段的中心断言只有一条 —— **库里有外键，图上也不画线**。
+       这条一破，图就又变成 schema 快照了：用户删掉一条，下次打开它又回来。
 
-       和上一版的区别：以前分组是按外键连通分量自动算的，所以能断言
-       「组数不超表数」。现在分组由用户建，没建就只有一个「未分组」。 */
+       为了断言有意义，先造一对带 REFERENCES 的表，否则开发库里可能一个外键
+       都没有，「0 条线」就成了废话。用完删掉。 */
+    const demo = await cdp.eval(`(async () => {
+      const q = sql => fetch('/api/query', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }) }).then(r => r.json()).catch(() => null);
+      await q('DROP TABLE er_fact');
+      await q('DROP TABLE er_basis');
+      await q('CREATE TABLE er_basis (id INTEGER PRIMARY KEY, label TEXT)');
+      await q('CREATE TABLE er_fact (id INTEGER PRIMARY KEY, basis_id INTEGER REFERENCES er_basis(id))');
+      await loadSchema();
+      const sch = await fetch('/api/schema').then(r => r.json());
+      return {
+        fk: sch.tables.reduce((n, t) => n + ((t.foreignKeys || []).length), 0),
+        tables: sch.tables.length,
+      };
+    })()`);
+
     await cdp.eval(`fetch('/api/diagram', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version: 2, groups: [], tables: {}, links: [], overrides: {} }) })`);
+      body: JSON.stringify({ version: 3, groups: [], tables: {}, links: [] }) })`);
     await cdp.eval(`document.getElementById('btnEr').click()`);
     await waitFor(cdp, `!document.getElementById('erPanel').classList.contains('hidden')
       && document.querySelectorAll('.er-card').length > 0`, { label: '模型图渲染', timeout: 6000 });
 
-    const erUi = await cdp.eval(`(async () => {
-      const sch = await fetch('/api/schema').then(r => r.json());
-      const fkCount = sch.tables.reduce((n, t) => n + ((t.foreignKeys || []).length), 0);
+    const erUi = await cdp.eval(`(() => {
       const stage = document.getElementById('erStage').getBoundingClientRect();
       const cards = [...document.querySelectorAll('.er-card')];
       const outside = cards.filter(c => {
@@ -3697,58 +3711,39 @@ class CDP {
           || r.top < stage.top - 1 || r.bottom > stage.bottom + 1;
       }).length;
       return {
-        tables: sch.tables.length,
         cards: cards.length,
-        folded: erModel.folded,
         groups: document.querySelectorAll('.er-group').length,
         looseName: (document.querySelector('.er-group-name') || {}).textContent || '',
-        edges: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
-        fkCount,
+        edges: document.querySelectorAll('.er-edge').length,
+        ticks: document.querySelectorAll('.er-tick, .er-crow').length,
+        dots: document.querySelectorAll('.er-col-dot').length,
         outside,
-        mode: erMode,
         note: document.getElementById('erNote').classList.contains('hidden')
           ? '' : document.getElementById('erNote').textContent,
         stats: document.getElementById('erStats').textContent,
         active: document.getElementById('btnEr').classList.contains('on'),
+        mode: typeof erMode,
       };
     })()`);
-    check('模型图：卡片数 + 折叠的关联表 = 表数',
-      erUi.cards + erUi.folded === erUi.tables,
-      `${erUi.cards} 卡片 + ${erUi.folded} 折叠 / ${erUi.tables} 张表`);
+    check('模型图：一张表一张卡片，没有折叠', erUi.cards === demo.tables,
+      `${erUi.cards} 卡片 / ${demo.tables} 张表`);
     check('模型图：没有手工分组时只有一个「未分组」',
       erUi.groups === 1 && /未分组/.test(erUi.looseName),
       `${erUi.groups} 个组框 · ${erUi.looseName}`);
-    check('模型图：打开时默认逻辑视图', erUi.mode === 'logic', erUi.mode);
     check('模型图：打开时自适应缩放，卡片不出画布',
       erUi.outside === 0, `${erUi.outside} 张卡片越界`);
     check('模型图：顶栏入口跟着亮', erUi.active === true);
-
-    // 物理视图：一张表不少、外键线一条不少、不画逻辑关系
-    await cdp.eval(`erToggleMode()`);
-    await waitFor(cdp, `erMode === 'physical'`, { label: '切到物理视图', timeout: 2000 });
-    const physUi = await cdp.eval(`(async () => {
-      const sch = await fetch('/api/schema').then(r => r.json());
-      const fkCount = sch.tables.reduce((n, t) => n + ((t.foreignKeys || []).length), 0);
-      return {
-        tables: sch.tables.length,
-        cards: document.querySelectorAll('.er-card').length,
-        edges: document.querySelectorAll('.er-edge').length,
-        fkCount,
-        manual: document.querySelectorAll('.er-edge.manual').length,
-        m2m: document.querySelectorAll('.er-edge.m2m').length,
-        folded: erModel.folded,
-        btn: document.getElementById('btnErMode').textContent,
-      };
-    })()`);
-    check('模型图：物理视图不折叠，一张表一张卡片',
-      physUi.cards === physUi.tables && physUi.folded === 0,
-      `${physUi.cards} 卡片 / ${physUi.tables} 张表`);
-    check('模型图：物理视图的外键线数等于 schema 里的外键数',
-      physUi.edges === physUi.fkCount && physUi.m2m === 0 && physUi.manual === 0,
-      `${physUi.edges} 条线 · ${physUi.fkCount} 个外键`);
-    check('模型图：物理视图按钮文案变成「物理」', physUi.btn === '物理', physUi.btn);
-    await cdp.eval(`erToggleMode()`);
-    await waitFor(cdp, `erMode === 'logic'`, { label: '切回逻辑视图', timeout: 2000 });
+    check('模型图：库里写着外键，图上一条线也不画',
+      demo.fk >= 1 && erUi.edges === 0,
+      `库 ${demo.fk} 个外键 · 图 ${erUi.edges} 条线`);
+    check('模型图：没有连线时状态栏报 0 条关系',
+      /0 条关系/.test(erUi.stats), erUi.stats);
+    check('模型图：空图给出「从字段拉线」的提示',
+      /字段/.test(erUi.note), erUi.note || '没有提示');
+    check('模型图：每个字段行都带一个拉线的小圆点',
+      erUi.dots === (await cdp.eval(`[...document.querySelectorAll('.er-card')]
+        .reduce((n, c) => n + c.querySelectorAll('.er-col-dot').length, 0)`))
+      && erUi.dots > 0, `${erUi.dots} 个连接点`);
 
     // ---- 分组：建、改名、把表移进去 ----
     const groupsBefore = await cdp.eval(`document.querySelectorAll('.er-group').length`);
@@ -3777,272 +3772,503 @@ class CDP {
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
       }
-      await sleep(200);
-      const renamed = await cdp.eval(
-        `[...document.querySelectorAll('.er-group-name')].some(n => n.textContent === '回归测试组')`);
-      check('模型图：双击组标题就地改名', gotInput && renamed === true,
-        gotInput ? (renamed ? '已改名' : '名字没变') : '没弹出输入框');
+      const renamed = await waitFor(cdp,
+        `[...document.querySelectorAll('.er-group-name')].some(x => x.textContent === '回归测试组')`,
+        { label: '分组改名', timeout: 2000 });
+      check('模型图：双击组标题就地改名', !!gotInput && !!renamed,
+        gotInput ? '输入框出现 · 名字已改' : '没找到空组标题');
     } else {
       check('模型图：双击组标题就地改名', false, '没找到空组标题');
     }
 
-    // 用卡片右上角的 ⋯ 把第一张表移进刚建的组
-    const movedCard = await cdp.eval(`(async () => {
-      const card = document.querySelector('.er-card');
-      const name = card.dataset.table;
-      const btn = card.querySelector('.er-card-more');
-      const r = btn.getBoundingClientRect();
-      btn.click();      // 走的是和真实点击同一个 handler
-      await new Promise(res => setTimeout(res, 80));
-      const items = [...document.querySelectorAll('.er-menu-item')];
-      const item = items.find(x => x.textContent === '回归测试组');
-      if (!item) return { ok: false, items: items.map(x => x.textContent) };
-      item.click();
-      await new Promise(res => setTimeout(res, 120));
-      const g = erModel.groups.find(x => x.name === '回归测试组');
-      return { ok: true, name, inGroup: g ? g.tables.map(t => t.name) : [] };
+    // 把 er_basis 移进新组：点卡片右上角 ⋯ → 菜单里选组名。
+    // 先「适应画布」：新建分组会把视图移到新组上，别的卡片可能落在视口外，
+    // 真实鼠标点不到 —— 用户遇到这种情况也是先点这个按钮。
+    await cdp.eval(`document.getElementById('btnErFit').click()`);
+    await sleep(320);
+    const moveTo = await cdp.eval(`(() => {
+      const card = document.querySelector('.er-card[data-table="er_basis"]');
+      if (!card) return null;
+      const b = card.querySelector('.er-card-more');
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     })()`);
+    let movedCard = null;
+    if (moveTo) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: moveTo.x, y: moveTo.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: moveTo.x, y: moveTo.y, button: 'left' });
+      const menuOpen = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
+        { label: '卡片菜单', timeout: 2000 });
+      if (menuOpen) {
+        const itemPt = await cdp.eval(`(() => {
+          const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
+            .find(x => x.textContent === '回归测试组');
+          if (!b) return null;
+          const r = b.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()`);
+        if (itemPt) {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: itemPt.x, y: itemPt.y, button: 'left', clickCount: 1 });
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: itemPt.x, y: itemPt.y, button: 'left' });
+          await sleep(200);
+          // 卡片是画布上的绝对定位元素，不在组框的 DOM 里 —— 只能按包围盒判断
+          // 「它在不在那个框里」，不能 querySelector。
+          movedCard = await cdp.eval(`(() => {
+            const card = document.querySelector('.er-card[data-table="er_basis"]');
+            const g = [...document.querySelectorAll('.er-group')].find(x =>
+              (x.querySelector('.er-group-name') || {}).textContent === '回归测试组');
+            const group = erGroupOf(erTableByName('er_basis'));
+            if (!card || !g) return { group, inThat: false };
+            const cr = card.getBoundingClientRect(), gr = g.getBoundingClientRect();
+            return {
+              group,
+              inThat: cr.left >= gr.left - 1 && cr.right <= gr.right + 1
+                && cr.top >= gr.top - 1 && cr.bottom <= gr.bottom + 1,
+            };
+          })()`);
+        }
+      }
+    }
     check('模型图：卡片菜单能把表移进指定分组',
-      movedCard.ok === true && movedCard.inGroup.includes(movedCard.name),
-      movedCard.ok ? `${movedCard.name} → [${movedCard.inGroup.join(',')}]` : `菜单项：${(movedCard.items || []).join('/')}`);
+      !!movedCard && movedCard.inThat === true,
+      movedCard ? `归属=${movedCard.group}` : '菜单没打开');
 
-    // 点色点换色：色相挂在组框的 class 上（g0..g7），换一次就要变一次
-    const toneBefore = await cdp.eval(
-      `[...document.querySelectorAll('.er-group')].map(b => b.className).sort().join(';')`);
+    // 点色点换分组颜色
     const dotPt = await cdp.eval(`(() => {
-      const d = document.querySelector('.er-group-dot');
+      const d = [...document.querySelectorAll('.er-group')]
+        .map(g => ({ g, n: (g.querySelector('.er-group-name') || {}).textContent }))
+        .filter(x => x.n === '回归测试组')
+        .map(x => x.g.querySelector('.er-group-dot'))[0];
       if (!d) return null;
       const r = d.getBoundingClientRect();
-      return { x: Math.round(r.left + 3), y: Math.round(r.top + 3) };
+      return {
+        x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+        tone: d.closest('.er-group').className,
+      };
     })()`);
     if (dotPt) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dotPt.x, y: dotPt.y, button: 'left', clickCount: 1 });
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dotPt.x, y: dotPt.y, button: 'left' });
-      await sleep(150);
+      await sleep(200);
     }
-    const toneAfter = await cdp.eval(
-      `[...document.querySelectorAll('.er-group')].map(b => b.className).sort().join(';')`);
-    check('模型图：点色点换分组颜色', !!dotPt && toneBefore !== toneAfter,
-      `${toneBefore} → ${toneAfter}`);
+    const toneAfter = await cdp.eval(`(() => {
+      const g = [...document.querySelectorAll('.er-group')]
+        .find(x => (x.querySelector('.er-group-name') || {}).textContent === '回归测试组');
+      return g ? g.className : '';
+    })()`);
+    check('模型图：点色点换分组颜色', !!dotPt && toneAfter && toneAfter !== dotPt.tone,
+      `${dotPt ? dotPt.tone : '无'} → ${toneAfter}`);
 
-    await sleep(500);   // 防抖保存
-    const savedGroups = await cdp.eval(`fetch('/api/diagram').then(r => r.json())`);
+    /* 侧车是 300ms 防抖写的（erSave），点完色点立刻 fetch 会拿到上一版 ——
+       颜色还是 -1。所以这里等「服务端真的存下了这个颜色」，而不是 sleep 一段时间
+       赌它写完了：机器快慢不同，赌必然有一天又开始红。 */
+    const probeSaved = `fetch('/api/diagram').then(r => r.json()).then(d => {
+      const g = (d.groups || []).find(x => x.name === '回归测试组') || {};
+      return {
+        groups: (d.groups || []).length,
+        name: g.name || '',
+        color: g.color,
+        groupOfBasis: ((d.tables || {})[String(erTableByName('er_basis').id)] || {}).group || '',
+      };
+    })`;
+    const savedDoc = await waitFor(cdp, `${probeSaved}.then(d => (d.color >= 0 ? d : null))`,
+      { timeout: 4000, label: '侧车落盘' })
+      || await cdp.eval(probeSaved);
     check('模型图：分组名 + 颜色 + 归属写进侧车文件',
-      (savedGroups.groups || []).some(g => g.name === '回归测试组')
-      && Object.values(savedGroups.tables || {}).some(t => t.group),
-      `${(savedGroups.groups || []).length} 个组 · ${Object.keys(savedGroups.tables || {}).length} 张有记录`);
+      savedDoc.groups === 1 && savedDoc.name === '回归测试组'
+      && savedDoc.groupOfBasis !== '' && savedDoc.color >= 0,
+      `${savedDoc.groups} 组 · ${savedDoc.name} · color=${savedDoc.color}`);
 
-    // ---- 拖拽摆位 ----
-    //
-    // 位置断言**必须按表名定位**，不能拿「第一张卡片」：拖完一张表之后
-    // erHotGroup 会把这组排到最后画（DOM 顺序变了），下一次 querySelector
-    // 拿到的是另一张表，比出来的位置毫无意义（这条踩过）。
-    const dragName = await cdp.eval(`document.querySelector('.er-card').dataset.table`);
-    const posSel = `(() => { const c = document.querySelector(${JSON.stringify('.er-card[data-table="' + dragName + '"]')});
-      return c ? { left: c.style.left, top: c.style.top, name: c.dataset.table } : null; })()`;
-    const near = (a, b) => Math.abs(parseFloat(a) - parseFloat(b)) <= 2;
-
-    const posBefore = await cdp.eval(posSel);
-    const cbox = await cdp.eval(`(() => {
-      const r = document.querySelector(${JSON.stringify('.er-card[data-table="' + dragName + '"]')}).getBoundingClientRect();
-      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 12) };
+    // ---- 拖动摆位 ----
+    const posBefore = await cdp.eval(`(() => {
+      const c = document.querySelector('.er-card[data-table="er_fact"]');
+      const r = c.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 10), left: c.style.left };
     })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cbox.x, y: cbox.y, button: 'left', clickCount: 1 });
-    for (let i = 1; i <= 6; i++) {
-      await cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseMoved', x: cbox.x + i * 12, y: cbox.y + i * 8, button: 'left', buttons: 1,
-      });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: posBefore.x, y: posBefore.y, button: 'left', clickCount: 1 });
+    for (let i = 1; i <= 5; i++) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: posBefore.x + i * 24, y: posBefore.y + i * 12, button: 'left', buttons: 1 });
     }
-    await cdp.send('Input.dispatchMouseEvent', {
-      type: 'mouseReleased', x: cbox.x + 72, y: cbox.y + 48, button: 'left',
-    });
-    const posDragged = await cdp.eval(posSel);
-    check('模型图：拖动卡片能摆位置',
-      posDragged.left !== posBefore.left || posDragged.top !== posBefore.top,
-      `(${posBefore.left},${posBefore.top}) → (${posDragged.left},${posDragged.top})`);
-
-    await sleep(500);
-    const savedDoc = await cdp.eval(`fetch('/api/diagram').then(r => r.json())`);
-    const savedCount = Object.keys(savedDoc.tables || {}).filter(k => {
-      const t = savedDoc.tables[k];
-      return t.x !== null && t.x !== undefined;
-    }).length;
-    check('模型图：松手后整张图的位置落盘（不是只存被拖的那张）',
-      savedCount === erUi.cards, `${savedCount} 张有坐标 / 共 ${erUi.cards} 张`);
-
-    // 关掉再开：位置要还在，否则「保存成功」只是自说自话
-    await cdp.eval(`document.getElementById('btnErClose').click()`);
-    await cdp.eval(`document.getElementById('btnEr').click()`);
-    await waitFor(cdp, `!!document.querySelector('.er-card')`, { label: '模型图卡片', timeout: 4000 });
-    const posReopen = await cdp.eval(posSel);
-    check('模型图：重开后面板还在拖到的位置',
-      near(posReopen.left, posDragged.left) && near(posReopen.top, posDragged.top),
-      `存 ${posDragged.left},${posDragged.top} · 读 ${posReopen.left},${posReopen.top}`);
-
-    // 自动排列：只清坐标，分组名和颜色是设计信息，不该被一起抹掉
-    await cdp.eval(`document.getElementById('btnErAuto').click()`);
-    await sleep(150);
-    const posAuto = await cdp.eval(posSel);
-    const keptGroup = await cdp.eval(
-      `[...document.querySelectorAll('.er-group-name')].some(n => n.textContent === '回归测试组')`);
-    check('模型图：自动排列把卡片摆回自动位置，分组名留着',
-      near(posAuto.left, posBefore.left) && near(posAuto.top, posBefore.top) && keptGroup,
-      `${posAuto.left},${posAuto.top} / 原始 ${posBefore.left},${posBefore.top} · 组名${keptGroup ? '在' : '丢了'}`);
-
-    // ---- 逻辑关系：只写模型，绝不能改库 ----
-    const fkBefore = await cdp.eval(`(async () => {
-      const sch = await fetch('/api/schema').then(r => r.json());
-      return sch.tables.reduce((n, t) => n + (t.foreignKeys || []).length, 0);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: posBefore.x + 120, y: posBefore.y + 60, button: 'left' });
+    await sleep(400);
+    const posAfter = await cdp.eval(`(() => {
+      const c = document.querySelector('.er-card[data-table="er_fact"]');
+      return { left: c.style.left, top: c.style.top };
     })()`);
-    await cdp.eval(`document.getElementById('btnErLink').click()`);
-    const modalOpen = await waitFor(cdp,
-      `!document.getElementById('erLinkModal').classList.contains('hidden')`,
-      { label: '新增关系弹窗', timeout: 2000 });
-    let added = null;
-    if (modalOpen) {
-      added = await cdp.eval(`(() => {
-        const c = document.getElementById('erLinkChild');
-        const p = document.getElementById('erLinkParent');
-        if (!c.options.length || !p.options.length) return { ok: false, why: '没有可选表' };
-        c.value = c.options[0].value;
-        c.dispatchEvent(new Event('change'));
-        p.value = p.options[p.options.length - 1].value;
-        p.dispatchEvent(new Event('change'));
-        document.getElementById('erLinkCard').value = '11';
-        document.getElementById('btnErLinkSave').click();
-        return {
-          ok: true,
-          closed: document.getElementById('erLinkModal').classList.contains('hidden'),
-          links: erDoc.links.length,
-          dashed: document.querySelectorAll('.er-edge.manual').length,
-          hint: document.getElementById('erLinkHint').textContent,
-        };
+    check('模型图：拖动卡片能摆位置',
+      posAfter.left !== posBefore.left, `${posBefore.left} → ${posAfter.left}`);
+
+    // 和上面同理：防抖 300ms，固定 sleep 只是「大概率」写完，这里等着它写完。
+    const probePos = `fetch('/api/diagram').then(r => r.json()).then(d => {
+      const tb = d.tables || {};
+      const vals = Object.keys(tb).map(k => tb[k]).filter(c => c.x != null);
+      return { withPos: vals.length, total: Object.keys(tb).length };
+    })`;
+    const allSaved = await waitFor(cdp, `${probePos}.then(d => (d.total > 0 && d.withPos === d.total ? d : null))`,
+      { timeout: 4000, label: '坐标落盘' })
+      || await cdp.eval(probePos);
+    check('模型图：松手后整张图的位置落盘（不是只存被拖的那张）',
+      allSaved.withPos === allSaved.total && allSaved.total > 0,
+      `${allSaved.withPos}/${allSaved.total} 张有坐标`);
+
+    // ---- 拖字段建一条关系（这次改动的核心交互）----
+    await cdp.eval(`document.getElementById('btnErFit').click()`);
+    await sleep(300);
+    const dragGeom = await cdp.eval(`(() => {
+      const src = document.querySelector('.er-card[data-table="er_basis"] .er-col[data-col="id"] .er-col-dot');
+      const dst = document.querySelector('.er-card[data-table="er_fact"] .er-col[data-col="basis_id"]');
+      if (!src || !dst) return null;
+      const a = src.getBoundingClientRect(), b = dst.getBoundingClientRect();
+      return {
+        from: { x: Math.round(a.left + a.width / 2), y: Math.round(a.top + a.height / 2) },
+        to: { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) },
+      };
+    })()`);
+    let ghostOk = false;
+    let linkMenu = null;
+    if (dragGeom) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dragGeom.from.x, y: dragGeom.from.y, button: 'left', buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 6; i++) {
+        const k = i / 6;
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', buttons: 1, button: 'left',
+          x: Math.round(dragGeom.from.x + (dragGeom.to.x - dragGeom.from.x) * k),
+          y: Math.round(dragGeom.from.y + (dragGeom.to.y - dragGeom.from.y) * k),
+        });
+      }
+      // 拉的过程中：有一条虚线跟着走，目标行被点亮
+      ghostOk = await cdp.eval(`(() => {
+        const g = document.querySelector('.er-link-ghost');
+        const t = document.querySelector('.er-col.link-target');
+        return !!g && (g.getAttribute('d') || '').indexOf('M') === 0 && !!t;
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dragGeom.to.x, y: dragGeom.to.y, button: 'left', buttons: 0, clickCount: 1 });
+      await sleep(250);
+      linkMenu = await cdp.eval(`(() => {
+        const items = [...document.querySelectorAll('.er-menu .er-menu-item')].map(b => b.textContent);
+        return { items, head: (document.querySelector('.er-menu .er-menu-head') || {}).textContent || '' };
       })()`);
     }
-    check('模型图：可以加一条库里没有外键的逻辑关系（画成虚线）',
-      !!added && added.ok && added.closed && added.links === 1 && added.dashed === 1,
-      added ? `links=${added.links} dashed=${added.dashed} ${added.hint || ''}` : '弹窗没打开');
+    check('模型图：从字段行拖出关系时有一条虚线跟着走、目标行点亮',
+      ghostOk === true, ghostOk ? 'ok' : '没有临时线或目标高亮');
+    check('模型图：松手后立刻问基数，四个选项（含反向）',
+      !!linkMenu && linkMenu.items.length === 4
+      && linkMenu.items.some(t => t.indexOf('1 : N') === 0)
+      && linkMenu.items.some(t => t.indexOf('M : N') === 0),
+      linkMenu ? linkMenu.items.join(' | ') : '没有菜单');
 
-    const fkAfter = await cdp.eval(`(async () => {
-      const sch = await fetch('/api/schema').then(r => r.json());
-      return sch.tables.reduce((n, t) => n + (t.foreignKeys || []).length, 0);
-    })()`);
-    check('模型图：加逻辑关系不会改库（外键数不变）',
-      fkAfter === fkBefore, `外键 ${fkBefore} → ${fkAfter}`);
+    // 选「1 : N」
+    if (linkMenu) {
+      const oneToN = await cdp.eval(`(() => {
+        const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
+          .find(x => x.textContent.indexOf('1 : N') === 0);
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (oneToN) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: oneToN.x, y: oneToN.y, button: 'left', clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: oneToN.x, y: oneToN.y, button: 'left' });
+        await sleep(300);
+      }
+    }
 
-    /* 逻辑层能「否认」一条外键：只影响这张图画不画，不动库。
-       开发库平时没有外键（上面刚断言 0 → 0），这里现造一对，否则没有可
-       隐藏的对象。造完立刻删掉，别把两张测试表留给下一轮。 */
-    const made = await cdp.eval(`(async () => {
-      const q = sql => fetch('/api/query', { method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sql }) }).then(r => r.json()).catch(() => null);
-      await q('DROP TABLE er_demo_child');
-      await q('DROP TABLE er_demo_parent');
-      await q('CREATE TABLE er_demo_parent (id INTEGER PRIMARY KEY)');
-      await q('CREATE TABLE er_demo_child (id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES er_demo_parent(id))');
-      await loadSchema();          // 模型图画的是 schemaCache，DDL 之后得先刷它
-      await erLoadThenRender();
-      const sch = await fetch('/api/schema').then(r => r.json());
+    const built = await cdp.eval(`(() => {
+      const e = erModel.edges[0];
+      if (!e) return { edges: 0 };
+      const path = document.querySelector('.er-edge');
+      const p0 = path.getPointAtLength(0);
+      const p1 = path.getPointAtLength(path.getTotalLength());
+      const a = e.from._er, b = e.to._er;
       return {
-        cards: document.querySelectorAll('.er-card').length,
-        fk: sch.tables.reduce((n, t) => n + (t.foreignKeys || []).length, 0),
-        lines: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
-      };
-    })()`);
-    check('模型图：为了测「否认」造出来的外键已经画成实线',
-      made.fk === fkBefore + 1 && made.lines === made.fk,
-      `${made.fk} 个外键 · ${made.lines} 条实线`);
-
-    const hid = await cdp.eval(`(() => {
-      const e = erModel.edges.find(x => x.kind === 'fk');
-      if (!e) return { ok: false };
-      const solid = () => document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length;
-      const before = solid();
-      erHideEdge(e.id);
-      return {
-        ok: true, id: e.id, name: e.child.name, before,
-        after: solid(),
-        chip: (document.querySelector('.er-hidden-chip') || {}).textContent || '',
+        edges: erModel.edges.length,
+        card: e.card,
+        fromName: e.from.name, fromCol: e.fromCol,
+        toName: e.to.name, toCol: e.toCol,
+        startY: Math.round(p0.y * 10) / 10,
+        wantStartY: Math.round(erColY(a, e.from, e.fromCol) * 10) / 10,
+        endY: Math.round(p1.y * 10) / 10,
+        wantEndY: Math.round(erColY(b, e.to, e.toCol) * 10) / 10,
+        startX: Math.round(p0.x * 10) / 10,
+        rightEdge: Math.round((a.x + a.w) * 10) / 10,
+        leftEdge: Math.round(a.x * 10) / 10,
         stats: document.getElementById('erStats').textContent,
-        saved: erDoc.hidden.length,
+        corners: (path.getAttribute('d').match(/Q/g) || []).length,
       };
     })()`);
-    check('模型图：逻辑视图可以否认一条外键，线从图上消失',
-      hid.ok && hid.before === 1 && hid.after === 0 && hid.saved === 1,
-      hid.ok ? `${hid.before} → ${hid.after} 条实线 · 记下 ${hid.saved} 条` : '没有外键边');
-    check('模型图：隐藏之后状态栏给出「已隐藏」入口',
-      /已隐藏 1 条/.test(hid.chip || ''), hid.chip || '没有入口');
+    check('模型图：拖出来的关系落在两个字段上（1 : N）',
+      built.edges === 1 && built.card === '1N'
+      && built.fromName === 'er_basis' && built.fromCol === 'id'
+      && built.toName === 'er_fact' && built.toCol === 'basis_id',
+      `${built.fromName}.${built.fromCol} → ${built.toName}.${built.toCol} · ${built.card}`);
+    check('模型图：线的起点高度就是那一行的中心（不是卡片边缘）',
+      Math.abs(built.startY - built.wantStartY) < 0.7
+      && Math.abs(built.endY - built.wantEndY) < 0.7,
+      `起 ${built.startY}/${built.wantStartY} · 止 ${built.endY}/${built.wantEndY}`);
+    check('模型图：线的起点贴着那张卡片的边缘',
+      Math.abs(built.startX - built.rightEdge) < 0.7
+      || Math.abs(built.startX - built.leftEdge) < 0.7,
+      `x=${built.startX} 边缘 ${built.leftEdge}/${built.rightEdge}`);
+    check('模型图：连线是带圆角的直角折线',
+      built.corners > 0, `${built.corners} 个圆角`);
 
-    // 物理视图照画：那里问的是「库里有什么」，用户怎么看不算数。
-    await cdp.eval(`erToggleMode()`);
-    await waitFor(cdp, `erMode === 'physical'`, { label: '切到物理视图（隐藏后）', timeout: 2000 });
-    const physHid = await cdp.eval(`({
-      lines: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
-      chip: !!document.querySelector('.er-hidden-chip'),
+    /* 连线不许从别的卡片背后穿过去。
+       两边隔着别的组时，竖线本来会直接穿过中间那组的卡片（卡片画在连线上面，
+       看上去就是「线进了这张表又从另一边出来」）；两端恰好都在第 0 行时，
+       线还会正好压在对方某个字段行上，被误读成「接的是这一列」。
+       卡片坐标取 style 上的画布坐标，和 path 的用户坐标同一套，不受缩放影响。 */
+    const crossings = await cdp.eval(`(() => {
+      const cards = [...document.querySelectorAll('.er-card')].map(c => ({
+        t: c.dataset.table,
+        x: parseFloat(c.style.left), y: parseFloat(c.style.top),
+        w: parseFloat(c.style.width), h: parseFloat(c.style.height),
+      }));
+      const bad = [];
+      for (const p of document.querySelectorAll('.er-edge')) {
+        const own = [p.dataset.from.split('.')[0], p.dataset.to.split('.')[0]];
+        const len = p.getTotalLength();
+        for (let d = 0; d <= len; d += 4) {
+          const pt = p.getPointAtLength(d);
+          for (const c of cards) {
+            if (own.includes(c.t)) continue;
+            if (pt.x > c.x + 4 && pt.x < c.x + c.w - 4
+              && pt.y > c.y + 4 && pt.y < c.y + c.h - 4) {
+              bad.push(c.t);
+            }
+          }
+        }
+      }
+      return [...new Set(bad)];
+    })()`);
+    check('模型图：连线不穿过别的卡片（跨组时从卡片之间的缝里绕）',
+      crossings.length === 0, crossings.length ? '穿过 ' + crossings.join(' / ') : '0 处穿越');
+
+    check('模型图：状态栏跟着报 1 条关系',
+      /1 条关系/.test(built.stats), built.stats);
+
+    const marks = await cdp.eval(`(() => {
+      const ticks = document.querySelectorAll('.er-tick').length;
+      const crows = document.querySelectorAll('.er-crow').length;
+      return { ticks, crows };
+    })()`);
+    check('模型图：1 : N 一端一横、一端鸦爪',
+      marks.ticks === 1 && marks.crows === 1,
+      `一横 ${marks.ticks} · 鸦爪 ${marks.crows}`);
+
+    const fkUnchanged = await cdp.eval(`fetch('/api/schema').then(r => r.json()).then(s =>
+      s.tables.reduce((n, t) => n + (t.foreignKeys || []).length, 0))`);
+    check('模型图：画关系不会改库（外键数不变）',
+      fkUnchanged === demo.fk, `外键 ${demo.fk} → ${fkUnchanged}`);
+
+    // 点线改基数：1 : N → M : N，两端都该变成鸦爪
+    await cdp.eval(`document.getElementById('btnErFit').click()`);
+    await sleep(300);
+    const edgePt = await cdp.eval(`(() => {
+      const h = document.querySelector('.er-hit');
+      const L = h.getTotalLength();
+      const p = h.getPointAtLength(L / 2);
+      const svg = h.ownerSVGElement;
+      const m = svg.getScreenCTM();
+      const pt = svg.createSVGPoint();
+      pt.x = p.x; pt.y = p.y;
+      const s = pt.matrixTransform(m);
+      return { x: Math.round(s.x), y: Math.round(s.y) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: edgePt.x, y: edgePt.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: edgePt.x, y: edgePt.y, button: 'left' });
+    const edgeMenuOpen = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
+      { label: '连线菜单', timeout: 2000 });
+    let cardChanged = null;
+    if (edgeMenuOpen) {
+      const mPt = await cdp.eval(`(() => {
+        const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
+          .find(x => x.textContent.indexOf('改成 M : N') === 0);
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (mPt) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: mPt.x, y: mPt.y, button: 'left', clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: mPt.x, y: mPt.y, button: 'left' });
+        await sleep(250);
+      }
+      cardChanged = await cdp.eval(`({
+        card: erDoc.links[0] ? erDoc.links[0].card : '',
+        ticks: document.querySelectorAll('.er-tick').length,
+        crows: document.querySelectorAll('.er-crow').length,
+      })`);
+    }
+    check('模型图：点连线能改基数，M : N 两端都是鸦爪',
+      !!cardChanged && cardChanged.card === 'NM'
+      && cardChanged.ticks === 0 && cardChanged.crows === 2,
+      cardChanged ? `${cardChanged.card} · 一横 ${cardChanged.ticks} 鸦爪 ${cardChanged.crows}` : '菜单没开');
+
+    // 落盘 + 重开：关系必须还在（这条线是用户画的，不是从库推出来的）
+    // 等侧车里真的写着 NM 再关面板重开，否则重开读的是上一版（1N）。
+    await waitFor(cdp, `fetch('/api/diagram').then(r => r.json()).then(d => {
+      const ln = (d.links || [])[0];
+      return (d.links || []).length === 1 && ln.card === 'NM';
+    })`, { timeout: 4000, label: '改基数落盘' });
+    await cdp.eval(`document.getElementById('btnErClose').click()`);
+    await sleep(200);
+    await cdp.eval(`document.getElementById('btnEr').click()`);
+    await waitFor(cdp, `document.querySelectorAll('.er-card').length > 0`, { label: '重开模型图', timeout: 4000 });
+    const reopened = await cdp.eval(`({
+      edges: document.querySelectorAll('.er-edge').length,
+      links: erDoc.links.length,
+      card: erDoc.links[0] ? erDoc.links[0].card : '',
+      groups: document.querySelectorAll('.er-group').length,
     })`);
-    check('模型图：隐藏只作用于逻辑视图，物理视图照旧画出这条外键',
-      physHid.lines === made.fk && !physHid.chip,
-      `${physHid.lines} 条线 / ${made.fk} 个外键 · 入口 ${physHid.chip}`);
+    check('模型图：重开之后手画的关系还在（不会被库里的外键冲掉）',
+      reopened.edges === 1 && reopened.links === 1 && reopened.card === 'NM',
+      `${reopened.edges} 条线 · ${reopened.links} 条记录 · ${reopened.card}`);
+    check('模型图：重开之后分组也还在', reopened.groups === 2, `${reopened.groups} 个组框`);
 
-    await cdp.eval(`erToggleMode()`);
-    await waitFor(cdp, `erMode === 'logic'`, { label: '切回逻辑视图（恢复用）', timeout: 2000 });
+    // 删关系：点线 → 删除
+    const delPt = await cdp.eval(`(() => {
+      const h = document.querySelector('.er-hit');
+      const L = h.getTotalLength();
+      const p = h.getPointAtLength(L / 2);
+      const svg = h.ownerSVGElement;
+      const pt = svg.createSVGPoint();
+      pt.x = p.x; pt.y = p.y;
+      const s = pt.matrixTransform(svg.getScreenCTM());
+      return { x: Math.round(s.x), y: Math.round(s.y) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: delPt.x, y: delPt.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: delPt.x, y: delPt.y, button: 'left' });
+    const delMenu = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
+      { label: '删除菜单', timeout: 2000 });
+    let deleted = null;
+    if (delMenu) {
+      const dPt = await cdp.eval(`(() => {
+        const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
+          .find(x => x.textContent === '删除这条关系');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (dPt) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dPt.x, y: dPt.y, button: 'left', clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dPt.x, y: dPt.y, button: 'left' });
+        await sleep(250);
+      }
+      deleted = await cdp.eval(`({
+        edges: document.querySelectorAll('.er-edge').length,
+        links: erDoc.links.length,
+        stats: document.getElementById('erStats').textContent,
+      })`);
+    }
+    check('模型图：能从图上删掉一条关系',
+      !!deleted && deleted.edges === 0 && deleted.links === 0,
+      deleted ? `${deleted.edges} 条线 · ${deleted.stats}` : '菜单没开');
 
-    // 恢复走真实鼠标：点状态栏入口 → 点菜单里的那条关系。
+    // ---- 图上的表：收起一张，再放回来 ----
+    await cdp.eval(`document.getElementById('btnErFit').click()`);
+    await sleep(300);
+    const cardsBeforeHide = await cdp.eval(`document.querySelectorAll('.er-card').length`);
+    const hidePt = await cdp.eval(`(() => {
+      const card = document.querySelector('.er-card[data-table="er_fact"]');
+      if (!card) return null;
+      const b = card.querySelector('.er-card-more');
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    let hiddenState = null;
+    if (hidePt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hidePt.x, y: hidePt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hidePt.x, y: hidePt.y, button: 'left' });
+      const mOpen = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
+        { label: '收起菜单', timeout: 2000 });
+      if (mOpen) {
+        const hPt = await cdp.eval(`(() => {
+          const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
+            .find(x => x.textContent === '从图上收起');
+          if (!b) return null;
+          const r = b.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()`);
+        if (hPt) {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hPt.x, y: hPt.y, button: 'left', clickCount: 1 });
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hPt.x, y: hPt.y, button: 'left' });
+          await sleep(250);
+        }
+      }
+      hiddenState = await cdp.eval(`({
+        cards: document.querySelectorAll('.er-card').length,
+        chip: (document.querySelector('.er-hidden-chip') || {}).textContent || '',
+        saved: erDoc.tables[String(erTableByName('er_fact').id)].hidden === true,
+      })`);
+    }
+    check('模型图：能把一张表从图上收起，卡片少一张',
+      !!hiddenState && hiddenState.cards === cardsBeforeHide - 1 && hiddenState.saved,
+      hiddenState ? `${cardsBeforeHide} → ${hiddenState.cards} 张` : '菜单没开');
+    check('模型图：收起之后状态栏给出「已收起」入口',
+      !!hiddenState && /已收起 1 张/.test(hiddenState.chip),
+      hiddenState ? hiddenState.chip || '没有入口' : '—');
+
+    // 点入口打开表清单，勾回来
     const chipPt = await cdp.eval(`(() => {
       const b = document.querySelector('.er-hidden-chip');
       if (!b) return null;
       const r = b.getBoundingClientRect();
       return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     })()`);
+    let pickerRows = 0;
     if (chipPt) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: chipPt.x, y: chipPt.y, button: 'left', clickCount: 1 });
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: chipPt.x, y: chipPt.y, button: 'left' });
+      const pOpen = await waitFor(cdp,
+        `!document.getElementById('erTablesModal').classList.contains('hidden')`,
+        { label: '表清单弹窗', timeout: 2000 });
+      if (pOpen) {
+        pickerRows = await cdp.eval(`document.querySelectorAll('.er-tables-row').length`);
+        // 勾回 er_fact
+        await cdp.eval(`(() => {
+          const rows = [...document.querySelectorAll('.er-tables-row')];
+          const row = rows.find(r => (r.querySelector('.er-tables-name') || {}).textContent === 'er_fact');
+          if (!row) return false;
+          const cb = row.querySelector('input');
+          cb.checked = true;
+          cb.dispatchEvent(new Event('change'));
+          return true;
+        })()`);
+        await sleep(250);
+        await cdp.eval(`document.getElementById('btnErTablesDone').click()`);
+        await sleep(150);
+      }
     }
-    const restoreOpen = await waitFor(cdp,
-      `!!document.querySelector('.er-menu .er-menu-item')`,
-      { label: '已隐藏菜单', timeout: 2000 });
-    let restored = null;
-    if (restoreOpen) {
-      const itemPt = await cdp.eval(`(() => {
-        const b = document.querySelector('.er-menu .er-menu-item');
-        const r = b.getBoundingClientRect();
-        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
-      })()`);
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: itemPt.x, y: itemPt.y, button: 'left', clickCount: 1 });
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: itemPt.x, y: itemPt.y, button: 'left' });
-      await sleep(200);
-      restored = await cdp.eval(`({
-        lines: document.querySelectorAll('.er-edge:not(.manual):not(.m2m)').length,
-        hidden: erDoc.hidden.length,
-        chip: !!document.querySelector('.er-hidden-chip'),
-      })`);
-    }
-    check('模型图：从「已隐藏」里点回来，线恢复且记录清空',
-      !!restored && restored.lines === made.fk && restored.hidden === 0 && !restored.chip,
-      restored ? `${restored.lines} 条线 · 隐藏 ${restored.hidden}` : '菜单没打开');
+    const afterRestore = await cdp.eval(`({
+      cards: document.querySelectorAll('.er-card').length,
+      chip: !!document.querySelector('.er-hidden-chip'),
+      picker: document.getElementById('erTablesModal').classList.contains('hidden'),
+    })`);
+    check('模型图：表清单列出全部表，勾回来之后卡片复位',
+      pickerRows === demo.tables && afterRestore.cards === cardsBeforeHide && !afterRestore.chip,
+      `${pickerRows} 行 · 卡片 ${afterRestore.cards}/${cardsBeforeHide} · 入口${afterRestore.chip ? '还在' : '已消失'}`);
 
-    // 造的表不能留：删掉再重画一次，后面的断言按真实表数走。
+    // 造的两张表不能留：删掉再重画，后面的断言按真实表数走。
     await cdp.eval(`(async () => {
       const q = sql => fetch('/api/query', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql }) }).then(r => r.json()).catch(() => null);
-      await q('DROP TABLE er_demo_child');
-      await q('DROP TABLE er_demo_parent');
-      await loadSchema();          // 模型图画的是 schemaCache，DDL 之后得先刷它
+      await q('DROP TABLE er_fact');
+      await q('DROP TABLE er_basis');
+      await loadSchema();
       await erLoadThenRender();
     })()`);
     const cleaned = await cdp.eval(`(async () => {
       const sch = await fetch('/api/schema').then(r => r.json());
       return {
-        demo: sch.tables.filter(t => t.name.indexOf('er_demo') === 0).length,
+        demo: sch.tables.filter(t => t.name.indexOf('er_') === 0).length,
         cards: document.querySelectorAll('.er-card').length,
         tables: sch.tables.length,
+        links: erDoc.links.filter(l => true).length,
       };
     })()`);
-    check('模型图：临时表已删干净，卡片回到真实表数',
-      cleaned.demo === 0 && cleaned.cards === cleaned.tables,
-      `${cleaned.cards} 卡片 / ${cleaned.tables} 张表`);
+    check('模型图：临时表删掉之后，卡片和关系一起被剪掉',
+      cleaned.demo === 0 && cleaned.cards === cleaned.tables && cleaned.links === 0,
+      `${cleaned.cards} 卡片 / ${cleaned.tables} 张表 · ${cleaned.links} 条关系`);
 
     // 点卡片 → 回到编辑器并打开这张表（和侧栏点表名是同一个动作）。
     // 必须用真实鼠标：点开和拖动共用 pointerdown/up，直接 dispatchEvent('click')
@@ -4066,7 +4292,7 @@ class CDP {
     // 收拾干净：这一组断言往开发库里写了布局和分组，别留给下一次
     await cdp.eval(`fetch('/api/diagram', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version: 2, groups: [], tables: {}, links: [], overrides: {} }) })`);
+      body: JSON.stringify({ version: 3, groups: [], tables: {}, links: [] }) })`);
 
     // Esc 关闭：和监控/设置一样，一层一层退
     await cdp.eval(`document.getElementById('btnEr').click()`);

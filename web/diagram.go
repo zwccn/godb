@@ -15,28 +15,25 @@ import (
 
 // 模型图的侧车文件：<数据目录>/diagram.json。
 //
-// 为什么用侧车文件而不是建一张表：
-//   - 它是「图」的元数据，不是业务数据。混进 catalog 会让 SHOW TABLES、
-//     备份、空间统计里多出一张用户没建过的表；
-//   - 布局坏了最多是图难看，不该影响数据库能不能用 —— 独立文件可以
-//     直接删掉重来，也不用进 WAL。
+// 这里存的是**模型**，不是库的镜像。
 //
-// 这份文件存三类东西，性质不同，必须分得清：
-//   - **布局**（坐标、分组）：纯视觉，和库对不对得上都无所谓；
-//   - **逻辑关系**（links）与**基数标注**（overrides）：是用户对业务的判断，
-//     库里可能没有对应约束。前端靠实线/虚线把它们和外键区分开，
-//     绝不能混成一份「看起来像 schema」的数据；
-//   - **隐藏的边**（hidden）：同样是判断，方向相反 —— 用户说这条关系在他的
-//     模型里不成立。只作用于逻辑视图。
+// 逻辑图是源头：一张表归哪个域、哪两列之间是 1-N 还是 M-N，全由用户定。
+// 库里的外键在这份文件里没有位置 —— 它落到图上属于物理层，是第二阶段的事。
+// 所以这里没有「外键边」「基数标注」「被否认的约束」这些概念，只有四样东西：
+// 分组、坐标、表在不在图上、以及用户画的端点对端点关系。
+//
+// 为什么不把外键也记进来「方便同步」：一旦这张图能自动长出线，它就不再是
+// 模型而是快照了 —— 用户删掉一条线，下次打开又回来，那这张图谁也不敢改。
 //
 // 表一律用**表 ID** 做键，不用表名：RENAME 之后布局和归属要跟着那张表走。
 // ID 只增不复用（见 catalog.Table.ID）。
 const diagramFile = "diagram.json"
 
 const (
-	// v1 是「组拥有表 + 外键自动分组」，v2 反转成「表拥有组」，并加了
-	// 逻辑关系和基数标注。读 v1 会自动迁移，不需要用户做任何事。
-	diagramVersion = 2
+	// v1「组拥有表 + 按外键自动分组」→ v2「表拥有组 + 手画关系 + 外键边」
+	// → v3「关系一律端点对端点，去掉一切从外键推导出来的东西」。
+	// 读旧版本自动迁移，不需要用户做任何事。
+	diagramVersion = 3
 
 	// 画布坐标的合理上限。超过这个值的不是图，是坏数据 —— 一个 1e300
 	// 的坐标会让整个 canvas 撑到浏览器算不出来的尺寸，表现成「打开就白屏」。
@@ -45,13 +42,13 @@ const (
 	diagramMaxBody = 1 << 20
 	// 分组名最长多少字符（按 rune 算）。够写「订单与结算」这类域名字了。
 	diagramMaxName = 40
-	// 逻辑关系条数上限。手工编辑的文件塞几万条会把前端画到卡死，
+	// 关系条数上限。手工编辑的文件塞几万条会把前端画到卡死，
 	// 一张模型图也放不下这么多线。
 	diagramMaxLinks = 2000
 )
 
 // 基数取值。只认这三种：前端和下发的走同一份定义，写错的一律退回 1N
-// （多对一视觉上最保守，不会让人以为唯一）。
+// （一对多视觉上最保守，不会让人以为唯一）。
 const (
 	card1to1 = "11"
 	card1toN = "1N"
@@ -71,6 +68,15 @@ type diagramCard struct {
 	Group string   `json:"group,omitempty"`
 	X     *float64 `json:"x,omitempty"`
 	Y     *float64 `json:"y,omitempty"`
+	// Hidden 是「用户把这张表从图上收起了」。
+	//
+	// 为什么记「收起」而不是「加入」：表本身只能来自库，默认全在图上，
+	// 否则第一次打开是一张空白画布，用户不知道该干什么。收起是个明确的
+	// 减动作，语义比「加入」清楚。
+	//
+	// 记录要留着：表被 DROP 掉之后这条记录会跟着剪掉，但用户重新建一张
+	// 同名的表时，它是一张新 ID 的表，本来就该重新出现。
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 func roundPtr(v float64) *float64 {
@@ -84,15 +90,28 @@ type diagramGroup struct {
 	Color int    `json:"color"` // 0..7 是固定色相；-1 表示「按顺序取」
 }
 
-// diagramLink 是用户手画的一条关系：库里没有对应外键。
-// 前端用虚线画，和实线的外键边区分开 —— 两种真相混在一起就没人敢信这张图了。
+// diagramEndpoint 是关系的一端：哪张表、哪几列。
+//
+// 用列名而不是列序号：ALTER TABLE 之后序号会漂，列名至少还能对上；
+// 列被删掉时这条关系随之失效，那是应该失效的 —— 它指向的东西已经不存在。
+type diagramEndpoint struct {
+	Table   int64    `json:"table"`
+	Columns []string `json:"columns"`
+}
+
+// diagramLink 是用户画的一条关系，两个端点都落在字段上。
+//
+// 没有实线/虚线之分。这条线不声称库里有对应约束，它只声称「我理解的模型
+// 是这样」；反过来，库里有的外键也不保证出现在图上 —— 那是用户的选择。
+//
+// Card 描述**从 From 看向 To** 的基数：'1N' = From 端一行、To 端多行。
+// 「一对多」和「多对一」因此是同一个存储值，但方向没有丢 —— 将来生成外键时
+// To 端是子表，方向得留得住。
 type diagramLink struct {
-	ID         string   `json:"id"`
-	Child      int64    `json:"child"`
-	Columns    []string `json:"columns"`
-	Parent     int64    `json:"parent"`
-	RefColumns []string `json:"refColumns"`
-	Card       string   `json:"card"`
+	ID   string          `json:"id"`
+	From diagramEndpoint `json:"from"`
+	To   diagramEndpoint `json:"to"`
+	Card string          `json:"card"`
 }
 
 type diagramDoc struct {
@@ -100,22 +119,6 @@ type diagramDoc struct {
 	Groups  []diagramGroup         `json:"groups,omitempty"`
 	Tables  map[string]diagramCard `json:"tables,omitempty"`
 	Links   []diagramLink          `json:"links,omitempty"`
-	// Overrides 是「用户改过的基数」，键是外键边的稳定标识
-	// fk|<子表ID>|<列名,列名>，值是三种基数之一。
-	//
-	// 为什么不直接改 schema：改约束是数据变更，得有 WAL、锁、校验、
-	// 失败回滚；而「我认为这里业务上是 1-1」只是个标注。把标注写进
-	// 侧车，改错了删掉文件就恢复，也不会有半条约束留在库里。
-	Overrides map[string]string `json:"overrides,omitempty"`
-	// Hidden 是「用户说这条关系在我的模型里不成立」的边。
-	//
-	// 键和边本身同一套拼法：fk|<子表ID>|<列名,列名> 或 j|<关联表ID>。
-	// 只影响**逻辑视图画不画这条线**，不动库 —— 物理视图照实画，那里问的
-	// 是「库里有什么」，用户怎么看不算数。
-	//
-	// 为什么逻辑层必须能删边：模型层的判断是「这两张表业务上有没有关系」，
-	// 和外键存不存在是两句话。不许否认，就是让约束反过来管住模型。
-	Hidden []string `json:"hidden,omitempty"`
 }
 
 // diagramMu 让「读 → 剪枝 → 写回」这一串不互相踩。
@@ -126,52 +129,54 @@ func validCoord(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0) && math.Abs(v) <= diagramMaxCoord
 }
 
-// fkEdgeKey 是外键边的稳定标识：子表 ID + 列名。
+// diagramLinkV2 是 v2 的边形状：child 指向 parent，列数组分别挂在两端。
 //
-// 不用外键名：名字可能由引擎自动生成，也可能被 ALTER 掉，而「哪几列指向
-// 谁」才是这条边本身。RENAME COLUMN 会让它变，那时标注失效、退回推导值，
-// 这是可接受的 —— 列都改了名，标注本来就该重新看一眼。
-func fkEdgeKey(childID int64, cols []string) string {
-	return "fk|" + strconv.FormatInt(childID, 10) + "|" + strings.Join(cols, ",")
+// 它读进来只为一件事：把用户手画过的关系搬到 v3 的端点结构上。
+// v2 里从外键推导出来的那些边不在这份数据里（它们是每次渲染时现算的），
+// 所以迁移不会把「库的结构」偷偷塞进模型。
+type diagramLinkV2 struct {
+	ID         string   `json:"id"`
+	Child      int64    `json:"child"`
+	Columns    []string `json:"columns"`
+	Parent     int64    `json:"parent"`
+	RefColumns []string `json:"refColumns"`
+	Card       string   `json:"card"`
 }
 
-// 模型图里「被隐藏的边」用同一套键：外键边用 fk|…，折叠出来的多对多用 j|<关联表ID>。
-// 手工画的逻辑关系不进这里 —— 它本来就能直接删掉，没有「隐藏」这层。
-func validHiddenKey(k string) bool {
-	if strings.HasPrefix(k, "fk|") {
-		return true
+// toV3 把「child 指向 parent」翻成「From 看向 To」。
+//
+// 两种形状对 card 的理解正好相反：v2 的 '1N' 说的是「子端多」，
+// v3 的 '1N' 说的是「From 端一」。所以 1:N 这一支要把父表放到 From，
+// 否则迁完之后每条一对多都会画反。
+func (v2 diagramLinkV2) toV3() diagramLink {
+	if v2.Card == card1toN {
+		return diagramLink{
+			ID:   v2.ID,
+			From: diagramEndpoint{Table: v2.Parent, Columns: v2.RefColumns},
+			To:   diagramEndpoint{Table: v2.Child, Columns: v2.Columns},
+			Card: card1toN,
+		}
 	}
-	if strings.HasPrefix(k, "j|") {
-		id, err := strconv.ParseInt(k[2:], 10, 64)
-		return err == nil && id > 0
+	// 1:1 和 M:N 两端对称，方向随便定，保持 v2 的子→父更接近用户当年的画法。
+	return diagramLink{
+		ID:   v2.ID,
+		From: diagramEndpoint{Table: v2.Child, Columns: v2.Columns},
+		To:   diagramEndpoint{Table: v2.Parent, Columns: v2.RefColumns},
+		Card: v2.Card,
 	}
-	return false
 }
 
-// hiddenKeyAlive 判断一条隐藏记录还指不指得着实物。
+// diagramRaw 是磁盘上的原始形状，同时兼容 v1 / v2 / v3。
 //
-// fk|… 要求这条外键还在（DROP / RENAME COLUMN 之后它就不在了，标注该失效）；
-// j|… 只能验到表还在 —— 折叠是前端按外键算出来的，服务端不重复实现一遍
-// 「四条件」。宁可在那边多一句判断，也不要两处逻辑各写一份、慢慢跑偏。
-func hiddenKeyAlive(k string, ids map[int64]bool, fkKeys map[string]bool) bool {
-	if strings.HasPrefix(k, "fk|") {
-		return fkKeys[k]
-	}
-	id, err := strconv.ParseInt(k[2:], 10, 64)
-	return err == nil && ids[id]
-}
-
-// diagramRaw 是磁盘上的原始形状，同时兼容 v1 和 v2。
-//
-// v1 用 cards（坐标）+ groups[].tables（组拥有表）；v2 用 tables（表拥有组）。
-// 用一个 union 结构一次解完，比先探版本号再解两遍省事，也少一处漏字段的机会。
+// 用一个 union 结构一次解完，比先探版本号再解三遍省事，也少一处漏字段的机会。
 type diagramRaw struct {
-	Version   int                    `json:"version"`
-	Tables    map[string]diagramCard `json:"tables,omitempty"`
-	Groups    []diagramGroupRaw      `json:"groups,omitempty"`
-	Links     []diagramLink          `json:"links,omitempty"`
-	Overrides map[string]string      `json:"overrides,omitempty"`
-	Hidden    []string               `json:"hidden,omitempty"`
+	Version int                    `json:"version"`
+	Tables  map[string]diagramCard `json:"tables,omitempty"`
+	Groups  []diagramGroupRaw      `json:"groups,omitempty"`
+
+	// links 在 v2 和 v3 里同名不同形，先当原始字节收着，再由 decodeLinks
+	// 按形状分派 —— 同一个 json 键没法挂两个 Go 字段。
+	Links json.RawMessage `json:"links,omitempty"`
 
 	// 以下只有 v1 才有
 	Cards map[string]struct {
@@ -187,15 +192,47 @@ type diagramGroupRaw struct {
 	Tables []int64 `json:"tables,omitempty"` // v1：组里的成员
 }
 
-// toDoc 把原始形状整成 v2。返回是否发生了迁移（迁移过就要写回，
+// decodeLinks 认两种边形状。
+//
+// 不看 version 字段而看形状，是因为手工编辑过的文件版本号常常没改；
+// 而「端点有没有表」这件事骗不了人。
+func decodeLinks(raw json.RawMessage) []diagramLink {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var probe []map[string]json.RawMessage
+	if json.Unmarshal(raw, &probe) != nil {
+		return nil
+	}
+
+	out := make([]diagramLink, 0, len(probe))
+	for _, m := range probe {
+		b, err := json.Marshal(m)
+		if err != nil {
+			continue
+		}
+		if _, ok := m["from"]; ok {
+			var ln diagramLink
+			if json.Unmarshal(b, &ln) == nil {
+				out = append(out, ln)
+			}
+			continue
+		}
+		var v2 diagramLinkV2
+		if json.Unmarshal(b, &v2) == nil {
+			out = append(out, v2.toV3())
+		}
+	}
+	return out
+}
+
+// toDoc 把原始形状整成 v3。返回是否发生了迁移（迁移过就要写回，
 // 否则每次打开都要重新折腾一遍旧格式）。
 func (raw *diagramRaw) toDoc() (diagramDoc, bool) {
 	doc := diagramDoc{
-		Version:   diagramVersion,
-		Tables:    map[string]diagramCard{},
-		Links:     raw.Links,
-		Overrides: raw.Overrides,
-		Hidden:    raw.Hidden,
+		Version: diagramVersion,
+		Tables:  map[string]diagramCard{},
+		Links:   decodeLinks(raw.Links),
 	}
 	migrated := raw.Version < diagramVersion
 
@@ -206,7 +243,7 @@ func (raw *diagramRaw) toDoc() (diagramDoc, bool) {
 	for k, c := range raw.Tables {
 		doc.Tables[k] = c
 	}
-	// v1 的坐标字段叫 cards，形状和 v2 的 tables 一样，只是没有 group。
+	// v1 的坐标字段叫 cards，形状和 v3 的 tables 一样，只是没有 group。
 	for k, c := range raw.Cards {
 		if _, ok := doc.Tables[k]; ok {
 			continue
@@ -293,27 +330,34 @@ func (doc *diagramDoc) normalize() {
 		if c.Group != "" && !seenGroup[c.Group] {
 			c.Group = ""
 		}
-		doc.Tables[k] = diagramCard{Group: c.Group, X: c.X, Y: c.Y}
+		doc.Tables[k] = diagramCard{Group: c.Group, X: c.X, Y: c.Y, Hidden: c.Hidden}
 	}
 
 	seenLink := map[string]bool{}
 	links := doc.Links[:0]
 	for _, ln := range doc.Links {
 		ln.ID = strings.TrimSpace(ln.ID)
-		if ln.ID == "" || seenLink[ln.ID] || ln.Child <= 0 || ln.Parent <= 0 {
+		if ln.ID == "" || seenLink[ln.ID] {
 			continue
 		}
-		if len(ln.Columns) == 0 || len(ln.Columns) != len(ln.RefColumns) {
+		from := cleanEndpoint(ln.From)
+		to := cleanEndpoint(ln.To)
+		if from == nil || to == nil {
 			continue
 		}
-		ln.Columns = trimAll(ln.Columns)
-		ln.RefColumns = trimAll(ln.RefColumns)
-		if hasEmpty(ln.Columns) || hasEmpty(ln.RefColumns) {
+		// 同一张表的同一列自己连自己，什么也表达不了。
+		// 同表不同列是合法的：employees.manager_id → employees.id 就是它。
+		if from.Table == to.Table && sameCols(from.Columns, to.Columns) {
+			continue
+		}
+		// 两端列数必须相等：一列不可能对上两列，那是两条关系被写进了一条。
+		if len(from.Columns) != len(to.Columns) {
 			continue
 		}
 		if !validCard(ln.Card) {
 			ln.Card = card1toN
 		}
+		ln.From, ln.To = *from, *to
 		seenLink[ln.ID] = true
 		links = append(links, ln)
 		if len(links) >= diagramMaxLinks {
@@ -321,35 +365,32 @@ func (doc *diagramDoc) normalize() {
 		}
 	}
 	doc.Links = links
+	if len(doc.Links) == 0 {
+		doc.Links = nil
+	}
+}
 
-	for k, v := range doc.Overrides {
-		// 键必须是我们认得的形状，否则前端查不到、留着只会越积越多。
-		if !strings.HasPrefix(k, "fk|") || !validCard(v) {
-			delete(doc.Overrides, k)
-		}
+func cleanEndpoint(e diagramEndpoint) *diagramEndpoint {
+	if e.Table <= 0 || len(e.Columns) == 0 {
+		return nil
 	}
-	if len(doc.Overrides) == 0 {
-		doc.Overrides = nil
+	cols := trimAll(e.Columns)
+	if hasEmpty(cols) {
+		return nil
 	}
+	return &diagramEndpoint{Table: e.Table, Columns: cols}
+}
 
-	seenHide := map[string]bool{}
-	hid := doc.Hidden[:0]
-	for _, k := range doc.Hidden {
-		k = strings.TrimSpace(k)
-		// 形状不认得的键前端永远查不到，留着只会越积越多。
-		if k == "" || seenHide[k] || !validHiddenKey(k) {
-			continue
-		}
-		seenHide[k] = true
-		hid = append(hid, k)
-		if len(hid) >= diagramMaxLinks {
-			break
+func sameCols(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
 		}
 	}
-	doc.Hidden = hid
-	if len(doc.Hidden) == 0 {
-		doc.Hidden = nil
-	}
+	return true
 }
 
 func trimAll(in []string) []string {
@@ -369,18 +410,25 @@ func hasEmpty(in []string) bool {
 	return false
 }
 
-// prune 把已经不存在的表从布局里摘掉，返回是否有改动（调用方据此决定要不要写回）。
+// prune 把已经不存在的表、列和关系摘掉，返回是否有改动
+// （调用方据此决定要不要写回）。
 //
-// 这是「生命周期剪枝」的落点：DROP TABLE 之后没人会去通知这张图，等下次
-// 打开时按当前 catalog 对一遍账最省事。RENAME 不会命中这里 —— ID 没变。
+// 这是「生命周期剪枝」的落点：DROP TABLE / DROP COLUMN 之后没人会去通知
+// 这张图，等下次打开时按当前 catalog 对一遍账最省事。RENAME 不会命中这里
+// —— 表和列的名字都跟着 catalog 变，ID 和「哪一列」都还在。
 //
 // 分组本身**不因为空了就删**：用户建了组还没放表，那也是他的设计意图，
 // 顺手删掉会让"新建分组"看起来毫无反应。
-func (doc *diagramDoc) prune(ids map[int64]bool, fkKeys map[string]bool) bool {
+func (doc *diagramDoc) prune(cols map[int64]map[string]bool) bool {
 	changed := false
 	for k := range doc.Tables {
 		id, err := strconv.ParseInt(k, 10, 64)
-		if err != nil || !ids[id] {
+		if err != nil {
+			delete(doc.Tables, k)
+			changed = true
+			continue
+		}
+		if _, ok := cols[id]; !ok {
 			delete(doc.Tables, k)
 			changed = true
 		}
@@ -389,7 +437,7 @@ func (doc *diagramDoc) prune(ids map[int64]bool, fkKeys map[string]bool) bool {
 	seen := map[string]bool{}
 	links := doc.Links[:0]
 	for _, ln := range doc.Links {
-		if !ids[ln.Child] || !ids[ln.Parent] || seen[ln.ID] {
+		if seen[ln.ID] || !endpointAlive(ln.From, cols) || !endpointAlive(ln.To, cols) {
 			changed = true
 			continue
 		}
@@ -397,48 +445,44 @@ func (doc *diagramDoc) prune(ids map[int64]bool, fkKeys map[string]bool) bool {
 		links = append(links, ln)
 	}
 	doc.Links = links
-
-	for k := range doc.Overrides {
-		// 外键可能已被 DROP 或 RENAME COLUMN 改掉，标注跟着失效 ——
-		// 留着一个指向不存在约束的标注，下次它可能恰好和另一条边同名。
-		if !fkKeys[k] {
-			delete(doc.Overrides, k)
-			changed = true
-		}
-	}
-	if len(doc.Overrides) == 0 {
-		doc.Overrides = nil
-	}
-
-	hid := doc.Hidden[:0]
-	for _, k := range doc.Hidden {
-		if !hiddenKeyAlive(k, ids, fkKeys) {
-			changed = true
-			continue
-		}
-		hid = append(hid, k)
-	}
-	doc.Hidden = hid
-	if len(doc.Hidden) == 0 {
-		doc.Hidden = nil
+	if len(doc.Links) == 0 {
+		doc.Links = nil
 	}
 	return changed
 }
 
-// tableIndex 把「表 ID」和「外键边的键」各做成一个集合，供剪枝对账。
-func tableIndex(d *db.DB) (map[int64]bool, map[string]bool) {
-	tables := d.Tables()
-	ids := make(map[int64]bool, len(tables))
-	fks := map[string]bool{}
-	for _, t := range tables {
-		if t.ID > 0 {
-			ids[t.ID] = true
-		}
-		for _, fk := range t.ForeignKeys {
-			fks[fkEdgeKey(t.ID, fk.Columns)] = true
+// endpointAlive 判断关系的一端还指不指得着实物。
+//
+// 列名大小写不敏感：PG 会把未加引号的标识符折成小写，用户手工改文件时
+// 写成 CUSTOMER_ID 也不该让整条关系消失。
+func endpointAlive(e diagramEndpoint, cols map[int64]map[string]bool) bool {
+	have, ok := cols[e.Table]
+	if !ok {
+		return false
+	}
+	for _, c := range e.Columns {
+		if !have[strings.ToLower(c)] {
+			return false
 		}
 	}
-	return ids, fks
+	return true
+}
+
+// tableIndex 把「表 ID → 列名（小写）」做成一张对照表，供剪枝对账。
+func tableIndex(d *db.DB) map[int64]map[string]bool {
+	tables := d.Tables()
+	out := make(map[int64]map[string]bool, len(tables))
+	for _, t := range tables {
+		if t.ID <= 0 {
+			continue
+		}
+		set := make(map[string]bool, len(t.Columns))
+		for _, c := range t.Columns {
+			set[strings.ToLower(c.Name)] = true
+		}
+		out[t.ID] = set
+	}
+	return out
 }
 
 func diagramPath(d *db.DB) string {
@@ -458,8 +502,7 @@ func loadDiagram(d *db.DB) diagramDoc {
 			doc.normalize()
 		}
 	}
-	ids, fks := tableIndex(d)
-	if doc.prune(ids, fks) {
+	if doc.prune(tableIndex(d)) {
 		migrated = true
 	}
 	if migrated {
@@ -528,8 +571,7 @@ func (s *Server) handleDiagram(w http.ResponseWriter, r *http.Request) {
 		}
 		doc.Version = diagramVersion
 		doc.normalize()
-		ids, fks := tableIndex(d)
-		doc.prune(ids, fks)
+		doc.prune(tableIndex(d))
 		diagramMu.Lock()
 		err := saveDiagram(d, doc)
 		diagramMu.Unlock()

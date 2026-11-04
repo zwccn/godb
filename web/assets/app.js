@@ -8900,8 +8900,16 @@ api('/api/bench/status').then(d => {
 
 /* ---------------- 模型图 ---------------- */
 
-// 布局常量集中在一处：卡片宽高直接决定连线的锚点位置，
-// 散在三处改一个数字就要跟着改另外两处。
+// 模型图是**逻辑模型**，不是库的镜像。
+//
+// 一张表归哪个域、哪两个字段之间是 1-1 / 1-N / M-N，全部由人定；图上没有
+// 「库里有约束 / 没有约束」这层区分，因为逻辑层不宣称任何约束。库里的外键
+// 在这张图上不出现 —— 把它变成物理图是第二阶段的事。
+//
+// 这条界线不是为了省事：一旦图上的线能从库自动长出来，用户删掉一条，下次
+// 打开它又回来了，那这张图谁也不敢改。模型层必须先能被自由否认。
+
+// 布局常量集中在一处：卡片宽高决定连线锚点，字段行高决定「线接在哪一行上」。
 const ER = {
   cardW: 236,          // 卡片宽：刚好放下「employee_benefits」+「NUMERIC(12,2)」
   headH: 28,           // 标题栏高
@@ -8914,18 +8922,22 @@ const ER = {
   rowMax: 1520,        // 一行最多摆多宽，超了换行
   maxRows: 14,         // 卡片最多显示多少行字段，多了折成「还有 N 列」
   colH: 820,           // 组内一列最多多高，超了就分列
-  colGap: 64,          // 列间距：同列的曲线要在这里绕过去
-  chanW: 44,           // 组框左侧的走线通道：同列不相邻的线从这儿绕
+  colGap: 64,          // 列间距：两侧对接的线在这里竖着走
+  chanW: 44,           // 组框左侧的走线通道：往左出线的卡片要留出这段
+  stub: 20,            // 连线离开字段行后先横着走这么一段，再拐弯
+  laneGap: 7,          // 同一侧多条线之间的通道间距
+  corner: 7,           // 折角圆角半径
 };
 
 // 视图状态（缩放 / 平移），和面板开合分开存：关了再开，
 // 除非手动缩放否则每次都重新适应画布。
 let erView = { zoom: 1, panX: 0, panY: 0 };
-let erModel = null;      // 当前渲染出来的分组 / 边 / 画布尺寸
+let erModel = null;      // 当前渲染出来的表 / 分组 / 边 / 画布尺寸
 let erPan = null;        // 拖动画布的临时状态
 let erDrag = null;       // 拖动某张卡片的临时状态
+let erLinkDrag = null;   // 从字段行拉关系的临时状态
 
-// erDoc 是「模型元数据」：分组、卡片归属与坐标、逻辑关系、基数标注。
+// erDoc 是「模型元数据」：分组、卡片归属与坐标、表在不在图上、字段之间的关系。
 // 存在服务端的 <数据目录>/diagram.json 里，键一律是**表 ID**（字符串化），
 // 因为 RENAME 之后归属和位置要跟着那张表走，用表名做键的话改个名就散了。
 let erDoc = null;        // null = 还没从服务端拉过
@@ -8933,30 +8945,38 @@ let erSaveTimer = 0;     // 保存的防抖句柄
 let erHotGroup = '';     // 最近操作过的那一组，画在最上层
 let erMenuEl = null;     // 当前打开的浮层菜单
 
-// 逻辑视图 / 物理视图。
-//
-// 逻辑视图是「我理解的模型」：折叠纯关联表、显示自己画的虚线关系，
-// 也可以否认一条库里的外键（hidden）；
-// 物理视图是「库真实长什么样」：一张表不少，一条逻辑关系不画，基数只报推导值。
-// 两者不能混着看 —— 照逻辑图去写 SQL 一定会踩到库里不存在的约束。
-let erMode = 'logic';
-try {
-  if (localStorage.getItem('godb.er.mode') === 'physical') erMode = 'physical';
-} catch (e) { /* 隐私模式下 localStorage 会抛，忽略就是默认逻辑视图 */ }
-
 function erTKey(t) { return String(t.id || 0); }
 
 function erValidCard(v) { return v === '11' || v === '1N' || v === 'NM'; }
 
-// erFkId 是外键边的稳定标识：子表 ID + 列名。
-// 和服务端 web/diagram.go 的 fkEdgeKey 必须是同一套拼法，否则基数标注读回来对不上。
-function erFkId(tableID, cols) { return 'fk|' + tableID + '|' + cols.join(','); }
+function erTableByName(name) {
+  for (const t of (schemaCache || [])) {
+    if (t.name === name) return t;
+  }
+  return null;
+}
+
+function erSameCols(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (String(a[i]).toLowerCase() !== String(b[i]).toLowerCase()) return false;
+  }
+  return true;
+}
+
+function erCleanEndpoint(e) {
+  if (!e || !Number.isFinite(e.table) || e.table <= 0) return null;
+  if (!Array.isArray(e.columns) || !e.columns.length) return null;
+  const cols = e.columns.map(c => String(c).trim());
+  if (cols.some(c => !c)) return null;
+  return { table: e.table, columns: cols };
+}
 
 // erNormalizeDoc 把服务端/本地缓存来的东西整成可用的形状。
 // 服务端已经清洗过一遍，这里再洗一遍是因为 erDoc 也会被本地的交互改写，
 // 与其在十几处调用点各写一遍校验，不如进出口各洗一次。
 function erNormalizeDoc(d) {
-  const out = { version: 2, groups: [], tables: {}, links: [], overrides: {}, hidden: [] };
+  const out = { version: 3, groups: [], tables: {}, links: [] };
   if (!d) return out;
 
   if (Array.isArray(d.groups)) {
@@ -8983,46 +9003,49 @@ function erNormalizeDoc(d) {
         group: gids.has(c.group) ? c.group : '',
         x: hasPos ? c.x : null,
         y: hasPos ? c.y : null,
+        hidden: c.hidden === true,
       };
     }
   }
 
   if (Array.isArray(d.links)) {
+    const seen = new Set();
     for (const ln of d.links) {
-      if (!ln || !ln.id || !Number.isFinite(ln.child) || !Number.isFinite(ln.parent)) continue;
-      if (!Array.isArray(ln.columns) || !Array.isArray(ln.refColumns)) continue;
-      if (!ln.columns.length || ln.columns.length !== ln.refColumns.length) continue;
+      if (!ln || !ln.id) continue;
+      const id = String(ln.id);
+      if (seen.has(id)) continue;
+      const from = erCleanEndpoint(ln.from);
+      const to = erCleanEndpoint(ln.to);
+      if (!from || !to) continue;
+      // 一列对两列不是一条关系，是两条被写进了一条。
+      if (from.columns.length !== to.columns.length) continue;
+      // 同表同列自连什么也表达不了；同表不同列是合法的（上级编号）。
+      if (from.table === to.table && erSameCols(from.columns, to.columns)) continue;
+      seen.add(id);
       out.links.push({
-        id: String(ln.id),
-        child: ln.child,
-        columns: ln.columns.map(String),
-        parent: ln.parent,
-        refColumns: ln.refColumns.map(String),
+        id,
+        from, to,
         card: erValidCard(ln.card) ? ln.card : '1N',
       });
     }
   }
-
-  if (d.overrides && typeof d.overrides === 'object') {
-    for (const k in d.overrides) {
-      if (k.indexOf('fk|') !== 0 || !erValidCard(d.overrides[k])) continue;
-      out.overrides[k] = d.overrides[k];
-    }
-  }
-
-  // 隐藏的边：只认两种键形状，和服务端 validHiddenKey 一致。
-  if (Array.isArray(d.hidden)) {
-    const seenHide = new Set();
-    for (const k of d.hidden) {
-      if (typeof k !== 'string') continue;
-      const v = k.trim();
-      if (!v || seenHide.has(v)) continue;
-      if (v.indexOf('fk|') !== 0 && v.indexOf('j|') !== 0) continue;
-      seenHide.add(v);
-      out.hidden.push(v);
-    }
-  }
   return out;
+}
+
+// erCardRec 拿到一张表在图上的记录，没有就现建一个。
+//
+// 不要用「取出来、改、整个换掉」的写法：那会把 hidden 一起丢掉，
+// 表现成「拖动过一次，收起的表又冒出来了」。
+function erCardRec(t) {
+  if (!erDoc) erDoc = erNormalizeDoc(null);
+  const k = erTKey(t);
+  let c = erDoc.tables[k];
+  if (!c) {
+    c = { group: '', x: null, y: null, hidden: false };
+    erDoc.tables[k] = c;
+  }
+  if (typeof c.hidden !== 'boolean') c.hidden = false;
+  return c;
 }
 
 // erSave 落盘。防抖 300ms：拖一张卡片松手只写一次，连着拖几张也只写一次。
@@ -9051,151 +9074,70 @@ function erCardHeight(t) {
   return ER.headH + (erRowsOf(t) + extra) * ER.rowH + ER.cardPad;
 }
 
-// erFkCard 从唯一键推导基数：子表的外键列本身唯一 → 一个父行最多一个子行。
-// 判不出来就按 1:N —— 少标一个 1:1 只是不够精确，标错 1:1 会让人以为插不进第二行。
-function erFkCard(t, fk) {
-  const keys = t.uniqueKeys || [];
-  const want = fk.columns.map(c => c.toLowerCase()).sort().join('\u0000');
-  for (const k of keys) {
-    if (k.map(c => c.toLowerCase()).sort().join('\u0000') === want) return '11';
+function erColIndex(t, name) {
+  const want = String(name || '').toLowerCase();
+  for (let i = 0; i < t.columns.length; i++) {
+    if (t.columns[i].name.toLowerCase() === want) return i;
   }
-  return '1N';
+  return -1;
 }
 
-// erFindJunctions 找出「纯关联表」：两张表之间的连接表，逻辑视图可以折叠掉。
+// erColY 是某一列在图上的中心 y —— 连线就是接在这个高度上。
 //
-// 四个条件缺一不可：
-//   1. 恰好两条外键，指向两张不同的表；
-//   2. 有唯一键**完全由这些外键列组成** —— 没有它，这张表允许重复插入同一对
-//      组合，它就不是真正的多对多，只是碰巧存了两次引用；
-//   3. 没有额外的业务列 —— order_items 的 qty、price 折叠掉会把业务信息一起吃掉；
-//   4. 允许一个单列主键当代理键（article_tags.id），那不是业务信息。
-function erFindJunctions(tables, edges) {
-  const out = new Map();
-  for (const t of tables) {
-    const outs = edges.filter(e => e.kind === 'fk' && e.child === t);
-    if (outs.length !== 2) continue;
-    const e1 = outs[0], e2 = outs[1];
-    if (e1.parent === e2.parent) continue;
-
-    const fkCols = new Set();
-    for (const c of e1.columns.concat(e2.columns)) fkCols.add(c.toLowerCase());
-
-    const keys = t.uniqueKeys || [];
-    let covered = false;
-    for (const k of keys) {
-      if (k.length && k.every(c => fkCols.has(c.toLowerCase()))) { covered = true; break; }
-    }
-    if (!covered) continue;
-
-    let pure = true;
-    for (const c of t.columns) {
-      const n = c.name.toLowerCase();
-      if (fkCols.has(n)) continue;
-      if (c.primaryKey && keys.some(k => k.length === 1 && k[0].toLowerCase() === n)) continue;
-      pure = false;
-      break;
-    }
-    if (!pure) continue;
-
-    out.set(t.id, { table: t, e1, e2 });
-  }
-  return out;
+// 找不到那一列时返回卡片**中心**而不是第一行：宁可线落在卡片中间，
+// 也不要落在第一行上，那是在骗人说「接的就是这一列」。
+function erColY(card, t, name) {
+  let i = erColIndex(t, name);
+  if (i < 0) return card.y + card.h / 2;
+  if (i >= ER.maxRows) i = ER.maxRows - 1;
+  return card.y + ER.headH + i * ER.rowH + ER.rowH / 2;
 }
 
-// erBuildModel 把「表 + 外键 + 逻辑关系」整理成「分组 + 边」。
+// erBuildModel 把「表 + 用户画的关系」整理成「分组 + 边」。
 //
-// 边有三种来源，必须分开记：
-//   kind='fk'     库里真实存在的约束（实线，基数从唯一键推导）
-//   kind='manual' 用户画的逻辑关系（虚线，基数全由用户给）
-//   kind='m2m'    逻辑视图里被折叠的纯关联表，两端都是鸦爪
-// 混成一种的话，看图的人没法知道哪条线照做会报错。
+// 这里没有任何推导：边就是 erDoc.links 原样搬过来，一条不多一条不少。
+// 库里写着 REFERENCES 也不会凭空多出一条线 —— 那是物理图的事。
 function erBuildModel(tables) {
-  const byName = new Map();
+  if (!erDoc) erDoc = erNormalizeDoc(null);
+
+  // 收起的表不上图：表还在库里，只是这张画布不看它。
+  const shown = tables.filter(t => {
+    const c = erDoc.tables[erTKey(t)];
+    return !(c && c.hidden);
+  });
+  const shownIds = new Set(shown.map(t => erTKey(t)));
   const byId = new Map();
-  for (const t of tables) {
-    byName.set(t.name, t);
-    byId.set(erTKey(t), t);
-  }
+  for (const t of shown) byId.set(erTKey(t), t);
 
-  const all = [];
-  for (const t of tables) {
-    for (const fk of (t.foreignKeys || [])) {
-      const parent = byName.get(fk.refTable);
-      if (!parent || !fk.columns || !fk.columns.length) continue;
-      const id = erFkId(t.id, fk.columns);
-      const dflt = erFkCard(t, fk);
-      all.push({
-        id, kind: 'fk', child: t, parent,
-        columns: fk.columns, refColumns: fk.refColumns || [],
-        defaultCard: dflt,
-        overridden: !!erDoc.overrides[id],
-        // 物理视图只报库里推导出来的那个：用户改过的基数是他对业务的判断，
-        // 放在物理层就成了「库里明明没有这条唯一约束，图上说 1:1」。
-        card: erMode === 'logic' ? (erDoc.overrides[id] || dflt) : dflt,
-      });
-    }
-  }
-
-  if (erMode === 'logic') {
-    for (const ln of erDoc.links) {
-      const child = byId.get(String(ln.child));
-      const parent = byId.get(String(ln.parent));
-      if (!child || !parent) continue;
-      all.push({
-        id: 'm|' + ln.id, kind: 'manual', linkId: ln.id,
-        child, parent,
-        columns: ln.columns, refColumns: ln.refColumns,
-        defaultCard: '1N', overridden: false, card: ln.card,
-      });
-    }
-  }
-
-  // 逻辑视图折叠纯关联表。物理视图不折叠 —— 那里要看的是库真实长什么样。
-  // 折叠判定**只看事实**（这张表是不是纯关联表），不受隐藏影响：隐藏是判断，
-  // 允许它改变判定的话，改一条边会让关联表卡片突然冒出来，看着像 bug。
-  const junctions = erMode === 'logic' ? erFindJunctions(tables, all) : new Map();
-  const folded = new Set(junctions.keys());
-
-  let edges = all.filter(e => !folded.has(e.child.id) && !folded.has(e.parent.id));
-  let m2m = [];
-  for (const j of junctions.values()) {
-    m2m.push({
-      id: 'j|' + j.table.id,
-      kind: 'm2m',
-      a: j.e1.parent, aCol: j.e1.refColumns[0],
-      b: j.e2.parent, bCol: j.e2.refColumns[0],
-      via: j.table,
+  const edges = [];
+  for (const ln of erDoc.links) {
+    const from = byId.get(String(ln.from.table));
+    const to = byId.get(String(ln.to.table));
+    // 一端被收起时整条线不画：半条线没有意义，端点也不在画布上。
+    if (!from || !to) continue;
+    if (!shownIds.has(erTKey(from)) || !shownIds.has(erTKey(to))) continue;
+    if (erColIndex(from, ln.from.columns[0]) < 0) continue;
+    if (erColIndex(to, ln.to.columns[0]) < 0) continue;
+    edges.push({
+      id: ln.id,
+      link: ln,
+      from, to,
+      fromCol: ln.from.columns[0],
+      toCol: ln.to.columns[0],
+      card: ln.card,
     });
   }
 
-  // 隐藏的边：逻辑层说「这条关系在我的模型里不成立」。只是不画，不改库。
-  // 留一份清单出去，状态栏里挂个入口 —— 否则隐藏之后没人找得回来。
-  const hidSet = new Set(erDoc.hidden);
-  const hiddenEdges = [];
-  if (erMode === 'logic' && hidSet.size) {
-    edges = edges.filter(e => {
-      if (!hidSet.has(e.id)) return true;
-      hiddenEdges.push(e);
-      return false;
-    });
-    m2m = m2m.filter(m => {
-      if (!hidSet.has(m.id)) return true;
-      hiddenEdges.push(m);
-      return false;
-    });
-  }
-
-  const visible = tables.filter(t => !folded.has(t.id));
-  const groups = erBuckets(visible);
+  const groups = erBuckets(shown);
   for (const g of groups) erOrderGroup(g, edges);
 
   erPlaceModel(groups);
   erRelayoutBoxes(groups);
 
   return {
-    groups, edges, m2m, hidden: hiddenEdges,
-    folded: visible.length !== tables.length ? tables.length - visible.length : 0,
+    tables: shown,
+    groups, edges,
+    hidden: tables.length - shown.length,
     w: erModelW(groups), h: erModelH(groups),
   };
 }
@@ -9236,19 +9178,21 @@ function erBuckets(tables) {
   return out;
 }
 
-// erOrderGroup 决定组内上下顺序：被引用的表在上，引用别人的在下。
+// erOrderGroup 决定组内上下顺序：一对一/一对多里「一」的那端在上，多的一端在下。
 //
-// 用「松弛」而不是拓扑排序：外键成环（a 引用 b、b 又引用 a）在真实库里
-// 是存在的，拓扑排序会失败，松弛只要给个上限就能收敛到「尽量分层」。
+// 用「松弛」而不是拓扑排序：关系成环（a 连着 b、b 又连着 a）在真实模型里
+// 很常见，拓扑排序会直接失败，松弛只要给个上限就能收敛到「尽量分层」。
 function erOrderGroup(g, edges) {
   if (g.tables.length < 2) return;
   const names = new Set(g.tables.map(t => t.name));
   const parents = new Map();
   for (const e of edges) {
-    if (!names.has(e.child.name) || !names.has(e.parent.name)) continue;
-    if (e.child.name === e.parent.name) continue;
-    if (!parents.has(e.child.name)) parents.set(e.child.name, []);
-    parents.get(e.child.name).push(e.parent.name);
+    // 多对多没有「谁在上」可言，塞进分层只会把两个对称的表拆成上下两层。
+    if (e.card === 'NM') continue;
+    if (!names.has(e.from.name) || !names.has(e.to.name)) continue;
+    if (e.from.name === e.to.name) continue;
+    if (!parents.has(e.to.name)) parents.set(e.to.name, []);
+    parents.get(e.to.name).push(e.from.name);
   }
   if (!parents.size) {
     g.tables.sort((a, b) => a.name.localeCompare(b.name));
@@ -9334,8 +9278,8 @@ function erAutoPlace(groups) {
 // erPlaceModel 先自动摆，再用手工坐标覆盖。
 //
 // 只要有一张卡片被拖过，整份坐标就已经存下来了（erSnapshotCards 存全量），
-// 所以「有坐标 = 用户摆过」。这时新出现的表（刚建、刚移组）没有坐标，
-// 留在自动位置多半会压在别人身上 —— 用户看到的是「新表不见了」。
+// 所以「有坐标 = 用户摆过」。这时新出现的表（刚建、刚移组、刚从清单放回来）
+// 没有坐标，留在自动位置多半会压在别人身上 —— 用户看到的是「新表不见了」。
 function erPlaceModel(groups) {
   erAutoPlace(groups);
 
@@ -9401,42 +9345,29 @@ function erRelayoutBoxes(groups) {
       if (r.x + r.w > maxX) maxX = r.x + r.w;
       if (r.y + r.h > maxY) maxY = r.y + r.h;
     }
-    // 左边多留一个走线通道：同列不相邻的连线要从卡片左侧绕过去，
-    // 不留的话弧线会冲出组框，看着像画到了隔壁组里。
-    const left = ER.groupPad + ER.chanW;
     g.box = {
-      x: minX - left,
-      y: minY - (ER.groupHead + ER.groupPad),
-      w: (maxX - minX) + left + ER.groupPad,
-      h: (maxY - minY) + ER.groupHead + ER.groupPad * 2,
+      x: minX - ER.groupPad - ER.chanW,
+      y: minY - ER.groupHead - ER.groupPad,
+      w: maxX - minX + (ER.groupPad + ER.chanW) * 2,
+      h: maxY - minY + ER.groupHead + ER.groupPad * 2,
     };
   }
 }
 
 function erModelW(groups) {
-  let w = 0;
-  for (const g of groups) {
-    w = Math.max(w, g.box.x + g.box.w);
-    for (const t of g.tables) if (t._er) w = Math.max(w, t._er.x + t._er.w);
-  }
-  return w;
+  let maxX = 0;
+  for (const g of groups) if (g.box && g.box.x + g.box.w > maxX) maxX = g.box.x + g.box.w;
+  return maxX + 40;
 }
 
 function erModelH(groups) {
-  let h = 0;
-  for (const g of groups) {
-    h = Math.max(h, g.box.y + g.box.h);
-    for (const t of g.tables) if (t._er) h = Math.max(h, t._er.y + t._er.h);
-  }
-  return h;
+  let maxY = 0;
+  for (const g of groups) if (g.box && g.box.y + g.box.h > maxY) maxY = g.box.y + g.box.h;
+  return maxY + 40;
 }
 
-function erGroupKey(g) {
-  if (g.gid) return g.gid;
-  return 'loose';
-}
+function erGroupKey(g) { return g.loose ? 'loose' : g.gid; }
 
-// erDrawOrder 把最近动过的那一组排到最后画。
 // DOM 顺序就是层级：后画的压在上面。卡片拖到别的组旁边时，如果它还沉在
 // 下面，会被别人的卡片盖住 —— 明明是自己正在摆的那张，却看不见。
 function erDrawOrder(groups) {
@@ -9452,17 +9383,6 @@ function erGroupTitle(g) {
   return '未命名分组';
 }
 
-function erColY(card, t, colName) {
-  let i = -1;
-  const want = String(colName || '').toLowerCase();
-  for (let k = 0; k < t.columns.length; k++) {
-    if (t.columns[k].name.toLowerCase() === want) { i = k; break; }
-  }
-  if (i < 0) i = 0;
-  if (i >= ER.maxRows) i = ER.maxRows - 1;
-  return card.y + ER.headH + i * ER.rowH + ER.rowH / 2;
-}
-
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 function erSvg(tag, attrs) {
@@ -9471,98 +9391,199 @@ function erSvg(tag, attrs) {
   return n;
 }
 
-// erShort 截断长名字。SVG 的 <text> 没有 text-overflow，超长会直接画出边界，
-// 所以自己截 —— 被截的是折叠掉的关联表名，看全名切到物理视图就行。
-function erShort(s, n) {
-  const chars = Array.from(String(s || ''));
-  return chars.length > n ? chars.slice(0, n - 1).join('') + '…' : String(s || '');
+// erPolyPath 把一串轴对齐的点连成带圆角的折线。
+//
+// 用直角折线而不是曲线：两条线交叉时，曲线看不出谁在上面，折线还能读出
+// 走向（先横、再竖、再横）；而且字段级的线经常是「同一侧出一堆平行竖段」，
+// 折线才是整齐的，曲线会糊成一团。
+function erPolyPath(pts, r) {
+  const p = [];
+  for (const q of pts) {
+    const last = p[p.length - 1];
+    if (!last || Math.abs(last.x - q.x) > 0.5 || Math.abs(last.y - q.y) > 0.5) p.push(q);
+  }
+  if (p.length < 2) return '';
+  let d = `M ${p[0].x} ${p[0].y}`;
+  for (let i = 1; i < p.length - 1; i++) {
+    const a = p[i - 1], b = p[i], c = p[i + 1];
+    const l1 = Math.hypot(b.x - a.x, b.y - a.y);
+    const l2 = Math.hypot(c.x - b.x, c.y - b.y);
+    if (l1 < 0.5 || l2 < 0.5) { d += ` L ${b.x} ${b.y}`; continue; }
+    const rr = Math.min(r, l1 / 2, l2 / 2);
+    d += ` L ${b.x - (b.x - a.x) / l1 * rr} ${b.y - (b.y - a.y) / l1 * rr}`;
+    d += ` Q ${b.x} ${b.y} ${b.x + (c.x - b.x) / l2 * rr} ${b.y + (c.y - b.y) / l2 * rr}`;
+  }
+  const last = p[p.length - 1];
+  return d + ` L ${last.x} ${last.y}`;
 }
 
-// erEdgeGeom 算一条线怎么走，并给出两端的端点（含出线方向）。
+// erBlocksInRun 判断一条横线（x1..x2，高度 y）有没有压在某张卡片上。
 //
-// 只有「同一列、父卡正好紧接在子卡上方」画直线 —— 这是最常见的情况
-// （父在上、子在下），拐弯反而看不出它们是直接相连的。
-// 其余全部画曲线：多列布局之后，组内通道折线会横穿别的列，
-// 既难写又难看，曲线从卡片侧面绕过去反而干净。
-function erEdgeGeom(c, p, cy, py) {
-  const cMid = c.x + c.w / 2, pMid = p.x + p.w / 2;
-  const dx = cMid - pMid;
-  const sameCol = Math.abs(dx) < 40;
-
-  if (sameCol && Math.abs((c.y - (p.y + p.h)) - ER.gap) < 2) {
-    const x = pMid;
-    const pa = p.y + p.h, cb = c.y;
-    return {
-      d: `M ${x} ${pa} L ${x} ${cb}`,
-      a: { x, y: cb, dir: 'up' },
-      b: { x, y: pa, dir: 'down' },
-      mid: { x, y: (pa + cb) / 2 },
-    };
+// 用 4px 容差：线正好贴着卡片边缘走是正常的（出线段就贴着），只有真的**穿进**
+// 卡片里才算挡路，否则每一条线都会被判定成被挡，通道选择全乱。
+function erBlocksInRun(avoid, x1, x2, y) {
+  const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
+  for (const r of avoid) {
+    if (r.x + r.w < lo - 4 || r.x > hi + 4) continue;
+    if (y < r.y - 4 || y > r.y + r.h + 4) continue;
+    return true;
   }
+  return false;
+}
 
-  let ax, bx, adir, bdir, bulge;
-  if (sameCol) {
-    // 同列但隔着别的卡片：两边都从左侧出，向左鼓出去绕开它们。
-    // 鼓出的幅度不能超过组框预留的走线通道，否则弧线会画到组框外面。
-    ax = c.x; bx = p.x;
-    adir = bdir = 'left';
-    bulge = ER.chanW - 6;
-  } else {
-    if (dx > 0) {
-      // 子卡在父卡右边：子从左出、父从右接。
-      ax = c.x; bx = p.x + p.w;
-      adir = 'left'; bdir = 'right';
-    } else {
-      ax = c.x + c.w; bx = p.x;
-      adir = 'right'; bdir = 'left';
+function erBlocksInCol(avoid, y1, y2, x) {
+  const lo = Math.min(y1, y2), hi = Math.max(y1, y2);
+  for (const r of avoid) {
+    if (x < r.x - 5 || x > r.x + r.w + 5) continue;
+    if (r.y + r.h < lo - 5 || r.y > hi + 5) continue;
+    return true;
+  }
+  return false;
+}
+
+// erFreeRunX / erFreeRunY 找一条不压卡片的通道。
+//
+// 为什么需要它：左边一组连右边一组，中间那组就挡在路中间，原来「取两端中线」
+// 的做法会把竖线直接穿进中间那组的卡片里 —— 卡片画在连线上面，看起来就是
+// 「线进了这张表又从另一边出来」，而且如果它正好压在某个字段行上（实测过：
+// 两端都是第 0 行时），还会被误读成「那条线接的是这一列」。
+//
+// 候选值只取卡片边缘外 `stub + 11` 处的两条线：绕行的最优解一定贴着某张卡片的边，
+// 在中间随便取点没有意义。
+//
+// 为什么是 stub + 11 而不是 11：卡片自己的出线段就占掉「边缘往外 20px」这一条带，
+// 通道贴着边缘的话会和别的线的出线段**共线重叠**，两段线叠成一段，看起来就像
+// 那条线接在这个字段上（实测撞过：两端都是第 0 行时最容易）。
+function erFreeRunX(avoid, y1, y2, want, lo, hi) {
+  if (!erBlocksInCol(avoid, y1, y2, want)) return want;
+  const gap = ER.stub + 11;
+  let best = want, bestD = Infinity;
+  for (const r of avoid) {
+    for (const x of [r.x - gap, r.x + r.w + gap]) {
+      if (x < lo || x > hi) continue;
+      if (erBlocksInCol(avoid, y1, y2, x)) continue;
+      const d = Math.abs(x - want);
+      if (d < bestD) { bestD = d; best = x; }
     }
-    // 相邻两列的间隙本来就窄，鼓太远会穿进对面的卡片；按实际间距收着来。
-    bulge = Math.min(130, Math.max(22, Math.abs(ax - bx) * 0.45));
+  }
+  return best;
+}
+
+function erFreeRunY(avoid, x1, x2, want) {
+  if (!erBlocksInRun(avoid, x1, x2, want)) return want;
+  let best = want, bestD = Infinity;
+  for (const r of avoid) {
+    for (const y of [r.y - 8, r.y + r.h + 8]) {
+      if (y < 0) continue;
+      if (erBlocksInRun(avoid, x1, x2, y)) continue;
+      const d = Math.abs(y - want);
+      if (d < bestD) { bestD = d; best = y; }
+    }
+  }
+  return best;
+}
+
+// erEdgeGeom 算一条字段到字段的线怎么走。
+//
+// 端点落在**字段行的左右边缘**上，不是卡片边缘 —— 这就是「线指到字段」：
+// 同一个字段进出的几条线起点完全相同，一个字段的多条关系自然聚成一束。
+//
+// erEdgeSides 定两端从卡片的哪一侧出线：+1 = 右，-1 = 左。
+// 单独抽出来是因为「分配通道」和「画线」两处都要用同一个判断，
+// 各算一遍迟早会算出两种结果，线就会从一边出、往另一边绕。
+function erEdgeSides(a, b) {
+  const aMid = a.x + a.w / 2, bMid = b.x + b.w / 2;
+  const stacked = a.x < b.x + b.w && b.x < a.x + a.w;
+  if (stacked) return [1, 1];
+  if (aMid < bMid) return [1, -1];
+  return [-1, 1];
+}
+
+// 出线侧按两张卡片的相对位置定：左右分开就对着出，上下排列都从右侧走通道。
+//
+// lane 是同侧通道里的序号：一列卡片右侧往往同时有好几条线，全挤在同一个
+// x 上会合成一根粗线，看不出哪条接哪行。每条错开 laneGap 像素，
+// 平行下去就和盘线的走法一样，一眼能数清有几条。
+//
+// avoid 是「除两端之外的所有卡片」：绕行只躲别人，不躲自己 —— 躲自己的话
+// 出线段（就贴在卡片边上）会被判定成挡路，通道永远选不出来。
+function erEdgeGeom(a, b, ay, by, lane, avoid) {
+  const [aSide, bSide] = erEdgeSides(a, b);
+  const solid = avoid || [];
+
+  const ax = aSide > 0 ? a.x + a.w : a.x;
+  const bx = bSide > 0 ? b.x + b.w : b.x;
+  const off = ER.stub + (lane || 0) * ER.laneGap;
+  const p0 = { x: ax, y: ay };
+  const p1 = { x: ax + aSide * off, y: ay };
+  const p2 = { x: bx + bSide * ER.stub, y: by };
+  const p3 = { x: bx, y: by };
+
+  // 中间那段竖线该走哪一列：两侧对接时走两卡之间的缝，否则绕到外侧。
+  const twoSidedOk = aSide > 0 ? p2.x > p1.x : p2.x < p1.x;
+  let pts;
+  if (aSide === bSide || !twoSidedOk) {
+    // 同侧出（上下排列），或者两卡贴得太近、中间没有缝：绕到最外侧那条通道。
+    const mx = aSide > 0
+      ? Math.max(p1.x, p2.x, a.x + a.w)
+      : Math.min(p1.x, p2.x, a.x);
+    pts = [p0, p1, { x: mx, y: ay }, { x: mx, y: by }, { x: p2.x, y: by }, p3];
+  } else {
+    // 两侧对接：竖线走缝里的通道，两条横线各自挑一个不压卡片的高度。
+    const lo = Math.min(p1.x, p2.x), hi = Math.max(p1.x, p2.x);
+    let mx = erFreeRunX(solid, ay, by, (p1.x + p2.x) / 2, lo, hi);
+    let ya = erFreeRunY(solid, p1.x, mx, ay);
+    let yb = erFreeRunY(solid, mx, p2.x, by);
+    // 绕行之后竖线变长，可能又压上别的卡片，按新的两端再校一轮。
+    mx = erFreeRunX(solid, ya, yb, mx, lo, hi);
+    ya = erFreeRunY(solid, p1.x, mx, ay);
+    yb = erFreeRunY(solid, mx, p2.x, by);
+
+    // 绕得太远就别绕了：跨过整张图的长横线比「从卡片背后穿过去」更难看，
+    // 也更容易看错。220px 大致是「两张卡片高」。
+    const wild = Math.abs(ya - ay) > 220 || Math.abs(yb - by) > 220;
+    if (wild || (ya === ay && yb === by)) {
+      pts = [p0, p1, { x: mx, y: ay }, { x: mx, y: by }, { x: p2.x, y: by }, p3];
+    } else {
+      pts = [p0, p1, { x: p1.x, y: ya }, { x: mx, y: ya },
+             { x: mx, y: yb }, { x: p2.x, y: yb }, p3];
+    }
   }
 
-  // 两端的控制点各按自己的出线方向外推。同向时（同列绕行）两个都往左，
-  // 反向时（左右两列对接）各往自己那一侧让开，曲线才落在列间隙里。
-  const s1 = adir === 'left' ? -1 : 1;
-  const s2 = bdir === 'left' ? -1 : 1;
-  const c1x = ax + s1 * bulge;
-  const c2x = bx + s2 * bulge;
   return {
-    d: `M ${ax} ${cy} C ${c1x} ${cy}, ${c2x} ${py}, ${bx} ${py}`,
-    a: { x: ax, y: cy, dir: adir },
-    b: { x: bx, y: py, dir: bdir },
-    // 三次贝塞尔 t=0.5 的解析解，比 getPointAtLength 省一次布局查询
-    mid: {
-      x: (ax + 3 * c1x + 3 * c2x + bx) / 8,
-      y: (cy + 3 * cy + 3 * py + py) / 8,
-    },
+    d: erPolyPath(pts, ER.corner),
+    a: { x: ax, y: ay, dir: aSide > 0 ? 'right' : 'left' },
+    b: { x: bx, y: by, dir: bSide > 0 ? 'right' : 'left' },
   };
 }
 
-// erMark 画端点符号。线从卡片侧面出，所以「一」要垂直于线，
-// 鸦爪要朝卡片方向张开。
+// erMark 画端点基数符号：一道短横 = 一，三条发散的线 = 多。
+//
+// 线从卡片侧面出，所以「一」要垂直于线；鸦爪的根在线上、脚落在卡片边缘，
+// 看着像爪子扒住这一行。反过来画（脚在外、根贴卡片）会变成一个悬空的「人」字。
 //
 // 画在卡片外面 3px：连线层在卡片下面，画进卡片里会被盖掉（实测过）。
-function erMark(svg, x, y, dir, kind) {
+function erMark(svg, x, y, dir, kind, edgeId) {
   const n = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[dir] || [-1, 0];
   const px = x + n[0] * 3, py = y + n[1] * 3;
   const t = { x: -n[1], y: n[0] };    // 线的法向
 
   if (kind === 'one') {
-    // 「一」= 垂直于线的一根短杠
-    svg.appendChild(erSvg('path', {
+    const tick = erSvg('path', {
       class: 'er-tick',
-      d: `M ${px - t.x * 6} ${py - t.y * 6} L ${px + t.x * 6} ${py + t.y * 6}`,
-    }));
+      d: `M ${px - t.x * 5.5} ${py - t.y * 5.5} L ${px + t.x * 5.5} ${py + t.y * 5.5}`,
+    });
+    tick.dataset.edge = edgeId;
+    svg.appendChild(tick);
     return;
   }
-  // 鸦爪：三条线从线上一点（离卡片 11px）发散到卡片边缘，
-  // 三个终点都落在同一条边缘上，看着像爪子扒住这张表。
-  // 反过来（终点散开、起点贴卡片）会画成一个悬空的「人」字，实测很难辨认。
-  const root = { x: px + n[0] * 11, y: py + n[1] * 11 };
+  const root = { x: px + n[0] * 10, y: py + n[1] * 10 };
   let d = `M ${root.x} ${root.y} L ${px} ${py} `;
-  d += `M ${root.x} ${root.y} L ${px + t.x * 5} ${py + t.y * 5} `;
-  d += `M ${root.x} ${root.y} L ${px - t.x * 5} ${py - t.y * 5}`;
-  svg.appendChild(erSvg('path', { class: 'er-crow', d }));
+  d += `M ${root.x} ${root.y} L ${px + t.x * 4.5} ${py + t.y * 4.5} `;
+  d += `M ${root.x} ${root.y} L ${px - t.x * 4.5} ${py - t.y * 4.5}`;
+  const crow = erSvg('path', { class: 'er-crow', d });
+  crow.dataset.edge = edgeId;
+  svg.appendChild(crow);
 }
 
 function erRender() {
@@ -9577,30 +9598,17 @@ function erRender() {
 
   const stats = document.getElementById('erStats');
   if (stats) {
-    const fkN = model.edges.filter(e => e.kind === 'fk').length;
-    const mN = model.edges.filter(e => e.kind === 'manual').length;
     // 未分组不算「组」—— 它是没有归属时的收容所，不是用户划的域。
     // 把它算进去，「1 组」会让人以为已经分过类了。
     const named = model.groups.filter(g => !g.loose).length;
-    let s = `${tables.length} 张表`;
+    let s = `${model.tables.length} 张表`;
     if (named) s += ` · ${named} 组`;
-    if (erMode === 'logic') {
-      // 逻辑层数的是「关系」，不是「外键」：里面掺着手画的、折叠出来的。
-      s += ` · ${fkN + mN + model.m2m.length} 条关系`;
-      if (mN) s += `（${mN} 条库里没有）`;
-      if (model.folded) s += ` · ${model.folded} 张关联表已折叠`;
-    } else {
-      s += ` · ${fkN} 条外键`;
-    }
+    s += ` · ${model.edges.length} 条关系`;
     stats.textContent = s;
-    // 隐藏之后那条线就没了，点不到也找不回 —— 入口只能挂在状态栏上。
-    if (erMode === 'logic' && model.hidden.length) {
-      stats.appendChild(erHiddenChip(model.hidden));
-    }
+    // 收起的表在画布上没有位置，点不到也找不回 —— 入口只能挂在状态栏上。
+    if (model.hidden) stats.appendChild(erHiddenChip(model.hidden));
   }
 
-  // 三种「图不好看」的情况各给一句话。没有外键是最常见的：
-  // 用户建表时大多不写 REFERENCES，不给提示会以为功能坏了。
   if (!tables.length) {
     erNote.textContent = '这个库还没有表。建几张表，这里就会出现卡片。';
     erNote.classList.remove('hidden');
@@ -9609,16 +9617,19 @@ function erRender() {
     return;
   }
   erLegend.classList.remove('hidden');
-  erLegend.classList.toggle('phys', erMode === 'physical');
-  if (!model.edges.length && !model.m2m.length) {
-    erNote.textContent = erMode === 'logic'
-      ? '还没有任何关系。可以用「+ 关系」画一条逻辑关系，或者建表时写 REFERENCES。'
-      : '当前库没有外键。切到逻辑视图，用「+ 关系」把业务关系画出来。';
+  document.getElementById('btnErFit').disabled = false;
+
+  if (!model.tables.length) {
+    erNote.textContent = '所有表都收起来了。点状态栏的「已收起」把它们放回图上。';
+    erNote.classList.remove('hidden');
+  } else if (!model.edges.length) {
+    // 没有关系是这张图的常态起点：关系全靠人画，库里有外键也不会自动出现。
+    // 不给这句话，用户会以为功能坏了。
+    erNote.textContent = '还没有关系。把鼠标移到字段行右侧的小圆点上，按住拖到另一张表的字段上。';
     erNote.classList.remove('hidden');
   } else {
     erNote.classList.add('hidden');
   }
-  document.getElementById('btnErFit').disabled = false;
 
   const frag = document.createDocumentFragment();
   const order = erDrawOrder(model.groups);
@@ -9634,8 +9645,7 @@ function erRender() {
     height: model.h,
     viewBox: `0 0 ${model.w} ${model.h}`,
   });
-  const edgeEls = new Map();     // 表名 -> [连线元素]，悬停高亮用
-  erDrawEdges(svg, model, edgeEls);
+  erDrawEdges(svg, model);
   frag.appendChild(svg);
 
   // 卡片最后放：DOM 顺序就是层级顺序，卡片永远压在线上面。
@@ -9644,30 +9654,43 @@ function erRender() {
   }
 
   erCanvas.appendChild(frag);
-  erCanvas._edgeEls = edgeEls;
 }
 
-function erDrawEdges(svg, model, edgeEls) {
-  const attach = (path, names) => {
-    for (const nm of names) {
-      if (!edgeEls.has(nm)) edgeEls.set(nm, []);
-      edgeEls.get(nm).push(path);
-    }
-  };
+function erDrawEdges(svg, model) {
+  // 先分配通道：同一列、同一侧的线按顺序错开。不这么做的话，一列卡片右侧
+  // 的三条线会完全重合，看着像一根粗线 —— 那这张图就没法读了。
+  const lanes = new Map();
+  for (const e of model.edges) {
+    const a = e.from._er, b = e.to._er;
+    if (!a || !b) continue;
+    const [side] = erEdgeSides(a, b);
+    const key = (side > 0 ? 'R' : 'L') + Math.round(side > 0 ? a.x + a.w : a.x);
+    const n = lanes.get(key) || 0;
+    lanes.set(key, n + 1);
+    e.lane = n;
+  }
+
+  const rects = model.tables.map(t => t._er).filter(Boolean);
 
   for (const e of model.edges) {
-    const c = e.child._er, p = e.parent._er;
-    if (!c || !p) continue;
-    const cy = erColY(c, e.child, e.columns[0]);
-    const py = erColY(p, e.parent, e.refColumns[0]);
-    const g = erEdgeGeom(c, p, cy, py);
+    const a = e.from._er, b = e.to._er;
+    if (!a || !b) continue;
+    const ay = erColY(a, e.from, e.fromCol);
+    const by = erColY(b, e.to, e.toCol);
+    // 绕行对象是「除两端之外的所有卡片」：两端自己的卡片不算挡路，
+    // 否则贴着边出线的那一段永远被判成撞上了。
+    const avoid = rects.filter(r => r !== a && r !== b);
+    const g = erEdgeGeom(a, b, ay, by, e.lane, avoid);
+    if (!g.d) continue;
 
-    const path = erSvg('path', {
-      class: 'er-edge' + (e.kind === 'manual' ? ' manual' : ''),
-      d: g.d,
-    });
-    path.dataset.child = e.child.name;
-    path.dataset.parent = e.parent.name;
+    const path = erSvg('path', { class: 'er-edge', d: g.d });
+    path.dataset.edge = e.id;
+    // 字段级标识（表名.列名）给悬停高亮用：卡片级的只能点亮「这张表参与
+    // 的线」，落到某一列才知道「到底哪几条接着这一列」。
+    path.dataset.from = e.from.name + '.' + e.fromCol;
+    path.dataset.to = e.to.name + '.' + e.toCol;
+    path.dataset.ft = e.from.name;
+    path.dataset.tt = e.to.name;
     svg.appendChild(path);
 
     // 热区：连线本身 pointer-events:none，点不中。单独铺一条宽的透明路径
@@ -9676,55 +9699,24 @@ function erDrawEdges(svg, model, edgeEls) {
     hit.dataset.edge = e.id;
     svg.appendChild(hit);
 
-    // 基数符号：子端在 a，父端在 b。
-    // 1:N → 子鸦爪 + 父一横；1:1 → 两端都一横；M:N → 两端都鸦爪。
-    const manyA = e.card !== '11';
-    const manyB = e.card === 'NM';
-    erMark(svg, g.a.x, g.a.y, g.a.dir, manyA ? 'many' : 'one');
-    erMark(svg, g.b.x, g.b.y, g.b.dir, manyB ? 'many' : 'one');
-
-    attach(path, [e.child.name, e.parent.name]);
+    // 基数按 From → To 标，不按屏幕左右：一条「1:N」翻个面还是「1:N」，
+    // 可它两端谁是一、谁是多是固定的，符号得跟着端点走。
+    //
+    // 起点符号跟着通道错开：同一个字段拉出两条线时（员工既关联部门又关联
+    // 上级），两个符号叠在卡片边缘上会糊成一个看不懂的记号。
+    const laneOff = (e.lane || 0) * ER.laneGap;
+    const aSign = g.a.dir === 'right' ? 1 : -1;
+    erMark(svg, g.a.x + aSign * laneOff, g.a.y, g.a.dir,
+      e.card === 'NM' ? 'many' : 'one', e.id);
+    erMark(svg, g.b.x, g.b.y, g.b.dir, e.card === '11' ? 'one' : 'many', e.id);
   }
 
-  // 折叠掉的关联表：两边都是多，中间标上它是谁实现的。
-  for (const m of model.m2m) {
-    const a = m.a._er, b = m.b._er;
-    if (!a || !b) continue;
-    const ay = erColY(a, m.a, m.aCol);
-    const by = erColY(b, m.b, m.bCol);
-    const g = erEdgeGeom(a, b, ay, by);
-
-    const path = erSvg('path', { class: 'er-edge m2m', d: g.d });
-    path.dataset.child = m.a.name;
-    path.dataset.parent = m.b.name;
-    svg.appendChild(path);
-
-    // 折叠出来的这条线也要能点：它是从「这张表恰好长成关联表」推出来的，
-    // 最可能被用户判定为「其实没关系」，不给入口就只能忍着。
-    const hit = erSvg('path', { class: 'er-hit', d: g.d });
-    hit.dataset.edge = m.id;
-    svg.appendChild(hit);
-
-    erMark(svg, g.a.x, g.a.y, g.a.dir, 'many');
-    erMark(svg, g.b.x, g.b.y, g.b.dir, 'many');
-
-    // 名字挂在组框左侧的走线通道里，不挂在曲线中点上：
-    // 中点正好是弧线最鼓的地方，文字以那里为中心会顶出组框外（实测过）。
-    // 靠卡片左边缘右对齐，长度再长也只往通道里长，压不到卡片。
-    const sameCol = Math.abs(a.x - b.x) < 2;
-    const tx = erSvg('text', {
-      class: 'er-via-text',
-      x: sameCol ? Math.min(a.x, b.x) - 6 : g.mid.x + 6,
-      y: sameCol ? (ay + by) / 2 : g.mid.y,
-      'text-anchor': sameCol ? 'end' : 'start',
-      'dominant-baseline': 'middle',
-    });
-    tx.textContent = erShort(m.via.name, 13);
-    svg.appendChild(tx);
-
-    attach(path, [m.a.name, m.b.name]);
-  }
-
+  svg.addEventListener('pointerdown', ev => {
+    // 点在线上时不要开始平移画布。erStage 的 pointerdown 会 setPointerCapture，
+    // 一旦捕获，后续的 click 目标就变成 stage，连线菜单永远打不开 —— 表现成
+    // 「点线没反应」，而且因为捕获了指针，连拖动都变得诡异。
+    if (ev.target.closest && ev.target.closest('.er-hit')) ev.stopPropagation();
+  });
   svg.addEventListener('click', ev => {
     const hit = ev.target.closest && ev.target.closest('.er-hit');
     if (!hit) return;
@@ -9807,7 +9799,7 @@ function erCardEl(t, g) {
 
   const more = el('button', 'er-card-more', '⋯');
   more.type = 'button';
-  more.title = '移动到分组';
+  more.title = '分组与显示';
   more.addEventListener('pointerdown', ev => ev.stopPropagation());
   more.addEventListener('click', ev => {
     ev.stopPropagation();
@@ -9817,22 +9809,35 @@ function erCardEl(t, g) {
   card.appendChild(head);
 
   const cols = el('div', 'er-card-cols');
-  const fkCols = new Set();
-  for (const fk of (t.foreignKeys || [])) {
-    for (const c of fk.columns || []) fkCols.add(c.toLowerCase());
-  }
   const shown = erRowsOf(t);
   for (let i = 0; i < shown; i++) {
     const c = t.columns[i];
     const row = el('div', 'er-col');
-    const isFk = fkCols.has(c.name.toLowerCase());
-    const mark = el('span', 'er-mark' + (c.primaryKey ? ' pk' : (isFk ? ' fk' : '')));
-    mark.title = c.primaryKey ? '主键' : (isFk ? '外键' : '');
+    row.dataset.col = c.name;
+
+    const mark = el('span', 'er-mark' + (c.primaryKey ? ' pk' : ''));
+    mark.title = c.primaryKey ? '主键' : '';
     row.appendChild(mark);
     row.appendChild(el('span', 'er-col-name', c.name));
     row.appendChild(el('span', 'er-col-type', c.type));
+
+    // 连接点：从这一行长出一条关系。默认很淡，鼠标到行上才亮 ——
+    // 一直显示会把每张卡片变成一排小按钮，看着像表单。
+    const dot = el('span', 'er-col-dot');
+    dot.title = '拖到另一张表的字段上，画一条关系';
+    row.appendChild(dot);
+
     row.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}`
-      + (c.primaryKey ? ' · 主键' : '') + (isFk ? ' · 外键' : '');
+      + (c.primaryKey ? ' · 主键' : '');
+    row.addEventListener('pointerenter', () => erHighlight(t.name, c.name, true));
+    row.addEventListener('pointerleave', () => erHighlight(t.name, c.name, false));
+    row.addEventListener('pointerdown', ev => {
+      if (ev.button !== 0) return;
+      if (!ev.target.closest('.er-col-dot')) return;
+      ev.stopPropagation();
+      ev.preventDefault();
+      erStartLinkDrag(t, c.name, ev);
+    });
     cols.appendChild(row);
   }
   if (t.columns.length > shown) {
@@ -9842,8 +9847,8 @@ function erCardEl(t, g) {
 
   // 悬停高亮：把「这张表参与的连线」和「另一端的卡片」一起点亮。
   // 表一多，光靠颜色找一条线比找一根针还难。
-  card.addEventListener('mouseenter', () => erHighlight(t.name, true));
-  card.addEventListener('mouseleave', () => erHighlight(t.name, false));
+  card.addEventListener('mouseenter', () => erHighlight(t.name, '', true));
+  card.addEventListener('mouseleave', () => erHighlight(t.name, '', false));
 
   // 拖动摆位 + 单击打开表共用一个 pointer 序列。
   //
@@ -9932,17 +9937,12 @@ function erEndDrag(ev) {
 // 布局是相对的：拖走一张，旁边那张的位置才有意义。只记被拖的那张，
 // 剩下的下次打开会按自动布局重排，相当于「拖了个寂寞」。
 function erSnapshotCards() {
-  if (!erDoc) erDoc = erNormalizeDoc(null);
   for (const g of erModel.groups) {
     for (const t of g.tables) {
       if (!t.id) continue;
-      const k = erTKey(t);
-      const old = erDoc.tables[k] || {};
-      erDoc.tables[k] = {
-        group: old.group || '',
-        x: Math.round(t._er.x),
-        y: Math.round(t._er.y),
-      };
+      const rec = erCardRec(t);
+      rec.x = Math.round(t._er.x);
+      rec.y = Math.round(t._er.y);
     }
   }
 }
@@ -9962,7 +9962,243 @@ function erSyncBoxStyles() {
   }
 }
 
-/* ---- 分组与关系的编辑 ---- */
+/* ---- 字段到字段拉关系 ---- */
+
+// 拖拽建关系。为什么不做成「点字段 → 点另一个字段」：两步点击中间没有任何
+// 反馈，用户不知道自己在建什么；拖着一条线走，松手前就能看出会连到哪里。
+function erStartLinkDrag(t, colName, ev) {
+  const anchor = erLinkAnchor(t.name, colName);
+  if (!anchor) return;
+  erCloseMenus();
+
+  const layer = erSvg('svg', { class: 'er-link-layer' });
+  erStage.appendChild(layer);
+  const ghost = erSvg('path', { class: 'er-link-ghost', d: '' });
+  layer.appendChild(ghost);
+
+  erLinkDrag = { t, colName, id: ev.pointerId, anchor, layer, ghost, target: null, hitRow: null };
+  erStage.classList.add('er-linking');
+  erLinkDragMove(ev);
+}
+
+function erLinkAnchor(tableName, colName) {
+  const card = erCanvas.querySelector(`.er-card[data-table="${CSS.escape(tableName)}"]`);
+  const row = card && card.querySelector(`.er-col[data-col="${CSS.escape(colName)}"]`);
+  if (!row) return null;
+  const r = row.getBoundingClientRect();
+  const sr = erStage.getBoundingClientRect();
+  return { x: r.right - sr.left, y: r.top - sr.top + r.height / 2 };
+}
+
+function erLinkDragMove(ev) {
+  const d = erLinkDrag;
+  if (!d || d.id !== ev.pointerId) return;
+  const sr = erStage.getBoundingClientRect();
+  const gx = ev.clientX - sr.left;
+  const gy = ev.clientY - sr.top;
+
+  // 落点用「鼠标底下是谁」判断，而不是自己算坐标：画布可能被缩放，
+  // DOM 命中测试得到的答案永远和用户眼睛看到的一致。
+  const under = document.elementFromPoint(ev.clientX, ev.clientY);
+  const row = under && under.closest ? under.closest('.er-col') : null;
+  const card = row && row.closest('.er-card');
+  let hit = null;
+  if (row && card && row.dataset.col && card.dataset.table !== d.t.name) {
+    const tt = erTableByName(card.dataset.table);
+    if (tt && erColIndex(tt, row.dataset.col) >= 0) {
+      hit = { t: tt, colName: row.dataset.col, row };
+    }
+  }
+  if (d.hitRow && (!hit || d.hitRow !== hit.row)) d.hitRow.classList.remove('link-target');
+  d.hitRow = hit ? hit.row : null;
+  if (hit) hit.row.classList.add('link-target');
+  d.target = hit;
+
+  // 从起点到光标的折线，形状和最终连线一致：松手前就知道它会怎么绕。
+  const sx = d.anchor.x, sy = d.anchor.y;
+  let pts;
+  if (Math.abs(gy - sy) < 12) {
+    pts = [{ x: sx, y: sy }, { x: gx, y: gy }];
+  } else if (gx >= sx) {
+    const mx = sx + ER.stub;
+    pts = [{ x: sx, y: sy }, { x: mx, y: sy }, { x: mx, y: gy }, { x: gx, y: gy }];
+  } else {
+    const mx = sx - ER.stub;
+    pts = [{ x: sx, y: sy }, { x: mx, y: sy }, { x: mx, y: gy }, { x: gx, y: gy }];
+  }
+  d.ghost.setAttribute('d', erPolyPath(pts, ER.corner));
+}
+
+function erLinkDragEnd(ev) {
+  const d = erLinkDrag;
+  if (!d || d.id !== ev.pointerId) return;
+  // 松手前再算一次落点：手快的时候最后一个 pointermove 可能还在路上，
+  // 用它来判断「松在哪一行上」才不会漏掉最后一格。
+  erLinkDragMove(ev);
+  erLinkDrag = null;
+  erStage.classList.remove('er-linking');
+  if (d.layer) d.layer.remove();
+  if (d.hitRow) d.hitRow.classList.remove('link-target');
+
+  const hit = d.target;
+  if (!hit) return;
+  if (hit.t === d.t && hit.colName === d.colName) return;
+  erAskCard(d.t, d.colName, hit.t, hit.colName, ev);
+}
+
+// erAskCard 松手时就要定基数。
+//
+// 不默认成 1:N 再让用户去改：默认值一旦写进去就没人回头改，而 1:N 和 M:N
+// 在业务上是完全不同的两件事（一个是「订单属于客户」，一个是「订单和商品」）。
+function erAskCard(fromT, fromCol, toT, toCol, ev) {
+  const sr = erStage.getBoundingClientRect();
+  const x = ev.clientX - sr.left, y = ev.clientY - sr.top;
+  erShowMenu(x + 6, y + 6, [
+    { head: `${fromT.name}.${fromCol} → ${toT.name}.${toCol}` },
+    { label: '1 : 1 · 两端各一行', run: () => erAddLink(fromT, fromCol, toT, toCol, '11') },
+    { label: '1 : N · 起点一个、终点多个', run: () => erAddLink(fromT, fromCol, toT, toCol, '1N') },
+    { label: 'N : 1 · 起点多个、终点一个', run: () => erAddLink(toT, toCol, fromT, fromCol, '1N') },
+    { label: 'M : N · 两端都多个', run: () => erAddLink(fromT, fromCol, toT, toCol, 'NM') },
+  ]);
+}
+
+/* ---- 关系的增删改 ---- */
+
+function erLinkCovers(ln, aT, aCol, bT, bCol) {
+  const eq = (x, y) => String(x).toLowerCase() === String(y).toLowerCase();
+  const fwd = ln.from.table === aT.id && eq(ln.from.columns[0], aCol)
+    && ln.to.table === bT.id && eq(ln.to.columns[0], bCol);
+  const rev = ln.from.table === bT.id && eq(ln.from.columns[0], bCol)
+    && ln.to.table === aT.id && eq(ln.to.columns[0], aCol);
+  return fwd || rev;
+}
+
+function erAddLink(fromT, fromCol, toT, toCol, card) {
+  if (!erDoc) erDoc = erNormalizeDoc(null);
+  // 同一对字段只能有一条关系。允许重复的话，图上会出现两条完全重合的线，
+  // 点其中一条改基数，另一条还留在原样 —— 用户没法判断哪条才算数。
+  if (erDoc.links.some(ln => erLinkCovers(ln, fromT, fromCol, toT, toCol))) {
+    toast('这两列之间已经有一条关系了，点那条线可以改基数');
+    return;
+  }
+  erDoc.links.push({
+    id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    from: { table: fromT.id, columns: [fromCol] },
+    to: { table: toT.id, columns: [toCol] },
+    card,
+  });
+  erRender();
+  erSave();
+}
+
+function erSetCard(edge, card) {
+  const ln = erDoc.links.find(x => x.id === edge.link.id);
+  if (!ln) return;
+  ln.card = card;
+  erRender();
+  erSave();
+}
+
+// erFlipLink 交换两端。「一个订单对应多个明细」和「多个明细属于一个订单」
+// 是同一件事，但方向要留得住 —— 将来生成外键时，谁是子表由方向决定。
+function erFlipLink(edge) {
+  const ln = erDoc.links.find(x => x.id === edge.link.id);
+  if (!ln) return;
+  const f = ln.from;
+  ln.from = ln.to;
+  ln.to = f;
+  erRender();
+  erSave();
+}
+
+function erDeleteLink(edge) {
+  erDoc.links = erDoc.links.filter(x => x.id !== edge.link.id);
+  erRender();
+  erSave();
+}
+
+/* ---- 哪些表在图上 ---- */
+
+// 表来自库，但上不上这张画布是用户的决定。默认全在 —— 第一次打开就是
+// 一张空白画布的话，用户不知道该从哪开始。
+function erSetShown(t, on) {
+  const rec = erCardRec(t);
+  rec.hidden = !on;
+  if (on) {
+    // 放回来时清掉坐标，按自动布局落位：留着旧坐标会直接压在现在别人身上。
+    rec.x = null;
+    rec.y = null;
+  }
+  erRender();
+  erSave();
+}
+
+const erTablesModal = document.getElementById('erTablesModal');
+const erTablesList = document.getElementById('erTablesList');
+const erTablesSearch = document.getElementById('erTablesSearch');
+const erTablesHint = document.getElementById('erTablesHint');
+
+function erOpenTablePicker() {
+  if (!erDoc) erDoc = erNormalizeDoc(null);
+  erTablesSearch.value = '';
+  erRenderTablePicker();
+  erTablesModal.classList.remove('hidden');
+  erTablesSearch.focus();
+}
+
+function erCloseTablePicker() {
+  erTablesModal.classList.add('hidden');
+}
+
+function erRenderTablePicker() {
+  const tables = schemaCache || [];
+  const q = erTablesSearch.value.trim().toLowerCase();
+  erTablesList.innerHTML = '';
+  let shownN = 0;
+  for (const t of tables) {
+    const c = erDoc.tables[erTKey(t)];
+    const on = !(c && c.hidden);
+    if (on) shownN++;
+    if (q && t.name.toLowerCase().indexOf(q) < 0) continue;
+
+    const row = el('label', 'er-tables-row');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = on;
+    cb.addEventListener('change', () => {
+      erSetShown(t, cb.checked);
+      erRenderTablePicker();
+    });
+    row.appendChild(cb);
+    row.appendChild(el('span', 'er-tables-name', t.name));
+    row.appendChild(el('span', 'er-tables-meta', `${t.columns.length} 列 · ${t.rows} 行`));
+    // 收起之后跟它有关的关系就不画了 —— 在这里说清楚，别让人以为关系被删了。
+    if (!on) {
+      const k = erDoc.links.filter(ln =>
+        ln.from.table === t.id || ln.to.table === t.id).length;
+      if (k) row.appendChild(el('span', 'er-tables-off', `${k} 条关系不显示`));
+    }
+    erTablesList.appendChild(row);
+  }
+  if (!erTablesList.children.length) {
+    erTablesList.appendChild(el('div', 'er-tables-none', q ? '没有匹配的表' : '这个库还没有表'));
+  }
+  erTablesHint.textContent = `${shownN} / ${tables.length} 张在图上`;
+}
+
+// 收起的入口只有状态栏一处：那些表在画布上没有位置，点不到。
+function erHiddenChip(n) {
+  const b = el('button', 'er-hidden-chip', `已收起 ${n} 张`);
+  b.type = 'button';
+  b.title = '点开选择要显示哪些表';
+  b.addEventListener('click', ev => {
+    ev.stopPropagation();
+    erOpenTablePicker();
+  });
+  return b;
+}
+
+/* ---- 分组编辑 ---- */
 
 function erGroupOf(t) {
   const c = erDoc.tables[erTKey(t)];
@@ -9970,12 +10206,12 @@ function erGroupOf(t) {
 }
 
 function erMoveToGroup(t, gid) {
-  if (!erDoc) erDoc = erNormalizeDoc(null);
-  const k = erTKey(t);
-  const old = erDoc.tables[k] || {};
+  const rec = erCardRec(t);
   // 清掉坐标：留着的话这张表会停在旧位置，把新组的框撑到别处去。
   // 让它按新组的自动布局落位，用户再拖就是他的事。
-  erDoc.tables[k] = { group: gid || '', x: null, y: null };
+  rec.group = gid || '';
+  rec.x = null;
+  rec.y = null;
   erHotGroup = gid || 'loose';
   erRender();
   erSave();
@@ -10102,14 +10338,9 @@ function erOpenCardMenu(t, cardEl) {
     });
   }
   items.push({ label: '未分组', on: !cur, run: () => erMoveToGroup(t, '') });
+  items.push({ label: '+ 新建分组并移入', run: () => erMoveToGroup(t, erAddGroup()) });
   items.push({ sep: true });
-  items.push({
-    label: '+ 新建分组并移入',
-    run: () => {
-      const id = erAddGroup();
-      erMoveToGroup(t, id);
-    },
-  });
+  items.push({ label: '从图上收起', run: () => erSetShown(t, false) });
   erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
 }
 
@@ -10138,147 +10369,40 @@ function erOpenEdgeMenu(edgeId, ev) {
   for (const e of erModel.edges) {
     if (e.id === edgeId) { edge = e; break; }
   }
-  if (!edge) {
-    for (const m of erModel.m2m) {
-      if (m.id === edgeId) { edge = m; break; }
-    }
-  }
   if (!edge) return;
 
   const label = { '11': '1 : 1', '1N': '1 : N', 'NM': 'M : N' };
-
-  // 折叠出来的多对多：基数没有可改的（两边都是多个是它的定义），
-  // 能做的只有「我不同意这条关系」。
-  if (edge.kind === 'm2m') {
-    erShowMenu(x + 4, y + 4, [
-      { head: `${edge.a.name} ↔ ${edge.b.name}` },
-      { head: `经 ${edge.via.name} 折叠` },
-      { sep: true },
-      { label: '我的模型里没有这条关系', run: () => erHideEdge(edge.id) },
-    ]);
-    return;
-  }
-
-  // 物理视图只报告，不改：那里问的是「库里有什么」，改基数等于在图上写假话。
-  if (erMode === 'physical') {
-    erShowMenu(x + 4, y + 4, [
-      { head: `${edge.child.name} → ${edge.parent.name}` },
-      { head: `库里推导：${label[edge.defaultCard]}` },
-      { sep: true },
-      { label: '去逻辑视图改基数', run: () => erToggleMode() },
-    ]);
-    return;
-  }
-
-  const items = [{ head: `${edge.child.name} → ${edge.parent.name}` }];
+  const items = [
+    { head: `${edge.from.name}.${edge.fromCol} → ${edge.to.name}.${edge.toCol}` },
+    { head: `当前：${label[edge.card]}` },
+  ];
   for (const k of ['11', '1N', 'NM']) {
-    items.push({
-      label: label[k] + (k === 'NM' ? '（两端都是多个）' : ''),
-      on: edge.card === k,
-      run: () => erSetCard(edge, k),
-    });
+    if (k === edge.card) continue;
+    items.push({ label: `改成 ${label[k]}`, run: () => erSetCard(edge, k) });
   }
-  if (edge.kind === 'fk' && edge.overridden) {
+  if (edge.card === '1N') {
     items.push({ sep: true });
     items.push({
-      label: `恢复推导值（${label[edge.defaultCard]}）`,
-      run: () => {
-        delete erDoc.overrides[edge.id];
-        erRender();
-        erSave();
-      },
+      label: `反过来（${edge.to.name} 是「一」侧）`,
+      run: () => erFlipLink(edge),
     });
   }
   items.push({ sep: true });
-  if (edge.kind === 'manual') {
-    // 手画的关系本来就能删，不需要「隐藏」这层 —— 两条菜单项做同一件事只会让人犹豫。
-    items.push({
-      label: '删除这条逻辑关系',
-      danger: true,
-      run: () => {
-        erDoc.links = erDoc.links.filter(x => x.id !== edge.linkId);
-        erRender();
-        erSave();
-      },
-    });
-  } else {
-    items.push({
-      label: '我的模型里没有这条关系',
-      run: () => erHideEdge(edge.id),
-    });
-  }
-  erShowMenu(x + 4, y + 4, items);
-}
-
-// erHideEdge / erUnhideEdge：逻辑层否认或恢复一条边。
-//
-// 只写侧车，不动库 —— 外键还在（物理视图照画），只是这张图不再画它。
-// 「这两张表业务上有没有关系」和「库里有没有约束」是两句话，前者归模型，
-// 后者归物理；不给前者一个表达方式，就是让约束反过来管住模型。
-function erHideEdge(id) {
-  if (!erDoc) return;
-  const set = new Set(erDoc.hidden);
-  set.add(id);
-  erDoc.hidden = Array.from(set);
-  erRender();
-  erSave();
-}
-
-function erUnhideEdge(id) {
-  if (!erDoc) return;
-  erDoc.hidden = erDoc.hidden.filter(x => x !== id);
-  erRender();
-  erSave();
-}
-
-// erHiddenChip 是「已隐藏 N 条」那个入口。挂在状态栏，不挂在画布上：
-// 被隐藏的边没有线可点，画布上也就没有它的位置。
-function erHiddenChip(hidden) {
-  const b = el('button', 'er-hidden-chip', `已隐藏 ${hidden.length} 条`);
-  b.type = 'button';
-  b.title = '这些关系还在库里，只是这张图不画。点开可以恢复。';
-  b.addEventListener('click', ev => {
-    ev.stopPropagation();
-    const r = b.getBoundingClientRect();
-    const sr = erStage.getBoundingClientRect();
-    const items = [{ head: '已隐藏的关系' }];
-    for (const e of hidden) {
-      items.push({
-        label: e.kind === 'm2m'
-          ? `${e.a.name} ↔ ${e.b.name}（经 ${e.via.name}）`
-          : `${e.child.name} → ${e.parent.name}`,
-        run: () => erUnhideEdge(e.id),
-      });
-    }
-    erShowMenu(r.left - sr.left, r.bottom - sr.top + 4, items);
+  items.push({
+    label: '删除这条关系',
+    danger: true,
+    run: () => erDeleteLink(edge),
   });
-  return b;
+  erShowMenu(x + 6, y + 6, items);
 }
 
-// erSetCard 记下用户指定的基数。
-//
-// 外键边：标注写进 overrides，不动库 —— 改约束是数据变更，要有 WAL、锁、
-// 校验、失败回滚；「我认为这里业务上是 1:1」只是个判断，写进侧车，改错了
-// 删掉就恢复。逻辑边：直接改它自己的字段。
-function erSetCard(edge, card) {
-  if (edge.kind === 'manual') {
-    const ln = erDoc.links.find(x => x.id === edge.linkId);
-    if (ln) ln.card = card;
-  } else {
-    if (edge.defaultCard === card) delete erDoc.overrides[edge.id];
-    else erDoc.overrides[edge.id] = card;
-  }
-  erRender();
-  erSave();
-}
-
-/* ---- 新增逻辑关系 ---- */
+/* ---- 用弹窗建关系（不拖拽时的备选路径） ---- */
 
 const erLinkModal = document.getElementById('erLinkModal');
-const erLinkChild = document.getElementById('erLinkChild');
-const erLinkChildCol = document.getElementById('erLinkChildCol');
-const erLinkParent = document.getElementById('erLinkParent');
-const erLinkParentCol = document.getElementById('erLinkParentCol');
+const erLinkFrom = document.getElementById('erLinkFrom');
+const erLinkFromCol = document.getElementById('erLinkFromCol');
+const erLinkTo = document.getElementById('erLinkTo');
+const erLinkToCol = document.getElementById('erLinkToCol');
 const erLinkCard = document.getElementById('erLinkCard');
 const erLinkHint = document.getElementById('erLinkHint');
 
@@ -10315,29 +10439,24 @@ function erOpenLinkModal() {
   const tables = schemaCache || [];
   if (!tables.length) return;
   erLinkHint.textContent = '';
-  erFillTableSelect(erLinkChild, tables);
-  erFillTableSelect(erLinkParent, tables, tables.length > 1 ? tables[1].id : tables[0].id);
+  erFillTableSelect(erLinkFrom, tables);
+  erFillTableSelect(erLinkTo, tables, tables.length > 1 ? tables[1].id : tables[0].id);
   erSyncLinkCols();
   erLinkCard.value = '1N';
   erLinkModal.classList.remove('hidden');
-  erLinkChild.focus();
+  erLinkFrom.focus();
 }
 
 function erSyncLinkCols() {
-  const child = erTableById(erLinkChild.value);
-  const parent = erTableById(erLinkParent.value);
-  erFillColSelect(erLinkChildCol, child);
-  erFillColSelect(erLinkParentCol, parent);
+  const from = erTableById(erLinkFrom.value);
+  const to = erTableById(erLinkTo.value);
+  erFillColSelect(erLinkFromCol, from);
+  erFillColSelect(erLinkToCol, to);
 
-  // 父表有主键就默认选它 —— 绝大多数关系指向主键，省一次点击。
-  if (parent) {
-    const pk = parent.columns.find(c => c.primaryKey);
-    if (pk) erLinkParentCol.value = pk.name;
-  }
-  // 子表已经有指向这个父表的外键，就把那几列预选上：用户多半是在看那条边。
-  if (child && parent) {
-    const fk = (child.foreignKeys || []).find(f => f.refTable === parent.name);
-    if (fk && fk.columns.length) erLinkChildCol.value = fk.columns[0];
+  // 「一」那一端多半指着主键，默认选中它，省一次点击。
+  if (to) {
+    const pk = to.columns.find(c => c.primaryKey);
+    if (pk) erLinkToCol.value = pk.name;
   }
 }
 
@@ -10346,63 +10465,54 @@ function erCloseLinkModal() {
 }
 
 function erSaveLink() {
-  const child = erTableById(erLinkChild.value);
-  const parent = erTableById(erLinkParent.value);
-  const cc = erLinkChildCol.value;
-  const pc = erLinkParentCol.value;
-  if (!child || !parent || !cc || !pc) {
-    erLinkHint.textContent = '子表、父表和两边的列都要选。';
+  const from = erTableById(erLinkFrom.value);
+  const to = erTableById(erLinkTo.value);
+  const fc = erLinkFromCol.value;
+  const tc = erLinkToCol.value;
+  if (!from || !to || !fc || !tc) {
+    erLinkHint.textContent = '两端的表和字段都要选。';
     return;
   }
-  if (child === parent && cc.toLowerCase() === pc.toLowerCase()) {
+  if (from === to && fc.toLowerCase() === tc.toLowerCase()) {
     erLinkHint.textContent = '同一张表的同一列不能自己连自己。';
     return;
   }
-  // 库里已经有这条外键了，再画一条逻辑关系就是同一件事出现两遍。
-  //
-  // 但如果这条边正好被隐藏过，那用户现在就是在说「加回来」—— 恢复它，
-  // 而不是新建一条虚线。库里确实有约束，画成虚线等于让图说假话。
-  for (const fk of (child.foreignKeys || [])) {
-    if (fk.refTable !== parent.name) continue;
-    if (fk.columns.length !== 1) continue;
-    if (fk.columns[0].toLowerCase() !== cc.toLowerCase()) continue;
-    const fid = erFkId(child.id, fk.columns);
-    if (erDoc && erDoc.hidden.indexOf(fid) >= 0) {
-      erCloseLinkModal();
-      erUnhideEdge(fid);
-      toast('这条外键本来就在库里，已经恢复显示');
-      return;
-    }
-    erLinkHint.textContent = '库里已经有这条外键了，图上会自动画出来，不用再加。';
-    return;
-  }
-
-  if (!erDoc) erDoc = erNormalizeDoc(null);
-  erDoc.links.push({
-    id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-    child: child.id,
-    columns: [cc],
-    parent: parent.id,
-    refColumns: [pc],
-    card: erLinkCard.value,
-  });
   erCloseLinkModal();
-  erRender();
-  erSave();
+  erAddLink(from, fc, to, tc, erLinkCard.value);
 }
 
 /* ---- 视图 ---- */
 
-function erHighlight(table, on) {
-  const list = erCanvas._edgeEls && erCanvas._edgeEls.get(table);
-  if (!list) return;
-  for (const p of list) p.classList.toggle('hot', on);
-  for (const p of list) {
-    for (const name of [p.dataset.child, p.dataset.parent]) {
-      if (!name) continue;
-      const card = erCanvas.querySelector(`.er-card[data-table="${CSS.escape(name)}"]`);
-      if (card) card.classList.toggle('hot', on);
-    }
+// 悬停高亮分两级：鼠标在卡片上是「这张表的所有关系」，落在某一列上是
+// 「进出这一列的线」。后者才是字段级连线的意义 —— 一个字段连着两张表，
+// 光看卡片是分不出来的。
+function erHighlight(table, col, on) {
+  const edges = erCanvas.querySelectorAll('.er-edge');
+  const hits = new Set();
+  for (const p of edges) {
+    const hit = col
+      ? (p.dataset.from === table + '.' + col || p.dataset.to === table + '.' + col)
+      : (p.dataset.ft === table || p.dataset.tt === table);
+    if (hit) hits.add(p.dataset.edge);
+  }
+  if (!hits.size) return;
+
+  const touched = new Set();
+  for (const p of edges) {
+    if (!hits.has(p.dataset.edge)) continue;
+    p.classList.toggle('hot', on);
+    touched.add(p.dataset.ft);
+    touched.add(p.dataset.tt);
+  }
+  // 端点符号是独立的 path，不跟着线变色的话，线亮了、鸦爪还是灰的。
+  for (const p of erCanvas.querySelectorAll('.er-tick, .er-crow')) {
+    if (hits.has(p.dataset.edge)) p.classList.toggle('hot', on);
+  }
+  if (col) return;
+  for (const nm of touched) {
+    if (!nm) continue;
+    const card = erCanvas.querySelector(`.er-card[data-table="${CSS.escape(nm)}"]`);
+    if (card) card.classList.toggle('hot', on);
   }
 }
 
@@ -10440,35 +10550,6 @@ function erZoomAt(factor, cx, cy) {
   erApplyView();
 }
 
-function erSyncModeBtn() {
-  const b = document.getElementById('btnErMode');
-  if (!b) return;
-  b.textContent = erMode === 'logic' ? '逻辑' : '物理';
-  b.classList.toggle('phys', erMode === 'physical');
-  b.title = erMode === 'logic'
-    ? '当前：逻辑视图（折叠关联表，显示你画的关系）。点击切到物理视图'
-    : '当前：物理视图（只显示库里真实存在的表和外键）。点击切回逻辑视图';
-  erSyncLegend();
-}
-
-// 图例跟着视图换词。
-//
-// 逻辑层说的是「这两张表有关系，库里管不管它」，物理层说的是「这里有一条外键」。
-// 两个视图共用「外键约束」四个字，就会让人以为逻辑层也是约束的镜像 ——
-// 而逻辑层恰恰可以否认一条约束（hidden），可以加一条库里没有的（links）。
-function erSyncLegend() {
-  const solid = document.getElementById('erLgSolid');
-  if (solid) solid.textContent = erMode === 'logic' ? '库里有约束' : '外键';
-}
-
-function erToggleMode() {
-  erMode = erMode === 'logic' ? 'physical' : 'logic';
-  try { localStorage.setItem('godb.er.mode', erMode); } catch (e) { /* 忽略 */ }
-  erSyncModeBtn();
-  erRender();
-  erFit();
-}
-
 function toggleER(force) {
   const want = force === undefined ? !erOpen : force;
   if (want === erOpen) return;
@@ -10490,7 +10571,7 @@ function toggleER(force) {
   syncTopNav();
 }
 
-// erLoadThenRender 先拉布局再画。
+// erLoadThenRender 先拉模型再画。
 //
 // 不等接口就画的话，第一次打开会先闪一下自动布局再跳成手工布局 ——
 // 看起来像「图在抖」。接口失败也要能画：拿不到布局就按自动布局来。
@@ -10510,7 +10591,6 @@ async function erLoadThenRender() {
 document.getElementById('btnEr').addEventListener('click', () => toggleER());
 document.getElementById('btnErClose').addEventListener('click', () => toggleER(false));
 document.getElementById('btnErFit').addEventListener('click', erFit);
-document.getElementById('btnErMode').addEventListener('click', erToggleMode);
 
 document.getElementById('btnErGroup').addEventListener('click', () => {
   if (!erDoc) erDoc = erNormalizeDoc(null);
@@ -10532,10 +10612,30 @@ document.getElementById('btnErLink').addEventListener('click', erOpenLinkModal);
 document.getElementById('btnErLinkClose').addEventListener('click', erCloseLinkModal);
 document.getElementById('btnErLinkCancel').addEventListener('click', erCloseLinkModal);
 document.getElementById('btnErLinkSave').addEventListener('click', erSaveLink);
-erLinkChild.addEventListener('change', erSyncLinkCols);
-erLinkParent.addEventListener('change', erSyncLinkCols);
+erLinkFrom.addEventListener('change', erSyncLinkCols);
+erLinkTo.addEventListener('change', erSyncLinkCols);
 
-// 自动排列：只清坐标，分组名、颜色、逻辑关系全留着 —— 那些是设计信息，不是布局。
+document.getElementById('btnErTables').addEventListener('click', erOpenTablePicker);
+document.getElementById('btnErTablesClose').addEventListener('click', erCloseTablePicker);
+document.getElementById('btnErTablesDone').addEventListener('click', erCloseTablePicker);
+erTablesSearch.addEventListener('input', erRenderTablePicker);
+document.getElementById('btnErTablesAll').addEventListener('click', () => {
+  for (const t of (schemaCache || [])) {
+    const rec = erCardRec(t);
+    rec.hidden = false;
+  }
+  erRender();
+  erSave();
+  erRenderTablePicker();
+});
+document.getElementById('btnErTablesNone').addEventListener('click', () => {
+  for (const t of (schemaCache || [])) erCardRec(t).hidden = true;
+  erRender();
+  erSave();
+  erRenderTablePicker();
+});
+
+// 自动排列：只清坐标，分组名、颜色、关系全留着 —— 那些是设计信息，不是布局。
 document.getElementById('btnErAuto').addEventListener('click', () => {
   if (!erDoc) return;
   for (const k in erDoc.tables) {
@@ -10595,5 +10695,24 @@ function erEndPan(ev) {
 erStage.addEventListener('pointerup', erEndPan);
 erStage.addEventListener('pointercancel', erEndPan);
 
-erSyncModeBtn();
+// 拉关系的收尾挂在 document 上：松手点可能在画布外，也可能落在别的卡片上，
+// 而卡片自己会吞掉 pointerup。
+document.addEventListener('pointermove', ev => {
+  if (erLinkDrag) erLinkDragMove(ev);
+});
+document.addEventListener('pointerup', ev => {
+  if (erLinkDrag) erLinkDragEnd(ev);
+});
+document.addEventListener('pointercancel', ev => {
+  if (erLinkDrag) erLinkDragEnd(ev);
+});
+
+// 画布空白处右键：打开表清单。这是「从这里挑表」最顺手的位置。
+erStage.addEventListener('contextmenu', ev => {
+  if (!erOpen) return;
+  if (ev.target.closest('.er-card, .er-group-label, .er-menu')) return;
+  ev.preventDefault();
+  erOpenTablePicker();
+});
+
 erApplyView();

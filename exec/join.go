@@ -42,8 +42,6 @@ type joinOp struct {
 	estRight int
 }
 
-const maxJoinOutput = 2000000
-
 func (o *joinOp) Schema() Schema       { return o.sc }
 func (o *joinOp) Children() []Operator { return []Operator{o.left, o.right} }
 

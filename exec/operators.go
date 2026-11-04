@@ -794,6 +794,14 @@ func (o *sortOp) Open() error {
 			if err != nil {
 				return err
 			}
+			// 全排序是「把整张表搬进内存再排」。这条兜底以前没有，于是
+			// `SELECT * FROM 大表 ORDER BY x`（不带 LIMIT）可以一路排到 OOM ——
+			// 连接那边早有 200 万行的保护，排序反而没有。
+			// 报错要说明「为什么」：本库不落盘，没有溢出到磁盘这条路。
+			if len(o.rows) >= maxSortRows {
+				return fmt.Errorf("排序需要缓存超过 %d 行：本库不落盘，全排序只能放在内存里。"+
+					"请加 LIMIT，或先用 WHERE 把行数收窄", maxSortRows)
+			}
 			o.rows = append(o.rows, e)
 		}
 	}

@@ -278,6 +278,10 @@ type ColumnInfo struct {
 	Unique     bool   `json:"unique"`
 	Serial     bool   `json:"serial"`
 	Default    string `json:"default,omitempty"`
+	// Comment 是 COMMENT ON COLUMN 写的说明。带出去是为了让侧栏的
+	// 字段提示能说清「这一列是干嘛的」—— 注释本来就存在 catalog 里
+	// （还落到 pg_description），只是以前没往控制台传。
+	Comment string `json:"comment,omitempty"`
 }
 
 // TableInfo 是前端展示用的表信息。
@@ -285,6 +289,8 @@ type TableInfo struct {
 	Name    string       `json:"name"`
 	Rows    int          `json:"rows"`
 	Columns []ColumnInfo `json:"columns"`
+	// Comment 是 COMMENT ON TABLE 写的一句话说明，侧栏会在表名下面显示。
+	Comment string `json:"comment,omitempty"`
 }
 
 // Open 打开（或初始化）数据目录。
@@ -1125,7 +1131,7 @@ func (d *DB) Tables() []TableInfo {
 	defer d.Store.SchemaMu.RUnlock()
 	out := make([]TableInfo, 0, len(d.Cat.Tables))
 	for _, t := range d.Cat.Tables {
-		ti := TableInfo{Name: t.Name, Rows: d.Store.RowCount(t.Name)}
+		ti := TableInfo{Name: t.Name, Rows: d.Store.RowCount(t.Name), Comment: t.Comment}
 		for _, c := range t.Columns {
 			ti.Columns = append(ti.Columns, ColumnInfo{
 				Name:       c.Name,
@@ -1135,6 +1141,7 @@ func (d *DB) Tables() []TableInfo {
 				Unique:     c.Unique,
 				Serial:     c.Serial,
 				Default:    c.Default,
+				Comment:    c.Comment,
 			})
 		}
 		out = append(out, ti)

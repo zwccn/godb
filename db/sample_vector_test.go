@@ -2,6 +2,7 @@ package db
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,30 @@ func TestSampleHasVectorTable(t *testing.T) {
 	// 向量列不能建索引 —— 示例表别埋一个「看起来能建」的坑
 	if err := runErr(t, d, s, `CREATE INDEX articles_emb ON articles (embedding)`); err == nil {
 		t.Fatal("向量列建索引应该被拒绝")
+	}
+
+	// 注释要跟着 /api/schema 一起出来：侧栏那行说明就是从这里取的。
+	// 只写进 catalog 不带出去的话，用户看到的还是光秃秃一个表名。
+	var found *TableInfo
+	for _, ti := range d.Tables() {
+		if ti.Name == "articles" {
+			t := ti
+			found = &t
+		}
+	}
+	if found == nil {
+		t.Fatal("Tables() 里没有 articles")
+	}
+	if !strings.Contains(found.Comment, "8 维向量") {
+		t.Fatalf("表注释没带出来: %q", found.Comment)
+	}
+	var embComment string
+	for _, c := range found.Columns {
+		if c.Name == "embedding" {
+			embComment = c.Comment
+		}
+	}
+	if !strings.Contains(embComment, "余弦") {
+		t.Fatalf("embedding 列注释没带出来: %q", embComment)
 	}
 }

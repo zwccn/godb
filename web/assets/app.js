@@ -2210,7 +2210,11 @@ function renderSchema(tables) {
   for (const t of shown) {
     const node = el('div', 'table-node' + (expandedTables.has(t.name) ? ' open' : ''));
     const row = el('div', 'table-row');
-    row.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 个字段（点 ▶ 展开字段，右键有表操作）`;
+    // 表注释进 tooltip：鼠标停一下就能知道「这张表是干嘛的」，
+    // 又不用在侧栏里挤第二行（注释长的会把整个树撑变形）。
+    row.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 个字段`
+      + (t.comment ? `\n${t.comment}` : '')
+      + '（点 ▶ 展开字段，右键有表操作）';
     const caret = el('span', 'caret', '▶');
     caret.addEventListener('click', ev => {
       ev.stopPropagation();
@@ -2228,6 +2232,13 @@ function renderSchema(tables) {
       showCtxMenu(ev.clientX, ev.clientY, tableMenuItems(t));
     });
     node.appendChild(row);
+    // 有注释才占一行：示例库里 articles 这种「需要一句话说明」的表
+    // 直接在树里写清楚，否则用户只能靠名字猜。
+    if (t.comment) {
+      const note = el('div', 'table-note', t.comment);
+      note.title = t.comment;
+      node.appendChild(note);
+    }
 
     const cols = el('div', 'cols');
     for (const c of t.columns) {
@@ -2235,7 +2246,8 @@ function renderSchema(tables) {
       cr.appendChild(el('span', '', c.name));
       if (c.primaryKey) cr.appendChild(el('span', 'pk', 'PK'));
       cr.appendChild(el('span', 'ctype', c.type));
-      cr.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}${c.default ? ' DEFAULT ' + c.default : ''}`;
+      cr.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}${c.default ? ' DEFAULT ' + c.default : ''}`
+        + (c.comment ? `\n${c.comment}` : '');
       cr.addEventListener('click', ev => {
         ev.stopPropagation();
         lastTableName = t.name;

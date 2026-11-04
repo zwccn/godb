@@ -83,6 +83,12 @@ INSERT INTO articles (title, topic, embedding) VALUES
      '[0.03,0.02,0.09,0.88,0.01,0.02,0.05,0.04]'),
     ('应收账款周转分析',                 'fin',
      '[0.02,0.04,0.12,0.90,0.03,0.01,0.03,0.02]');
+
+-- 注释：侧栏会在表名下面显示这一行。示例表尤其需要 —— 「articles」这名字
+-- 本身说明不了里面存的是向量，也说明不了该怎么查。
+COMMENT ON TABLE articles IS '示例：9 篇文档 + 8 维向量，演示按相似度取前 K 条';
+COMMENT ON COLUMN articles.topic IS 'tech / prod / mkt / fin';
+COMMENT ON COLUMN articles.embedding IS '8 维向量（四类主题各占一个方向），用 <=> 算余弦距离';
 `
 
 // LoadSample 载入示例数据（会先清空所有表）。

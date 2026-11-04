@@ -675,6 +675,19 @@ a[href]:focus-visible {
   font-family: var(--mono);
 }
 
+/* 表的注释（COMMENT ON TABLE）：只在有注释时渲染一行，超出省略。
+   左边 24px = 8 的 padding + 9 的箭头 + 7 的 gap，和表名对齐；
+   不写第二行是因为注释可能很长，把树撑变形比看不到更糟。 */
+.table-note {
+  padding: 0 8px 2px 24px;
+  font-size: calc(11px * var(--fs));
+  line-height: 1.5;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cols {
   display: none;
   padding: 2px 0 8px 22px;

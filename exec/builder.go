@@ -1734,8 +1734,18 @@ func (p *Planner) buildSetOp(s *sql.Select) (Operator, error) {
 func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Operator, sc Schema) (Operator, error) {
 	groupEvals := make([]Eval, len(s.GroupBy))
 	groupTypes := make([]types.Type, len(s.GroupBy))
+	// groupExprs 是「解析过序号 / 输出别名之后」的分组表达式。
+	// 后面建输出 schema 和 canonical→下标映射都要用它：投影里写的是
+	// `id % 10 AS k`，分组若按原始写法 `k` 建键，两边的 canonical 就对不上，
+	// 投影会以为这一列没被分组、报「必须出现在 GROUP BY 里」。
+	groupExprs := make([]sql.Expr, len(s.GroupBy))
 	for i, ge := range s.GroupBy {
-		ev, err := p.compile(ge, sc)
+		expr, err := p.groupExpr(ge, items, sc)
+		if err != nil {
+			return nil, err
+		}
+		groupExprs[i] = expr
+		ev, err := p.compile(expr, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -1766,7 +1776,7 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 
 	outSc := make(Schema, 0, len(groupEvals)+len(col.aggs))
 	keys := map[string]int{}
-	for i, ge := range s.GroupBy {
+	for i, ge := range groupExprs {
 		name := "?column?"
 		qual := ""
 		if cr, ok := ge.(*sql.ColumnRef); ok {
@@ -1872,6 +1882,47 @@ func (p *Planner) orderKey(oi *sql.OrderItem, items []*sql.SelectItem, targetExp
 	}
 	// 走到这里说明不是输出列名（或本来就带表限定/是表达式），回落到来源列解析
 	return compile(oi.Expr, ctx)
+}
+
+// groupExpr 解析 GROUP BY 的一项：序号、输出别名、普通表达式（PG 的三条规矩）。
+//
+// 两种写法以前都不认：`GROUP BY 1` 被当成常量 1（于是整张表一组，接着在投影里
+// 报一句莫名其妙的「column id must appear in the GROUP BY clause」），
+// `GROUP BY k`（k 是输出别名）直接报「column "k" does not exist」。
+//
+// 歧义优先级和 ORDER BY **相反**，这两处都是照 PG 文档来的：
+//   · 裸名字既是输入列又是输出列 → 按输入列解释（GROUP BY 文档：input column wins）；
+//   · 反过来 ORDER BY 是按输出列解释（见 orderKey 里那段注释）。
+func (p *Planner) groupExpr(ge sql.Expr, items []*sql.SelectItem, sc Schema) (sql.Expr, error) {
+	// 1) 序号：GROUP BY 2 —— 指向第 2 个输出列的表达式
+	if lit, ok := ge.(*sql.Literal); ok && lit.Val.K == types.KInt {
+		n := lit.Val.I
+		if n < 1 || int(n) > len(items) {
+			return nil, fmt.Errorf("GROUP BY position %d is not in select list", n)
+		}
+		return items[n-1].Expr, nil
+	}
+	// 2) 输出别名。只在「它不是输入列」时才按别名解释 —— 输入列优先。
+	cr, ok := ge.(*sql.ColumnRef)
+	if !ok || cr.Table != "" || sc.Contains("", cr.Name) {
+		return ge, nil
+	}
+	hit := -1
+	for i, it := range items {
+		if !strings.EqualFold(itemName(it), cr.Name) {
+			continue
+		}
+		if hit >= 0 {
+			return nil, fmt.Errorf("GROUP BY %q is ambiguous", cr.Name)
+		}
+		hit = i
+	}
+	if hit < 0 {
+		// 既不是输入列也不是输出列：原样返回，让 compile 报「列不存在」——
+		// 那里的文案带着候选信息，比这里重新编一句准。
+		return ge, nil
+	}
+	return items[hit].Expr, nil
 }
 
 // topNHint 返回 Top-N 排序应保留的行数（LIMIT+OFFSET），0 表示不适用。

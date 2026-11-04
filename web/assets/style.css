@@ -2543,7 +2543,10 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  padding: 10px 12px 2px;
+  /* 底部原来只有 2px：数字块的第三行（「峰值 0 · 语句/秒」）和下面的图例
+     只隔 4px，两块挤在一起，看着像图例是数字块的第四行。给到 8px，
+     和顶部 10px 一起把「读数」与「曲线」分成两个区块。 */
+  padding: 10px 12px 8px;
 }
 .proc-cell { min-width: 0; }
 .pc-name { font-size: calc(11px * var(--fs)); color: var(--text-3); }
@@ -2568,7 +2571,10 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 
 /* 吞吐与连接：两行小图叠在一张卡里（QPS/TPS 一行、连接数一行）。
    每行 64px：比进程资源那块矮一点，因为它是两行，加起来反而更高。 */
-.mon-spark { display: flex; flex-direction: column; padding: 2px 12px 8px; }
+/* 图上方的 8px 是给「上一块（读数）」留的气：图例本身属于这张图，
+   它和曲线之间只隔 2px 是对的，但和上面的数字块必须分开 —— 否则读者会
+   把图例读成数字块的第四行。 */
+.mon-spark { display: flex; flex-direction: column; padding: 8px 12px 8px; }
 .mon-spark .spark-plot svg { height: 64px; }
 
 /* 两张小图之间必须有界线，图例也要挪到各自那张图的上面。

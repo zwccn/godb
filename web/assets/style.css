@@ -60,7 +60,7 @@
   --danger-text: #ff9ba3;
   --danger-text-dim: #d98b93;
   --border-hover: #35424f;
-  --row-hover: #141b23;
+  --row-hover: #1b2430;
   --scroll-thumb: #263140;
   --scroll-thumb-hover: #33414f;
   --code-bg: #0d1319;
@@ -117,7 +117,7 @@ html[data-theme="sky"] {
   --danger-text: #b32f3d;
   --danger-text-dim: #c25d68;
   --border-hover: #9dc2e4;
-  --row-hover: #e8f2fb;
+  --row-hover: #d8e7f7;
   --scroll-thumb: #c2d7e9;
   --scroll-thumb-hover: #a9c6e0;
   --code-bg: #e7f1fa;
@@ -170,7 +170,7 @@ html[data-theme="taro"] {
   --danger-text: #b32f3d;
   --danger-text-dim: #c25d68;
   --border-hover: #b9a2e2;
-  --row-hover: #f0e8fc;
+  --row-hover: #e4d6f7;
   --scroll-thumb: #d3c3ec;
   --scroll-thumb-hover: #bda8e2;
   --code-bg: #efe7fb;
@@ -223,7 +223,7 @@ html[data-theme="mint"] {
   --danger-text: #b32f3d;
   --danger-text-dim: #c25d68;
   --border-hover: #98cdb6;
-  --row-hover: #e6f6ee;
+  --row-hover: #d4ebdf;
   --scroll-thumb: #c3e2d4;
   --scroll-thumb-hover: #a8d3c0;
   --code-bg: #e4f5ed;
@@ -295,7 +295,7 @@ html[data-theme="steel"] {
   --danger-text: #f395a9;
   --danger-text-dim: #c97b8b;
   --border-hover: #44465f;
-  --row-hover: #20202d;
+  --row-hover: #2c2c40;
   --scroll-thumb: #383a4f;
   --scroll-thumb-hover: #4a4c66;
   --code-bg: #131320;
@@ -1520,7 +1520,14 @@ a[href]:focus-visible {
   border-left: 2px solid transparent;
   border-radius: 6px;
 }
-.probe-row:hover { background: var(--row-hover); }
+/* 悬停：底色 + 左侧一条灰竖线。
+   只有底色时很难看出来 —— 尤其浅色主题，原来的 --row-hover 和卡片底色
+   几乎同色（#e8f2fb vs #eaf3fc），鼠标扫过去几乎没有反馈。竖线和
+   「最贵一步」的黄色竖条共用同一条 2px 边，不会多出新元素。 */
+.probe-row:hover {
+  background: var(--row-hover);
+  border-left-color: var(--text-3);
+}
 /* 最贵的一步：竖条 + 淡色底。只加一条竖线会看不出来，只加底色又不够明确 */
 .probe-row.is-worst {
   border-left-color: var(--warn);

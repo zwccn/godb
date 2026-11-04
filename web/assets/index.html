@@ -892,11 +892,17 @@ LIMIT 3;
 -- 也可以先按距离筛一遍，再按别的列排序
 SELECT id, title FROM demo_vec
 WHERE v &lt;-&gt; '[1,0,0]' &lt; 0.5
-ORDER BY id;</pre>
+ORDER BY id;
+
+-- 示例库里已经有一张 articles（9 篇文档 × 8 维，四类主题），打开就能试：
+SELECT title, 1 - (embedding &lt;=&gt; '[0.9,0.08,0.02,0,0.05,0.1,0.02,0.01]') AS score
+FROM articles
+ORDER BY embedding &lt;=&gt; '[0.9,0.08,0.02,0,0.05,0.1,0.02,0.01]'
+LIMIT 3;</pre>
           <div class="help-lv-desc">
             <b>三个算子怎么选</b>（都满足「越小越像」，所以 <code>ORDER BY</code> 一律升序）：<br>
             · <code>&lt;=&gt;</code> <b>余弦距离</b> = 1 − cos，只看方向、不看长度。embedding 基本都用它；
-            模型输出已归一化时，<code>1 - (v &lt;=&gt; q)</code> 就是余弦相似度（0～1，越大越像）。<br>
+            <code>1 - (v &lt;=&gt; q)</code> 就是余弦相似度（0～1，越大越像），和向量有没有归一化无关。<br>
             · <code>&lt;-&gt;</code> <b>欧氏距离</b>，看绝对位置。数值尺度差别大（如图像特征）时更合适；
             向量没归一化时它和余弦给出的排序会不一样。<br>
             · <code>&lt;#&gt;</code> <b>负内积</b> = −(a·b)（所以是负数）。只想按「热度 × 相似」排序、

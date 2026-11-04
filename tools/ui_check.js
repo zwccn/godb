@@ -3675,6 +3675,12 @@ class CDP {
 
     /* 关系图：把外键摊开成一张图。这里断言的是「图和 schema 对得上」，
        不写死张数 —— 库里有没有外键、有几张表都是运行时才知道的。 */
+    // 先把上一次运行留在 diagram.json 里的布局清掉：下面「自动排列摆回原位」
+    // 拿的基准是自动布局算出来的位置，有残留就变成了拿残留位置当基准，
+    // 这条断言会时好时坏。
+    await cdp.eval(`fetch('/api/diagram', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: 1, cards: {}, groups: [] }) })`);
     await cdp.eval(`document.getElementById('btnEr').click()`);
     await waitFor(cdp, `!document.getElementById('erPanel').classList.contains('hidden')
       && document.querySelectorAll('.er-card').length > 0`, { label: '关系图渲染', timeout: 6000 });
@@ -3713,9 +3719,104 @@ class CDP {
       erUi.outside === 0, `${erUi.outside} 张卡片越界`);
     check('关系图：顶栏入口跟着亮', erUi.active === true);
 
-    // 点卡片 → 回到编辑器并打开这张表（和侧栏点表名是同一个动作）
+    // ---- 拖拽摆位 + 设计稿元数据（第 2、3 期） ----
+    //
+    // 这一组会真的往 <数据目录>/diagram.json 写东西，跑完在最后清空。
+    // 断言全用**模型坐标**（卡片 style.left/top），不用屏幕坐标 ——
+    // 每次打开都重新 erFit，缩放不一样，屏幕坐标跟着变，比不出结论。
+    const cardPos = `(() => { const c = document.querySelector('.er-card');
+      return { left: c.style.left, top: c.style.top }; })()`;
+    const near = (a, b) => Math.abs(parseFloat(a) - parseFloat(b)) <= 2;
+
+    const posBefore = await cdp.eval(cardPos);
+    const cbox = await cdp.eval(`(() => { const r = document.querySelector('.er-card').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 12) }; })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cbox.x, y: cbox.y, button: 'left', clickCount: 1 });
+    for (let i = 1; i <= 6; i++) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: cbox.x + i * 12, y: cbox.y + i * 8, button: 'left', buttons: 1,
+      });
+    }
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: cbox.x + 72, y: cbox.y + 48, button: 'left',
+    });
+    const posDragged = await cdp.eval(cardPos);
+    check('关系图：拖动卡片能摆位置',
+      posDragged.left !== posBefore.left || posDragged.top !== posBefore.top,
+      `(${posBefore.left},${posBefore.top}) → (${posDragged.left},${posDragged.top})`);
+
+    await sleep(500);   // 保存有 300ms 防抖
+    const savedDoc = await cdp.eval(`fetch('/api/diagram').then(r => r.json())`);
+    const savedCount = Object.keys(savedDoc.cards || {}).length;
+    check('关系图：松手后整张图的位置落盘（不是只存被拖的那张）',
+      savedCount === erUi.cards, `${savedCount} 张有坐标 / 共 ${erUi.cards} 张`);
+
+    // 关掉再开：位置要还在，否则「保存成功」只是自说自话
+    await cdp.eval(`document.getElementById('btnErClose').click()`);
+    await cdp.eval(`document.getElementById('btnEr').click()`);
+    await waitFor(cdp, `!!document.querySelector('.er-card')`, { label: '关系图卡片', timeout: 4000 });
+    const posReopen = await cdp.eval(cardPos);
+    check('关系图：重开后面板还在拖到的位置',
+      near(posReopen.left, posDragged.left) && near(posReopen.top, posDragged.top),
+      `存 ${posDragged.left},${posDragged.top} · 读 ${posReopen.left},${posReopen.top}`);
+
+    // 自动排列：只清坐标，分组名和颜色是设计信息，不该被一起抹掉
+    await cdp.eval(`document.getElementById('btnErAuto').click()`);
+    await sleep(120);
+    const posAuto = await cdp.eval(cardPos);
+    check('关系图：自动排列把卡片摆回按外键推出来的位置',
+      near(posAuto.left, posBefore.left) && near(posAuto.top, posBefore.top),
+      `${posAuto.left},${posAuto.top} / 原始 ${posBefore.left},${posBefore.top}`);
+
+    // 双击组标题改名
+    const gname = await cdp.eval(`(() => { const r = document.querySelector('.er-group-name').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`);
+    for (const clickCount of [1, 2]) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: gname.x, y: gname.y, button: 'left', clickCount });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: gname.x, y: gname.y, button: 'left', clickCount });
+    }
+    const gotInput = await waitFor(cdp, `!!document.querySelector('.er-group-input')`,
+      { label: '改名输入框', timeout: 2000 });
+    if (gotInput) {
+      await cdp.eval(`(() => { document.querySelector('.er-group-input').value = '回归测试组'; })()`);
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    }
+    await sleep(200);
+    // 断言「存在某组叫这个名字」，不问「第一个组叫什么」：
+    // 组框的 DOM 顺序会跟着「最近操作过的组浮到最上层」变，取第一个是不稳的。
+    const renamed = await cdp.eval(
+      `[...document.querySelectorAll('.er-group-name')].some(n => n.textContent === '回归测试组')`);
+    check('关系图：双击组标题就地改名', gotInput && renamed === true,
+      gotInput ? (renamed ? '已改名' : '名字没变') : '没弹出输入框');
+
+    // 点色点换色：色相挂在组框的 class 上（g0..g7），换一次就要变一次。
+    // 同样按「整份集合」比，不盯某一个组 —— 顺序会变。
+    const toneBefore = await cdp.eval(
+      `[...document.querySelectorAll('.er-group')].map(b => b.className).sort().join(';')`);
+    const dot = await cdp.eval(`(() => { const r = document.querySelector('.er-group-dot').getBoundingClientRect();
+      return { x: Math.round(r.left + 3), y: Math.round(r.top + 3) }; })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dot.x, y: dot.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dot.x, y: dot.y, button: 'left' });
+    await sleep(150);
+    const toneAfter = await cdp.eval(
+      `[...document.querySelectorAll('.er-group')].map(b => b.className).sort().join(';')`);
+    check('关系图：点色点换分组颜色', toneBefore !== toneAfter, `${toneBefore} → ${toneAfter}`);
+
+    await sleep(500);   // 换色同样是防抖保存
+    const savedGroups = await cdp.eval(`fetch('/api/diagram').then(r => r.json())`);
+    check('关系图：手工分组（名字 + 颜色）写进侧车文件',
+      (savedGroups.groups || []).some(g => g.name === '回归测试组'),
+      `${(savedGroups.groups || []).length} 个手工组`);
+
+    // 点卡片 → 回到编辑器并打开这张表（和侧栏点表名是同一个动作）。
+    // 必须用真实鼠标：点开和拖动共用 pointerdown/up，直接 dispatchEvent('click')
+    // 绕过了这一层，测的就不是用户实际走的那条路。
     const firstTable = await cdp.eval(`document.querySelector('.er-card').dataset.table`);
-    await cdp.eval(`document.querySelector('.er-card').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+    const clickPt = await cdp.eval(`(() => { const r = document.querySelector('.er-card').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 12) }; })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: clickPt.x, y: clickPt.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: clickPt.x, y: clickPt.y, button: 'left' });
     await waitFor(cdp, `document.getElementById('erPanel').classList.contains('hidden')`,
       { label: '关系图关闭', timeout: 4000 });
     const afterCard = await cdp.eval(`({
@@ -3726,6 +3827,11 @@ class CDP {
     check('关系图：点卡片回到编辑器并查询这张表',
       afterCard.closed && afterCard.sql.includes(firstTable) && afterCard.home,
       `${firstTable} · 面板关 ${afterCard.closed}`);
+
+    // 收拾干净：这一组断言往开发库里写了布局和分组，别留给下一次
+    await cdp.eval(`fetch('/api/diagram', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: 1, cards: {}, groups: [] }) })`);
 
     // Esc 关闭：和监控/设置一样，一层一层退
     await cdp.eval(`document.getElementById('btnEr').click()`);

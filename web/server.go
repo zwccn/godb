@@ -94,6 +94,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.Handle("/", noStoreAssets(http.FileServer(http.FS(Assets()))))
 	mux.HandleFunc("/api/query", s.handleQuery)
 	mux.HandleFunc("/api/schema", s.handleSchema)
+	mux.HandleFunc("/api/diagram", s.handleDiagram)
 	mux.HandleFunc("/api/tx", s.handleTx)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/sample", s.handleSample)

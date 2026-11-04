@@ -5421,6 +5421,7 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   color: var(--text-2);
   font-size: calc(11.5px * var(--fs));
   white-space: nowrap;
+  cursor: default;
 }
 .er-group-dot {
   flex: 0 0 auto;
@@ -5428,8 +5429,25 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   height: 7px;
   border-radius: 50%;
   background: hsl(var(--g-h) var(--g-s) 55%);
+  cursor: pointer;
+  /* 点热区比 7px 的点大一圈：不然要瞄准半天 */
+  box-shadow: 0 0 0 4px transparent;
+  transition: box-shadow .12s;
 }
+.er-group-dot:hover { box-shadow: 0 0 0 4px hsl(var(--g-h) var(--g-s) 55% / .22); }
 .er-group-name { overflow: hidden; text-overflow: ellipsis; }
+/* 就地改名：输入框贴着原来的标题位置，宽度跟着组名走，不撑开组框 */
+.er-group-input {
+  width: 100%;
+  min-width: 60px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 1px solid hsl(var(--g-h) var(--g-s) 55% / .8);
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
 .er-card {
   position: absolute;
   display: flex;
@@ -5439,9 +5457,17 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   border-radius: 8px;
   background: var(--bg-1);
   box-shadow: 0 1px 3px var(--shadow-color, rgba(0, 0, 0, .22));
-  cursor: pointer;
+  cursor: grab;
   transition: border-color .12s, box-shadow .12s;
 }
+.er-card.dragging {
+  cursor: grabbing;
+  z-index: 6;                 /* 拖动时压在同组其它卡片上面 */
+  box-shadow: 0 8px 24px var(--shadow-color, rgba(0, 0, 0, .35));
+}
+/* 拖动中连线不跟着重算（每帧重建整张图会丢 pointer capture），先淡掉，
+   松手后重绘。淡到 .25 而不是 0：还能看出「这张表和谁连着」。 */
+.er-canvas.er-dragging .er-edges { opacity: .25; transition: opacity .1s; }
 .er-card:hover,
 .er-card.hot {
   border-color: hsl(var(--g-h) var(--g-s) 55% / .95);

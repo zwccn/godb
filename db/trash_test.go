@@ -198,3 +198,84 @@ func TestTrashDirLayout(t *testing.T) {
 		t.Fatalf("备份文件只有 %d 字节，应该包含行数据", info.Size())
 	}
 }
+
+// 向量列的数据不在行快照里（行里只有一个槽位号），回收站必须把 .vec 文件
+// 一起备份、恢复时再按新表 ID 装回去。漏掉这步的后果是恢复出来变成
+// [vector:0] —— 看着像有值，其实原数据全丢了（这个 bug 实测复现过）。
+func TestRestoreTrashKeepsVectorData(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	run(t, d, "s", `CREATE TABLE t_vlost (id INTEGER, v vector(3))`)
+	run(t, d, "s", `INSERT INTO t_vlost VALUES (1,'[1,2,3]'),(2,'[4,5,6]')`)
+	run(t, d, "s", `DROP TABLE t_vlost`)
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// 备份目录里要真的有 .vec 文件
+	ents := trashEntries(t, dir)
+	if len(ents) == 0 {
+		t.Fatal("回收站里没有备份")
+	}
+	vecs, _ := filepath.Glob(filepath.Join(dir, storage.TrashDirName(), ents[0], "vec", "*.vec"))
+	if len(vecs) != 1 {
+		t.Fatalf("备份里向量文件数 = %d，期望 1（%v）", len(vecs), vecs)
+	}
+
+	rep, err := RestoreTrash(dir, "latest")
+	if err != nil {
+		t.Fatalf("恢复: %v", err)
+	}
+	if len(rep.Restored) != 1 || rep.Restored[0].VecFiles != 1 {
+		t.Fatalf("恢复结果应带 1 个向量文件: %+v", rep.Restored)
+	}
+
+	d2, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+	res := run(t, d2, "s2", `SELECT id, v FROM t_vlost ORDER BY id`)
+	if len(res) == 0 || len(res[0].Rows) != 2 {
+		t.Fatalf("恢复后行数不对: %v", res)
+	}
+	// 值必须是真的向量，不是指向空槽的占位
+	got, ok := res[0].Rows[0][1].(string)
+	if !ok || got != "[1,2,3]" {
+		t.Fatalf("恢复后的向量 = %v，期望 [1,2,3]（丢数据了）", res[0].Rows[0][1])
+	}
+}
+
+// .trash/vec 是向量文件的回收目录，不是一次备份。它必须被排除在备份列表外，
+// 否则 'v' 排在 '2' 之后、倒序时成了「latest」，-restore-trash latest 会去读
+// .trash/vec/manifest.json 然后直接报错 —— 恢复功能整个不可用（实测踩过）。
+func TestTrashEntriesSkipsVecDir(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	run(t, d, "s", `CREATE TABLE t_vskip (id INTEGER, v vector(2))`)
+	run(t, d, "s", `INSERT INTO t_vskip VALUES (1,'[1,2]')`)
+	run(t, d, "s", `DROP TABLE t_vskip`)
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// DROP 会把 .vec 移进 .trash/vec，这个目录一定存在
+	if _, err := os.Stat(filepath.Join(dir, storage.TrashDirName(), "vec")); err != nil {
+		t.Fatalf("预期 .trash/vec 存在: %v", err)
+	}
+	for _, name := range trashEntries(t, dir) {
+		if name == "vec" {
+			t.Fatal("TrashEntries 不该把 .trash/vec 当成一次备份")
+		}
+	}
+	// latest 必须能正常恢复（修复前这里直接报「读不到 manifest」）
+	if _, err := RestoreTrash(dir, "latest"); err != nil {
+		t.Fatalf("latest 恢复失败: %v", err)
+	}
+}

@@ -347,10 +347,15 @@ func runRestoreTrash(dir, entry string) error {
 		log.Printf("没有需要恢复的表")
 	}
 	for _, t := range rep.Restored {
+		// 向量列的文件要说出来：它不在行快照里，用户没法从「行数对不对」判断它回来没有。
+		vec := ""
+		if t.VecFiles > 0 {
+			vec = fmt.Sprintf("，含 %d 个向量列文件", t.VecFiles)
+		}
 		if t.Bytes > 0 {
-			log.Printf("  已恢复 %s（%d 行，%s）", t.Name, t.Rows, humanBytes(t.Bytes))
+			log.Printf("  已恢复 %s（%d 行，%s%s）", t.Name, t.Rows, humanBytes(t.Bytes), vec)
 		} else {
-			log.Printf("  已恢复 %s（仅表结构，没有数据文件）", t.Name)
+			log.Printf("  已恢复 %s（仅表结构，没有数据文件%s）", t.Name, vec)
 		}
 	}
 	for _, name := range rep.Skipped {

@@ -41,6 +41,9 @@ type TrashTable struct {
 	File string `json:"file,omitempty"`
 	// From 说明数据取自内存（memory，最新）还是磁盘快照（disk，可能旧一些）。
 	From string `json:"from"`
+	// VecFiles 是随表一起备份的向量列文件数（0 表示这张表没有 VECTOR 列）。
+	// 向量数据不在行快照里（行里只有一个槽位号），必须单独拷文件。
+	VecFiles int `json:"vecFiles,omitempty"`
 }
 
 // TrashManifest 是回收站里 manifest.json 的内容。
@@ -143,6 +146,16 @@ func (s *Store) TrashTables(reason string, names []string) (string, error) {
 		}
 		mf.Tables = append(mf.Tables, tt)
 		mf.Defs = append(mf.Defs, t)
+
+		// 向量列的数据在 tables/t<ID>.c<列>.vec 里，**不在行快照里** ——
+		// 行里存的只是 Value{K:KVector, I:槽位号}，一个引用。
+		// 不把文件一起拷进备份，恢复出来的就是一串指向空槽的引用
+		// （实测显示成 [vector:0]，看着像有值，其实全丢了）。
+		if n, err := s.copyVecFilesInto(dir, t.ID); err != nil {
+			return "", err
+		} else if n > 0 {
+			tt.VecFiles = n
+		}
 	}
 
 	mb, err := json.MarshalIndent(mf, "", "  ")
@@ -154,6 +167,68 @@ func (s *Store) TrashTables(reason string, names []string) (string, error) {
 	}
 	s.pruneTrash()
 	return dir, nil
+}
+
+// copyVecFilesInto 把一张表的向量列文件拷进备份目录的 vec/ 子目录，返回拷了几个。
+//
+// 向量数据在 tables/t<ID>.c<列>.vec，按「表 ID + 列 ID」命名；备份里也保持这个名字，
+// 因为备份的 manifest 记的是旧表 ID，恢复时据此找文件、再改名成新表 ID。
+//
+// 一个文件都没有（表没有 VECTOR 列）不算错，返回 0 —— 绝大多数表都是这样。
+func (s *Store) copyVecFilesInto(trashDir string, tableID int64) (int, error) {
+	pat := filepath.Join(s.Dir, "tables", fmt.Sprintf("t%06d.c*.vec", tableID))
+	files, err := filepath.Glob(pat)
+	if err != nil || len(files) == 0 {
+		return 0, nil
+	}
+	dstDir := filepath.Join(trashDir, "vec")
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, src := range files {
+		b, err := os.ReadFile(src)
+		if err != nil {
+			// 单个文件读不出来就跳过：丢一个向量列，总比整个 DROP 失败、表删不掉强。
+			continue
+		}
+		if err := writeFileAtomic(filepath.Join(dstDir, filepath.Base(src)), b); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// InstallVecFiles 把备份里的向量列文件装回数据目录，返回装了几个。
+//
+// 恢复相当于一次「新的建表」（表 ID 会重新分配），而文件名里编着表 ID，
+// 所以这里要把 t<旧ID>.c<列>.vec 改名成 t<新ID>.c<列>.vec。列 ID 不变 ——
+// 备份里的列定义和恢复后的列定义是同一套。
+func InstallVecFiles(root, trashDir string, oldID, newID int64) (int, error) {
+	pat := filepath.Join(trashDir, "vec", fmt.Sprintf("t%06d.c*.vec", oldID))
+	files, err := filepath.Glob(pat)
+	if err != nil || len(files) == 0 {
+		return 0, nil
+	}
+	dstDir := filepath.Join(root, "tables")
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, src := range files {
+		rest := strings.TrimPrefix(filepath.Base(src), fmt.Sprintf("t%06d.", oldID))
+		dst := filepath.Join(dstDir, fmt.Sprintf("t%06d.%s", newID, rest))
+		b, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		if err := writeFileAtomic(dst, b); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // TrashEntries 列出回收站里的备份（目录名，从新到旧）。
@@ -168,9 +243,19 @@ func TrashEntries(dir string) ([]string, error) {
 	}
 	out := make([]string, 0, len(ents))
 	for _, e := range ents {
-		if e.IsDir() {
-			out = append(out, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		// 只认「真备份」：目录里必须有 manifest.json。
+		//
+		// .trash/vec 是向量文件的回收目录（见 vecstore.go 的 trashVecFile），
+		// 它不是一次备份。不排除的话会踩两个坑：'v' > '2'，倒序排在所有
+		// 2026xxxx 目录之前，于是 -restore-trash latest 拿到的是它，去读
+		// .trash/vec/manifest.json 直接报「找不到文件」—— 恢复功能整个不可用。
+		if _, err := os.Stat(filepath.Join(root, e.Name(), "manifest.json")); err != nil {
+			continue
+		}
+		out = append(out, e.Name())
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(out)))
 	return out, nil

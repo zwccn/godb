@@ -266,6 +266,20 @@ checkpoint，正常。
 交换格式）里向量也只能存 vecID，**必须把 `.vec` 文件一起拷**，否则恢复出
 一堆指向空槽的引用。`storage.TrashTables` 与 `/api/backup` 的改动在 T8。
 
+> **T8 补齐（2026-11-04）**：作者提交时这部分漏了，实测两个后果 ——
+> `.trash/vec` 目录被 `TrashEntries` 当成备份（`'v' > '2'`，倒序排第一），
+> `-restore-trash latest` 去读 `vec/manifest.json` 直接报错；指定正确备份目录
+> 恢复也只剩 `[vector:0]`（引用指向空槽，原数据全丢）。
+>
+> 已修：`TrashTables` 把 `t<表ID>.c<列>.vec` 拷进备份的 `vec/` 子目录；
+> `RestoreTrash` 用 `InstallVecFiles` 按**新表 ID** 装回去（恢复相当于重新建表，
+> ID 会变，文件名里编着表 ID）；`TrashEntries` 只认含 `manifest.json` 的目录。
+> 回归用例：`db/trash_test.go` 的 `TestRestoreTrashKeepsVectorData` /
+> `TestTrashEntriesSkipsVecDir`（修复前两条都红）。
+>
+> `/api/backup` 不需要改：它导出 SQL 文本，向量按 `'[1,2,3]'` 输出、列类型写
+> `vector(n)`，恢复时走普通 INSERT 即可（实测验证过）。
+
 ### 3.4 恢复
 
 启动/打开表时：

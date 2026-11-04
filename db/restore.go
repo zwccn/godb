@@ -31,6 +31,8 @@ type RestoredTable struct {
 	Rows int
 	// Bytes 是写入的数据文件大小（0 表示这张表本来就没有数据）。
 	Bytes int64
+	// VecFiles 是随表恢复的向量列文件数（0 表示这张表没有 VECTOR 列）。
+	VecFiles int
 }
 
 // RestoreTrash 把回收站里的一次备份恢复回数据目录。
@@ -93,6 +95,14 @@ func RestoreTrash(root, entry string) (RestoreReport, error) {
 			if rows, ok := trashRowsOf(mf, def.Name); ok {
 				rt.Rows = rows
 			}
+		}
+		// 向量列的数据不在行快照里（行里只有一个槽位号），要单独把 .vec 文件
+		// 装回去，并按新表 ID 改名。漏了这一步，恢复出来的向量是指向空槽的引用
+		// —— 实测显示成 [vector:0]，看着像有值，其实原数据全丢了。
+		if nv, err := storage.InstallVecFiles(root, dir, oldID, newID); err != nil {
+			return rep, fmt.Errorf("恢复表 %q 的向量文件失败: %w", def.Name, err)
+		} else {
+			rt.VecFiles = nv
 		}
 		rep.Restored = append(rep.Restored, rt)
 	}

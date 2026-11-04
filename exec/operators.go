@@ -3,8 +3,10 @@ package exec
 import (
 	"container/heap"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"godb/catalog"
 	"godb/storage"
@@ -606,6 +608,18 @@ func (o *sortOp) Describe() string {
 // 哪怕调用方只取前 10 行；只有走了 Top-N（带 LIMIT）才真的只留 N 行。
 func (o *sortOp) MemRows() int64 { return int64(len(o.rows)) }
 
+// ExplainDetail 说明这一步是否把排序键的求值并行化了。
+//
+// 这句话等于解释「为什么 100 万行 × 128 维的 Top-K 只用了几十分之一秒」——
+// 没有它，计划里只有一串耗时，看不出并行这件事。
+func (o *sortOp) ExplainDetail() []string {
+	nw := o.parallelWorkers()
+	if nw == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("排序键并行求值（%d 个 worker，每批 %d 行）", nw, sortParBatch)}
+}
+
 // lessEntry 按排序键比较两行：true 表示 a 应该排在 b 前面。
 func (o *sortOp) lessEntry(a, b sortEntry) bool {
 	for i, k := range o.keys {
@@ -674,46 +688,17 @@ func (o *sortOp) Open() error {
 	// 预计算排序键：每行只 Eval 一次，比较时直接用值。
 	// 单独计一段 evalNs：`ORDER BY v <=> q` 的距离计算全在这里，不单列的话
 	// 会被当成「排序慢」（见 OpProfile.evalNs）。
-	makeEntry := func(row types.Row) (sortEntry, error) {
-		et := o.evalTimer()
-		ks := make([]types.Value, len(o.keys))
-		for i, k := range o.keys {
-			v, err := k.eval.Eval(row)
-			if err != nil {
-				return sortEntry{}, err
-			}
-			ks[i] = v
-		}
-		o.evalDone(et)
-		return sortEntry{row: row, keys: ks}, nil
-	}
-
 	if o.topN > 0 {
-		h := &topNHeap{op: o}
-		for {
-			row, ok, err := o.child.Next()
-			if err != nil {
+		// 只有「一个排序键、且这个键能复制出独立求值器」时才并行。
+		// 典型就是 `ORDER BY v <=> q LIMIT k`：距离计算是纯算术，能分给多核；
+		// 而堆的维护必须串行（要保持行序，否则并列值的取舍会变）。
+		if nw := o.parallelWorkers(); nw > 0 {
+			if err := o.topNParallel(nw); err != nil {
 				return err
 			}
-			if !ok {
-				break
-			}
-			e, err := makeEntry(row)
-			if err != nil {
-				return err
-			}
-			if h.Len() < o.topN {
-				heap.Push(h, e)
-			} else if o.lessEntry(e, h.items[0]) {
-				// e 比堆顶（当前最差）更好 → 换掉堆顶
-				h.items[0] = e
-				heap.Fix(h, 0)
-			}
-			if o.err != nil {
-				return o.err
-			}
+		} else if err := o.topNSerial(); err != nil {
+			return err
 		}
-		o.rows = h.items
 	} else {
 		for {
 			row, ok, err := o.child.Next()
@@ -723,7 +708,7 @@ func (o *sortOp) Open() error {
 			if !ok {
 				break
 			}
-			e, err := makeEntry(row)
+			e, err := o.entry(row)
 			if err != nil {
 				return err
 			}
@@ -738,6 +723,182 @@ func (o *sortOp) Open() error {
 		}
 		return o.lessEntry(entries[i], entries[j])
 	})
+	return o.err
+}
+
+// entry 算一行的排序键（含求值计时）。
+func (o *sortOp) entry(row types.Row) (sortEntry, error) {
+	et := o.evalTimer()
+	ks := make([]types.Value, len(o.keys))
+	for i, k := range o.keys {
+		v, err := k.eval.Eval(row)
+		if err != nil {
+			return sortEntry{}, err
+		}
+		ks[i] = v
+	}
+	o.evalDone(et)
+	return sortEntry{row: row, keys: ks}, nil
+}
+
+// topNSerial 是 Top-N 的串行版本（不并行的所有情形都走这里）。
+func (o *sortOp) topNSerial() error {
+	h := &topNHeap{op: o}
+	for {
+		row, ok, err := o.child.Next()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		e, err := o.entry(row)
+		if err != nil {
+			return err
+		}
+		if h.Len() < o.topN {
+			heap.Push(h, e)
+		} else if o.lessEntry(e, h.items[0]) {
+			// e 比堆顶（当前最差）更好 → 换掉堆顶
+			h.items[0] = e
+			heap.Fix(h, 0)
+		}
+		if o.err != nil {
+			return o.err
+		}
+	}
+	o.rows = h.items
+	return nil
+}
+
+// parKeyEval 是「可以把求值复制给多个 goroutine」的排序键。
+//
+// 这条路径只为向量距离准备：它只依赖只读的查询向量 + 只读映射的列文件，
+// 每个 worker 一份自己的缓冲就能并行。任意表达式（子查询、聚合）不满足，返回 nil。
+type parKeyEval interface {
+	parallelWorker() Eval
+}
+
+// sortParBatch 是并行求值的一批行数。
+//
+// 太小 → goroutine 调度/同步开销显影；太大 → 内存里多攒一份行指针，
+// 中止响应也变慢。1024 行 × 8 字节指针 = 8KB，可以忽略。
+const sortParBatch = 1024
+
+// parallelWorkers 返回并行度；0 表示走串行。
+func (o *sortOp) parallelWorkers() int {
+	if o.topN <= 0 || len(o.keys) != 1 {
+		return 0
+	}
+	if _, ok := o.keys[0].eval.(parKeyEval); !ok {
+		return 0
+	}
+	n := runtime.GOMAXPROCS(0)
+	if n > 8 {
+		// 距离计算是纯算术，8 核之后基本被内存带宽卡住，再多只是抢核。
+		n = 8
+	}
+	if n < 2 {
+		return 0
+	}
+	return n
+}
+
+// topNParallel 与 topNSerial 语义完全相同，只是把「算排序键」按批分给 nw 个 worker。
+//
+// 入堆顺序仍是原始行序 —— 这样并列值在 Top-K 边界上的取舍与串行版一致，
+// 并行只改变「什么时候算」，不改变「谁进堆」。
+func (o *sortOp) topNParallel(nw int) error {
+	proto := o.keys[0].eval.(parKeyEval)
+	workers := make([]Eval, nw)
+	for i := range workers {
+		w := proto.parallelWorker()
+		if w == nil {
+			// parallelWorkers 说能并行、复制时又不行了：退回串行，别报错。
+			return o.topNSerial()
+		}
+		workers[i] = w
+	}
+	h := &topNHeap{op: o}
+	rows := make([]types.Row, sortParBatch)
+	errs := make([]error, nw)
+	for {
+		n := 0
+		for n < len(rows) {
+			row, ok, err := o.child.Next()
+			if err != nil {
+				return err
+			}
+			if !ok {
+				break
+			}
+			rows[n] = row
+			n++
+		}
+		if n == 0 {
+			break
+		}
+
+		keys := make([]types.Value, n)
+		chunk := (n + nw - 1) / nw
+		et := o.evalTimer()
+		var wg sync.WaitGroup
+		for w := 0; w < nw; w++ {
+			lo, hi := w*chunk, (w+1)*chunk
+			if lo >= n {
+				break
+			}
+			if hi > n {
+				hi = n
+			}
+			wg.Add(1)
+			go func(w int, ev Eval, lo, hi int) {
+				defer wg.Done()
+				for i := lo; i < hi; i++ {
+					v, err := ev.Eval(rows[i])
+					if err != nil {
+						errs[w] = err
+						return
+					}
+					keys[i] = v
+				}
+			}(w, workers[w], lo, hi)
+		}
+		wg.Wait()
+		o.evalDone(et)
+
+		// 报错按行序挑第一个（worker 顺序就是行序），和串行版一致。
+		var firstErr error
+		for _, e := range errs {
+			if e != nil {
+				firstErr = e
+				break
+			}
+		}
+		for i := range errs {
+			errs[i] = nil
+		}
+		if firstErr != nil {
+			return firstErr
+		}
+
+		for i := 0; i < n; i++ {
+			if o.err != nil {
+				return o.err
+			}
+			// keys[i:i+1] 共享这一批的键数组：整批只分配一次，
+			// 只有留在堆里的那几个 entry 会把这个数组留在内存里。
+			e := sortEntry{row: rows[i], keys: keys[i : i+1]}
+			if h.Len() < o.topN {
+				heap.Push(h, e)
+			} else if o.lessEntry(e, h.items[0]) {
+				h.items[0] = e
+				heap.Fix(h, 0)
+			}
+			rows[i] = nil
+		}
+	}
+	o.rows = h.items
 	return o.err
 }
 

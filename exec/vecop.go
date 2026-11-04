@@ -226,6 +226,39 @@ type vecDistEval struct {
 
 func (e *vecDistEval) Type() types.Type { return e.t }
 
+// parallelWorker 给「排序键并行求值」用（见 sortOp 的并行分支）。
+//
+// 不能直接把这个对象丢给多个 goroutine：vecArg 里有复用缓冲 buf、内联解析缓存
+// （lastText/lastVec）、以及第一次用到时才解析的列句柄 h —— 全是可变状态。
+// 这里返回一份**浅拷贝**，只共享只读的东西：
+//   - 编译期常量向量（konst 是只读的 []float32）；
+//   - 列文件句柄（mmap 只读视图，VecFile.View 本身是并发安全的）；
+//   - src（VecSource 取的是同一个只读映射）。
+//
+// 两侧都必须是「常量」或「直接列引用」：如果某一侧是任意表达式，它的 Eval
+// 可能带状态（子查询的 outer、聚合缓存），没法安全复制 —— 返回 nil 让调用方
+// 退回串行。
+func (e *vecDistEval) parallelWorker() Eval {
+	if !e.l.parallelSafe() || !e.r.parallelSafe() {
+		return nil
+	}
+	return &vecDistEval{op: e.op, l: e.l.clone(), r: e.r.clone(), t: e.t}
+}
+
+// parallelSafe 判断这一侧能不能被复制到别的 goroutine 上算。
+func (a *vecArg) parallelSafe() bool {
+	if a.konst != nil {
+		return true
+	}
+	// 只有「按列下标直接取槽位」这条路径不碰 ev；其余都可能是带状态的表达式。
+	return a.col != nil && a.colIdx >= 0
+}
+
+// clone 复制出独立的一份：缓冲与缓存都留空，让 worker 自己长。
+func (a *vecArg) clone() *vecArg {
+	return &vecArg{ev: a.ev, src: a.src, col: a.col, konst: a.konst, colIdx: a.colIdx}
+}
+
 func (e *vecDistEval) Eval(row types.Row) (types.Value, error) {
 	a, aok, err := e.l.load(row)
 	if err != nil {

@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"math"
 	"math/rand"
 	"strings"
@@ -233,5 +234,29 @@ func TestDotProductMatchesNaive(t *testing.T) {
 		if math.Abs(got-want)/scale > 1e-4 {
 			t.Fatalf("n=%d 点积 %v，期望 ≈%v", n, got, want)
 		}
+	}
+}
+
+// 向量不能充当等值/分组键：内联字面量也不行。
+//
+// 内联值本可以按文本当身份，但同一句查询里「有的行内联、有的行已落盘」是可能的
+// （事务内还没物化），两种身份混用会让去重结果取决于物理时机。所以一致拒绝。
+func TestVectorNotKeyable(t *testing.T) {
+	inline := VectorLiteral("[1,2,3]", 3)
+	if _, err := Key([]Value{inline}); !errors.Is(err, ErrVectorNotKeyable) {
+		t.Fatalf("内联向量编码键应报 ErrVectorNotKeyable，实际 %v", err)
+	}
+	stored := VectorRef(7, 3)
+	if _, err := Key([]Value{stored}); !errors.Is(err, ErrVectorNotKeyable) {
+		t.Fatalf("落盘向量编码键应报 ErrVectorNotKeyable，实际 %v", err)
+	}
+	// 混在正常列里同样拒绝：一个键里只要有一列是向量就没有正确的身份。
+	if _, err := Key([]Value{Int(1), inline}); !errors.Is(err, ErrVectorNotKeyable) {
+		t.Fatalf("混合值里的向量也应报错，实际 %v", err)
+	}
+	// 普通值的编码行为不变。
+	k, err := Key([]Value{Int(1), Text("a"), Float(0)})
+	if err != nil || k == "" {
+		t.Fatalf("普通值编码键失败：%q %v", k, err)
 	}
 }

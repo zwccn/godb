@@ -527,7 +527,10 @@ func (o *distinctOp) Open() error {
 		if !ok {
 			break
 		}
-		k := types.Key(row)
+		k, err := types.Key(row)
+		if err != nil {
+			return fmt.Errorf("SELECT DISTINCT needs to compare rows: %w", err)
+		}
 		if o.seen[k] {
 			continue
 		}

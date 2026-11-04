@@ -339,7 +339,12 @@ func evalKey(evals []Eval, row types.Row) (string, bool, error) {
 		}
 		vals[i] = v
 	}
-	return types.Key(vals), false, nil
+	k, err := types.Key(vals)
+	if err != nil {
+		// 哈希连接靠「相等」配对，向量没有可用的相等身份。
+		return "", false, fmt.Errorf("join on vector values needs equality: %w", err)
+	}
+	return k, false, nil
 }
 
 // exprRefs 收集表达式中的列引用。

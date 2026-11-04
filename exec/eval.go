@@ -1944,7 +1944,11 @@ func (e *inSubEval) Eval(row types.Row) (types.Value, error) {
 	}
 	defer e.plan.Close()
 
-	key := types.Key([]types.Value{v})
+	key, err := types.Key([]types.Value{v})
+	if err != nil {
+		// IN 靠「相等」判断，向量没有可用的相等身份（见 types.ErrVectorNotKeyable）。
+		return types.Null, err
+	}
 	found, sawNull := false, false
 	for {
 		r, ok, err := e.plan.Next()
@@ -1959,7 +1963,11 @@ func (e *inSubEval) Eval(row types.Row) (types.Value, error) {
 			sawNull = true
 			continue
 		}
-		if types.Key([]types.Value{r[0]}) == key {
+		rk, err := types.Key([]types.Value{r[0]})
+		if err != nil {
+			return types.Null, err
+		}
+		if rk == key {
 			found = true
 			break
 		}

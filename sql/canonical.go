@@ -110,7 +110,14 @@ func canon(b *strings.Builder, e Expr) {
 	switch n := e.(type) {
 	case *Literal:
 		b.WriteString("L")
-		b.WriteString(types.Key([]types.Value{n.Val}))
+		// 向量字面量不能走 types.Key（值当键是没有意义的），但这里的用途只是
+		// 给表达式一个稳定的文本身份，用它的书写形式即可。
+		if k, err := types.Key([]types.Value{n.Val}); err == nil {
+			b.WriteString(k)
+		} else {
+			b.WriteString("v")
+			b.WriteString(n.Val.TextForm())
+		}
 	case *ColumnRef:
 		b.WriteString("C")
 		b.WriteString(strings.ToLower(n.Table))

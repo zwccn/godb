@@ -100,24 +100,29 @@ func TestVectorColumnThroughCTE(t *testing.T) {
 	}
 }
 
-// MIN/MAX 不能走「索引端点」快路径。
+// MIN/MAX 作用在向量列上一律拒绝，而且是在规划期就拒绝。
 //
-// 索引键存的是槽位号，取端点 = 按插入顺序挑一行，和 min/max 的语义无关。
-// 实测：不建索引时 MIN(v) 会被 types.Compare 拒绝（正确），一建索引反而
-// "成功"并返回 [vector:0] —— 有索引比没索引更容易给出错答案。
+// 历史：这里曾经能建向量索引，索引键存的是槽位号，取端点 = 按插入顺序挑一行，
+// 于是 MIN(v) 会「成功」并返回 [vector:0] —— 有索引比没索引更容易给出错答案。
+// 现在两道门：规划期（buildAggSpec）直接拒绝 MIN/MAX(vector)；向量列也不允许
+// 建索引（键是按列值编码的，槽位号编码出来的键没有任何语义）。
 func TestVectorMinMaxRefusedWithIndex(t *testing.T) {
 	d := newTestDB(t)
 	s := "s"
 	run(t, d, s, `CREATE TABLE t_mmvec (id INTEGER, v vector(3))`)
 	run(t, d, s, `INSERT INTO t_mmvec VALUES (1,'[1,2,3]'),(2,'[4,5,6]')`)
-	run(t, d, s, `CREATE INDEX t_mmvec_v ON t_mmvec (v)`)
+
+	// 向量列上建不了索引，快路径的入口就被堵死了。
+	if err := runErr(t, d, s, `CREATE INDEX t_mmvec_v ON t_mmvec (v)`); !strings.Contains(err.Error(), "no default operator class") {
+		t.Fatalf("向量索引应被拒绝: %v", err)
+	}
 
 	for _, fn := range []string{"MIN", "MAX"} {
 		err := runErr(t, d, s, `SELECT `+fn+`(v) FROM t_mmvec`)
 		if err == nil {
-			t.Fatalf("%s(v) 应该报错（向量不能直接比较），却成功了", fn)
+			t.Fatalf("%s(v) 应该报错（向量没有可比顺序），却成功了", fn)
 		}
-		if !strings.Contains(err.Error(), "cannot be compared") {
+		if !strings.Contains(err.Error(), fn+"()") {
 			t.Fatalf("%s(v) 的报错不对: %v", fn, err)
 		}
 	}

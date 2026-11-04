@@ -930,8 +930,14 @@ func (d *DB) execAnalyze(sess *txn.Session, _ *sql.Analyze) (*exec.Result, error
 				c := t.Columns[i]
 				cs := cols[strings.ToLower(c.Name)]
 				cs.NotNull++
-				if len(seen[i]) < 1024 {
-					seen[i][types.Key([]types.Value{row[i]})] = true
+				// 向量列不统计基数：值里只有 .vec 槽位号，数出来的是「槽位数」而不是
+				// 「不同向量的个数」，写进 pg_stats 只会让规划器拿着假数据做决定。
+				if len(seen[i]) < 1024 && types.Kind(c.Kind) != types.KVector {
+					k, kerr := types.Key([]types.Value{row[i]})
+					if kerr != nil {
+						return kerr
+					}
+					seen[i][k] = true
 					cs.Distinct = int64(len(seen[i]))
 				}
 				cols[strings.ToLower(c.Name)] = cs

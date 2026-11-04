@@ -62,11 +62,16 @@ func (o *setOp) materialize() error {
 	if err != nil {
 		return err
 	}
+	// 去重要按「行内容」判断，向量行没有这样的身份（见 types.ErrVectorNotKeyable）。
+	// UNION ALL 不排序也不去重，仍然允许出现在向量列上。
 	switch o.op {
 	case "union":
 		for _, r := range append(leftRows, rightRows...) {
 			if !o.all {
-				k := types.Key(r)
+				k, err := types.Key(r)
+				if err != nil {
+					return fmt.Errorf("%s needs to compare rows for duplicates: %w", strings.ToUpper(o.op), err)
+				}
 				if o.seen[k] {
 					continue
 				}
@@ -74,27 +79,21 @@ func (o *setOp) materialize() error {
 			}
 			o.buf = append(o.buf, r)
 		}
-	case "intersect":
+	case "intersect", "except":
 		right := map[string]bool{}
 		for _, r := range rightRows {
-			right[types.Key(r)] = true
-		}
-		for _, r := range leftRows {
-			k := types.Key(r)
-			if !right[k] || o.seen[k] {
-				continue
+			k, err := types.Key(r)
+			if err != nil {
+				return fmt.Errorf("%s needs to compare rows for duplicates: %w", strings.ToUpper(o.op), err)
 			}
-			o.seen[k] = true
-			o.buf = append(o.buf, r)
-		}
-	case "except":
-		right := map[string]bool{}
-		for _, r := range rightRows {
-			right[types.Key(r)] = true
+			right[k] = true
 		}
 		for _, r := range leftRows {
-			k := types.Key(r)
-			if right[k] || o.seen[k] {
+			k, err := types.Key(r)
+			if err != nil {
+				return fmt.Errorf("%s needs to compare rows for duplicates: %w", strings.ToUpper(o.op), err)
+			}
+			if (o.op == "intersect" && !right[k]) || (o.op == "except" && right[k]) || o.seen[k] {
 				continue
 			}
 			o.seen[k] = true

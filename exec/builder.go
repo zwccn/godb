@@ -684,6 +684,18 @@ func (p *Planner) buildTableRef(r sql.TableRef) (Operator, Schema, error) {
 				j.residual = re
 			}
 		}
+		// 连接键是向量时没有可用的相等语义：哈希连接会拿 .vec 槽位号配对，
+		// 结果是「内容相同的两行配不上、内容不同的两行反而可能配上」。
+		for _, k := range j.leftKeys {
+			if err := checkVectorKey("JOIN ... ON", k.Type()); err != nil {
+				return nil, nil, err
+			}
+		}
+		for _, k := range j.rightKeys {
+			if err := checkVectorKey("JOIN ... ON", k.Type()); err != nil {
+				return nil, nil, err
+			}
+		}
 		// 索引连接：把「大表」当内表按索引点查，小表驱动。
 		// 走不了就还是原来的「物化两侧 + 哈希连接」。
 		if iop := p.tryIndexJoin(n, j, lop, rop, lcols, rcols); iop != nil {
@@ -1620,12 +1632,18 @@ func (p *Planner) buildSimple(s *sql.Select, items []*sql.SelectItem, op Operato
 				}
 				keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 			}
+			if err := checkSortKeys("ORDER BY", keys); err != nil {
+				return nil, err
+			}
 			op = &sortOp{child: op, keys: keys, sc: sc, topN: topNHint(s)}
 		}
 	}
 
 	op = &projectOp{child: op, exprs: exprs, sc: out}
 	if s.Distinct {
+		if err := checkSchemaKeyable("SELECT DISTINCT", out); err != nil {
+			return nil, err
+		}
 		op = &distinctOp{child: op, sc: out}
 		if distinctFirst {
 			op = &sortOp{child: op, keys: postKeys, sc: out, topN: topNHint(s)}
@@ -1667,6 +1685,13 @@ func (p *Planner) buildSetOp(s *sql.Select) (Operator, error) {
 		return nil, fmt.Errorf("%s ALL is not supported", strings.ToUpper(s.SetOp))
 	}
 	sc := left.Schema()
+	// UNION 去重、INTERSECT、EXCEPT 都要按「行内容」判断相等，向量行没有这种身份。
+	// UNION ALL 只拼结果不去重，仍然可以带向量列。
+	if !(s.SetAll && s.SetOp == "union") {
+		if err := checkSchemaKeyable(strings.ToUpper(s.SetOp), sc); err != nil {
+			return nil, err
+		}
+	}
 	var op Operator = &setOp{left: left, right: right, op: s.SetOp, all: s.SetAll, sc: sc}
 
 	// ORDER BY / LIMIT 属于整条查询，作用在集合运算的结果上。
@@ -1684,6 +1709,9 @@ func (p *Planner) buildSetOp(s *sql.Select) (Operator, error) {
 			}
 			keys = append(keys, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 		}
+		if err := checkSortKeys("ORDER BY", keys); err != nil {
+			return nil, err
+		}
 		op = &sortOp{child: op, keys: keys, sc: sc, topN: topNHint(s)}
 	}
 	return p.applyLimit(s, op)
@@ -1700,6 +1728,9 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 		}
 		groupEvals[i] = ev
 		groupTypes[i] = ev.Type()
+		if err := checkVectorKey("GROUP BY", groupTypes[i]); err != nil {
+			return nil, err
+		}
 	}
 
 	col := &aggCollector{byKey: map[string]int{}, sc: sc,
@@ -1778,11 +1809,17 @@ func (p *Planner) buildAggregate(s *sql.Select, items []*sql.SelectItem, op Oper
 			}
 			keysOut = append(keysOut, sortKey{eval: ev, desc: oi.Desc, nullsFirst: nullsFirst})
 		}
+		if err := checkSortKeys("ORDER BY", keysOut); err != nil {
+			return nil, err
+		}
 		op = &sortOp{child: op, keys: keysOut, sc: outSc, topN: topNHint(s)}
 	}
 
 	op = &projectOp{child: op, exprs: exprs, sc: finalSc}
 	if s.Distinct {
+		if err := checkSchemaKeyable("SELECT DISTINCT", finalSc); err != nil {
+			return nil, err
+		}
 		op = &distinctOp{child: op, sc: finalSc}
 	}
 	return p.applyLimit(s, op)
@@ -1964,6 +2001,21 @@ func buildAggSpec(fc *sql.FuncCall, sc Schema, parent *compileCtx) (*aggSpec, er
 		return nil, err
 	}
 	spec.Arg = arg
+	if arg.Type().Kind == types.KVector {
+		// min/max 要一个顺序，DISTINCT 要一个内容身份，向量两样都没有（见
+		// vector_guard.go）。count / sum / avg 不在此列：count 只数非 NULL，
+		// sum/avg 后面会按数值类型报错。
+		if name == "min" || name == "max" {
+			if err := checkVectorOrder(fmt.Sprintf("%s()", strings.ToUpper(name)), arg.Type()); err != nil {
+				return nil, err
+			}
+		}
+		if fc.Distinct {
+			if err := checkVectorKey(fmt.Sprintf("%s(DISTINCT ...)", strings.ToUpper(name)), arg.Type()); err != nil {
+				return nil, err
+			}
+		}
+	}
 	switch name {
 	case "string_agg":
 		spec.Type = types.Type{Kind: types.KText, Name: "text"}

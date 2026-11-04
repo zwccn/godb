@@ -86,7 +86,7 @@ func BenchmarkKeyEncode200k(b *testing.B) {
 			for j, ci := range pk {
 				vals[j] = row[ci]
 			}
-			if types.Key(vals) != "" {
+			if k, err := types.Key(vals); err == nil && k != "" {
 				n++
 			}
 		}

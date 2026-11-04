@@ -179,6 +179,42 @@ VALUES (1, '集合运算', '[0.12,-0.34,0.56,…]'),
 坏处：客户端拿不到 pgvector 的类型，`::vector` 在客户端侧不可用 ——
 首期接受，Phase 3 再评估自定义 OID。
 
+### 2.5 不支持的用法（明确报错）
+
+向量**不参与**「等值 / 分组 / 排序 / 索引」这四件事，全部在规划期或 DDL 期报错：
+
+| 写法 | 报错 | 原因 |
+|---|---|---|
+| `WHERE v = '[1,2,3]'` | `operator does not exist: vector = text` | 文本侧没有隐式转成向量（只有距离算子的常量侧放宽） |
+| `ORDER BY v` / `MIN(v)` / `MAX(v)` | `… has no comparable order` | 向量没有全序，排出来的顺序没有含义 |
+| `SELECT DISTINCT v` | `SELECT DISTINCT cannot be applied to vector values` | 去重要「内容身份」，行里只有槽位号 |
+| `GROUP BY v` / `COUNT(DISTINCT v)` | `GROUP BY … / …(DISTINCT …)` | 同上 |
+| `UNION` / `INTERSECT` / `EXCEPT` | `UNION needs to compare rows …` | 去重同上；**`UNION ALL` 不受限** |
+| `a JOIN b ON a.v = b.v` | `JOIN ... ON cannot be applied to vector values` | 哈希连接会拿槽位号配对 |
+| `v IN (SELECT v FROM …)` | `… cannot be used as equality or grouping keys` | 同上 |
+| `CREATE INDEX … (v)` | `data type vector has no default operator class for access method btree` | 索引键按列值编码，槽位号编出来的键没有语义 |
+| `v vector PRIMARY KEY / UNIQUE` | `PRIMARY KEY / UNIQUE cannot be applied to vector column` | 唯一性检查同样要内容身份 |
+| `ALTER COLUMN v TYPE vector`（该列已有索引/约束） | `cannot change … to vector` | 会把已有索引变成错的东西 |
+
+**为什么必须报错，而不是「尽量给个答案」**：行里的向量值只有一个 `.vec` 槽位号
+（决策 1），槽位每次 `INSERT` / `UPDATE` 都会重新分配、删除后还会被别的行复用。
+拿它当身份，`DISTINCT` 的组数、唯一约束的判重结果都取决于物理写入时机 ——
+同一份数据在不同时刻能给出不同答案，而且看不出来是错的。
+
+修复前这三条路径是**静默错误**的：同内容的 `[1,2,3]` 插入两行，`SELECT DISTINCT v`
+返回两行；`CREATE UNIQUE INDEX ON t(v)` 能把不同向量当成同一个键，之后插入任何
+新向量都报 `duplicate key`。如果在这个版本之前建过向量索引，请 `DROP INDEX` 重建 ——
+那条索引里所有向量被编码成了同一个键。
+
+正确的用法是距离算子排序：
+
+```sql
+SELECT id, 1 - (embedding <=> '[0.1,0.2,…]') AS score
+FROM questions
+ORDER BY embedding <=> '[0.1,0.2,…]'
+LIMIT 10;
+```
+
 ---
 
 ## 3. 存储实现
@@ -486,6 +522,8 @@ Top-10 延迟、WAL 增长量、`.vec` 文件大小、页缓存命中后的第�
 ## 8. 未决
 
 - 维度上限 4096 是否够？（1536 维 × 1000 万 = 57 GB，超出常见机器内存）
-- 是否允许 `vector` 列做 `DEFAULT` / 唯一索引？（都不建议）
+- 是否允许 `vector` 列做 `DEFAULT` / 唯一索引？**已定**：都拒绝（见 2.5）。
+  真要「按内容去重」得等 Phase 2 的向量索引（按内容编码键 + 回表校验），
+  而不是复用 btree 的槽位号键。
 - 删除向量的空间回收：Phase 1 只记账不回收，Phase 2 跟 VACUUM 一起做。
 - `.vec` 是否纳入 checkpoint 的 fsync 范围（当前设计：提交时已 fsync，checkpoint 不管）。

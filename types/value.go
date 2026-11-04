@@ -3,6 +3,7 @@ package types
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -304,9 +305,16 @@ func Compare(a, b Value) (int, error) {
 	}
 	if a.K == KVector || b.K == KVector {
 		if a.K != b.K {
+			// `WHERE v = '[1,2,3]'` 是最容易写出来的形式，报错要直接指出该怎么办，
+			// 而不是只回一句「操作符不存在」让人以为是字面量没转类型。
+			if a.K == KText || b.K == KText {
+				return 0, fmt.Errorf("operator does not exist: %s = %s; "+
+					"vector values have no equality, use a distance operator (<->, <=> or <#>) to rank rows", a.K, b.K)
+			}
 			return 0, fmt.Errorf("operator does not exist: %s = %s", a.K, b.K)
 		}
-		// 向量的「字典序」没有任何语义，直接比大小还要把两侧 float32 都读出来。
+		// 向量之间既没有顺序、也没有等值身份：行里的值只有一个 .vec 槽位号，
+		// 判断「内容是否相同」得去读列文件，而 Compare 拿不到那个上下文。
 		// 明确拒绝，而不是给出一个看起来能用、实际毫无意义的结果。
 		return 0, fmt.Errorf("vector values cannot be compared directly; use a distance operator (<->, <=> or <#>)")
 	}
@@ -401,16 +409,32 @@ func RowSame(a, b Row) bool {
 // Row 是一行数据，位置与表定义中的列顺序一致。
 type Row []Value
 
+// ErrVectorNotKeyable 是「把向量当等值/分组键」时返回的错误。
+//
+// 向量没有可比较的全序，而等值、DISTINCT、GROUP BY、唯一约束、索引键都需要
+// 一个「相同内容 → 相同键」的身份。行里的向量值只有一个 .vec 槽位号，槽位
+// 每次 INSERT / UPDATE 都会重新分配、被删除后还会被别的行复用 —— 拿它当身份
+// 会让「内容相同的两行」算成两行、「内容不同的两行」算成一行。
+//
+// 这些路径宁可报错也不给答案：错得看不出来，比不支持更糟糕。
+var ErrVectorNotKeyable = errors.New("vector values cannot be used as equality or grouping keys: " +
+	"a vector has no comparable order, and its stored form is only a slot reference, " +
+	"so DISTINCT / GROUP BY / unique constraints / indexes have no correct answer here; " +
+	"use a distance operator (<->, <=> or <#>) instead")
+
 // Key 把若干值编码成可做 map key 的字符串（无二义性、无分隔符冲突）。
-func Key(vals []Value) string {
+// 含向量时返回 ErrVectorNotKeyable：见该错误的说明。
+func Key(vals []Value) (string, error) {
 	var b strings.Builder
 	for _, v := range vals {
-		AppendKey(&b, v)
+		if err := AppendKey(&b, v); err != nil {
+			return "", err
+		}
 	}
-	return b.String()
+	return b.String(), nil
 }
 
-func AppendKey(b *strings.Builder, v Value) {
+func AppendKey(b *strings.Builder, v Value) error {
 	b.WriteByte(byte(v.K) + 'a')
 	switch v.K {
 	case KNull:
@@ -439,17 +463,13 @@ func AppendKey(b *strings.Builder, v Value) {
 	case KDecimal:
 		b.WriteString(v.S)
 	case KVector:
-		// 内联字面量按文本，已落盘的按槽位号 —— 槽位号唯一标识内容，
-		// 所以同一个向量无论写几次，键都一样。
-		if v.I == vecInlineID {
-			b.WriteString("i")
-			b.WriteString(v.S)
-		} else {
-			b.WriteString("r")
-			b.WriteString(strconv.FormatInt(v.I, 10))
-		}
+		// 内联字面量本可以按文本当身份，但「同一列里有的行内联、有的行已落盘」
+		// 在同一句查询里是可能的（事务内还没物化），两种身份混用会让去重结果
+		// 取决于物理时机。所以这里不区分内联与落盘，一律不参与键编码。
+		return ErrVectorNotKeyable
 	}
 	b.WriteByte('|')
+	return nil
 }
 
 // MarshalJSON 用于持久化：时间用 {"$ts":...} 包装，避免与文本字面量混淆。

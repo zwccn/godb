@@ -42,7 +42,10 @@ func (a *countAcc) add(v types.Value) error {
 		return nil
 	}
 	if a.distinct {
-		k := types.Key([]types.Value{v})
+		k, err := types.Key([]types.Value{v})
+		if err != nil {
+			return err
+		}
 		if a.seen[k] {
 			return nil
 		}
@@ -74,7 +77,10 @@ func (a *sumAcc) add(v types.Value) error {
 		return nil
 	}
 	if a.distinct {
-		k := types.Key([]types.Value{v})
+		k, err := types.Key([]types.Value{v})
+		if err != nil {
+			return err
+		}
 		if a.seen[k] {
 			return nil
 		}
@@ -244,7 +250,10 @@ func (a *avgAcc) add(v types.Value) error {
 		return nil
 	}
 	if a.distinct {
-		k := types.Key([]types.Value{v})
+		k, err := types.Key([]types.Value{v})
+		if err != nil {
+			return err
+		}
 		if a.seen[k] {
 			return nil
 		}
@@ -380,7 +389,10 @@ func (a *minMaxAcc) add(v types.Value) error {
 		return nil
 	}
 	if a.distinct {
-		k := types.Key([]types.Value{v})
+		k, err := types.Key([]types.Value{v})
+		if err != nil {
+			return err
+		}
 		if a.seen[k] {
 			return nil
 		}
@@ -504,7 +516,10 @@ func (o *aggOp) Open() error {
 			}
 			keyVals[i] = v
 		}
-		k := types.Key(keyVals)
+		k, err := types.Key(keyVals)
+		if err != nil {
+			return err
+		}
 		g, exists := groups[k]
 		if !exists {
 			g = &aggGroup{keys: keyVals, accs: make([]accum, len(o.aggs))}

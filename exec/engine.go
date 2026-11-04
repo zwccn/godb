@@ -297,6 +297,13 @@ func (e *Engine) buildColumns(defs []*sql.ColumnDef) ([]*catalog.Column, error) 
 		c.NotNull = d.NotNull
 		c.PrimaryKey = d.PrimaryKey
 		c.Unique = d.Unique
+		// 主键/唯一约束要按「内容」判断重复，而向量行里只存 .vec 槽位号：
+		// 槽位每次写入都会换、删掉还会被别的行复用，判重结果取决于物理时机。
+		// 这里直接拒绝，而不是让约束看起来生效、实际只拦住「同一个槽位」。
+		if t.Kind == types.KVector && (d.PrimaryKey || d.Unique) {
+			return nil, fmt.Errorf("PRIMARY KEY / UNIQUE cannot be applied to vector column %q: "+
+				"rows only store a .vec slot reference, so there is no content-based identity to enforce", d.Name)
+		}
 		c.Serial = d.Serial
 		if d.Serial {
 			c.NotNull = true
@@ -590,6 +597,23 @@ func (e *Engine) execAlterTable(s *sql.AlterTable) (*Result, error) {
 		newType, err := types.ParseType(act.TypeName, act.TypeArgs)
 		if err != nil {
 			return nil, err
+		}
+		// 改成向量列 = 让这一列失去「按内容比较」的能力，主键/唯一约束/索引
+		// 都会随之变成错的东西（槽位号当身份）。改类型前先要求用户删掉它们。
+		if newType.Kind == types.KVector {
+			col := t.Columns[idx]
+			used := col.PrimaryKey || col.Unique
+			for _, ix := range t.Indexes {
+				for _, cn := range ix.Columns {
+					if strings.EqualFold(cn, col.Name) {
+						used = true
+					}
+				}
+			}
+			if used {
+				return nil, fmt.Errorf("cannot change %q to vector: it is used by a PRIMARY KEY / UNIQUE constraint or an index, "+
+					"and those need a content-based identity that vector values do not have", col.Name)
+			}
 		}
 		for i := 0; i < td.SlotCount(); i++ {
 			row, ok := td.RowAt(i)
@@ -946,7 +970,12 @@ func (e *Engine) insertConflict(tx *storage.Tx, t *catalog.Table, row types.Row,
 		}
 		name := groupName(t, g)
 		handled := conflictHandled(t, oc, g, name)
-		k := types.Key(vals)
+		k, err := types.Key(vals)
+		if err != nil {
+			// 唯一约束/主键建在向量列上时，这里没有正确的「相同内容」可比。
+			// DDL 已经拦过一次，这条是兜底（比如旧库里的约束）。
+			return conflictInfo{}, false, fmt.Errorf("unique constraint %q: %w", name, err)
+		}
 		cm := seenKeys(seen, fmt.Sprintf("g%d", gi))
 		if cm[k] {
 			if !handled {
@@ -1931,8 +1960,17 @@ func (e *Engine) execCreateIndex(s *sql.CreateIndex) (*Result, error) {
 	}
 	cols := make([]string, len(s.Cols))
 	for i, name := range s.Cols {
-		if _, ok := t.ColumnIdx(name); !ok {
+		ci, ok := t.ColumnIdx(name)
+		if !ok {
 			return nil, fmt.Errorf("column %q does not exist", name)
+		}
+		// 索引键必须是「按内容排序/相等」的编码，而向量行里只有 .vec 槽位号。
+		// 放进去的后果不是慢，是错：建索引时所有向量会被编码成同一个键
+		// （唯一索引因此把「任意两个向量」判成重复），而等值查询又永远匹配不上。
+		if types.Kind(t.Columns[ci].Kind) == types.KVector {
+			return nil, fmt.Errorf("data type vector has no default operator class for access method btree: "+
+				"index keys are built from column values, and a stored vector is only a .vec slot reference; "+
+				"remove %q from the index and use a distance operator (<->, <=> or <#>) for similarity search", name)
 		}
 		cols[i] = strings.ToLower(name)
 	}
@@ -2008,7 +2046,10 @@ func (e *Engine) checkUniqueIndexData(t *catalog.Table, cols []string, name stri
 		if !ok {
 			continue // 含 NULL 的行不参与唯一性判断
 		}
-		k := types.Key(vals)
+		k, err := types.Key(vals)
+		if err != nil {
+			return fmt.Errorf("could not create unique index %q on (%s): %w", name, strings.Join(cols, ", "), err)
+		}
 		if seen[k] {
 			return fmt.Errorf("could not create unique index %q: duplicate key value in (%s)", name, strings.Join(cols, ", "))
 		}

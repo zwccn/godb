@@ -9944,6 +9944,13 @@ function erRender() {
     for (const t of g.tables) frag.appendChild(erCardEl(t, g));
   }
 
+  // 例外：**刚才动过的空组**压到最上层。
+  // 空组没有卡片可依附，框就是它全部的存在感；被别的组的卡片盖住之后只剩
+  // 一个框边，标题条都点不到（拖整组只认标题条）。有成员的组不能这么干 ——
+  // 它是卡片的背景，压上去会把字段名盖掉。
+  const top = order.find(g => !g.tables.length && erGroupKey(g) === erHotGroup);
+  if (top && top._box) frag.appendChild(top._box);
+
   erCanvas.appendChild(frag);
 }
 
@@ -10850,6 +10857,35 @@ function erAddGroup() {
   return id;
 }
 
+// erPlaceNewGroup 给刚建的空组找个不压人的位置。
+//
+// 自动布局按行排，算的是「上一组预留的宽度」，可组的实际框是卡片包围盒 ——
+// 一旦有人拖过卡片，包围盒会变得比预留大很多，新组就落到别人的框（和卡片）里。
+// 空组没有卡片，被盖住之后连标题条都点不到，所以这里兜一次：真压上了就挪到
+// 整张图下面（那里一定是空的）。
+function erPlaceNewGroup(g) {
+  if (!g || !g.box) return false;
+  const rects = [];
+  for (const gg of erModel.groups) {
+    if (gg === g) continue;
+    rects.push(gg.box);
+    for (const t of gg.tables) if (t._er) rects.push(t._er);
+  }
+  const hit = rects.some(r => g.box.x < r.x + r.w && r.x < g.box.x + g.box.w
+    && g.box.y < r.y + r.h && r.y < g.box.y + g.box.h);
+  if (!hit) return false;
+  const rec = erGroupRec(g);
+  if (!rec) return false;
+  let minX = Infinity, bottom = 0;
+  for (const r of rects) {
+    if (r.x < minX) minX = r.x;
+    if (r.y + r.h > bottom) bottom = r.y + r.h;
+  }
+  rec.x = Math.round(minX === Infinity ? g.box.x : minX);
+  rec.y = Math.round(bottom + 40);
+  return true;
+}
+
 function erDeleteGroup(g) {
   erDoc.groups = erDoc.groups.filter(x => x.id !== g.gid);
   for (const k in erDoc.tables) {
@@ -11599,6 +11635,9 @@ document.getElementById('btnErGroup').addEventListener('click', () => {
   const id = erAddGroup();
   erHotGroup = id;
   erRender();
+  // 落在别人框里的（自动化时包围盒会变），挪到图下面再画一次
+  const fresh = erModel.groups.find(x => x.gid === id);
+  if (fresh && erPlaceNewGroup(fresh)) erRender();
   // 新组在末尾，画面可能已经滚过去了 —— 直接把它送到视野中间，
   // 否则用户点完「+ 分组」什么都没发生。
   const g = erModel.groups.find(x => x.gid === id);

@@ -4012,6 +4012,31 @@ class CDP {
     check('模型图：新建分组立刻出现一个空组框',
       groupsAfter === groupsBefore + 1, `${groupsBefore} → ${groupsAfter}`);
 
+    /* 新组要**看得见**：空组没有卡片可依附，框就是它全部的存在感。
+       两件事都得成立 ——
+       ① DOM 上排在所有卡片之后（层级最高，不被别的组的卡片盖住）；
+       ② 位置不和任何别的组框 / 卡片相交（自动化按「预留宽度」排，可实际框是
+          卡片包围盒，有人拖过卡片之后就会算错，新组会落进别人地盘）。 */
+    const freshZ = await cdp.eval(`(() => {
+      const g = erModel.groups.find(x => !x.tables.length && !x.loose);
+      if (!g || !g._box) return null;
+      const kids = [...document.querySelectorAll('.er-canvas > *')];
+      const idx = kids.indexOf(g._box);
+      const cardsAfter = kids.slice(idx + 1).filter(k => k.classList.contains('er-card')).length;
+      const rects = [];
+      for (const gg of erModel.groups) {
+        if (gg === g) continue;
+        rects.push(gg.box);
+        for (const t of gg.tables) if (t._er) rects.push(t._er);
+      }
+      const hit = rects.filter(r => g.box.x < r.x + r.w && r.x < g.box.x + g.box.w
+        && g.box.y < r.y + r.h && r.y < g.box.y + g.box.h).length;
+      return { last: idx === kids.length - 1, cardsAfter, hit };
+    })()`);
+    check('模型图：新建的空组画在最上层，且不压在别的组/卡片上',
+      !!freshZ && freshZ.last && freshZ.cardsAfter === 0 && freshZ.hit === 0,
+      freshZ ? `在末尾 ${freshZ.last} · 后面还有 ${freshZ.cardsAfter} 张卡片 · 相交 ${freshZ.hit}` : '没有空组');
+
     // 双击空组标题改名
     const gname = await cdp.eval(`(() => {
       const n = [...document.querySelectorAll('.er-group-name')].find(x => x.textContent === '未命名分组');

@@ -5299,33 +5299,48 @@ html[data-theme="steel"] .ctx-menu {
    这里只留色相行，深浅由 --er-tint / --er-line 两个变量控制 ——
    深色皮肤要更浓（暗底上 alpha 小就看不见），浅色皮肤要更淡
    （同样的 alpha 扑在白底上会变成一块脏色）。 */
+/* 分组色 = 色板给的「色相 + 基准饱和/明度」，皮肤再乘一个饱和度、加一点明度。
+   为什么不在 16 条规则里给每套皮肤各写一遍：那是 96 个值，调一次得改一整天，
+   而且深色皮肤要提饱和、浅色皮肤不用 —— 这种「整族一起动」的调整本来就该是一个数。 */
+.er-card, .er-group, .er-swatch {
+  --g-s: calc(var(--g-s0, 60%) * var(--er-sat, 1));
+  --g-l: calc(var(--g-l0, 55%) + var(--er-lb, 0%));
+}
+
 /* 马卡龙色板：16 个色相，统一走「饱和中等 + 明度高」—— 卡片标题栏和组底色都是
    低透明度叠色，真正能分辨的是色相；L 压太低在深色皮肤上会糊成一片。 */
-.er-card.g0, .er-group.g0, .er-swatch.g0 { --g-h: 345; --g-s: 72%; --g-l: 80%; } /* 草莓 */
-.er-card.g1, .er-group.g1, .er-swatch.g1 { --g-h: 22; --g-s: 88%; --g-l: 79%; } /* 蜜桃 */
-.er-card.g2, .er-group.g2, .er-swatch.g2 { --g-h: 45; --g-s: 80%; --g-l: 76%; } /* 柠檬 */
-.er-card.g3, .er-group.g3, .er-swatch.g3 { --g-h: 88; --g-s: 48%; --g-l: 72%; } /* 抹茶 */
-.er-card.g4, .er-group.g4, .er-swatch.g4 { --g-h: 152; --g-s: 52%; --g-l: 73%; } /* 薄荷 */
-.er-card.g5, .er-group.g5, .er-swatch.g5 { --g-h: 176; --g-s: 50%; --g-l: 72%; } /* 蒂芙尼 */
-.er-card.g6, .er-group.g6, .er-swatch.g6 { --g-h: 200; --g-s: 68%; --g-l: 76%; } /* 天蓝 */
-.er-card.g7, .er-group.g7, .er-swatch.g7 { --g-h: 218; --g-s: 62%; --g-l: 78%; } /* 蓝莓 */
-.er-card.g8, .er-group.g8, .er-swatch.g8 { --g-h: 250; --g-s: 52%; --g-l: 80%; } /* 薰衣草 */
-.er-card.g9, .er-group.g9, .er-swatch.g9 { --g-h: 280; --g-s: 42%; --g-l: 78%; } /* 葡萄 */
-.er-card.g10, .er-group.g10, .er-swatch.g10 { --g-h: 312; --g-s: 48%; --g-l: 79%; } /* 紫罗兰 */
-.er-card.g11, .er-group.g11, .er-swatch.g11 { --g-h: 335; --g-s: 66%; --g-l: 80%; } /* 玫瑰 */
-.er-card.g12, .er-group.g12, .er-swatch.g12 { --g-h: 5; --g-s: 76%; --g-l: 79%; } /* 珊瑚 */
-.er-card.g13, .er-group.g13, .er-swatch.g13 { --g-h: 30; --g-s: 58%; --g-l: 74%; } /* 焦糖 */
-.er-card.g14, .er-group.g14, .er-swatch.g14 { --g-h: 65; --g-s: 45%; --g-l: 74%; } /* 开心果 */
-.er-card.g15, .er-group.g15, .er-swatch.g15 { --g-h: 190; --g-s: 22%; --g-l: 74%; } /* 雾霭 */
+.er-card.g0, .er-group.g0, .er-swatch.g0 { --g-h: 345; --g-s0: 72%; --g-l0: 80%; } /* 草莓 */
+.er-card.g1, .er-group.g1, .er-swatch.g1 { --g-h: 22; --g-s0: 88%; --g-l0: 79%; } /* 蜜桃 */
+.er-card.g2, .er-group.g2, .er-swatch.g2 { --g-h: 45; --g-s0: 80%; --g-l0: 76%; } /* 柠檬 */
+.er-card.g3, .er-group.g3, .er-swatch.g3 { --g-h: 88; --g-s0: 48%; --g-l0: 72%; } /* 抹茶 */
+.er-card.g4, .er-group.g4, .er-swatch.g4 { --g-h: 152; --g-s0: 52%; --g-l0: 73%; } /* 薄荷 */
+.er-card.g5, .er-group.g5, .er-swatch.g5 { --g-h: 176; --g-s0: 50%; --g-l0: 72%; } /* 蒂芙尼 */
+.er-card.g6, .er-group.g6, .er-swatch.g6 { --g-h: 200; --g-s0: 68%; --g-l0: 76%; } /* 天蓝 */
+.er-card.g7, .er-group.g7, .er-swatch.g7 { --g-h: 218; --g-s0: 62%; --g-l0: 78%; } /* 蓝莓 */
+.er-card.g8, .er-group.g8, .er-swatch.g8 { --g-h: 250; --g-s0: 52%; --g-l0: 80%; } /* 薰衣草 */
+.er-card.g9, .er-group.g9, .er-swatch.g9 { --g-h: 280; --g-s0: 42%; --g-l0: 78%; } /* 葡萄 */
+.er-card.g10, .er-group.g10, .er-swatch.g10 { --g-h: 312; --g-s0: 48%; --g-l0: 79%; } /* 紫罗兰 */
+.er-card.g11, .er-group.g11, .er-swatch.g11 { --g-h: 335; --g-s0: 66%; --g-l0: 80%; } /* 玫瑰 */
+.er-card.g12, .er-group.g12, .er-swatch.g12 { --g-h: 5; --g-s0: 76%; --g-l0: 79%; } /* 珊瑚 */
+.er-card.g13, .er-group.g13, .er-swatch.g13 { --g-h: 30; --g-s0: 58%; --g-l0: 74%; } /* 焦糖 */
+.er-card.g14, .er-group.g14, .er-swatch.g14 { --g-h: 65; --g-s0: 45%; --g-l0: 74%; } /* 开心果 */
+.er-card.g15, .er-group.g15, .er-swatch.g15 { --g-h: 190; --g-s0: 22%; --g-l0: 74%; } /* 雾霭 */
 
 :root {
-  --er-tint: .20;      /* 卡片标题栏 / 组底色的不透明度 */
-  --er-line: .45;      /* 组框描边的不透明度 */
+  --er-tint: .34;      /* 卡片标题栏 / 组底色的不透明度 */
+  --er-line: .70;      /* 组框描边的不透明度 */
+  /* 深色底上，马卡龙那种「高亮低饱和」直接铺会发灰（灰粉、灰绿），
+     所以提一档饱和度，让色相还认得出来；明度不动 —— 再压就真的变黑了。 */
+  --er-sat: 1.3;
+  --er-lb: 0%;
 }
 
 html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
-  --er-tint: .13;
-  --er-line: .52;
+  --er-tint: .22;
+  --er-line: .60;
+  /* 浅底上本色就够亮，提饱和会变成糖果色而不是马卡龙 */
+  --er-sat: 1;
+  --er-lb: 0%;
 }
 
 .er {
@@ -5964,8 +5979,19 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   gap: 8px;
   height: 28px;
   padding: 0 10px;
-  background: hsl(var(--g-h) var(--g-s) var(--g-l, 55%) / var(--er-tint));
-  border-bottom: 1px solid hsl(var(--g-h) var(--g-s) var(--g-l, 55%) / calc(var(--er-line) * .6));
+  /* 标题栏是**实心马卡龙色块**，不是叠色：
+     叠色在暗底上只能得到灰粉 / 灰绿（前景只占三成，其余全是背景），
+     在浅底上又淡到看不出色相 —— 两头都不像马卡龙。铺实色之后色相是确定的，
+     字改成同色系的深色（L 20%），对比度够，也不破坏色相。 */
+  background: hsl(var(--g-h) var(--g-s) var(--g-l, 55%) / .92);
+  border-bottom: 1px solid hsl(var(--g-h) var(--g-s) 55% / .35);
+}
+.er-card-head .er-card-name { color: hsl(var(--g-h) 45% 20%); }
+.er-card-head .er-card-rows { color: hsl(var(--g-h) 35% 34%); }
+.er-card-head .er-card-more { color: hsl(var(--g-h) 30% 36%); }
+.er-card-head .er-card-more:hover {
+  background: hsl(var(--g-h) 40% 30% / .16);
+  color: hsl(var(--g-h) 45% 18%);
 }
 .er-card-name {
   overflow: hidden;

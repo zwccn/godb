@@ -549,8 +549,6 @@ try {
               title="这个模型里有哪些表">表</button>
       <button id="btnErGroup" class="btn btn-ghost btn-sm" type="button"
               title="新建一个空分组">+ 分组</button>
-      <button id="btnErLink" class="btn btn-ghost btn-sm" type="button"
-              title="用弹窗在两张表的字段之间建一条关系">+ 关系</button>
       <button id="btnErAuto" class="btn btn-ghost btn-sm er-wide" type="button"
               title="按关系重新摆放所有卡片（分组和颜色保留）">自动排列</button>
       <button id="btnErFit" class="btn btn-ghost btn-sm er-wide" type="button"
@@ -631,46 +629,7 @@ try {
   </div>
 </div>
 
-<!-- 新增关系：两个端点都是「表 + 字段」。逻辑图只表达「我理解的模型」，
-     不校验类型能不能对上，也不声称库里有这条约束。 -->
-<div id="erLinkModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="新增关系">
-  <div class="modal-card mid">
-    <div class="modal-head">
-      <span>新增关系</span>
-      <button id="btnErLinkClose" class="icon-btn" type="button" title="关闭">×</button>
-    </div>
-    <div class="modal-body er-link-body">
-      <div class="er-link-grid">
-        <label for="erLinkFrom">起点表</label>
-        <select id="erLinkFrom"></select>
-        <select id="erLinkFromCol" title="起点的关联字段"></select>
-        <label for="erLinkTo">终点表</label>
-        <select id="erLinkTo"></select>
-        <select id="erLinkToCol" title="终点的关联字段"></select>
-        <label for="erLinkCard">基数</label>
-        <select id="erLinkCard" class="er-link-span2">
-          <option value="1N">1 : N —— 起点一个对应终点多个</option>
-          <option value="11">1 : 1 —— 两端各一个</option>
-          <option value="NM">M : N —— 两端都多个</option>
-        </select>
-      </div>
-      <p class="er-link-note">
-        这条关系只存在于模型图里，<b>不会修改数据库</b>。
-        图上的线一律是「我理解的模型」，不区分库里有没有对应约束 ——
-        让这张图能自由否认，它才是模型而不是快照。
-      </p>
-    </div>
-    <div class="modal-foot">
-      <span id="erLinkHint" class="modal-hint"></span>
-      <div class="foot-actions">
-        <button id="btnErLinkCancel" class="btn btn-sm" type="button">取消</button>
-        <button id="btnErLinkSave" class="btn btn-primary btn-sm" type="button">添加</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- 图上有哪些表：表来自库，但上不上这张画布是人的决定。 -->
+<!-- 模型里有哪些表：显示/收起，以及从当前库把表复制进来。 -->
 <div id="erTablesModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="图上的表">
   <div class="modal-card mid">
     <div class="modal-head">

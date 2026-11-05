@@ -5550,28 +5550,6 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
 .er-menu-item.on::after { content: ' ✓'; }
 .er-menu-item.danger { color: var(--danger); }
 .er-menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
-/* 新增逻辑关系 */
-.er-link-body { padding: 16px 18px 2px; }
-.er-link-grid {
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr);
-  gap: 9px 10px;
-  align-items: center;
-}
-.er-link-grid label {
-  color: var(--text-2);
-  font-size: calc(12px * var(--fs));
-}
-.er-link-grid select { min-width: 0; }
-.er-link-span2 { grid-column: 2 / 4; }
-.er-link-note {
-  margin: 14px 0 12px;
-  color: var(--text-3);
-  font-size: calc(11.5px * var(--fs));
-  line-height: 1.7;
-}
-.er-link-note b { color: var(--text-2); font-weight: 600; }
-
 /* 图上的表：表来自库，上不上这张画布是人选的 */
 .er-tables-top {
   display: flex;
@@ -5656,7 +5634,6 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   }
   .er-zoom-val { min-width: 38px; }
   .er-legend { display: none; }
-  .er-link-grid { grid-template-columns: 38px minmax(0, 1fr) minmax(0, 1fr); }
 }
 /* ---- 模型：标题、列表、版本 ---- */
 .er-model-btn {

@@ -10623,91 +10623,6 @@ function erOpenEdgeMenu(edgeId, ev) {
   erShowMenu(x + 6, y + 6, items);
 }
 
-/* ---- 用弹窗建关系（不拖拽时的备选路径） ---- */
-
-const erLinkModal = document.getElementById('erLinkModal');
-const erLinkFrom = document.getElementById('erLinkFrom');
-const erLinkFromCol = document.getElementById('erLinkFromCol');
-const erLinkTo = document.getElementById('erLinkTo');
-const erLinkToCol = document.getElementById('erLinkToCol');
-const erLinkCard = document.getElementById('erLinkCard');
-const erLinkHint = document.getElementById('erLinkHint');
-
-function erFillTableSelect(sel, tables, pick) {
-  sel.innerHTML = '';
-  for (const t of tables) {
-    const o = document.createElement('option');
-    o.value = String(t.id);
-    o.textContent = t.name;
-    sel.appendChild(o);
-  }
-  if (pick) sel.value = String(pick);
-}
-
-function erFillColSelect(sel, t) {
-  sel.innerHTML = '';
-  if (!t) return;
-  for (const c of t.columns) {
-    const o = document.createElement('option');
-    o.value = c.name;
-    o.textContent = `${c.name} · ${c.type}`;
-    sel.appendChild(o);
-  }
-}
-
-function erTableById(id) {
-  for (const t of (schemaCache || [])) {
-    if (String(t.id) === String(id)) return t;
-  }
-  return null;
-}
-
-function erOpenLinkModal() {
-  const tables = schemaCache || [];
-  if (!tables.length) return;
-  erLinkHint.textContent = '';
-  erFillTableSelect(erLinkFrom, tables);
-  erFillTableSelect(erLinkTo, tables, tables.length > 1 ? tables[1].id : tables[0].id);
-  erSyncLinkCols();
-  erLinkCard.value = '1N';
-  erLinkModal.classList.remove('hidden');
-  erLinkFrom.focus();
-}
-
-function erSyncLinkCols() {
-  const from = erTableById(erLinkFrom.value);
-  const to = erTableById(erLinkTo.value);
-  erFillColSelect(erLinkFromCol, from);
-  erFillColSelect(erLinkToCol, to);
-
-  // 「一」那一端多半指着主键，默认选中它，省一次点击。
-  if (to) {
-    const pk = to.columns.find(c => c.primaryKey);
-    if (pk) erLinkToCol.value = pk.name;
-  }
-}
-
-function erCloseLinkModal() {
-  erLinkModal.classList.add('hidden');
-}
-
-function erSaveLink() {
-  const from = erTableById(erLinkFrom.value);
-  const to = erTableById(erLinkTo.value);
-  const fc = erLinkFromCol.value;
-  const tc = erLinkToCol.value;
-  if (!from || !to || !fc || !tc) {
-    erLinkHint.textContent = '两端的表和字段都要选。';
-    return;
-  }
-  if (from === to && fc.toLowerCase() === tc.toLowerCase()) {
-    erLinkHint.textContent = '同一张表的同一列不能自己连自己。';
-    return;
-  }
-  erCloseLinkModal();
-  erAddLink(from, fc, to, tc, erLinkCard.value);
-}
-
 /* ---- 视图 ---- */
 
 // 悬停高亮分两级：鼠标在卡片上是「这张表的所有关系」，落在某一列上是
@@ -11168,12 +11083,6 @@ document.getElementById('btnErGroup').addEventListener('click', () => {
   erSave();
 });
 
-document.getElementById('btnErLink').addEventListener('click', erOpenLinkModal);
-document.getElementById('btnErLinkClose').addEventListener('click', erCloseLinkModal);
-document.getElementById('btnErLinkCancel').addEventListener('click', erCloseLinkModal);
-document.getElementById('btnErLinkSave').addEventListener('click', erSaveLink);
-erLinkFrom.addEventListener('change', erSyncLinkCols);
-erLinkTo.addEventListener('change', erSyncLinkCols);
 
 document.getElementById('btnErTables').addEventListener('click', erOpenTablePicker);
 document.getElementById('btnErTablesClose').addEventListener('click', erCloseTablePicker);

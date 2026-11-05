@@ -5416,6 +5416,19 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  /* 整个模型图不许选文字：这里所有东西都是**抓手**（拖卡片、拖组、拉关系、
+     拖空白平移），浏览器默认的「按住拖动＝选文本」会把一次拖拽变成选中一片
+     表名，松手还留着蓝色高亮 —— 看着像界面坏了。
+     输入框单独放开（见下面那条），否则组名/表名改不了。 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 例外：真正要编辑的地方还得能选、能拖选、能右键剪切复制 */
+.er input,
+.er textarea,
+.er [contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
 }
 .er-head {
   flex: 0 0 auto;

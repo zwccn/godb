@@ -3828,6 +3828,43 @@ class CDP {
         .reduce((n, c) => n + c.querySelectorAll('.er-col-dot').length, 0)`))
       && erUi.dots > 0, `${erUi.dots} 个连接点`);
 
+    /* 画布上不许选中文字：这里按住拖是「拖卡片 / 拖组 / 拉线 / 平移」，
+       浏览器默认的「按住＝选文本」会顺手选中一片表名，松手还留着高亮。 */
+    {
+      const selUi = await cdp.eval(`(() => {
+        const p = document.getElementById('erPanel');
+        const cs = getComputedStyle(p);
+        const t = document.querySelector('.er-title');
+        const r = t.getBoundingClientRect();
+        return {
+          panel: cs.userSelect || cs.webkitUserSelect,
+          input: (() => {
+            const i = document.createElement('input');
+            p.appendChild(i);
+            const v = getComputedStyle(i).userSelect || getComputedStyle(i).webkitUserSelect;
+            i.remove();
+            return v;
+          })(),
+          from: { x: Math.round(r.left + 20), y: Math.round(r.top + r.height / 2) },
+          to: { x: Math.round(r.left + 320), y: Math.round(r.top + r.height / 2) },
+        };
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: selUi.from.x, y: selUi.from.y, button: 'left', buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 6; i++) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', button: 'left', buttons: 1,
+          x: Math.round(selUi.from.x + (selUi.to.x - selUi.from.x) * i / 6),
+          y: selUi.from.y,
+        });
+      }
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: selUi.to.x, y: selUi.to.y, button: 'left', buttons: 0, clickCount: 1 });
+      await sleep(120);
+      const picked = await cdp.eval(`String(window.getSelection() || '').length`);
+      check('模型图：拖拽不会选中文字（面板禁选，输入框仍可编辑）',
+        selUi.panel === 'none' && selUi.input === 'text' && picked === 0,
+        `面板 user-select=${selUi.panel} · 输入框 ${selUi.input} · 选中 ${picked} 字`);
+    }
+
     /* 圆点的**热区**够不够大：视觉只有 10px，要求瞄准太反人类。
        量两件事（都换算成画布坐标，画布是缩放的，屏幕像素会随 --zoom 变）：
        ① 沿行往里能点到多少；② 上下到这一行的边缘仍然命中同一个圆点

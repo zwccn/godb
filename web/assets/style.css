@@ -5452,9 +5452,11 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
      同色叠同色只剩一圈光晕，看着就「不够明显」。--text 在深色皮肤下是近白、
      浅色皮肤下是近深，叠在 accent 亮线上也分得开；光晕仍用 accent。 */
   stroke: var(--text);
-  stroke-width: 3;
+  stroke-width: 3.2;
   stroke-linecap: round;
-  stroke-dasharray: 7 11;
+  /* dasharray 0 + 圆头 = 圆点：线宽就是点径，间距由第二个值定。
+     以前是 7/11 的小长条，放大看像一串短横杠。 */
+  stroke-dasharray: 0 11;
   opacity: 0;
   pointer-events: none;
   transition: opacity .16s;
@@ -5474,7 +5476,7 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   animation: er-flow-dash 1.1s linear infinite;
 }
 @keyframes er-flow-dash {
-  to { stroke-dashoffset: -36; }   /* 一个 dash 周期 18px，两格 = 36，接得上 */
+  to { stroke-dashoffset: -22; }   /* 一个周期 11px，走两格 = 22，接得上 */
 }
 /* 系统开了「减少动态效果」就不跑动画，只留一条亮着的线 */
 @media (prefers-reduced-motion: reduce) {

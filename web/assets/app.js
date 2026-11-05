@@ -9416,8 +9416,12 @@ function erAutoPlace(groups) {
   let rowX = 0, rowY = 0, rowH = 0;
   for (const g of groups) {
     const plan = erGroupPlan(g);
-    const boxW = ER.groupPad * 2 + ER.chanW + plan.w;
-    const boxH = ER.groupHead + ER.groupPad * 2 + plan.h;
+    // 空组的框由 erRelayoutBoxes 定死成「一张卡片的宽 + 内边距」（没有 chanW，
+    // 也没有卡片可包），这里必须用同一个尺寸占位，不然预留的和画出来的对不上。
+    const boxW = g.empty ? ER.cardW + ER.groupPad * 2
+      : ER.groupPad * 2 + ER.chanW + plan.w;
+    const boxH = g.empty ? ER.groupHead + ER.groupPad * 2 + 24
+      : ER.groupHead + ER.groupPad * 2 + plan.h;
     if (rowX > 0 && rowX + boxW > ER.rowMax) {
       rowX = 0;
       rowY += rowH + ER.groupGap;
@@ -9531,7 +9535,10 @@ function erRelayoutBoxes(groups) {
     g.box = {
       x: minX - ER.groupPad - ER.chanW,
       y: minY - ER.groupHead - ER.groupPad,
-      w: maxX - minX + (ER.groupPad + ER.chanW) * 2,
+      // 右边只留内边距：chanW 是**左侧**的走线通道（往左出线的卡片要那段）。
+      // 以前两边都加 chanW，框比自动布局预留的宽出一个 chanW（44px），
+      // 组间距 46 被吃掉只剩 2px —— 看起来就是「组和组挨在一起/重叠」。
+      w: maxX - minX + ER.groupPad * 2 + ER.chanW,
       h: maxY - minY + ER.groupHead + ER.groupPad * 2,
     };
   }
@@ -11264,6 +11271,12 @@ document.getElementById('btnErAuto').addEventListener('click', () => {
   for (const k in erDoc.tables) {
     erDoc.tables[k].x = null;
     erDoc.tables[k].y = null;
+  }
+  // **空组的落脚点也要清**：空组没有卡片，位置只存在组记录里。不清的话，
+  // 它留在拖动后的原地，新布局排过来正好压在它身上 —— 表现为「组和组重叠」。
+  for (const g of erDoc.groups) {
+    g.x = null;
+    g.y = null;
   }
   erHotGroup = '';
   erRender();

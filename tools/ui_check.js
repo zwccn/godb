@@ -4206,7 +4206,38 @@ class CDP {
 
     // 摆过之后回到自动布局，后面的连线用例从一个规整的图开始
     await cdp.eval(`document.getElementById('btnErAuto').click()`);
-    await sleep(300);
+    await sleep(400);
+
+    /* 自动排列之后，组框之间必须留出设计间距（46px），不许挨在一起。
+       踩过两个坑：①组框右边多算了一个 chanW（44px），把间距吃成 2px；
+       ②空组的位置只存在组记录里，自动排列只清卡片坐标，它就留在原地压别人。 */
+    const lay = await cdp.eval(`(() => {
+      const rects = erModel.groups.map((g, i) => ({
+        n: g.loose ? '未分组' : (g.name || '未命名' + i),
+        x: g.box.x, y: g.box.y, w: g.box.w, h: g.box.h,
+      }));
+      const bad = [];
+      let minGap = Infinity;
+      for (let i = 0; i < rects.length; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i], b = rects[j];
+          if (a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1
+            && a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1) bad.push(a.n + '×' + b.n);
+          if (a.y < b.y + b.h && b.y < a.y + a.h) {
+            const gap = Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w));
+            minGap = Math.min(minGap, gap);
+          }
+        }
+      }
+      return {
+        n: rects.length, bad,
+        minGap: minGap === Infinity ? null : Math.round(minGap),
+        stalePos: erDoc.groups.filter(g => g.x != null || g.y != null).length,
+      };
+    })()`);
+    check('模型图：自动排列后组与组不重叠、间距还在（空组也回到布局里）',
+      lay.bad.length === 0 && lay.stalePos === 0 && (lay.minGap === null || lay.minGap >= 20),
+      `${lay.n} 组 · 重叠 ${lay.bad.join(',') || '无'} · 最小间距 ${lay.minGap}px · 残留坐标 ${lay.stalePos}`);
 
     // ---- 拖字段建一条关系（这次改动的核心交互）----
     await cdp.eval(`document.getElementById('btnErFit').click()`);

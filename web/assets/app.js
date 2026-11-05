@@ -8452,6 +8452,15 @@ document.getElementById('btnAddCol').addEventListener('click', () => {
   designer.sel = designer.rows.length - 1;
   renderDesigner();
   refreshDesignerSql();
+  // 新行在网格最下面，行一多就看不见了 —— 滚过去并把光标放进名字格，
+  // 否则点「＋ 添加字段」像是没反应（要自己往下滚才知道加了一行）。
+  const rows = document.querySelectorAll('#designerRows tr');
+  const fresh = rows[designer.sel];
+  if (fresh) {
+    fresh.scrollIntoView({ block: 'nearest' });
+    const input = fresh.querySelector('.c-name input');
+    if (input) { input.focus(); input.select && input.select(); }
+  }
 });
 document.getElementById('btnDelCol').addEventListener('click', () => {
   if (!designer) return;

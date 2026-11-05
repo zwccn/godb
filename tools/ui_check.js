@@ -3960,6 +3960,40 @@ class CDP {
       && /text/i.test(mtModel.columns[1].type),
       `${dInfo.title} · 列 ${mtModel ? mtModel.columns.map(c => c.name + ':' + c.type).join(',') : '无'}`);
 
+    /* 表结构弹窗的高度：以前是「贴着内容缩」，一进来只有一行字段，弹窗就
+       三百来像素高，网格区更小 —— 加几个字段就得在一条缝里滚。现在高度定了
+       （min(视口-80, 800)），网格区把剩下的空间吃满。 */
+    await cdp.eval(`document.getElementById('btnErNewTable').click()`);
+    await sleep(450);
+    const dgSize = await cdp.eval(`(() => {
+      const c = document.querySelector('#designerModal .modal-card').getBoundingClientRect();
+      const g = document.getElementById('designerGrid').getBoundingClientRect();
+      return { h: Math.round(c.height), grid: Math.round(g.height), vh: window.innerHeight };
+    })()`);
+    check('模型：表结构弹窗高度够用（网格区不再是一条缝）',
+      dgSize.h >= Math.min(dgSize.vh - 80, 600) && dgSize.grid >= 300,
+      `弹窗 ${dgSize.h}px · 网格 ${dgSize.grid}px · 视口 ${dgSize.vh}px`);
+
+    // 连加 20 个字段：网格出滚动条，新行要自己滚进视野（不然点「＋」像没反应）
+    await cdp.eval(`(() => { for (let i = 0; i < 20; i++) document.getElementById('btnAddCol').click(); })()`);
+    await sleep(400);
+    const dgScroll = await cdp.eval(`(() => {
+      const wrap = document.getElementById('designerGrid');
+      const rows = document.querySelectorAll('#designerRows tr');
+      const last = rows[rows.length - 1].getBoundingClientRect();
+      const wb = wrap.getBoundingClientRect();
+      return {
+        rows: rows.length,
+        scrollable: wrap.scrollHeight > wrap.clientHeight + 2,
+        lastVisible: last.top >= wb.top - 1 && last.bottom <= wb.bottom + 1,
+      };
+    })()`);
+    check('模型：加字段时新行自动滚进视野（网格可滚，最后一行可见）',
+      dgScroll.scrollable && dgScroll.lastVisible,
+      `${dgScroll.rows} 行 · 可滚 ${dgScroll.scrollable} · 末行可见 ${dgScroll.lastVisible}`);
+    await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
+    await sleep(250);
+
     // 定版 → 版本列表出现一条
     await cdp.eval(`document.getElementById('btnErRev').click()`);
     await waitFor(cdp, `!document.getElementById('erRevsModal').classList.contains('hidden')`,

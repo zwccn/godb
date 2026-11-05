@@ -3477,6 +3477,11 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 
 /* ---------- 表设计器 ---------- */
 .modal-card.wide { width: min(1180px, calc(100vw - 40px)); }
+
+/* 表结构弹窗给一个**固定高度**：字段一多就是「在网格里滚动找行」，
+   高度跟着行数长会让上面的工具栏、表名和下面的保存按钮每次都跳位置。
+   小屏仍然按视口收（100vh - 80px），不会顶到屏幕外。 */
+#designerModal .modal-card { height: min(calc(100vh - 80px), 800px); }
 .modal-card.narrow { width: 420px; }
 
 .designer-bar {
@@ -3523,7 +3528,8 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
   flex: 1 1 auto;
   overflow: auto;
   min-height: 180px;
-  max-height: 52vh;
+  /* 不再按 52vh 封顶：弹窗高度已经定了，网格应该把剩下的空间吃满
+     （52vh 会让下面空出一大块，反而不像「表格」）。 */
 }
 
 table.dgrid {

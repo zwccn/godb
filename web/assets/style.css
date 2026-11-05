@@ -5992,43 +5992,44 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
    位置必须留在卡片内 —— 卡片是 overflow:hidden，压在边框上会被切掉一半。 */
 .er-col-dot {
   position: absolute;
-  /* 圆点画在卡片右侧的内边距里，但**热区**比它大一圈（见下面的 ::after）：
+  /* 圆点画在卡片右侧的内边距里，但**热区**比它大得多（见下面的 ::after）：
      9px 的圆点要求瞄准，手一抖就抓空。 */
   z-index: 2;
   right: -8px;
   top: 50%;
-  width: 9px;
-  height: 9px;
-  margin-top: -4.5px;
+  width: 10px;
+  height: 10px;
+  margin-top: -5px;
   border: 1.5px solid hsl(var(--g-h) var(--g-s) var(--g-l, 55%) / .7);
   border-radius: 50%;
   background: var(--bg-1);
-  opacity: .16;
+  opacity: .2;
   cursor: crosshair;
   transition: opacity .12s, transform .12s, border-color .12s, box-shadow .12s;
 }
 /* 三层显隐：平时几乎看不见（不干扰读字段名），鼠标进卡片时整列浮出来
    （一眼知道这张表每个字段都能拉线），落在某一行时那个点变实心。 */
+/* 热区 34 × 行高，而且**靠卡片内侧**：卡片是 overflow:hidden，热区往外长会被裁掉
+   （圆点右边到卡片边缘只剩 5px）。所以基准点放在右边缘、宽度往左长 ——
+   用户瞄的多半是「这一行的右边」，正好都落在里面。
+
+   高度**就取一行**，不要更高：相邻两行只隔 20px，热区一超出就会压到隔壁那行，
+   变成「点这一行的点，拉出来的是下一行的线」。 */
 .er-col-dot::after {
   content: '';
   position: absolute;
-  left: 50%;
+  right: -6px;
   top: 50%;
-  width: 20px;
+  width: 34px;
   height: 20px;
-  transform: translate(-50%, -50%);
+  transform: translateY(-50%);
 }
-.er-card:hover .er-col-dot { opacity: .55; }
+.er-card:hover .er-col-dot { opacity: .6; }
 .er-col:hover .er-col-dot { opacity: 1; }
 .er-col-dot:hover {
   border-color: var(--accent);
   transform: scale(1.25);
   box-shadow: 0 0 0 3px hsl(var(--g-h) var(--g-s) var(--g-l, 55%) / .18);
-}
-.er-col:hover .er-col-dot { opacity: 1; }
-.er-col-dot:hover {
-  border-color: var(--accent);
-  transform: scale(1.25);
 }
 /* 拉线时落到的那一行：整行亮起来，松手前就能确认接的是哪一列 */
 .er-col.link-target {

@@ -3769,6 +3769,39 @@ class CDP {
         .reduce((n, c) => n + c.querySelectorAll('.er-col-dot').length, 0)`))
       && erUi.dots > 0, `${erUi.dots} 个连接点`);
 
+    /* 圆点的**热区**够不够大：视觉只有 10px，要求瞄准太反人类。
+       量两件事（都换算成画布坐标，画布是缩放的，屏幕像素会随 --zoom 变）：
+       ① 沿行往里能点到多少；② 上下到这一行的边缘仍然命中同一个圆点
+       —— 热区一旦高过行高，就会压到隔壁行，「点这行拉出下行的线」。 */
+    const dotHit = await cdp.eval(`(() => {
+      const d = document.querySelector('.er-col-dot');
+      if (!d) return null;
+      const z = erView.zoom || 1;
+      const row = d.closest('.er-col').getBoundingClientRect();
+      const r = d.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const at = (x, y) => {
+        const el = document.elementFromPoint(x, y);
+        const got = el && el.closest ? el.closest('.er-col-dot') : null;
+        return got === d;
+      };
+      let inner = 0;
+      for (let k = 0; k <= 40; k += 2) { if (!at(cx - k, cy)) { inner = k; break; } inner = k; }
+      return {
+        zoom: Math.round(z * 100) / 100,
+        dotCss: Math.round(r.width / z * 10) / 10,
+        innerCss: Math.round(inner / z),
+        edgeTop: at(cx, row.top + 1),
+        edgeBottom: at(cx, row.bottom - 1),
+        rowCss: Math.round(row.height / z),
+      };
+    })()`);
+    check('模型图：拉线圆点的热区够大（视觉 10px，往里能点到 24px 以上）',
+      !!dotHit && dotHit.innerCss >= 24 && dotHit.edgeTop && dotHit.edgeBottom,
+      dotHit
+        ? `缩放 ${dotHit.zoom} · 视觉 ${dotHit.dotCss}px · 内侧可点 ${dotHit.innerCss}px · 行高 ${dotHit.rowCss}px · 上下边缘${dotHit.edgeTop && dotHit.edgeBottom ? '都命中' : '有漏点'}`
+        : '没有圆点');
+
     /* ---- 模型：列表 / 新建 / 加表 / 定版 ----
        模型是独立的设计：可以新建一个空白的（不依赖库），也可以把库里的表
        复制进来；定版把当前副本整份存成快照。这套是新加的，单独验一遍。 */
@@ -4323,7 +4356,7 @@ class CDP {
       });
       await sleep(80);
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dragGeom.to.x, y: dragGeom.to.y, button: 'left', buttons: 0, clickCount: 1 });
-      await sleep(250);
+      await sleep(300);
       linkMenu = await cdp.eval(`(() => {
         const items = [...document.querySelectorAll('.er-menu .er-menu-item')].map(b => b.textContent);
         return { items, head: (document.querySelector('.er-menu .er-menu-head') || {}).textContent || '' };
@@ -4331,27 +4364,10 @@ class CDP {
     }
     check('模型图：从字段行拖出关系时有一条虚线跟着走、目标行点亮',
       ghostOk === true, ghostOk ? 'ok' : '没有临时线或目标高亮');
-    check('模型图：松手后立刻问基数，四个选项（含反向）',
-      !!linkMenu && linkMenu.items.length === 4
-      && linkMenu.items.some(t => t.indexOf('1 : N') === 0)
-      && linkMenu.items.some(t => t.indexOf('M : N') === 0),
-      linkMenu ? linkMenu.items.join(' | ') : '没有菜单');
-
-    // 选「1 : N」
-    if (linkMenu) {
-      const oneToN = await cdp.eval(`(() => {
-        const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
-          .find(x => x.textContent.indexOf('1 : N') === 0);
-        if (!b) return null;
-        const r = b.getBoundingClientRect();
-        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
-      })()`);
-      if (oneToN) {
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: oneToN.x, y: oneToN.y, button: 'left', clickCount: 1 });
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: oneToN.x, y: oneToN.y, button: 'left' });
-        await sleep(300);
-      }
-    }
+    // 松手不再弹「四选一」：直接按最保守的 1 : 1 建出来，要改点这条线（菜单里三个基数都在）。
+    check('模型图：松手直接建 1 : 1，不再弹基数菜单',
+      !!linkMenu && linkMenu.items.length === 0,
+      linkMenu ? `菜单项 ${linkMenu.items.join(' | ') || '（无）'}` : '没有读到菜单状态');
 
     const built = await cdp.eval(`(() => {
       const e = erModel.edges[0];
@@ -4376,8 +4392,8 @@ class CDP {
         corners: (path.getAttribute('d').match(/Q/g) || []).length,
       };
     })()`);
-    check('模型图：拖出来的关系落在两个字段上（1 : N）',
-      built.edges === 1 && built.card === '1N'
+    check('模型图：拖出来的关系落在两个字段上（默认 1 : 1）',
+      built.edges === 1 && built.card === '11'
       && built.fromName === 'er_basis' && built.fromCol === 'id'
       && built.toName === 'er_fact' && built.toCol === 'basis_id',
       `${built.fromName}.${built.fromCol} → ${built.toName}.${built.toCol} · ${built.card}`);
@@ -4526,8 +4542,8 @@ class CDP {
       const crows = document.querySelectorAll('.er-crow').length;
       return { ticks, crows };
     })()`);
-    check('模型图：1 : N 一端一横、一端鸦爪',
-      marks.ticks === 1 && marks.crows === 1,
+    check('模型图：1 : 1 两端都是一横（没有鸦爪）',
+      marks.ticks === 2 && marks.crows === 0,
       `一横 ${marks.ticks} · 鸦爪 ${marks.crows}`);
 
     const fkUnchanged = await cdp.eval(`fetch('/api/schema').then(r => r.json()).then(s =>
@@ -4535,7 +4551,7 @@ class CDP {
     check('模型图：画关系不会改库（外键数不变）',
       fkUnchanged === demo.fk, `外键 ${demo.fk} → ${fkUnchanged}`);
 
-    // 点线改基数：1 : N → M : N，两端都该变成鸦爪
+    // 点线改基数：1 : 1 → M : N，两端都该变成鸦爪
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);
     const edgePt = await cdp.eval(`(() => {

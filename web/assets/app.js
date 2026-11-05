@@ -10422,23 +10422,14 @@ function erLinkDragEnd(ev) {
   const hit = d.target;
   if (!hit) return;
   if (hit.t === d.t && hit.colName === d.colName) return;
-  erAskCard(d.t, d.colName, hit.t, hit.colName, ev);
-}
 
-// erAskCard 松手时就要定基数。
-//
-// 不默认成 1:N 再让用户去改：默认值一旦写进去就没人回头改，而 1:N 和 M:N
-// 在业务上是完全不同的两件事（一个是「订单属于客户」，一个是「订单和商品」）。
-function erAskCard(fromT, fromCol, toT, toCol, ev) {
-  const sr = erStage.getBoundingClientRect();
-  const x = ev.clientX - sr.left, y = ev.clientY - sr.top;
-  erShowMenu(x + 6, y + 6, [
-    { head: `${fromT.name}.${fromCol} → ${toT.name}.${toCol}` },
-    { label: '1 : 1 · 两端各一行', run: () => erAddLink(fromT, fromCol, toT, toCol, '11') },
-    { label: '1 : N · 起点一个、终点多个', run: () => erAddLink(fromT, fromCol, toT, toCol, '1N') },
-    { label: 'N : 1 · 起点多个、终点一个', run: () => erAddLink(toT, toCol, fromT, fromCol, '1N') },
-    { label: 'M : N · 两端都多个', run: () => erAddLink(fromT, fromCol, toT, toCol, 'NM') },
-  ]);
+  // 默认就建 1 : 1，不再弹「四选一」。
+  //
+  // 以前松手要选基数：多一步、还容易点错（1:N 和 M:N 在业务上不是一回事）。
+  // 但绝大多数连线是「这两列有关系」这件事本身，基数多半是回头细看才定。
+  // 现在先按最保守的 1 : 1 建出来，要改点一下线 —— 菜单里三个基数都在。
+  const made = erAddLink(d.t, d.colName, hit.t, hit.colName, '11');
+  if (made) toast('已建 1 : 1 关系 · 点这条线可以改基数');
 }
 
 /* ---- 关系的增删改 ---- */
@@ -10452,13 +10443,13 @@ function erLinkCovers(ln, aT, aCol, bT, bCol) {
   return fwd || rev;
 }
 
-function erAddLink(fromT, fromCol, toT, toCol, card) {
+function erAddLink(fromT, fromCol, toT, toCol, card = '11') {
   if (!erDoc) erDoc = erNormalizeDoc(null);
   // 同一对字段只能有一条关系。允许重复的话，图上会出现两条完全重合的线，
   // 点其中一条改基数，另一条还留在原样 —— 用户没法判断哪条才算数。
   if (erDoc.links.some(ln => erLinkCovers(ln, fromT, fromCol, toT, toCol))) {
     toast('这两列之间已经有一条关系了，点那条线可以改基数');
-    return;
+    return false;
   }
   erDoc.links.push({
     id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
@@ -10468,6 +10459,7 @@ function erAddLink(fromT, fromCol, toT, toCol, card) {
   });
   erRender();
   erSave();
+  return true;
 }
 
 function erSetCard(edge, card) {

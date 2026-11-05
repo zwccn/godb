@@ -5009,6 +5009,131 @@ class CDP {
       !!openItem && !!editorUi && editorUi.sql.includes(firstTable) && editorUi.home,
       editorUi ? `${firstTable} · 菜单项 ${openItem ? '有' : '无'}` : '菜单没点成');
 
+    /* 右键菜单：点哪儿弹哪儿的。
+       卡片 = 这张表的事（表结构 / 进编辑器 / 归组），空白 = 整张图的事
+       （显示隐藏 / 新建 / 排列）。以前空白右键直接开表清单，卡片右键出的是
+       浏览器原生菜单 —— 三个层级只有一层能操作。 */
+    await cdp.eval(`document.getElementById('btnEr').click()`);
+    await sleep(600);
+    const blankPt = await cdp.eval(`(() => {
+      const r = document.getElementById('erStage').getBoundingClientRect();
+      for (let y = r.top + 70; y < r.bottom - 70; y += 18) {
+        for (let x = r.left + 40; x < r.right - 40; x += 18) {
+          const el = document.elementFromPoint(x, y);
+          if (el && !el.closest('.er-group, .er-card, .er-menu, .er-legend')) {
+            return { x: Math.round(x), y: Math.round(y) };
+          }
+        }
+      }
+      return null;
+    })()`);
+    const rightClick = async (x, y) => {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', buttons: 2, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', buttons: 0, clickCount: 1 });
+      await sleep(300);
+    };
+    let ctxUi = null;
+    if (blankPt) {
+      await rightClick(blankPt.x, blankPt.y);
+      ctxUi = await cdp.eval(`(() => {
+        const m = document.querySelector('.er-menu');
+        if (!m) return null;
+        return {
+          top: [...m.querySelectorAll(':scope > .er-menu-item, :scope > .er-menu-sub > .er-menu-item')]
+            .map(b => b.textContent),
+          subs: m.querySelectorAll(':scope > .er-menu-sub').length,
+        };
+      })()`);
+    }
+    check('模型图：右键空白处弹菜单（显示/隐藏 + 新建/导入 两路二级）',
+      !!ctxUi && ctxUi.subs === 2
+      && ctxUi.top.some(t => t.indexOf('显示 / 隐藏') === 0)
+      && ctxUi.top.some(t => t.indexOf('新建 / 导入') === 0)
+      && ctxUi.top.indexOf('自动排列') >= 0,
+      ctxUi ? ctxUi.top.join(' | ') : '没有菜单');
+
+    // 悬停展开第一个二级：应该列出模型里每张表 + 全显示/全收起
+    const sub1Pt = await cdp.eval(`(() => {
+      const b = document.querySelectorAll('.er-menu > .er-menu-sub > .er-menu-item')[0];
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    let subUi = null;
+    if (sub1Pt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: sub1Pt.x, y: sub1Pt.y });
+      await sleep(300);
+      subUi = await cdp.eval(`(() => {
+        const sub = document.querySelector('.er-menu > .er-menu-sub > .er-menu');
+        if (!sub || getComputedStyle(sub).display === 'none') return null;
+        return {
+          items: [...sub.querySelectorAll('.er-menu-item')].map(b => b.textContent),
+          inside: sub.getBoundingClientRect().right <= window.innerWidth + 1,
+        };
+      })()`);
+    }
+    check('模型图：右键「显示 / 隐藏」展开成表清单（带勾）+ 全显示/全收起',
+      !!subUi && subUi.inside
+      && subUi.items.length >= 3
+      && subUi.items.indexOf('全部显示') >= 0 && subUi.items.indexOf('全部收起') >= 0,
+      subUi ? `${subUi.items.length} 项 · ${subUi.items.slice(0, 3).join(' / ')}` : '二级菜单没展开');
+
+    // 点掉一张表：卡片少一张，状态栏挂上「已收起」
+    const hideUi = await cdp.eval(`(async () => {
+      const before = document.querySelectorAll('.er-card').length;
+      const item = [...document.querySelectorAll('.er-menu-sub .er-menu-item')]
+        .find(b => /^✓ /.test(b.textContent));
+      if (!item) return null;
+      const name = item.textContent.replace(/^✓ /, '');
+      item.click();
+      await new Promise(r => setTimeout(r, 350));
+      return {
+        name, before, after: document.querySelectorAll('.er-card').length,
+        stats: document.getElementById('erStats').textContent,
+      };
+    })()`);
+    check('模型图：右键里点一张表就能收起（卡片少一张，状态栏提示已收起）',
+      !!hideUi && hideUi.after === hideUi.before - 1 && /已收起/.test(hideUi.stats),
+      hideUi ? `${hideUi.name}：${hideUi.before} → ${hideUi.after} · ${hideUi.stats}` : '二级菜单里没有可勾的表');
+
+    // 再点回来，别把后面的用例带跑偏（走同一套 erSetShown，和菜单里那一项同源）
+    if (hideUi) {
+      await cdp.eval(`(async () => {
+        for (const t of erSchema) if (erCardRec(t).hidden) erSetShown(t, true);
+        await new Promise(r => setTimeout(r, 300));
+      })()`);
+      const back = await cdp.eval(`({
+        cards: document.querySelectorAll('.er-card').length,
+        stats: document.getElementById('erStats').textContent,
+      })`);
+      check('模型图：右键收起之后能恢复（状态栏不再提示已收起）',
+        !/已收起/.test(back.stats), back.stats);
+    }
+    await cdp.eval(`erCloseMenus()`);
+
+    // 卡片上右键：弹的是这张表的菜单（不是画布菜单）
+    const cardPt2 = await cdp.eval(`(() => {
+      const c = document.querySelector('.er-card');
+      const r = c.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 10), t: c.dataset.table };
+    })()`);
+    let cardCtx = null;
+    if (cardPt2) {
+      await rightClick(cardPt2.x, cardPt2.y);
+      cardCtx = await cdp.eval(`(() => {
+        const m = document.querySelector('.er-menu');
+        if (!m) return null;
+        return { items: [...m.querySelectorAll('.er-menu-item')].map(b => b.textContent) };
+      })()`);
+    }
+    check('模型图：卡片上右键弹这张表的菜单',
+      !!cardCtx && cardCtx.items.indexOf('编辑表结构') >= 0
+      && cardCtx.items.indexOf('在编辑器中打开') >= 0,
+      cardCtx ? cardCtx.items.join(' | ') : '没有菜单');
+    await cdp.eval(`erCloseMenus()`);
+    await cdp.eval(`toggleER(false)`);
+    await sleep(300);
+
     // 收拾干净：这次建的模型是测试数据，删掉；别人的模型不动
     await cdp.eval(`fetch('/api/models/' + window.__modelId, { method: 'DELETE' })`);
 

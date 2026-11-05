@@ -10951,14 +10951,32 @@ function erCloseMenus() {
   }
 }
 
-function erShowMenu(x, y, items) {
-  erCloseMenus();
+// erBuildMenu 只负责拼菜单，不负责摆位置 —— 二级菜单要复用同一套拼装，
+// 但它挂在父项里（绝对定位），不参与顶层那套「贴边翻转」。
+function erBuildMenu(items) {
   const m = el('div', 'er-menu');
   for (const it of items) {
     if (it.sep) { m.appendChild(el('div', 'er-menu-sep')); continue; }
     if (it.head) { m.appendChild(el('div', 'er-menu-head', it.head)); continue; }
     // 自定义内容（颜色板这种放不进「一行一个按钮」的东西）
     if (it.node) { m.appendChild(it.node); continue; }
+    // 二级菜单：靠 CSS 的 :hover 展开（键盘/触屏用点击切 .open），
+    // 不需要 JS 算位置，也就不会有「鼠标一移就收起来」的抖动。
+    if (it.sub) {
+      const wrap = el('div', 'er-menu-sub');
+      const b = el('button', 'er-menu-item has-sub', it.label);
+      b.type = 'button';
+      b.setAttribute('aria-haspopup', 'true');
+      b.appendChild(el('span', 'er-menu-arrow', '›'));
+      b.addEventListener('click', ev => {
+        ev.stopPropagation();
+        wrap.classList.toggle('open');
+      });
+      wrap.appendChild(b);
+      wrap.appendChild(erBuildMenu(it.sub));
+      m.appendChild(wrap);
+      continue;
+    }
     const b = el('button', 'er-menu-item' + (it.on ? ' on' : '') + (it.danger ? ' danger' : ''), it.label);
     b.type = 'button';
     b.addEventListener('click', ev => {
@@ -10968,6 +10986,12 @@ function erShowMenu(x, y, items) {
     });
     m.appendChild(b);
   }
+  return m;
+}
+
+function erShowMenu(x, y, items) {
+  erCloseMenus();
+  const m = erBuildMenu(items);
   m.addEventListener('pointerdown', ev => ev.stopPropagation());
   erStage.appendChild(m);
 
@@ -10979,11 +11003,13 @@ function erShowMenu(x, y, items) {
   if (top + r.height > sr.height - 8) top = Math.max(8, sr.height - r.height - 8);
   m.style.left = Math.max(8, left) + 'px';
   m.style.top = Math.max(8, top) + 'px';
+  // 右边放不下二级菜单就整棵往左开（CSS 里 .er-menu.flip 一套规则）
+  if (left + r.width + 200 > sr.width - 8) m.classList.add('flip');
   erMenuEl = m;
   return m;
 }
 
-function erOpenCardMenu(t, cardEl) {
+function erOpenCardMenu(t, cardEl, ev) {
   const r = cardEl.getBoundingClientRect();
   const sr = erStage.getBoundingClientRect();
   const cur = erGroupOf(t);
@@ -11005,7 +11031,60 @@ function erOpenCardMenu(t, cardEl) {
   items.push({ sep: true });
   items.push({ label: '从图上收起', run: () => erSetShown(t, false) });
   items.push({ label: '从模型里删除', danger: true, run: () => erDeleteModelTable(t) });
-  erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
+  // 右键时按指针位置弹，和系统菜单的习惯一致；点 ⋯ 仍贴着卡片右上角。
+  if (ev) erShowMenu(ev.clientX - sr.left + 2, ev.clientY - sr.top + 2, items);
+  else erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
+}
+
+// 空白处右键：这里只放「对着整张图做的事」。
+//
+// 「显示 / 隐藏」给一张表一个勾选项 —— 以前只有表清单一个入口（顶栏「表」），
+// 想临时收起一张表得先开弹窗、再找那一行；右键顺手点一下就行。
+//
+// 「新建」那几条收成二级：它们是低频动作，摊在顶层会把「显示 / 隐藏」和
+// 「自动排列」挤开，而这两个才是右键时最常要的。
+function erVisibilityItems() {
+  const items = [];
+  const tables = erSchema.slice().sort((a, b) => a.name.localeCompare(b.name));
+  for (const t of tables) {
+    const hidden = !!erCardRec(t).hidden;
+    items.push({
+      label: (hidden ? '　' : '✓ ') + t.name,
+      run: () => erSetShown(t, hidden),   // 现在是隐藏的就显示回来
+    });
+  }
+  if (!tables.length) items.push({ label: '（这个模型还没有表）', run: () => {} });
+  items.push({ sep: true });
+  items.push({
+    label: '全部显示',
+    run: () => { for (const t of erSchema) if (erCardRec(t).hidden) erSetShown(t, true); },
+  });
+  items.push({
+    label: '全部收起',
+    run: () => { for (const t of erSchema) if (!erCardRec(t).hidden) erSetShown(t, false); },
+  });
+  return items;
+}
+
+function erOpenCanvasMenu(ev) {
+  const sr = erStage.getBoundingClientRect();
+  const x = ev.clientX - sr.left + 2, y = ev.clientY - sr.top + 2;
+  erShowMenu(x, y, [
+    { head: '整张图' },
+    { label: '显示 / 隐藏', sub: erVisibilityItems() },
+    {
+      label: '新建 / 导入',
+      sub: [
+        // 直接点顶栏那个按钮：建组之后要把视野挪到新组上，那段逻辑只写一份
+        { label: '创建分组', run: () => document.getElementById('btnErGroup').click() },
+        { label: '创建新表', run: erNewModelTable },
+        { label: '从库选表…', run: erOpenTablePicker },
+      ],
+    },
+    { sep: true },
+    { label: '自动排列', run: () => document.getElementById('btnErAuto').click() },
+    { label: '适应画布', run: () => document.getElementById('btnErFit').click() },
+  ]);
 }
 
 function erOpenGroupMenu(g, anchorEl) {
@@ -11643,12 +11722,25 @@ document.addEventListener('pointercancel', ev => {
   if (erGroupDrag) erEndGroupDrag(ev);
 });
 
-// 画布空白处右键：打开表清单。这是「从这里挑表」最顺手的位置。
+// 右键：点哪儿就弹哪儿的菜单 —— 卡片是这张表的事，组标题是这一组的事，
+// 空白处是整张图的事。以前只有「空白处 = 打开表清单」一条路，卡片和组上
+// 右键只能出系统菜单，等于三个层级只有一层能操作。
 erStage.addEventListener('contextmenu', ev => {
   if (!erOpen) return;
-  if (ev.target.closest('.er-card, .er-group-label, .er-menu')) return;
+  if (ev.target.closest('.er-menu')) return;   // 菜单自己身上右键别叠加
   ev.preventDefault();
-  erOpenTablePicker();
+
+  const cardEl = ev.target.closest('.er-card');
+  if (cardEl) {
+    const t = erTableByName(cardEl.dataset.table);
+    if (t) { erOpenCardMenu(t, cardEl, ev); return; }
+  }
+  const groupEl = ev.target.closest('.er-group');
+  if (groupEl && erModel && !groupEl.classList.contains('loose')) {
+    const g = erModel.groups.find(x => x._box === groupEl);
+    if (g) { erOpenGroupMenu(g, groupEl.querySelector('.er-group-label') || groupEl); return; }
+  }
+  erOpenCanvasMenu(ev);
 });
 
 erApplyView();

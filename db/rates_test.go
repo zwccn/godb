@@ -3,6 +3,8 @@ package db
 import (
 	"testing"
 	"time"
+
+	"godb/netio"
 )
 
 // QPS 的数据源：每执行成功一条语句累加一次，事务控制语句不算。
@@ -86,5 +88,49 @@ func TestThroughputSampler(t *testing.T) {
 	}
 	if rs.Conns != 1 {
 		t.Fatalf("连接数 = %d，期望 1（run 建了一个会话）", rs.Conns)
+	}
+}
+
+// 带宽：收 / 发各自求差，首点只立基线，曲线里带的是每秒增量。
+//
+// 这里的字节由测试自己往 netio.PG 里加 —— 单测没有 PG 监听，
+// 真实链路由 netio 自己的用例和端到端手册覆盖。
+func TestNetBytesRate(t *testing.T) {
+	d, err := Open(t.TempDir(), testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer d.Close()
+
+	p := &procSampler{thruSeries: make([]RatePoint, rateSeriesCap)}
+	now := time.Now()
+
+	// 第一个点：计数器里可能已有别的用例留下的字节，但绝不能算进这一秒
+	p.tickRates(d, now)
+	if pt := p.thruSeries[0]; pt.NetIn != 0 || pt.NetOut != 0 {
+		t.Fatalf("第一个采样点 netIn=%d netOut=%d，期望都是 0（只立基线）", pt.NetIn, pt.NetOut)
+	}
+
+	netio.PG.AddIn(1024)
+	netio.PG.AddOut(8192)
+	p.tickRates(d, now.Add(time.Second))
+	pt := p.thruSeries[1]
+	if pt.NetIn != 1024 || pt.NetOut != 8192 {
+		t.Fatalf("第二个点 netIn=%d netOut=%d，期望 1024 / 8192", pt.NetIn, pt.NetOut)
+	}
+
+	// 没有新流量的一秒必须是 0，不能把上一秒的值再报一遍
+	p.tickRates(d, now.Add(2*time.Second))
+	if pt := p.thruSeries[2]; pt.NetIn != 0 || pt.NetOut != 0 {
+		t.Fatalf("空闲的一秒 netIn=%d netOut=%d，期望 0 / 0", pt.NetIn, pt.NetOut)
+	}
+
+	rs := p.rateStatsLocked()
+	if rs.PeakNetIn != 1024 || rs.PeakNetOut != 8192 {
+		t.Fatalf("峰值 in=%d out=%d，期望 1024 / 8192", rs.PeakNetIn, rs.PeakNetOut)
+	}
+	// 三个点的平均：(0 + 1024 + 0)/3 = 341，(0 + 8192 + 0)/3 = 2730
+	if rs.NetIn != 341 || rs.NetOut != 2730 {
+		t.Fatalf("平均 in=%d out=%d，期望 341 / 2730", rs.NetIn, rs.NetOut)
 	}
 }

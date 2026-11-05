@@ -3,6 +3,7 @@ package db
 import (
 	"time"
 
+	"godb/netio"
 	"godb/syscat"
 )
 
@@ -28,6 +29,12 @@ type RatePoint struct {
 	TPS  int   `json:"tps"`
 	// Conns 是采样这一刻的会话数（瞬时值，不是每秒增量）。
 	Conns int `json:"conns"`
+
+	// NetIn / NetOut 是这一秒 PG 端口的收发字节数（每秒增量）。
+	// 分收发两条而不是加总：查大结果集时 发 远大于 收，收写入时反过来，
+	// 合成一个数就看不出「是在拖数据还是在灌数据」了。
+	NetIn  int64 `json:"netIn"`
+	NetOut int64 `json:"netOut"`
 }
 
 // RateStats 是「吞吐与连接」卡片的完整数据。
@@ -38,10 +45,17 @@ type RateStats struct {
 	TPS   int `json:"tps"`
 	Conns int `json:"conns"` // 当前连接数（瞬时）
 
+	// NetIn / NetOut 是当前带宽（字节/秒，同样取最近 5 秒平均）。
+	// 单秒值抖动太大 —— 一个 8KB 的查询响应进来就跳一下，盯着看没意义。
+	NetIn  int64 `json:"netIn"`
+	NetOut int64 `json:"netOut"`
+
 	// 峰值取整个窗口（5 分钟），用来回答「忙到什么程度过」。
-	PeakQPS   int `json:"peakQps"`
-	PeakTPS   int `json:"peakTps"`
-	PeakConns int `json:"peakConns"`
+	PeakQPS    int   `json:"peakQps"`
+	PeakTPS    int   `json:"peakTps"`
+	PeakConns  int   `json:"peakConns"`
+	PeakNetIn  int64 `json:"peakNetIn"`
+	PeakNetOut int64 `json:"peakNetOut"`
 
 	// Sampled 为 false 表示还没采到第二个点（刚启动），速率暂时无意义。
 	Sampled bool `json:"sampled"`
@@ -63,12 +77,16 @@ func (d *DB) sessionCount() int {
 // 迟早会有一处忘记加。
 func (p *procSampler) tickRates(d *DB, now time.Time) {
 	qps, tps, conns := 0, 0, 0
+	var netIn, netOut int64
 	if d != nil {
 		stmts := d.stmtTotal.Load()
 		ds := syscat.GetDBStats()
 		xact := ds.XactCommit + ds.XactRollback
 		conns = d.sessionCount()
-		// p.ratePos>0 || p.rateFilled 表示「已经写过至少一个点」，也就是有这个
+		// 只读一次：读两次的话基线会比取样点晚一点，晚到的字节就被算进下一秒，
+		// 数值没错但两个数的时刻对不上，排查时容易看糊涂。
+		cin, cout := netio.PG.Totals()
+		// p.thruPos>0 || p.thruFilled 表示「已经写过至少一个点」，也就是有这个
 		// 差值基线了。首轮绝不能算：会把「进程启动至今」的所有语句当成这一秒。
 		if p.thruPos > 0 || p.thruFilled {
 			if dv := stmts - p.lastStmts; dv > 0 {
@@ -77,12 +95,24 @@ func (p *procSampler) tickRates(d *DB, now time.Time) {
 			if dv := xact - p.lastXact; dv > 0 {
 				tps = int(dv)
 			}
+			// 网络字节走同一个基线约定。计数器是进程级、只增不减，
+			// 所以热切换端口也不用重置 —— 换了监听接着累加，差值仍然对。
+			if dv := cin - p.lastNetIn; dv > 0 {
+				netIn = dv
+			}
+			if dv := cout - p.lastNetOut; dv > 0 {
+				netOut = dv
+			}
 		}
 		p.lastStmts, p.lastXact = stmts, xact
+		p.lastNetIn, p.lastNetOut = cin, cout
 		p.curConns = conns
 	}
 
-	p.thruSeries[p.thruPos] = RatePoint{AtMs: now.UnixMilli(), QPS: qps, TPS: tps, Conns: conns}
+	p.thruSeries[p.thruPos] = RatePoint{
+		AtMs: now.UnixMilli(), QPS: qps, TPS: tps, Conns: conns,
+		NetIn: netIn, NetOut: netOut,
+	}
 	p.thruPos = (p.thruPos + 1) % len(p.thruSeries)
 	if p.thruPos == 0 {
 		p.thruFilled = true
@@ -106,6 +136,7 @@ func (p *procSampler) rateStatsLocked() RateStats {
 		start = p.thruPos
 	}
 	var sumQ, sumT int
+	var sumIn, sumOut int64
 	tail := n
 	if tail > rateWindow {
 		tail = rateWindow
@@ -122,12 +153,22 @@ func (p *procSampler) rateStatsLocked() RateStats {
 		if pt.Conns > out.PeakConns {
 			out.PeakConns = pt.Conns
 		}
+		if pt.NetIn > out.PeakNetIn {
+			out.PeakNetIn = pt.NetIn
+		}
+		if pt.NetOut > out.PeakNetOut {
+			out.PeakNetOut = pt.NetOut
+		}
 		if i >= n-tail {
 			sumQ += pt.QPS
 			sumT += pt.TPS
+			sumIn += pt.NetIn
+			sumOut += pt.NetOut
 		}
 	}
 	out.QPS = sumQ / tail
 	out.TPS = sumT / tail
+	out.NetIn = sumIn / int64(tail)
+	out.NetOut = sumOut / int64(tail)
 	return out
 }

@@ -140,7 +140,10 @@ type procSampler struct {
 	// 语句/事务累计数的基线，用差值得到每秒速率。
 	lastStmts int64
 	lastXact  int64
-	curConns  int
+	// 网络字节的基线（netio.PG 的累计值）。和语句数同理，只增不减。
+	lastNetIn  int64
+	lastNetOut int64
+	curConns   int
 	// thru 是 throughput 的缩写，避开上面 IO 速率用的 ratePos。
 	thruSeries []RatePoint
 	thruPos    int

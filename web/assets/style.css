@@ -2256,6 +2256,8 @@ body.sidebar-collapsed .sidebar {
   --hm-ok: #46b95c;
   --hm-warn: #d9a441;
   --hm-danger: #f0616d;
+  /* 带宽：蓝绿和灰都被占了，用一个偏冷的紫，在深底上和它们分得开 */
+  --hm-alt: #9b8cf0;
 
   position: fixed;
   top: 52px;

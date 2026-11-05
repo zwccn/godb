@@ -6238,12 +6238,20 @@ const HOME_KPIS = [
     hint: m => 'heap ' + fmtBytes((m.proc || {}).heapObjects),
   },
   {
-    // 带宽来自 PG 连接的收发字节（netsrv 里计的数）。没接上时显示破折号，
-    // 而不是 0 —— 0 会被读成「真的一点流量都没有」，那是另一回事。
+    // 带宽来自 PG 连接的收发字节（netsrv 在 listener 层计的数，见 netio 包）。
+    // 没采到第二个点之前显示破折号，而不是 0 —— 0 会被读成「真的一点流量都没有」，
+    // 那是另一回事；刚启动那两秒确实还判断不出速率。
     id: 'net', name: '带宽',
-    value: m => (m.rates && m.rates.netOut != null) ? homeBytes(m.rates.netOut) : { n: '—' },
-    hint: m => (m.rates && m.rates.netOut != null)
-      ? '收 ' + fmtBytes(m.rates.netIn || 0) : '未统计',
+    value: m => {
+      const r = m.rates || {};
+      if (!r.sampled) return { n: '—' };
+      return homeRate((r.netIn || 0) + (r.netOut || 0));
+    },
+    hint: m => {
+      const r = m.rates || {};
+      if (!r.sampled) return '未统计';
+      return '↓收 ' + fmtRate(r.netIn || 0) + ' · ↑发 ' + fmtRate(r.netOut || 0);
+    },
   },
 ];
 
@@ -6254,6 +6262,18 @@ function homeBytes(n) {
   const s = fmtBytes(n);
   const i = s.lastIndexOf(' ');
   return i < 0 ? { n: s } : { n: s.slice(0, i), u: s.slice(i + 1) };
+}
+
+// 带宽是「每秒多少」，单位后面要带 /s。fmtBytes 只认总量，
+// 所以在它劈好的单位上再接一节 —— 数字仍按 KB / MB 换档。
+function homeRate(n) {
+  const v = homeBytes(n);
+  return v.u ? { n: v.n, u: v.u + '/s' } : v;
+}
+
+// 一行文字里用的速率（图例、副标题），不分大小号，直接拼一串。
+function fmtRate(n) {
+  return fmtBytes(n) + '/s';
 }
 
 function ensureHomeKpis() {
@@ -6377,6 +6397,12 @@ function renderHomeCharts(m) {
     {
       label: '连接', color: 'var(--hm-dim)', width: 1.2, minSpan: 2,
       get: p => p.conns || 0, fmt: v => String(Math.round(v)),
+    },
+    {
+      // 收 + 发合成一条：分两条画的话，两条几乎重合的线反而看不清。
+      // 想拆开看就去监控页 —— 大屏只要「有没有在吐数据」这个结论。
+      label: '带宽', color: 'var(--hm-alt)', width: 1.2, minSpan: 64 * 1024,
+      get: p => (p.netIn || 0) + (p.netOut || 0), fmt: fmtRate,
     },
   ]);
   const p = m.proc || {};

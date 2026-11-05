@@ -6072,6 +6072,32 @@ class CDP {
       home ? `${home.dot} / 水位 ${home.water.level}` : '');
     check('总览：两条走势都画出来了（QPS 与资源各一）',
       !!home && home.plots === 2, home ? `${home.plots} 条` : '');
+
+    // 带宽：数字必须带 /s（它是速率不是总量），副标题要拆开收 / 发。
+    // 这两条一起盯着「接的是真数据」—— 后端没接上时这里会退回破折号。
+    const netCell = await cdp.eval(`(() => {
+      const c = document.querySelector('[data-kpi="net"]');
+      if (!c) return null;
+      return {
+        v: ((c.querySelector('.home-kpi-val') || {}).textContent || '').replace(/\\s+/g, ''),
+        sub: (c.querySelector('.home-kpi-sub') || {}).textContent || '',
+      };
+    })()`);
+    check('总览：带宽格显示「每秒多少」，并拆开收 / 发',
+      !!netCell && netCell.v.endsWith('/s') && /收/.test(netCell.sub) && /发/.test(netCell.sub),
+      netCell ? `${netCell.v} · ${netCell.sub}` : '没有带宽格');
+
+    const rateChart = await cdp.eval(`(() => {
+      const c = document.querySelectorAll('.home-chart')[0];
+      if (!c) return null;
+      return {
+        paths: c.querySelectorAll('svg path').length,
+        legend: [...c.querySelectorAll('.home-lg span')].map(s => s.textContent).join('/'),
+      };
+    })()`);
+    check('总览：吞吐曲线真的画了三条线（QPS / 连接 / 带宽）',
+      !!rateChart && rateChart.paths === 3 && /带宽/.test(rateChart.legend),
+      rateChart ? `${rateChart.paths} 条 · ${rateChart.legend}` : '没有曲线');
     check('总览：版本号 / 运行时长 / 时钟都有内容（不是占位符）',
       !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
       && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),

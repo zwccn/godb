@@ -19,6 +19,7 @@ import (
 
 	"godb/config"
 	"godb/db"
+	"godb/netio"
 	"godb/pgwire"
 )
 
@@ -268,6 +269,12 @@ func (m *Manager) rebindPG(addr string) error {
 	lns, err := listenLoopback(addr)
 	if err != nil {
 		return err
+	}
+	// 只包 PG，不包 HTTP：控制台自己每两秒轮询一次 /api/monitor，
+	// 算进「数据库带宽」就成了一个恒定底噪。
+	// 包在 listener 层 = 在 TLS 之外：加密连接记的是上线缆的字节数。
+	for i := range lns {
+		lns[i] = netio.Wrap(lns[i], &netio.PG)
 	}
 	srv := &pgwire.Server{
 		DB:       m.db,

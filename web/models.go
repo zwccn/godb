@@ -590,6 +590,8 @@ func migrateLegacyDiagrams(root *db.DB) {
 		return // 没摆过图，没什么可迁的
 	}
 	m := importFromDB(root, "默认模型")
+	m.CreatedAt = nowStr()
+	m.UpdatedAt = m.CreatedAt
 	if err := saveModel(root, m); err != nil {
 		return
 	}

@@ -537,12 +537,16 @@ try {
 <section id="erPanel" class="er hidden" aria-label="模型图">
   <div class="er-head">
     <div class="er-title">
-      模型图
+      <button id="btnErModels" class="er-model-btn" type="button"
+              title="模型列表：新建 / 打开 / 删除">模型</button>
+      <span class="er-model-name" id="erModelName">—</span>
       <span class="er-stats" id="erStats"></span>
     </div>
     <div class="er-actions">
+      <button id="btnErRev" class="btn btn-ghost btn-sm" type="button"
+              title="定版并查看历史版本">版本</button>
       <button id="btnErTables" class="btn btn-ghost btn-sm" type="button"
-              title="选择哪些表出现在图上">表</button>
+              title="这个模型里有哪些表">表</button>
       <button id="btnErGroup" class="btn btn-ghost btn-sm" type="button"
               title="新建一个空分组">+ 分组</button>
       <button id="btnErLink" class="btn btn-ghost btn-sm" type="button"
@@ -584,6 +588,48 @@ try {
     <div class="er-note hidden" id="erNote"></div>
   </div>
 </section>
+
+<!-- 模型列表：模型是独立的设计，不属于某个库。 -->
+<div id="erModelsModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="模型列表">
+  <div class="modal-card er-models-card">
+    <div class="modal-head">
+      <span>模型</span>
+      <button id="erModelsClose" class="icon-btn" type="button" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="er-models-new">
+        <input id="erModelNameInput" type="text" placeholder="新模型的名字（留空则叫「未命名模型」）"
+               spellcheck="false" autocomplete="off" maxlength="60">
+        <button id="erModelNew" class="btn btn-ghost btn-sm" type="button">新建空白模型</button>
+        <button id="erModelImport" class="btn btn-ghost btn-sm" type="button"
+                title="按当前库的表结构建一个模型">从当前库导入</button>
+      </div>
+      <div id="erModelsList" class="er-models-list"></div>
+      <div class="modal-hint">
+        模型和库是分开的：库里改了什么，模型不会自动变；要落地请用「差异 SQL」。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 版本历史：只有定版过的才算一个版本，历史版本可以单独删。 -->
+<div id="erRevsModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="版本历史">
+  <div class="modal-card er-revs-card">
+    <div class="modal-head">
+      <span id="erRevsTitle">版本历史</span>
+      <button id="erRevsClose" class="icon-btn" type="button" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="er-revs-new">
+        <input id="erRevNote" type="text" placeholder="这一版改了什么（可留空）"
+               spellcheck="false" autocomplete="off" maxlength="200">
+        <button id="erRevMake" class="btn btn-primary btn-sm" type="button">定版</button>
+      </div>
+      <div id="erRevsList" class="er-revs-list"></div>
+      <div class="modal-hint">定版 = 把当前模型整份存成一个快照；回滚只是把快照写回工作副本，不会删掉历史。</div>
+    </div>
+  </div>
+</div>
 
 <!-- 新增关系：两个端点都是「表 + 字段」。逻辑图只表达「我理解的模型」，
      不校验类型能不能对上，也不声称库里有这条约束。 -->

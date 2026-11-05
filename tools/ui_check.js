@@ -3695,9 +3695,25 @@ class CDP {
       };
     })()`);
 
-    await cdp.eval(`fetch('/api/diagram', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version: 3, groups: [], tables: {}, links: [] }) })`);
+    /* 模型：每个 run 从确定的状态起步。
+       只清掉上次遗留的「回归模型」，别人的模型一个不碰 —— 以前清 diagram.json
+       是清一个库的布局，现在一个模型可能承载真实设计，不能随手删。 */
+    await cdp.eval(`(async () => {
+      // 老侧车里的坐标会被导入照搬（上一轮测试可能把它拖到画布外），先清干净，
+      // 让新模型从自动布局开始 —— 「布局跟着搬」这条由 Go 单测覆盖。
+      await fetch('/api/diagram', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version: 3, groups: [], tables: {}, links: [] }) });
+      const list = await fetch('/api/models').then(r => r.json());
+      for (const m of (list.models || [])) {
+        if (m.name === '回归模型') await fetch('/api/models/' + m.id, { method: 'DELETE' });
+      }
+      const m = await fetch('/api/models', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '回归模型', fromDB: true }) }).then(r => r.json());
+      localStorage.setItem('godb.model', m.id);
+      window.__modelId = m.id;
+    })()`);
     await cdp.eval(`document.getElementById('btnEr').click()`);
     await waitFor(cdp, `!document.getElementById('erPanel').classList.contains('hidden')
       && document.querySelectorAll('.er-card').length > 0`, { label: '模型图渲染', timeout: 6000 });
@@ -3744,6 +3760,105 @@ class CDP {
       erUi.dots === (await cdp.eval(`[...document.querySelectorAll('.er-card')]
         .reduce((n, c) => n + c.querySelectorAll('.er-col-dot').length, 0)`))
       && erUi.dots > 0, `${erUi.dots} 个连接点`);
+
+    /* ---- 模型：列表 / 新建 / 加表 / 定版 ----
+       模型是独立的设计：可以新建一个空白的（不依赖库），也可以把库里的表
+       复制进来；定版把当前副本整份存成快照。这套是新加的，单独验一遍。 */
+    await cdp.eval(`document.getElementById('btnErModels').click()`);
+    const listOpen = await waitFor(cdp,
+      `!document.getElementById('erModelsModal').classList.contains('hidden')
+       && document.querySelectorAll('.er-models-row').length > 0`,
+      { label: '模型列表', timeout: 3000 });
+    const listUi = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('.er-models-row')];
+      const cur = rows.find(r => r.classList.contains('on'));
+      return {
+        n: rows.length,
+        names: rows.map(r => (r.querySelector('.er-models-name') || {}).textContent || ''),
+        curName: cur ? (cur.querySelector('.er-models-name') || {}).textContent : '',
+      };
+    })()`);
+    check('模型：列表列出全部模型，当前那个高亮',
+      !!listOpen && listUi.names.includes('回归模型') && listUi.curName === '回归模型',
+      `${listUi.n} 个 · 当前 ${listUi.curName || '无'}`);
+
+    // 新建空白模型 → 画布是空的（模型不依赖库）
+    await cdp.eval(`(() => {
+      const inp = document.getElementById('erModelNameInput');
+      inp.value = '空模型测试';
+    })()`);
+    await cdp.eval(`document.getElementById('erModelNew').click()`);
+    const emptyOpened = await waitFor(cdp,
+      `document.getElementById('erModelsModal').classList.contains('hidden')
+       && document.querySelectorAll('.er-card').length === 0`,
+      { label: '空白模型', timeout: 4000 });
+    const emptyUi = await cdp.eval(`({
+      model: (document.getElementById('erModelName') || {}).textContent || '',
+      note: document.getElementById('erNote').classList.contains('hidden')
+        ? '' : document.getElementById('erNote').textContent,
+    })`);
+    check('模型：新建空白模型后画布是空的（不依赖库）',
+      !!emptyOpened && emptyUi.model === '空模型测试',
+      `当前 ${emptyUi.model} · ${emptyUi.note.slice(0, 24)}`);
+
+    // 表清单里「从当前库加进模型」：空白模型靠它长出第一张表
+    await cdp.eval(`document.getElementById('btnErTables').click()`);
+    await waitFor(cdp, `!document.getElementById('erTablesModal').classList.contains('hidden')`,
+      { label: '表清单', timeout: 2000 });
+    const addRows = await cdp.eval(`document.querySelectorAll('.er-tables-add').length`);
+    await cdp.eval(`(() => {
+      const b = document.querySelector('.er-tables-add');
+      if (b) b.click();
+    })()`);
+    const gotOne = await waitFor(cdp, `document.querySelectorAll('.er-card').length === 1`,
+      { label: '加表进模型', timeout: 3000 });
+    check('模型：空白模型能从库里加表进来（复制结构，不是引用）',
+      addRows > 0 && !!gotOne, `${addRows} 张可选 · 卡片 1`);
+    await cdp.eval(`document.getElementById('btnErTablesDone').click()`);
+
+    // 定版 → 版本列表出现一条
+    await cdp.eval(`document.getElementById('btnErRev').click()`);
+    await waitFor(cdp, `!document.getElementById('erRevsModal').classList.contains('hidden')`,
+      { label: '版本弹窗', timeout: 3000 });
+    await cdp.eval(`(() => { document.getElementById('erRevNote').value = '第一版'; })()`);
+    await cdp.eval(`document.getElementById('erRevMake').click()`);
+    const gotRev = await waitFor(cdp, `document.querySelectorAll('.er-rev-row').length === 1`,
+      { label: '定版', timeout: 4000 });
+    const revUi = await cdp.eval(`(() => {
+      const row = document.querySelector('.er-rev-row');
+      return {
+        seq: (document.querySelector('.er-rev-seq') || {}).textContent || '',
+        note: (document.querySelector('.er-rev-note') || {}).textContent || '',
+        acts: [...document.querySelectorAll('.er-rev-acts button')].map(b => b.textContent),
+      };
+    })()`);
+    check('模型：定版之后版本历史里有一条，带备注和「回滚 / 删除」',
+      !!gotRev && revUi.seq === 'v1' && revUi.note === '第一版'
+      && revUi.acts.includes('回滚') && revUi.acts.includes('删除'),
+      `${revUi.seq} · ${revUi.note} · ${revUi.acts.join('/')}`);
+    await cdp.eval(`document.getElementById('erRevsClose').click()`);
+
+    // 切回回归模型：列表里点「打开」
+    await cdp.eval(`document.getElementById('btnErModels').click()`);
+    await waitFor(cdp, `document.querySelectorAll('.er-models-row').length > 1`,
+      { label: '模型列表（两个）', timeout: 3000 });
+    await cdp.eval(`(() => {
+      const row = [...document.querySelectorAll('.er-models-row')]
+        .find(r => (r.querySelector('.er-models-name') || {}).textContent === '回归模型');
+      if (row) row.querySelector('.er-models-acts button').click();
+    })()`);
+    const backOk = await waitFor(cdp, `document.querySelectorAll('.er-card').length === ${demo.tables}`,
+      { label: '切回回归模型', timeout: 4000 });
+    check('模型：从列表切回另一个模型，画布换成它自己的表',
+      !!backOk, `卡片 ${await cdp.eval(`document.querySelectorAll('.er-card').length`)} / ${demo.tables}`);
+    // 测完的空模型删掉，别留在数据目录里
+    await cdp.eval(`(async () => {
+      const list = await fetch('/api/models').then(r => r.json());
+      for (const m of (list.models || [])) {
+        if (m.name === '空模型测试') await fetch('/api/models/' + m.id, { method: 'DELETE' });
+      }
+      localStorage.setItem('godb.model', window.__modelId);
+    })()`);
 
     // ---- 分组：建、改名、把表移进去 ----
     const groupsBefore = await cdp.eval(`document.querySelectorAll('.er-group').length`);
@@ -3862,19 +3977,20 @@ class CDP {
     /* 侧车是 300ms 防抖写的（erSave），点完色点立刻 fetch 会拿到上一版 ——
        颜色还是 -1。所以这里等「服务端真的存下了这个颜色」，而不是 sleep 一段时间
        赌它写完了：机器快慢不同，赌必然有一天又开始红。 */
-    const probeSaved = `fetch('/api/diagram').then(r => r.json()).then(d => {
+    const probeSaved = `fetch('/api/models/' + window.__modelId).then(r => r.json()).then(d => {
       const g = (d.groups || []).find(x => x.name === '回归测试组') || {};
+      const bt = (d.tables || []).find(t => t.name === 'er_basis') || {};
       return {
         groups: (d.groups || []).length,
         name: g.name || '',
         color: g.color,
-        groupOfBasis: ((d.tables || {})[String(erTableByName('er_basis').id)] || {}).group || '',
+        groupOfBasis: bt.group || '',
       };
     })`;
     const savedDoc = await waitFor(cdp, `${probeSaved}.then(d => (d.color >= 0 ? d : null))`,
       { timeout: 4000, label: '侧车落盘' })
       || await cdp.eval(probeSaved);
-    check('模型图：分组名 + 颜色 + 归属写进侧车文件',
+    check('模型图：分组名 + 颜色 + 归属写进模型文件',
       savedDoc.groups === 1 && savedDoc.name === '回归测试组'
       && savedDoc.groupOfBasis !== '' && savedDoc.color >= 0,
       `${savedDoc.groups} 组 · ${savedDoc.name} · color=${savedDoc.color}`);
@@ -3899,10 +4015,9 @@ class CDP {
       posAfter.left !== posBefore.left, `${posBefore.left} → ${posAfter.left}`);
 
     // 和上面同理：防抖 300ms，固定 sleep 只是「大概率」写完，这里等着它写完。
-    const probePos = `fetch('/api/diagram').then(r => r.json()).then(d => {
-      const tb = d.tables || {};
-      const vals = Object.keys(tb).map(k => tb[k]).filter(c => c.x != null);
-      return { withPos: vals.length, total: Object.keys(tb).length };
+    const probePos = `fetch('/api/models/' + window.__modelId).then(r => r.json()).then(d => {
+      const tb = d.tables || [];
+      return { withPos: tb.filter(t => t.x != null).length, total: tb.length };
     })`;
     const allSaved = await waitFor(cdp, `${probePos}.then(d => (d.total > 0 && d.withPos === d.total ? d : null))`,
       { timeout: 4000, label: '坐标落盘' })
@@ -4027,14 +4142,14 @@ class CDP {
       const eAfter = await cdp.eval(gSnap);
       const eBox = eAfter.list.find(g => g.key === emptyInfo.gid);
       const eBox0 = eMid.list.find(g => g.key === emptyInfo.gid);
-      const saved = await waitFor(cdp, `fetch('/api/diagram').then(r => r.json()).then(d => {
+      const saved = await waitFor(cdp, `fetch('/api/models/' + window.__modelId).then(r => r.json()).then(d => {
         const g = (d.groups || []).find(x => x.id === ${JSON.stringify(emptyInfo.gid)});
         return g && Number.isFinite(g.x) && Number.isFinite(g.y) ? g : null;
       })`, { timeout: 4000, label: '空组坐标落盘' });
       check('模型图：新建的空组也能拖（位置记在组的记录里，不是每次渲染重算）',
         movedBy(eBox0, eBox, 100 / eAfter.zoom) && othersStill(eMid, eAfter, emptyInfo.gid),
         `组框 Δx=${eBox && eBox0 ? Math.round(eBox.box.x - eBox0.box.x) : '?'}px`);
-      check('模型图：空组的位置落进侧车文件（重新打开还在原地）',
+      check('模型图：空组的位置落进模型文件（重新打开还在原地）',
         !!saved && Math.abs(saved.x - eBox.box.x) <= 2 && Math.abs(saved.y - eBox.box.y) <= 2,
         saved ? `x=${saved.x} y=${saved.y} · 画布 ${eBox.box.x}/${eBox.box.y}` : '侧车里没有坐标');
       // 用完删掉，后面的用例仍然按「两个组」算
@@ -4042,7 +4157,7 @@ class CDP {
       await sleep(400);
     } else {
       check('模型图：新建的空组也能拖（位置记在组的记录里，不是每次渲染重算）', false, '没找到空组');
-      check('模型图：空组的位置落进侧车文件（重新打开还在原地）', false, '没找到空组');
+      check('模型图：空组的位置落进模型文件（重新打开还在原地）', false, '没找到空组');
     }
 
     // 摆过之后回到自动布局，后面的连线用例从一个规整的图开始
@@ -4202,18 +4317,31 @@ class CDP {
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);
     const edgePt = await cdp.eval(`(() => {
+      // 连线的热区在卡片**下面**（卡片画在线上层）。线要是从某张卡片上穿过去，
+      // 那个点上的点击是卡片收到的 —— 用户也点不到，所以这里沿线上找一个
+      // 真正压在最上面的点，而不是死取中点。
       const h = document.querySelector('.er-hit');
+      if (!h) return null;
       const L = h.getTotalLength();
-      const p = h.getPointAtLength(L / 2);
       const svg = h.ownerSVGElement;
       const m = svg.getScreenCTM();
-      const pt = svg.createSVGPoint();
-      pt.x = p.x; pt.y = p.y;
-      const s = pt.matrixTransform(m);
-      return { x: Math.round(s.x), y: Math.round(s.y) };
+      for (let k = 0; k <= 0.45; k += 0.05) {
+        for (const f of [0.5 + k, 0.5 - k]) {
+          if (f <= 0 || f >= 1) continue;
+          const p = h.getPointAtLength(L * f);
+          const pt = svg.createSVGPoint();
+          pt.x = p.x; pt.y = p.y;
+          const s = pt.matrixTransform(m);
+          const el = document.elementFromPoint(s.x, s.y);
+          if (el && el.classList && el.classList.contains('er-hit')) {
+            return { x: Math.round(s.x), y: Math.round(s.y) };
+          }
+        }
+      }
+      return null;
     })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: edgePt.x, y: edgePt.y, button: 'left', clickCount: 1 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: edgePt.x, y: edgePt.y, button: 'left' });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: (edgePt || {}).x || 0, y: (edgePt || {}).y || 0, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: (edgePt || {}).x || 0, y: (edgePt || {}).y || 0, button: 'left' });
     const edgeMenuOpen = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
       { label: '连线菜单', timeout: 2000 });
     let cardChanged = null;
@@ -4243,7 +4371,7 @@ class CDP {
 
     // 落盘 + 重开：关系必须还在（这条线是用户画的，不是从库推出来的）
     // 等侧车里真的写着 NM 再关面板重开，否则重开读的是上一版（1N）。
-    await waitFor(cdp, `fetch('/api/diagram').then(r => r.json()).then(d => {
+    await waitFor(cdp, `fetch('/api/models/' + window.__modelId).then(r => r.json()).then(d => {
       const ln = (d.links || [])[0];
       return (d.links || []).length === 1 && ln.card === 'NM';
     })`, { timeout: 4000, label: '改基数落盘' });
@@ -4264,17 +4392,31 @@ class CDP {
 
     // 删关系：点线 → 删除
     const delPt = await cdp.eval(`(() => {
+      // 连线的热区在卡片**下面**（卡片画在线上层）。线要是从某张卡片上穿过去，
+      // 那个点上的点击是卡片收到的 —— 用户也点不到，所以这里沿线上找一个
+      // 真正压在最上面的点，而不是死取中点。
       const h = document.querySelector('.er-hit');
+      if (!h) return null;
       const L = h.getTotalLength();
-      const p = h.getPointAtLength(L / 2);
       const svg = h.ownerSVGElement;
-      const pt = svg.createSVGPoint();
-      pt.x = p.x; pt.y = p.y;
-      const s = pt.matrixTransform(svg.getScreenCTM());
-      return { x: Math.round(s.x), y: Math.round(s.y) };
+      const m = svg.getScreenCTM();
+      for (let k = 0; k <= 0.45; k += 0.05) {
+        for (const f of [0.5 + k, 0.5 - k]) {
+          if (f <= 0 || f >= 1) continue;
+          const p = h.getPointAtLength(L * f);
+          const pt = svg.createSVGPoint();
+          pt.x = p.x; pt.y = p.y;
+          const s = pt.matrixTransform(m);
+          const el = document.elementFromPoint(s.x, s.y);
+          if (el && el.classList && el.classList.contains('er-hit')) {
+            return { x: Math.round(s.x), y: Math.round(s.y) };
+          }
+        }
+      }
+      return null;
     })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: delPt.x, y: delPt.y, button: 'left', clickCount: 1 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: delPt.x, y: delPt.y, button: 'left' });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: (delPt || {}).x || 0, y: (delPt || {}).y || 0, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: (delPt || {}).x || 0, y: (delPt || {}).y || 0, button: 'left' });
     const delMenu = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
       { label: '删除菜单', timeout: 2000 });
     let deleted = null;
@@ -4397,16 +4539,18 @@ class CDP {
     })()`);
     const cleaned = await cdp.eval(`(async () => {
       const sch = await fetch('/api/schema').then(r => r.json());
+      const m = await fetch('/api/models/' + window.__modelId).then(r => r.json());
       return {
         demo: sch.tables.filter(t => t.name.indexOf('er_') === 0).length,
         cards: document.querySelectorAll('.er-card').length,
-        tables: sch.tables.length,
-        links: erDoc.links.filter(l => true).length,
+        inDB: sch.tables.length,
+        inModel: (m.tables || []).length,
       };
     })()`);
-    check('模型图：临时表删掉之后，卡片和关系一起被剪掉',
-      cleaned.demo === 0 && cleaned.cards === cleaned.tables && cleaned.links === 0,
-      `${cleaned.cards} 卡片 / ${cleaned.tables} 张表 · ${cleaned.links} 条关系`);
+    // 模型和库是分开的：库里删了表，模型**不该**跟着掉 —— 那正是这次改动的意义。
+    check('模型图：库里删掉表，模型里还在（模型不跟库走）',
+      cleaned.demo === 0 && cleaned.cards === cleaned.inModel && cleaned.inModel > cleaned.inDB,
+      `卡片 ${cleaned.cards} / 模型 ${cleaned.inModel} 张 / 库 ${cleaned.inDB} 张`);
 
     /* 单击卡片：**只选中，不进编辑**。
        以前这一下会关掉模型图、把编辑器里的 SQL 换成这张表 —— 图是用来读结构的，
@@ -4445,10 +4589,8 @@ class CDP {
       afterDbl.closed && afterDbl.sql.includes(firstTable) && afterDbl.home,
       `${firstTable} · 面板关 ${afterDbl.closed}`);
 
-    // 收拾干净：这一组断言往开发库里写了布局和分组，别留给下一次
-    await cdp.eval(`fetch('/api/diagram', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version: 3, groups: [], tables: {}, links: [] }) })`);
+    // 收拾干净：这次建的模型是测试数据，删掉；别人的模型不动
+    await cdp.eval(`fetch('/api/models/' + window.__modelId, { method: 'DELETE' })`);
 
     // Esc 关闭：和监控/设置一样，一层一层退
     await cdp.eval(`document.getElementById('btnEr').click()`);

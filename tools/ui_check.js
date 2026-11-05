@@ -3911,6 +3911,94 @@ class CDP {
       allSaved.withPos === allSaved.total && allSaved.total > 0,
       `${allSaved.withPos}/${allSaved.total} 张有坐标`);
 
+    /* ---- 拖整组：只有这一组跟着走，别组不动、画布也不平移 ----
+       以前组框 pointer-events:none，拖组框落到画布上就是平移，表现成
+       「拖一个分组，其他分组一起动」。这里同时验标题条和组内空白处两个抓手。 */
+    const gSnap = `(() => {
+      const pick = () => {
+        const out = {};
+        for (const g of erModel.groups) out[g.name || 'loose'] = {
+          box: { x: Math.round(g.box.x), y: Math.round(g.box.y) },
+          cards: g.tables.map(t => ({ n: t.name, x: Math.round(t._er.x), y: Math.round(t._er.y) })),
+        };
+        return out;
+      };
+      return { groups: pick(), zoom: erView.zoom, tf: (document.getElementById('erCanvas').style.transform || '') };
+    })()`;
+    const gDrag = async spot => {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spot.x, y: spot.y, button: 'left', buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 5; i++) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', button: 'left', buttons: 1,
+          x: Math.round(spot.x + spot.dx * i / 5), y: Math.round(spot.y + spot.dy * i / 5),
+        });
+      }
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1,
+        x: Math.round(spot.x + spot.dx), y: Math.round(spot.y + spot.dy),
+      });
+      await sleep(320);
+    };
+
+    const gBefore = await cdp.eval(gSnap);
+    const titleSpot = await cdp.eval(`(() => {
+      const g = erModel.groups.find(x => x.name === '回归测试组');
+      const r = g._box.querySelector('.er-group-name').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    await gDrag({ ...titleSpot, dx: 120, dy: 50 });
+    const afterTitle = await cdp.eval(gSnap);
+
+    const dTitle = afterTitle.groups['回归测试组'].box.x - gBefore.groups['回归测试组'].box.x;
+    const wantDx = 120 / afterTitle.zoom;
+    const basisMoved = afterTitle.groups['回归测试组'].cards.every(c => {
+      const b = gBefore.groups['回归测试组'].cards.find(o => o.n === c.n);
+      return b && Math.abs((c.x - b.x) - wantDx) < 3;
+    });
+    const looseStill = afterTitle.groups.loose.cards.every(c => {
+      const b = gBefore.groups.loose.cards.find(o => o.n === c.n);
+      return b && c.x === b.x && c.y === b.y;
+    });
+    check('模型图：拖组标题条能整组移动（组内每张卡片位移一致）',
+      Math.abs(dTitle - wantDx) < 3 && basisMoved,
+      `组框 Δx=${Math.round(dTitle)}px（应 ${Math.round(wantDx)}）· 卡片同步 ${basisMoved}`);
+    check('模型图：拖一个组，别的组不跟着动',
+      looseStill, looseStill ? '其他组原地不动' : '其他组被带走了');
+
+    // 组内空白处（卡片下方的内边距）也是抓手 —— 找不到就跳过这一条
+    const bodySpot = await cdp.eval(`(() => {
+      const g = erModel.groups.find(x => x.name === '回归测试组');
+      const b = g._box.getBoundingClientRect();
+      for (let k = 0.15; k <= 0.85; k += 0.1) {
+        for (const y of [b.bottom - 8, b.top + b.height * 0.5]) {
+          const el = document.elementFromPoint(b.left + b.width * k, y);
+          if (el && el.closest('.er-group') === g._box && !el.closest('.er-card')) {
+            return { x: Math.round(b.left + b.width * k), y: Math.round(y) };
+          }
+        }
+      }
+      return null;
+    })()`);
+    if (bodySpot) {
+      const gMid = await cdp.eval(gSnap);
+      await gDrag({ ...bodySpot, dx: 60, dy: 0 });
+      const afterBody = await cdp.eval(gSnap);
+      const dBody = afterBody.groups['回归测试组'].box.x - gMid.groups['回归测试组'].box.x;
+      check('模型图：拖组里的空白处也是整组移动，不是平移画布',
+        Math.abs(dBody - 60 / gMid.zoom) < 3 && afterBody.tf === gMid.tf
+        && afterBody.groups.loose.cards.every(c => {
+          const b = gMid.groups.loose.cards.find(o => o.n === c.n);
+          return b && c.x === b.x && c.y === b.y;
+        }),
+        `组框 Δx=${Math.round(dBody)}px · 画布变换${afterBody.tf === gMid.tf ? '没变' : '变了'}`);
+    } else {
+      check('模型图：拖组里的空白处也是整组移动，不是平移画布', false, '这张图上找不到不压卡片的空白点');
+    }
+
+    // 摆过之后回到自动布局，后面的连线用例从一个规整的图开始
+    await cdp.eval(`document.getElementById('btnErAuto').click()`);
+    await sleep(300);
+
     // ---- 拖字段建一条关系（这次改动的核心交互）----
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);

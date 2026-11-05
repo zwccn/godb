@@ -8935,6 +8935,7 @@ let erView = { zoom: 1, panX: 0, panY: 0 };
 let erModel = null;      // 当前渲染出来的表 / 分组 / 边 / 画布尺寸
 let erPan = null;        // 拖动画布的临时状态
 let erDrag = null;       // 拖动某张卡片的临时状态
+let erGroupDrag = null;  // 拖动某一整组的临时状态
 let erLinkDrag = null;   // 从字段行拉关系的临时状态
 
 // erDoc 是「模型元数据」：分组、卡片归属与坐标、表在不在图上、字段之间的关系。
@@ -9736,6 +9737,9 @@ function erGroupEl(g) {
     const dot = el('span', 'er-group-dot');
     dot.title = '点击换颜色';
     dot.setAttribute('role', 'button');
+    // 色点是「点一下就完事」的按钮，不参与整组拖动：一旦让组框拿到指针捕获，
+    // 这一下就成了拖动的开始，改色反而要看运气。
+    dot.addEventListener('pointerdown', ev => ev.stopPropagation());
     dot.addEventListener('click', ev => {
       ev.stopPropagation();
       erCycleGroupColor(g);
@@ -9745,7 +9749,9 @@ function erGroupEl(g) {
 
   const nameEl = el('span', 'er-group-name', erGroupTitle(g));
   if (!g.loose) {
-    nameEl.title = '双击改名';
+    // 空组没得拖：它的位置每次渲染都由自动布局算，拖了会弹回去。别让提示骗人。
+    nameEl.title = g.empty ? '空组：移进一张表之后就能整组拖动，双击改名'
+      : '拖动移动整组，双击改名';
     nameEl.addEventListener('dblclick', ev => {
       ev.stopPropagation();
       erRenameGroup(g, nameEl);
@@ -9756,7 +9762,7 @@ function erGroupEl(g) {
   if (g.loose) {
     // 提示不放在标题行里：未分组这一组的宽度正好一列，标题 + 计数就把位置占满了，
     // 再塞一句提示会被压成 0 宽（flex 里 ellipsis 也救不回来）。挂到 title 上。
-    label.title = '在卡片右上角的 ⋯ 里把表移进分组';
+    label.title = '拖动这一组可整体移动；在卡片右上角的 ⋯ 里把表移进分组';
   } else {
     const more = el('button', 'er-group-more', '⋯');
     more.type = 'button';
@@ -9776,7 +9782,84 @@ function erGroupEl(g) {
 
   g._box = box;
   g._nameEl = nameEl;
+
+  // 整组拖动：按住标题条（或组里的空白处）把这组连同成员卡片一起挪走。
+  //
+  // 以前只有卡片能吃 pointerdown，组框是 pointer-events:none —— 拖组框等于拖
+  // 空白画布，走的是平移，表现成「拖一个组，所有组一起动」。组框就是这一组的
+  // 容器，把它当拖动柄才对得上人的直觉；平移留给组外的空白和中键拖动。
+  box.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0) return;
+    if (ev.target.closest('.er-card, .er-group-input, .er-group-more')) return;
+    erStartGroupDrag(g, box, ev);
+  });
+  box.addEventListener('pointermove', ev => erGroupDragMove(ev));
+  box.addEventListener('pointerup', ev => erEndGroupDrag(ev));
+  box.addEventListener('pointercancel', ev => erEndGroupDrag(ev));
   return box;
+}
+
+// erStartGroupDrag 记下这一组每张卡片的起点，拖动时整体平移。
+//
+// 空组不给拖：它的位置每次渲染都由自动布局算出来，拖了也会弹回去 —— 与其
+// 让人拖完发现白拖，不如让这一下继续落到画布上去平移。所以这里在真正开始
+// 拖动之前就返回，不拦事件。
+function erStartGroupDrag(g, box, ev) {
+  const members = g.tables.filter(t => t._er && t._el);
+  if (!members.length) return;
+  ev.stopPropagation();          // 别让画布跟着平移
+  erCloseMenus();
+  erGroupDrag = {
+    g, box, id: ev.pointerId,
+    sx: ev.clientX, sy: ev.clientY,
+    cards: members.map(t => ({ t, x: t._er.x, y: t._er.y })),
+    bx: g.box.x, by: g.box.y,
+    moved: false,
+  };
+  box.setPointerCapture(ev.pointerId);
+}
+
+function erGroupDragMove(ev) {
+  const d = erGroupDrag;
+  if (!d || d.id !== ev.pointerId) return;
+  const sdx = ev.clientX - d.sx, sdy = ev.clientY - d.sy;
+  if (!d.moved) {
+    // 和拖卡片同一个 4px 阈值：按住标题只为点一下色点 / 打开菜单时，
+    // 手抖不该把整组挪走。
+    if (Math.abs(sdx) < 4 && Math.abs(sdy) < 4) return;
+    d.moved = true;
+    d.box.classList.add('dragging');
+    erCanvas.classList.add('er-dragging');
+  }
+  // 画布是 transform: scale 出来的，屏幕位移要折回模型坐标
+  const dx = sdx / erView.zoom, dy = sdy / erView.zoom;
+  for (const c of d.cards) {
+    c.t._er.x = c.x + dx;
+    c.t._er.y = c.y + dy;
+    c.t._el.style.left = c.t._er.x + 'px';
+    c.t._el.style.top = c.t._er.y + 'px';
+  }
+  d.g.box.x = d.bx + dx;
+  d.g.box.y = d.by + dy;
+  d.box.style.left = d.g.box.x + 'px';
+  d.box.style.top = d.g.box.y + 'px';
+  ev.preventDefault();
+}
+
+function erEndGroupDrag(ev) {
+  const d = erGroupDrag;
+  erGroupDrag = null;
+  if (!d) return;
+  if (d.box.hasPointerCapture && d.box.hasPointerCapture(ev.pointerId)) {
+    d.box.releasePointerCapture(ev.pointerId);
+  }
+  d.box.classList.remove('dragging');
+  erCanvas.classList.remove('er-dragging');
+  if (!d.moved) return;
+  erHotGroup = erGroupKey(d.g);
+  erSnapshotCards();             // 存全量坐标：组内卡片一起动了
+  erRender();
+  erSave();
 }
 
 function erCardEl(t, g) {
@@ -9787,6 +9870,7 @@ function erCardEl(t, g) {
   card.style.width = r.w + 'px';
   card.style.height = r.h + 'px';
   card.dataset.table = t.name;
+  t._el = card;   // 整组拖动时按这张卡片的 DOM 一起挪（重绘后重建）
   card.setAttribute('role', 'button');
   card.tabIndex = 0;
   card.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 列`
@@ -10670,12 +10754,17 @@ erStage.addEventListener('wheel', ev => {
   erZoomAt(k, ev.clientX - r.left, ev.clientY - r.top);
 }, { passive: false });
 
-// 空白处拖动平移。卡片自己接 pointerdown（拖动摆位 + 单击打开），
-// 组标题也不接 —— 拖标题时把画布一起平移，就地改名的输入框会立刻失焦。
+// 空白处拖动平移。卡片和组框自己接 pointerdown（拖动摆位 / 拖整组 + 单击打开），
+// 事件在它们那里就 stopPropagation 了，走不到这一层。
+//
+// 组框整块都能拖整组之后，留给「空白」的只剩组与组之间那条缝 —— 所以补一条
+// 中键拖动：按在哪儿都平移，压在任何卡片或组框上也照样好使。
 erStage.addEventListener('pointerdown', ev => {
-  if (!erOpen || ev.button !== 0) return;
+  if (!erOpen) return;
+  if (ev.button !== 0 && ev.button !== 1) return;
   if (erMenuEl && !ev.target.closest('.er-menu')) erCloseMenus();
-  if (ev.target.closest('.er-card, .er-group-label, .er-menu, .er-legend')) return;
+  if (ev.button === 0 && ev.target.closest('.er-card, .er-group-label, .er-menu, .er-legend')) return;
+  if (ev.button === 1) ev.preventDefault();   // 中键别唤出浏览器的自动滚动
   erPan = { x: ev.clientX, y: ev.clientY, px: erView.panX, py: erView.panY };
   erStage.setPointerCapture(ev.pointerId);
   erStage.classList.add('panning');

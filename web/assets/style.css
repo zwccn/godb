@@ -5658,9 +5658,15 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   border: 1px solid hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-line) * .5));
   background: hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-tint) * .14));
   border-radius: 12px;
-  /* 框只是「这块是一组」的背景。跨组连线要能穿过它，
-     卡片也不能被它挡住点击 —— 所以整块不吃事件，只有标题条吃。 */
-  pointer-events: none;
+  /* 框就是这一组的容器：整块都是整组拖动的抓手（卡片压在它上面，自己接事件）。
+     空白画布的平移交给组外的空白和中键拖动 —— 拖框只该动这一组。 */
+  pointer-events: auto;
+  cursor: move;
+}
+.er-group:hover { border-color: hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-line) * .8)); }
+.er-group.dragging {
+  cursor: grabbing;
+  box-shadow: 0 6px 22px var(--shadow-color, rgba(0, 0, 0, .22));
 }
 .er-group-label {
   display: flex;
@@ -5675,7 +5681,7 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   color: var(--text-2);
   font-size: calc(11.5px * var(--fs));
   white-space: nowrap;
-  cursor: default;
+  cursor: move;
   pointer-events: auto;
 }
 .er-group-dot {

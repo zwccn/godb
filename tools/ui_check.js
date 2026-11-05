@@ -3816,6 +3816,50 @@ class CDP {
       addRows > 0 && !!gotOne, `${addRows} 张可选 · 卡片 1`);
     await cdp.eval(`document.getElementById('btnErTablesDone').click()`);
 
+    /* 在模型里手工建表：表不必是库里已有的。
+       复用表设计器那张网格，但保存写回模型、不执行 DDL；「引用（外键）」列
+       在模型模式下整列隐藏 —— 模型里的关系是画布上的线。 */
+    await cdp.eval(`document.getElementById('btnErNewTable').click()`);
+    const dOpen = await waitFor(cdp,
+      `!document.getElementById('designerModal').classList.contains('hidden')`,
+      { label: '表结构设计器', timeout: 3000 });
+    const dInfo = await cdp.eval(`({
+      title: document.getElementById('designerTitle').textContent,
+      model: document.getElementById('designerModal').classList.contains('model-mode'),
+      refHidden: getComputedStyle(document.querySelector('#designerModal th.c-ref')).display === 'none',
+      meta: document.getElementById('designerMeta').textContent,
+    })`);
+    await cdp.eval(`(() => {
+      const inp = document.getElementById('designerTableName');
+      inp.value = '手工表';
+      inp.dispatchEvent(new Event('input'));
+      document.getElementById('btnAddCol').click();
+    })()`);
+    await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('#designerRows tr')];
+      const last = rows[rows.length - 1];
+      const n = last.querySelector('.c-name input');
+      n.value = 'note';
+      n.dispatchEvent(new Event('input'));
+      const sel = last.querySelector('.c-type select');
+      sel.value = 'text';
+      sel.dispatchEvent(new Event('change'));
+    })()`);
+    await cdp.eval(`document.getElementById('btnDesignerSave').click()`);
+    const madeTable = await waitFor(cdp,
+      `document.querySelectorAll('.er-card').length === 2`,
+      { label: '新表落到画布', timeout: 4000 });
+    // erSave 是 300ms 防抖：等模型文件里真有这张表，而不是赌它写完了
+    // 注意用 erModelDoc.id：这一步开的是**空模型测试**，window.__modelId 还指着回归模型
+    const mtModel = await waitFor(cdp, `fetch('/api/models/' + erModelDoc.id).then(r => r.json())
+      .then(d => (d.tables || []).find(t => t.name === '手工表') || null)`,
+      { timeout: 4000, label: '手工表落盘' });
+    check('模型：能在模型里手工建表（字段自己填，不执行 DDL）',
+      !!dOpen && dInfo.title.startsWith('表结构 · ') && dInfo.model && dInfo.refHidden
+      && !!madeTable && !!mtModel && mtModel.columns.length === 2
+      && /text/i.test(mtModel.columns[1].type),
+      `${dInfo.title} · 列 ${mtModel ? mtModel.columns.map(c => c.name + ':' + c.type).join(',') : '无'}`);
+
     // 定版 → 版本列表出现一条
     await cdp.eval(`document.getElementById('btnErRev').click()`);
     await waitFor(cdp, `!document.getElementById('erRevsModal').classList.contains('hidden')`,
@@ -4424,14 +4468,18 @@ class CDP {
       const dPt = await cdp.eval(`(() => {
         const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
           .find(x => x.textContent === '删除这条关系');
-        if (!b) return null;
+        if (!b) {
+          return { items: [...document.querySelectorAll('.er-menu .er-menu-item')].map(x => x.textContent) };
+        }
         const r = b.getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
       })()`);
-      if (dPt) {
+      if (dPt && dPt.x) {
         await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dPt.x, y: dPt.y, button: 'left', clickCount: 1 });
         await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dPt.x, y: dPt.y, button: 'left' });
         await sleep(250);
+      } else {
+        console.log('      菜单里没有「删除这条关系」，实际是：', (dPt && dPt.items || []).join(' | '));
       }
       deleted = await cdp.eval(`({
         edges: document.querySelectorAll('.er-edge').length,

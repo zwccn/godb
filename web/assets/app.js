@@ -7792,6 +7792,44 @@ function typeGroup(t) {
   return b;
 }
 
+// openModelDesigner 用**同一张网格**编辑模型里的表结构。
+//
+// 为什么复用设计器的界面而不是另做一个：字段名的重复校验、类型 + 长度/精度、
+// 主键单选、默认值这些输入规则，两处一模一样；做两个界面迟早会长出两种行为。
+// 差别只在**保存写哪儿**：这里写回模型，不执行任何 DDL。
+function openModelDesigner(tableId) {
+  const mt = erModelDoc && (erModelDoc.tables || []).find(t => t.id === tableId);
+  if (!mt) return;
+  designer = {
+    mode: 'model', modelId: tableId, origName: mt.name, sel: -1, compositeFks: [],
+    rows: (mt.columns || []).map(c => {
+      const p = parseType(c.type);
+      return {
+        orig: c.name, name: c.name, type: p.base, len: p.len, scale: p.scale,
+        notNull: !!c.notNull, pk: !!c.pk, uniq: !!c.uniq, def: c.def || '',
+        ref: '', origRef: '', origFk: '',
+      };
+    }),
+  };
+  if (!designer.rows.length) designer.rows = [newDesignerRow()];
+
+  document.getElementById('designerTitle').textContent = '表结构 · ' + mt.name;
+  document.getElementById('designerTableName').value = mt.name;
+  document.getElementById('designerMeta').textContent = '只改模型，不动数据库';
+  const hint = document.getElementById('designerHint');
+  hint.textContent = '';
+  hint.className = 'modal-hint';
+  document.getElementById('btnSqlPreview').disabled = true;
+  designerModalEl().classList.add('model-mode');
+  designerModalEl().classList.remove('hidden');
+  setSqlPreviewOpen(false);
+  renderDesigner();
+  setTimeout(() => {
+    const first = document.getElementById('designerRows').querySelector('input');
+    if (first) first.focus();
+  }, 30);
+}
+
 function openDesigner(name) {
   const t = name ? schemaCache.find(x => x.name === name) : null;
   if (name && !t) { toast('找不到表 ' + name, true); return; }
@@ -7854,6 +7892,8 @@ function openDesigner(name) {
 
 function closeDesigner() {
   designerModalEl().classList.add('hidden');
+  designerModalEl().classList.remove('model-mode');
+  document.getElementById('btnSqlPreview').disabled = false;
   designer = null;
 }
 
@@ -7908,6 +7948,15 @@ function renderDesigner() {
       o.textContent = ty;
       sel.appendChild(o);
     }
+    if (!TYPE_LIST.includes(r.type)) {
+      // 模型里的类型是自由字符串（NUMERIC(12,2) 之类），解析出来的基础类型
+      // 可能不在这个下拉里。补一个临时项，否则下拉会显示成空白，
+      // 用户一保存就把类型改没了。
+      const o = document.createElement('option');
+      o.value = r.type;
+      o.textContent = r.type;
+      sel.appendChild(o);
+    }
     sel.value = r.type;
     tdType.appendChild(sel);
     tr.appendChild(tdType);
@@ -7952,6 +8001,10 @@ function renderDesigner() {
     tdUniq.appendChild(checkEl(r.uniq, v => { r.uniq = v; refreshDesignerSql(); }));
     tr.appendChild(tdUniq);
 
+    if (designer.mode === 'model') {
+      // 引用列在模型模式下整列隐藏（CSS），这里只放一个空单元格占位。
+      tr.appendChild(el('td', 'c-ref'));
+    } else {
     const tdRef = el('td', 'c-ref');
     const refSel = document.createElement('select');
     const mkOpt = (val, text) => {
@@ -8004,6 +8057,7 @@ function renderDesigner() {
     syncRefHint();
     tdRef.appendChild(refSel);
     tr.appendChild(tdRef);
+    }
 
     const tdDef = el('td', 'c-def');
     const defIn = document.createElement('input');
@@ -8159,6 +8213,10 @@ function buildDesignerSql() {
 function refreshDesignerSql() {
   if (!designer) return;
   const pre = document.getElementById('designerSql');
+  if (designer.mode === 'model') {
+    pre.textContent = '-- 这是模型里的表：改的是模型，不执行 DDL。落地请用「差异 SQL」。';
+    return null;
+  }
   const built = buildDesignerSql();
   if (!pre.classList.contains('hidden')) {
     pre.textContent = built.error ? '-- ' + built.error : (built.stmts.length ? built.sql : '-- 没有修改');
@@ -8177,8 +8235,61 @@ function setSqlPreviewOpen(open) {
   }
 }
 
+// saveModelTable 把网格里的内容写回模型（不碰库）。
+function saveModelTable() {
+  const hint = document.getElementById('designerHint');
+  const name = document.getElementById('designerTableName').value.trim();
+  const mt = erModelDoc && (erModelDoc.tables || []).find(t => t.id === designer.modelId);
+  if (!mt) return;
+
+  if (!name) {
+    hint.textContent = '表名不能为空';
+    hint.className = 'modal-hint err';
+    return;
+  }
+  const lower = name.toLowerCase();
+  const clash = (erModelDoc.tables || []).find(t => t.id !== mt.id && t.name.toLowerCase() === lower);
+  if (clash) {
+    hint.textContent = `模型里已经有叫「${name}」的表了`;
+    hint.className = 'modal-hint err';
+    return;
+  }
+  const rows = designer.rows.filter(r => (r.name || '').trim());
+  if (!rows.length) {
+    hint.textContent = '至少要有一个字段';
+    hint.className = 'modal-hint err';
+    return;
+  }
+  const seen = new Set();
+  for (const r of rows) {
+    const k = r.name.trim().toLowerCase();
+    if (seen.has(k)) {
+      hint.textContent = '字段名重复：' + r.name.trim();
+      hint.className = 'modal-hint err';
+      return;
+    }
+    seen.add(k);
+  }
+
+  mt.name = name;
+  mt.columns = rows.map(r => ({
+    name: r.name.trim(),
+    type: typeSql({ type: r.type, len: r.len, scale: r.scale }),
+    pk: !!r.pk,
+    notNull: !!(r.notNull || r.pk),
+    uniq: !!r.uniq,
+    def: (r.def || '').trim(),
+  }));
+  erSchema = erCardsOf(erModelDoc);
+  closeDesigner();
+  erRender();
+  erSave();
+  toast('表结构已保存到模型');
+}
+
 async function saveDesigner() {
   if (!designer) return;
+  if (designer.mode === 'model') { saveModelTable(); return; }
   const hint = document.getElementById('designerHint');
   const built = buildDesignerSql();
   if (built.error) {
@@ -8274,7 +8385,14 @@ document.getElementById('btnSetPk').addEventListener('click', () => {
   renderDesigner();
   refreshDesignerSql();
 });
-document.getElementById('designerTableName').addEventListener('input', refreshDesignerSql);
+document.getElementById('designerTableName').addEventListener('input', () => {
+  refreshDesignerSql();
+  // 模型模式下标题跟着表名走：这个弹窗可能就是为这张表打开的，标题停在旧名字会上人以为没改名。
+  if (designer && designer.mode === 'model') {
+    const v = document.getElementById('designerTableName').value.trim();
+    document.getElementById('designerTitle').textContent = '表结构 · ' + (v || '新建表');
+  }
+});
 
 designerModalEl().addEventListener('keydown', ev => {
   if (ev.key === 'Escape') closeDesigner();
@@ -9676,7 +9794,7 @@ function erRender() {
   }
 
   if (!tables.length) {
-    erNote.textContent = '这个模型还没有表。点顶栏的「表」，从当前库把表加进来。';
+    erNote.textContent = '这个模型还没有表。点「+ 表」新建一张，或者用「表」把库里的表复制进来。';
     erNote.classList.remove('hidden');
     document.getElementById('btnErFit').disabled = true;
     erLegend.classList.add('hidden');
@@ -10386,6 +10504,38 @@ function erRenderTablePicker() {
   erTablesHint.textContent = `${shownN} / ${tables.length} 张在模型里`;
 }
 
+// erNewModelTable 在模型里新建一张空表：一个 id 主键列，然后直接打开设计器。
+//
+// 名字先给「新建表N」再让人改 —— 表名可以后改（关系按表 id 引用，不会散），
+// 但一进来就是无名表反而让人先愣一下。
+function erNewModelTable() {
+  if (!erModelDoc) return;
+  const used = new Set((erModelDoc.tables || []).map(t => t.name.toLowerCase()));
+  let n = 1;
+  while (used.has(('新建表' + n).toLowerCase())) n++;
+  const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  erModelDoc.tables.push({
+    id, name: '新建表' + n, comment: '', x: null, y: null, group: '',
+    columns: [{ name: 'id', type: 'INTEGER', pk: true, notNull: true }],
+  });
+  erSchema = erCardsOf(erModelDoc);
+  erDoc.tables[id] = { group: '', x: null, y: null, hidden: false };
+  erRender();
+  erSave();
+  openModelDesigner(id);
+}
+
+function erDeleteModelTable(t) {
+  if (!erModelDoc || !t) return;
+  if (!confirm(`从模型里删除表「${t.name}」？\n\n只删模型里的这张表，库里的不受影响。`)) return;
+  erModelDoc.tables = (erModelDoc.tables || []).filter(x => x.id !== t.id);
+  delete erDoc.tables[t.id];
+  erDoc.links = erDoc.links.filter(l => l.from.table !== t.id && l.to.table !== t.id);
+  erSchema = erCardsOf(erModelDoc);
+  erRender();
+  erSave();
+}
+
 // erAddTableFromDB 按库里这张表的结构，复制一份进模型。
 //
 // 复制而不是「引用」：模型是独立的设计，之后你在库里改这张表，模型不该跟着变。
@@ -10554,6 +10704,7 @@ function erOpenCardMenu(t, cardEl) {
   const cur = erGroupOf(t);
   const items = [
     { label: '打开这张表', run: () => erOpenTable(t) },
+    { label: '编辑表结构', run: () => openModelDesigner(t.id) },
     { sep: true },
     { head: '移到分组' },
   ];
@@ -10568,6 +10719,7 @@ function erOpenCardMenu(t, cardEl) {
   items.push({ label: '+ 新建分组并移入', run: () => erMoveToGroup(t, erAddGroup()) });
   items.push({ sep: true });
   items.push({ label: '从图上收起', run: () => erSetShown(t, false) });
+  items.push({ label: '从模型里删除', danger: true, run: () => erDeleteModelTable(t) });
   erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
 }
 
@@ -11066,6 +11218,8 @@ document.getElementById('erRevNote').addEventListener('keydown', ev => {
   if (ev.key === 'Enter') { ev.preventDefault(); erMakeRev(); }
 });
 document.getElementById('btnErFit').addEventListener('click', erFit);
+
+document.getElementById('btnErNewTable').addEventListener('click', erNewModelTable);
 
 document.getElementById('btnErGroup').addEventListener('click', () => {
   if (!erDoc) erDoc = erNormalizeDoc(null);

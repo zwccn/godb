@@ -5635,6 +5635,10 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   .er-zoom-val { min-width: 38px; }
   .er-legend { display: none; }
 }
+/* 模型模式下设计器不显示「引用（外键）」列：模型里的关系是画布上的线，
+   不是某一列的属性，留着这一列会让人以为改它就能连表。 */
+#designerModal.model-mode .c-ref { display: none; }
+
 /* ---- 模型：标题、列表、版本 ---- */
 .er-model-btn {
   padding: 2px 9px;

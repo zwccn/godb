@@ -8989,7 +8989,12 @@ function erNormalizeDoc(d) {
       seen.add(id);
       let color = Number.isFinite(g.color) ? g.color : -1;
       if (color < -1 || color > 7) color = -1;
-      out.groups.push({ id, name: String(g.name || '').slice(0, 40), color });
+      // 组坐标只对空组有意义：有成员的组，框由卡片包围盒算。
+      const hasPos = Number.isFinite(g.x) && Number.isFinite(g.y);
+      out.groups.push({
+        id, name: String(g.name || '').slice(0, 40), color,
+        x: hasPos ? g.x : null, y: hasPos ? g.y : null,
+      });
     }
   }
 
@@ -9037,6 +9042,20 @@ function erNormalizeDoc(d) {
 //
 // 不要用「取出来、改、整个换掉」的写法：那会把 hidden 一起丢掉，
 // 表现成「拖动过一次，收起的表又冒出来了」。
+// erGroupRec 拿到一个组在侧车里的记录（未分组没有记录，返回 null）。
+//
+// 组的位置存这里：**有成员时框由卡片算，这份坐标不参与**；只在组里一张表都
+// 没有的时候用它 —— 否则空组没有任何可依附的东西，拖完一渲染就弹回自动布局。
+function erGroupRec(g) {
+  if (!erDoc || !g || !g.gid) return null;
+  let rec = erDoc.groups.find(x => x.id === g.gid);
+  if (!rec) {
+    rec = { id: g.gid, name: g.name || '', color: -1, x: null, y: null };
+    erDoc.groups.push(rec);
+  }
+  return rec;
+}
+
 function erCardRec(t) {
   if (!erDoc) erDoc = erNormalizeDoc(null);
   const k = erTKey(t);
@@ -9271,6 +9290,15 @@ function erAutoPlace(groups) {
       x += ER.cardW + ER.colGap;
     }
     g.box = { x: rowX, y: rowY, w: boxW, h: boxH };
+    // 空组被拖到过某处就待在那儿。仍然照常推进 rowX —— 自动布局不能因为
+    // 某个组被挪走就整体重排，那会让「拖一个组，别的组跟着动」以另一种方式回来。
+    if (!g.tables.length) {
+      const rec = erGroupRec(g);
+      if (rec && rec.x !== null && rec.y !== null) {
+        g.box.x = rec.x;
+        g.box.y = rec.y;
+      }
+    }
     rowX += boxW + ER.groupGap;
     rowH = Math.max(rowH, boxH);
   }
@@ -9312,10 +9340,19 @@ function erPlaceModel(groups) {
       }
     }
     if (!miss.length) continue;
-    // 组里一张都没摆过 → 接在全图下面；摆过 → 接在那一组下面。
-    if (anchorX === null) { anchorX = minX; anchorBottom = maxBottom; }
-    let x = anchorX;
-    const y = anchorBottom + 40;
+    // 组里一张都没摆过 → 看这个组自己有没有落脚点（曾经是空组、被拖到过某处），
+    // 有就把第一张表放进那个框里；没有才接在全图下面。
+    let x = anchorX, y = anchorBottom + 40;
+    if (anchorX === null) {
+      const rec = erGroupRec(g);
+      if (rec && rec.x !== null && rec.y !== null) {
+        x = rec.x + ER.groupPad + ER.chanW;
+        y = rec.y + ER.groupHead + ER.groupPad;
+      } else {
+        x = minX;
+        y = maxBottom + 40;
+      }
+    }
     for (const t of miss) {
       t._er.x = x;
       t._er.y = y;
@@ -9749,9 +9786,7 @@ function erGroupEl(g) {
 
   const nameEl = el('span', 'er-group-name', erGroupTitle(g));
   if (!g.loose) {
-    // 空组没得拖：它的位置每次渲染都由自动布局算，拖了会弹回去。别让提示骗人。
-    nameEl.title = g.empty ? '空组：移进一张表之后就能整组拖动，双击改名'
-      : '拖动移动整组，双击改名';
+    nameEl.title = '拖动移动整组，双击改名';
     nameEl.addEventListener('dblclick', ev => {
       ev.stopPropagation();
       erRenameGroup(g, nameEl);
@@ -9798,35 +9833,34 @@ function erGroupEl(g) {
     }
     erStartGroupDrag(g, box, ev);
   });
-  box.addEventListener('pointermove', ev => erGroupDragMove(ev));
-  box.addEventListener('pointerup', ev => erEndGroupDrag(ev));
-  box.addEventListener('pointercancel', ev => erEndGroupDrag(ev));
   return box;
 }
 
 // erStartGroupDrag 记下这一组每张卡片的起点，拖动时整体平移。
 //
-// 空组不给拖：它的位置每次渲染都由自动布局算出来，拖了也会弹回去 —— 与其
-// 让人拖完发现白拖，不如让这一下继续落到画布上去平移。所以这里在真正开始
-// 拖动之前就返回，不拦事件。
+// 空组也能拖：它没有卡片可挪，挪的是框自己 —— 位置写回组的记录（`erGroupRec`），
+// 否则框没有任何可依附的东西，松手一渲染就弹回自动布局，表现成「拖不动」。
+// 未分组没有记录，但它总有卡片（没卡片就不显示），走的是卡片那条路。
 function erStartGroupDrag(g, box, ev) {
-  const members = g.tables.filter(t => t._er && t._el);
-  if (!members.length) return;
+  if (!g.box) return;
   ev.stopPropagation();          // 别让画布跟着平移
   erCloseMenus();
   erGroupDrag = {
     g, box, id: ev.pointerId,
     sx: ev.clientX, sy: ev.clientY,
-    cards: members.map(t => ({ t, x: t._er.x, y: t._er.y })),
+    cards: g.tables.filter(t => t._er && t._el).map(t => ({ t, x: t._er.x, y: t._er.y })),
     bx: g.box.x, by: g.box.y,
     moved: false,
   };
-  box.setPointerCapture(ev.pointerId);
+  erStage.classList.add('er-group-dragging');
 }
 
 function erGroupDragMove(ev) {
   const d = erGroupDrag;
   if (!d || d.id !== ev.pointerId) return;
+  // 没有指针捕获，鼠标在窗口外松开时收不到 pointerup —— 这一下就别再跟手了，
+  // 否则「松手之后鼠标还在拖着组跑」。
+  if (!(ev.buttons & 1)) { erEndGroupDrag(ev); return; }
   const sdx = ev.clientX - d.sx, sdy = ev.clientY - d.sy;
   if (!d.moved) {
     // 和拖卡片同一个 4px 阈值：按住标题只为点一下色点 / 打开菜单时，
@@ -9855,14 +9889,19 @@ function erEndGroupDrag(ev) {
   const d = erGroupDrag;
   erGroupDrag = null;
   if (!d) return;
-  if (d.box.hasPointerCapture && d.box.hasPointerCapture(ev.pointerId)) {
-    d.box.releasePointerCapture(ev.pointerId);
-  }
+  erStage.classList.remove('er-group-dragging');
   d.box.classList.remove('dragging');
   erCanvas.classList.remove('er-dragging');
   if (!d.moved) return;
+  // 组框的位置写回组记录：空组靠它落位；有成员的组以卡片为准，这条只是
+  // 「组清空之后回到最后待过的地方」的备忘。
+  const rec = erGroupRec(d.g);
+  if (rec) {
+    rec.x = Math.round(d.g.box.x);
+    rec.y = Math.round(d.g.box.y);
+  }
   erHotGroup = erGroupKey(d.g);
-  erSnapshotCards();             // 存全量坐标：组内卡片一起动了
+  if (d.cards.length) erSnapshotCards();   // 存全量坐标：组内卡片一起动了
   erRender();
   erSave();
 }
@@ -10309,7 +10348,7 @@ function erMoveToGroup(t, gid) {
 function erAddGroup() {
   if (!erDoc) erDoc = erNormalizeDoc(null);
   const id = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  erDoc.groups.push({ id, name: '', color: -1 });
+  erDoc.groups.push({ id, name: '', color: -1, x: null, y: null });
   return id;
 }
 
@@ -10789,16 +10828,23 @@ function erEndPan(ev) {
 erStage.addEventListener('pointerup', erEndPan);
 erStage.addEventListener('pointercancel', erEndPan);
 
-// 拉关系的收尾挂在 document 上：松手点可能在画布外，也可能落在别的卡片上，
-// 而卡片自己会吞掉 pointerup。
+// 拉关系 / 拖整组的收尾都挂在 document 上：松手点可能在画布外，也可能落在
+// 别的卡片上，而卡片自己会吞掉 pointerup。
+//
+// 拖整组**不调 setPointerCapture**：捕获会把后续的鼠标事件重定向到组框上，
+// 双击标题改名（dblclick 监听挂在名字那个 span 上）就再也收不到 —— 表现成
+// 「双击改名坏了」。组框本来就不小，靠 document 这一层接后续事件已经够用。
 document.addEventListener('pointermove', ev => {
   if (erLinkDrag) erLinkDragMove(ev);
+  if (erGroupDrag) erGroupDragMove(ev);
 });
 document.addEventListener('pointerup', ev => {
   if (erLinkDrag) erLinkDragEnd(ev);
+  if (erGroupDrag) erEndGroupDrag(ev);
 });
 document.addEventListener('pointercancel', ev => {
   if (erLinkDrag) erLinkDragEnd(ev);
+  if (erGroupDrag) erEndGroupDrag(ev);
 });
 
 // 画布空白处右键：打开表清单。这是「从这里挑表」最顺手的位置。

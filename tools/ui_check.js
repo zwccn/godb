@@ -3917,21 +3917,18 @@ class CDP {
           → 表现成「拖一个分组，其他分组一起动」；
        2) 整块组框都能拖 → 拖空白也能把整组拽走，不是人想要的。
        现在：标题条 = 抓手；组里别的地方吃掉左键、什么都不做。
-       起点先「自动排列」清掉所有坐标 —— 没摆过的图最容易露馅：别的组的卡片
-       要靠 erPlaceModel 的兜底位置落位，一旦兜底用了全局锚点，拖一组会带着别组跳。 */
+       起点先「自动排列」清掉所有坐标 —— 没摆过的图最容易露馅。 */
     await cdp.eval(`document.getElementById('btnErAuto').click()`);
     await sleep(300);
 
     const gSnap = `(() => {
-      const pick = () => {
-        const out = {};
-        for (const g of erModel.groups) out[g.name || 'loose'] = {
-          box: { x: Math.round(g.box.x), y: Math.round(g.box.y) },
-          cards: g.tables.map(t => ({ n: t.name, x: Math.round(t._er.x), y: Math.round(t._er.y) })),
-        };
-        return out;
-      };
-      return { groups: pick(), zoom: erView.zoom, tf: (document.getElementById('erCanvas').style.transform || '') };
+      const list = erModel.groups.map((g, i) => ({
+        key: g.loose ? 'loose' : g.gid,
+        name: g.loose ? '未分组' : (g.name || '未命名' + i),
+        box: { x: Math.round(g.box.x), y: Math.round(g.box.y) },
+        cards: g.tables.map(t => ({ n: t.name, x: Math.round(t._er.x), y: Math.round(t._er.y) })),
+      }));
+      return { list, zoom: erView.zoom, tf: (document.getElementById('erCanvas').style.transform || '') };
     })()`;
     const gDrag = async spot => {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: spot.x, y: spot.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -3947,14 +3944,19 @@ class CDP {
       });
       await sleep(320);
     };
+    const movedBy = (a, b, dx, tol = 3) => a && b && Math.abs((b.box.x - a.box.x) - dx) < tol;
     // 别的组：框和卡片都一动不动
     const othersStill = (a, b, key) => {
-      const g0 = a.groups[key], g1 = b.groups[key];
-      if (!g0 || !g1) return true;
-      if (g0.box.x !== g1.box.x || g0.box.y !== g1.box.y) return false;
-      return g1.cards.every(c => {
-        const o = g0.cards.find(z => z.n === c.n);
-        return o && o.x === c.x && o.y === c.y;
+      const g0 = a.list.filter(g => g.key !== key), g1 = b.list.filter(g => g.key !== key);
+      if (g0.length !== g1.length) return false;
+      return g0.every(x => {
+        const y = g1.find(z => z.key === x.key);
+        if (!y) return false;
+        if (x.box.x !== y.box.x || x.box.y !== y.box.y) return false;
+        return x.cards.length === y.cards.length && y.cards.every(c => {
+          const o = x.cards.find(z => z.n === c.n);
+          return o && o.x === c.x && o.y === c.y;
+        });
       });
     };
 
@@ -3967,18 +3969,19 @@ class CDP {
     await gDrag({ ...titleSpot, dx: 120, dy: 50 });
     const afterTitle = await cdp.eval(gSnap);
 
-    const dTitle = afterTitle.groups['回归测试组'].box.x - gBefore.groups['回归测试组'].box.x;
+    const gA0 = gBefore.list.find(g => g.name === '回归测试组');
+    const gA1 = afterTitle.list.find(g => g.name === '回归测试组');
     const wantDx = 120 / afterTitle.zoom;
-    const basisMoved = afterTitle.groups['回归测试组'].cards.every(c => {
-      const b = gBefore.groups['回归测试组'].cards.find(o => o.n === c.n);
+    const basisMoved = gA1.cards.every(c => {
+      const b = gA0.cards.find(o => o.n === c.n);
       return b && Math.abs((c.x - b.x) - wantDx) < 3;
     });
     check('模型图：拖组标题条能整组移动（组内每张卡片位移一致）',
-      Math.abs(dTitle - wantDx) < 3 && basisMoved,
-      `组框 Δx=${Math.round(dTitle)}px（应 ${Math.round(wantDx)}）· 卡片同步 ${basisMoved}`);
+      movedBy(gA0, gA1, wantDx) && basisMoved,
+      `组框 Δx=${Math.round(gA1.box.x - gA0.box.x)}px（应 ${Math.round(wantDx)}）· 卡片同步 ${basisMoved}`);
     check('模型图：拖一个组，别的组不跟着动（框和卡片都不动）',
-      othersStill(gBefore, afterTitle, 'loose'),
-      othersStill(gBefore, afterTitle, 'loose') ? '其他组原地不动' : '其他组被带走了');
+      othersStill(gBefore, afterTitle, gA0.key),
+      othersStill(gBefore, afterTitle, gA0.key) ? '其他组原地不动' : '其他组被带走了');
 
     // 组里没压卡片的空白：既不许拖整组，也不许漏下去平移画布
     const bodySpot = await cdp.eval(`(() => {
@@ -3998,13 +4001,48 @@ class CDP {
       const gMid = await cdp.eval(gSnap);
       await gDrag({ ...bodySpot, dx: 60, dy: 0 });
       const afterBody = await cdp.eval(gSnap);
-      const stillMine = othersStill(gMid, afterBody, '回归测试组');
+      const stillMine = othersStill(gMid, afterBody, gA0.key);
       check('模型图：拖组里的空白处什么都不做（不动整组、也不平移画布）',
         stillMine && afterBody.tf === gMid.tf,
         `整组${stillMine ? '没动' : '被拖走了'} · 画布变换${afterBody.tf === gMid.tf ? '没变' : '变了（=平移）'}`);
     } else {
       check('模型图：拖组里的空白处什么都不做（不动整组、也不平移画布）', false,
         '这张图上找不到不压卡片的空白点');
+    }
+
+    /* ---- 空组也要拖得动 ----
+       刚建的组一张表都没有，框没有任何东西可依附：位置只能记在组的记录里。
+       不记的话拖完一渲染就弹回自动布局，用户看到的是「这个组拖不走」。 */
+    await cdp.eval(`document.getElementById('btnErGroup').click()`);
+    await sleep(400);
+    const emptyInfo = await cdp.eval(`(() => {
+      const g = erModel.groups.find(x => x.empty && !x.loose);
+      if (!g) return null;
+      const n = g._box.querySelector('.er-group-name').getBoundingClientRect();
+      return { gid: g.gid, x: Math.round(n.left + n.width / 2), y: Math.round(n.top + n.height / 2) };
+    })()`);
+    if (emptyInfo) {
+      const eMid = await cdp.eval(gSnap);
+      await gDrag({ ...emptyInfo, dx: 100, dy: 40 });
+      const eAfter = await cdp.eval(gSnap);
+      const eBox = eAfter.list.find(g => g.key === emptyInfo.gid);
+      const eBox0 = eMid.list.find(g => g.key === emptyInfo.gid);
+      const saved = await waitFor(cdp, `fetch('/api/diagram').then(r => r.json()).then(d => {
+        const g = (d.groups || []).find(x => x.id === ${JSON.stringify(emptyInfo.gid)});
+        return g && Number.isFinite(g.x) && Number.isFinite(g.y) ? g : null;
+      })`, { timeout: 4000, label: '空组坐标落盘' });
+      check('模型图：新建的空组也能拖（位置记在组的记录里，不是每次渲染重算）',
+        movedBy(eBox0, eBox, 100 / eAfter.zoom) && othersStill(eMid, eAfter, emptyInfo.gid),
+        `组框 Δx=${eBox && eBox0 ? Math.round(eBox.box.x - eBox0.box.x) : '?'}px`);
+      check('模型图：空组的位置落进侧车文件（重新打开还在原地）',
+        !!saved && Math.abs(saved.x - eBox.box.x) <= 2 && Math.abs(saved.y - eBox.box.y) <= 2,
+        saved ? `x=${saved.x} y=${saved.y} · 画布 ${eBox.box.x}/${eBox.box.y}` : '侧车里没有坐标');
+      // 用完删掉，后面的用例仍然按「两个组」算
+      await cdp.eval(`erDeleteGroup(erModel.groups.find(g => g.gid === ${JSON.stringify(emptyInfo.gid)}))`);
+      await sleep(400);
+    } else {
+      check('模型图：新建的空组也能拖（位置记在组的记录里，不是每次渲染重算）', false, '没找到空组');
+      check('模型图：空组的位置落进侧车文件（重新打开还在原地）', false, '没找到空组');
     }
 
     // 摆过之后回到自动布局，后面的连线用例从一个规整的图开始

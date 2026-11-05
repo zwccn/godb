@@ -88,6 +88,15 @@ type diagramGroup struct {
 	ID    string `json:"id"`
 	Name  string `json:"name,omitempty"`
 	Color int    `json:"color"` // 0..7 是固定色相；-1 表示「按顺序取」
+
+	// X/Y 是**空组**的落脚点。
+	//
+	// 有成员的组，框是成员卡片的包围盒算出来的，这两个值不参与；但组里一张
+	// 表都没有时，框没有任何东西可以依附 —— 不留坐标的话，新建的空组就没法
+	// 拖动（拖完一渲染就弹回自动布局的位置）。组清空之后也回到这里，而不是
+	// 跳回全图末尾。
+	X *float64 `json:"x,omitempty"`
+	Y *float64 `json:"y,omitempty"`
 }
 
 // diagramEndpoint 是关系的一端：哪张表、哪几列。
@@ -186,10 +195,12 @@ type diagramRaw struct {
 }
 
 type diagramGroupRaw struct {
-	ID     string  `json:"id"`
-	Name   string  `json:"name,omitempty"`
-	Color  int     `json:"color"`
-	Tables []int64 `json:"tables,omitempty"` // v1：组里的成员
+	ID     string   `json:"id"`
+	Name   string   `json:"name,omitempty"`
+	Color  int      `json:"color"`
+	Tables []int64  `json:"tables,omitempty"` // v1：组里的成员
+	X      *float64 `json:"x,omitempty"`
+	Y      *float64 `json:"y,omitempty"`
 }
 
 // decodeLinks 认两种边形状。
@@ -237,7 +248,9 @@ func (raw *diagramRaw) toDoc() (diagramDoc, bool) {
 	migrated := raw.Version < diagramVersion
 
 	for _, g := range raw.Groups {
-		doc.Groups = append(doc.Groups, diagramGroup{ID: g.ID, Name: g.Name, Color: g.Color})
+		doc.Groups = append(doc.Groups, diagramGroup{
+			ID: g.ID, Name: g.Name, Color: g.Color, X: g.X, Y: g.Y,
+		})
 	}
 
 	for k, c := range raw.Tables {
@@ -301,6 +314,19 @@ func (doc *diagramDoc) normalize() {
 		}
 		if r := []rune(g.Name); len(r) > diagramMaxName {
 			g.Name = string(r[:diagramMaxName])
+		}
+		// 组坐标和卡片坐标同一套规矩：半个、越界、NaN 一律清掉。
+		// 只是组坐标允许为空（= 让它回自动布局），不影响 group 本身。
+		if g.X != nil && !validCoord(*g.X) {
+			g.X = nil
+		}
+		if g.Y != nil && !validCoord(*g.Y) {
+			g.Y = nil
+		}
+		if (g.X == nil) != (g.Y == nil) {
+			g.X, g.Y = nil, nil
+		} else if g.X != nil {
+			g.X, g.Y = roundPtr(*g.X), roundPtr(*g.Y)
 		}
 		groups = append(groups, g)
 	}

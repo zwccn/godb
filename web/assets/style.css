@@ -5397,7 +5397,8 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
   background-size: 22px 22px;
 }
-.er-stage.panning { cursor: grabbing; }
+.er-stage.panning,
+.er-stage.er-group-dragging { cursor: grabbing; }
 .er-canvas {
   position: absolute;
   left: 0;

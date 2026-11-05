@@ -411,6 +411,34 @@ func TestDiagramKeepsEmptyGroups(t *testing.T) {
 	}
 }
 
+// 空组也要有落脚点：刚建的组里一张表都没有，没有坐标就拖不动 ——
+// 拖完一渲染框又回到自动布局的位置，表现成「这个组拖不走」。
+// 规则和卡片坐标一样：半个坐标（只有 x）整条丢掉，越界的丢掉，其余四舍五入。
+func TestDiagramKeepsEmptyGroupPosition(t *testing.T) {
+	s, mgr, _ := newDBServer(t)
+	makeTables(t, mgr.Default(), "CREATE TABLE a (id INTEGER PRIMARY KEY)")
+	body := `{"version":3,"groups":[
+		{"id":"g1","color":1,"x":320.4,"y":-40.6},
+		{"id":"g2","color":2,"x":10},
+		{"id":"g3","color":3,"x":1e12,"y":5}]}`
+	if code, _ := diagramCall(t, s, http.MethodPost, body); code != http.StatusOK {
+		t.Fatalf("post code = %d", code)
+	}
+	code, doc := diagramCall(t, s, http.MethodGet, "")
+	if code != http.StatusOK || len(doc.Groups) != 3 {
+		t.Fatalf("三个组都该留下: code=%d %+v", code, doc.Groups)
+	}
+	if doc.Groups[0].X == nil || doc.Groups[0].Y == nil ||
+		*doc.Groups[0].X != 320 || *doc.Groups[0].Y != -41 {
+		t.Fatalf("组坐标没四舍五入或丢了: %+v", doc.Groups[0])
+	}
+	for _, g := range doc.Groups[1:] {
+		if g.X != nil || g.Y != nil {
+			t.Fatalf("半个坐标 / 越界坐标应整条丢掉: %+v", g)
+		}
+	}
+}
+
 // 指向不存在的组：表保留，归属归零（不能凭空造出一个组）。
 func TestDiagramDropsUnknownGroupRef(t *testing.T) {
 	s, mgr, _ := newDBServer(t)

@@ -3911,9 +3911,17 @@ class CDP {
       allSaved.withPos === allSaved.total && allSaved.total > 0,
       `${allSaved.withPos}/${allSaved.total} 张有坐标`);
 
-    /* ---- 拖整组：只有这一组跟着走，别组不动、画布也不平移 ----
-       以前组框 pointer-events:none，拖组框落到画布上就是平移，表现成
-       「拖一个分组，其他分组一起动」。这里同时验标题条和组内空白处两个抓手。 */
+    /* ---- 拖整组：只有标题条是抓手，别的组和画布都不许动 ----
+       历史上有两个真出过的问题：
+       1) 组框 pointer-events:none，拖组里的空白漏给 erStage，走的是平移画布
+          → 表现成「拖一个分组，其他分组一起动」；
+       2) 整块组框都能拖 → 拖空白也能把整组拽走，不是人想要的。
+       现在：标题条 = 抓手；组里别的地方吃掉左键、什么都不做。
+       起点先「自动排列」清掉所有坐标 —— 没摆过的图最容易露馅：别的组的卡片
+       要靠 erPlaceModel 的兜底位置落位，一旦兜底用了全局锚点，拖一组会带着别组跳。 */
+    await cdp.eval(`document.getElementById('btnErAuto').click()`);
+    await sleep(300);
+
     const gSnap = `(() => {
       const pick = () => {
         const out = {};
@@ -3939,6 +3947,16 @@ class CDP {
       });
       await sleep(320);
     };
+    // 别的组：框和卡片都一动不动
+    const othersStill = (a, b, key) => {
+      const g0 = a.groups[key], g1 = b.groups[key];
+      if (!g0 || !g1) return true;
+      if (g0.box.x !== g1.box.x || g0.box.y !== g1.box.y) return false;
+      return g1.cards.every(c => {
+        const o = g0.cards.find(z => z.n === c.n);
+        return o && o.x === c.x && o.y === c.y;
+      });
+    };
 
     const gBefore = await cdp.eval(gSnap);
     const titleSpot = await cdp.eval(`(() => {
@@ -3955,17 +3973,14 @@ class CDP {
       const b = gBefore.groups['回归测试组'].cards.find(o => o.n === c.n);
       return b && Math.abs((c.x - b.x) - wantDx) < 3;
     });
-    const looseStill = afterTitle.groups.loose.cards.every(c => {
-      const b = gBefore.groups.loose.cards.find(o => o.n === c.n);
-      return b && c.x === b.x && c.y === b.y;
-    });
     check('模型图：拖组标题条能整组移动（组内每张卡片位移一致）',
       Math.abs(dTitle - wantDx) < 3 && basisMoved,
       `组框 Δx=${Math.round(dTitle)}px（应 ${Math.round(wantDx)}）· 卡片同步 ${basisMoved}`);
-    check('模型图：拖一个组，别的组不跟着动',
-      looseStill, looseStill ? '其他组原地不动' : '其他组被带走了');
+    check('模型图：拖一个组，别的组不跟着动（框和卡片都不动）',
+      othersStill(gBefore, afterTitle, 'loose'),
+      othersStill(gBefore, afterTitle, 'loose') ? '其他组原地不动' : '其他组被带走了');
 
-    // 组内空白处（卡片下方的内边距）也是抓手 —— 找不到就跳过这一条
+    // 组里没压卡片的空白：既不许拖整组，也不许漏下去平移画布
     const bodySpot = await cdp.eval(`(() => {
       const g = erModel.groups.find(x => x.name === '回归测试组');
       const b = g._box.getBoundingClientRect();
@@ -3983,16 +3998,13 @@ class CDP {
       const gMid = await cdp.eval(gSnap);
       await gDrag({ ...bodySpot, dx: 60, dy: 0 });
       const afterBody = await cdp.eval(gSnap);
-      const dBody = afterBody.groups['回归测试组'].box.x - gMid.groups['回归测试组'].box.x;
-      check('模型图：拖组里的空白处也是整组移动，不是平移画布',
-        Math.abs(dBody - 60 / gMid.zoom) < 3 && afterBody.tf === gMid.tf
-        && afterBody.groups.loose.cards.every(c => {
-          const b = gMid.groups.loose.cards.find(o => o.n === c.n);
-          return b && c.x === b.x && c.y === b.y;
-        }),
-        `组框 Δx=${Math.round(dBody)}px · 画布变换${afterBody.tf === gMid.tf ? '没变' : '变了'}`);
+      const stillMine = othersStill(gMid, afterBody, '回归测试组');
+      check('模型图：拖组里的空白处什么都不做（不动整组、也不平移画布）',
+        stillMine && afterBody.tf === gMid.tf,
+        `整组${stillMine ? '没动' : '被拖走了'} · 画布变换${afterBody.tf === gMid.tf ? '没变' : '变了（=平移）'}`);
     } else {
-      check('模型图：拖组里的空白处也是整组移动，不是平移画布', false, '这张图上找不到不压卡片的空白点');
+      check('模型图：拖组里的空白处什么都不做（不动整组、也不平移画布）', false,
+        '这张图上找不到不压卡片的空白点');
     }
 
     // 摆过之后回到自动布局，后面的连线用例从一个规整的图开始

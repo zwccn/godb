@@ -5658,16 +5658,18 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   border: 1px solid hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-line) * .5));
   background: hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-tint) * .14));
   border-radius: 12px;
-  /* 框就是这一组的容器：整块都是整组拖动的抓手（卡片压在它上面，自己接事件）。
-     空白画布的平移交给组外的空白和中键拖动 —— 拖框只该动这一组。 */
+  /* 组框整块吃事件，但**只有标题条是抓手**：卡片压在它上面，自己接拖动。
+     组里的空白既不该拖动整组，也不能漏到画布上去 —— 漏下去就变成平移，
+     表现成「拖一个分组，其他分组一起动」。所以这里吃掉左键、什么也不做。
+     平移走组外空白或中键拖动。 */
   pointer-events: auto;
-  cursor: move;
+  cursor: default;
 }
 .er-group:hover { border-color: hsl(var(--g-h) var(--g-s) 55% / calc(var(--er-line) * .8)); }
 .er-group.dragging {
-  cursor: grabbing;
   box-shadow: 0 6px 22px var(--shadow-color, rgba(0, 0, 0, .22));
 }
+.er-group.dragging .er-group-label { cursor: grabbing; }
 .er-group-label {
   display: flex;
   align-items: center;
@@ -5681,7 +5683,7 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   color: var(--text-2);
   font-size: calc(11.5px * var(--fs));
   white-space: nowrap;
-  cursor: move;
+  cursor: grab;
   pointer-events: auto;
 }
 .er-group-dot {

@@ -9783,14 +9783,19 @@ function erGroupEl(g) {
   g._box = box;
   g._nameEl = nameEl;
 
-  // 整组拖动：按住标题条（或组里的空白处）把这组连同成员卡片一起挪走。
+  // 整组拖动：**只有标题条**是抓手，按住它把这组连同成员卡片一起挪走。
   //
-  // 以前只有卡片能吃 pointerdown，组框是 pointer-events:none —— 拖组框等于拖
-  // 空白画布，走的是平移，表现成「拖一个组，所有组一起动」。组框就是这一组的
-  // 容器，把它当拖动柄才对得上人的直觉；平移留给组外的空白和中键拖动。
+  // 组框不能是 pointer-events:none —— 那样组里的空白会把 pointerdown 漏给
+  // erStage，走的是平移画布，表现成「拖一个分组，其他分组一起动」。
+  // 也不能整块都能拖 —— 拖空白拖出整组位移同样不是人想要的。
+  // 所以：标题条 → 拖整组；组里别的地方 → 吃掉左键，什么都不做。
   box.addEventListener('pointerdown', ev => {
-    if (ev.button !== 0) return;
+    if (ev.button !== 0) return;      // 中键留给画布平移
     if (ev.target.closest('.er-card, .er-group-input, .er-group-more')) return;
+    if (!ev.target.closest('.er-group-label')) {
+      ev.stopPropagation();           // 组里的空白：别漏到画布上去平移
+      return;
+    }
     erStartGroupDrag(g, box, ev);
   });
   box.addEventListener('pointermove', ev => erGroupDragMove(ev));

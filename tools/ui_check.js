@@ -4557,6 +4557,71 @@ class CDP {
       shape ? `${shape.cols} 列 · 宽高比 ${shape.ratio}（${shape.box.w}×${shape.box.h}）`
         + ` · 卡片间距 ${shape.colGaps.join('/') || '—'} · 组间距 ${shape.groupGap}` : '没摆出来');
 
+    /* 自动排列要按关系挑顺序：相连的表挨着放，线就不会横穿整张图。
+       造几条「交叉机会很大」的关系（0→1、2→1、0→3、2→3 这种对角交叉），
+       自动排列后数真实交叉数，然后把这些临时关系删掉、坐标恢复原样。 */
+    const crossUi = await cdp.eval(`(async () => {
+      const snap = {};
+      for (const k in erDoc.tables) snap[k] = { x: erDoc.tables[k].x, y: erDoc.tables[k].y };
+      const ts = erSchema.slice();
+      if (ts.length < 4) return { skip: true };
+      const probes = [];
+      const add = (a, b) => {
+        if (!a || !b || a === b) return;
+        probes.push({
+          id: 'l-crossprobe' + probes.length,
+          from: { table: String(a.id), columns: [a.columns[0].name] },
+          to: { table: String(b.id), columns: [b.columns[0].name] },
+          card: '1N',
+        });
+      };
+      // 一条链：0-1-2-3-4。链本身是平面的，排得好就一处交叉都不该有。
+      add(ts[0], ts[1]); add(ts[1], ts[2]); add(ts[2], ts[3]);
+      if (ts[4]) add(ts[3], ts[4]);
+      erDoc.links.push(...probes);
+      erAutoLayout();
+      await new Promise(r => setTimeout(r, 300));
+
+      const rects = erModel.tables.map(t => t._er).filter(Boolean);
+      erAssignLanes(erModel.edges);
+      const segs = [];
+      for (const e of erModel.edges) {
+        const a = e.from._er, b = e.to._er;
+        if (!a || !b) continue;
+        const ay = erColY(a, e.from, e.fromCol), by = erColY(b, e.to, e.toCol);
+        const g = erEdgeGeom(a, b, ay, by, e.lane, rects.filter(r => r !== a && r !== b));
+        for (let i = 0; i < g.pts.length - 1; i++) segs.push({ e: e.id, p: g.pts[i], q: g.pts[i + 1] });
+      }
+      const hit = (p1, p2, p3, p4) => {
+        const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+        if (Math.abs(d) < 1e-9) return false;
+        const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+        const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+        return t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98;
+      };
+      const pairs = new Set();
+      for (let i = 0; i < segs.length; i++) {
+        for (let j = i + 1; j < segs.length; j++) {
+          if (segs[i].e === segs[j].e) continue;
+          if (hit(segs[i].p, segs[i].q, segs[j].p, segs[j].q)) {
+            pairs.add([segs[i].e, segs[j].e].sort().join('|'));
+          }
+        }
+      }
+      const out = { probes: probes.length, crosses: pairs.size, edges: erModel.edges.length };
+
+      erDoc.links = erDoc.links.filter(l => l.id.indexOf('l-crossprobe') !== 0);
+      for (const k in snap) { erDoc.tables[k].x = snap[k].x; erDoc.tables[k].y = snap[k].y; }
+      erRender();
+      await new Promise(r => setTimeout(r, 200));
+      return out;
+    })()`);
+    if (!crossUi.skip) {
+      check('模型图：自动排列会按关系挑顺序，造出来的交叉关系也不打结',
+        crossUi.crosses === 0,
+        `${crossUi.edges} 条线（含 ${crossUi.probes} 条探针）· 交叉 ${crossUi.crosses} 处`);
+    }
+
     // ---- 拖字段建一条关系（这次改动的核心交互）----
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);

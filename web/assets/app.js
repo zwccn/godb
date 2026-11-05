@@ -9608,35 +9608,64 @@ function erBuckets(tables) {
 function erOrderGroup(g, edges) {
   if (g.tables.length < 2) return;
   const names = new Set(g.tables.map(t => t.name));
-  const parents = new Map();
+
+  // 邻接表：组内的边才算，跨组的边不参与「谁挨着谁」（那两张表根本不在一个框里）
+  const adj = new Map(g.tables.map(t => [t.name, []]));
   for (const e of edges) {
-    // 多对多没有「谁在上」可言，塞进分层只会把两个对称的表拆成上下两层。
-    if (e.card === 'NM') continue;
-    if (!names.has(e.from.name) || !names.has(e.to.name)) continue;
     if (e.from.name === e.to.name) continue;
-    if (!parents.has(e.to.name)) parents.set(e.to.name, []);
-    parents.get(e.to.name).push(e.from.name);
+    if (!names.has(e.from.name) || !names.has(e.to.name)) continue;
+    adj.get(e.from.name).push(e.to.name);
+    adj.get(e.to.name).push(e.from.name);
   }
-  if (!parents.size) {
+  const hasEdge = [...adj.values()].some(list => list.length);
+
+  // 没有任何关系：按名字 —— 至少是稳定、可预期的顺序
+  if (!hasEdge) {
     g.tables.sort((a, b) => a.name.localeCompare(b.name));
     return;
   }
-  const depth = new Map();
-  for (const t of g.tables) depth.set(t.name, 0);
-  for (let round = 0; round < g.tables.length; round++) {
-    let changed = false;
-    for (const [child, ps] of parents) {
-      let want = 0;
-      for (const p of ps) want = Math.max(want, (depth.get(p) || 0) + 1);
-      if (want > (depth.get(child) || 0) && want < g.tables.length) {
-        depth.set(child, want);
-        changed = true;
-      }
+
+  // 从「度数最大」的表开始走 BFS。hub 先出场，它的邻居紧跟着排，
+  // 网格填充时就会落在它旁边 —— 这比按名字排更能让相连接的表挨在一起。
+  const start = [...g.tables].sort((a, b) =>
+    (adj.get(b.name).length - adj.get(a.name).length) || a.name.localeCompare(b.name))[0];
+  const seen = new Set([start.name]);
+  const order = [];
+  const queue = [start.name];
+  while (queue.length) {
+    const cur = queue.shift();
+    order.push(cur);
+    const next = adj.get(cur).slice().sort();
+    for (const nb of next) {
+      if (seen.has(nb)) continue;
+      seen.add(nb);
+      queue.push(nb);
     }
-    if (!changed) break;
   }
-  g.tables.sort((a, b) =>
-    (depth.get(a.name) || 0) - (depth.get(b.name) || 0) || a.name.localeCompare(b.name));
+  // 断开的孤岛接在后面（它们本来就没关系，放哪都一样）
+  for (const t of g.tables) if (!seen.has(t.name)) order.push(t.name);
+
+  const pos = new Map(order.map((n, i) => [n, i]));
+
+  // 重心法收敛几轮：每张表排到「它邻居们的平均位置」上去。
+  //
+  // 这是画图算法的老套路（Sugiyama 的层内排序）。直觉很简单 —— 一条边的两端
+  // 在顺序上靠得越近，落到网格里越可能在同一行/相邻行，线就越短、越不容易交叉。
+  // 只排 3 轮：再排下去收益很小，还可能出现「加一张表整组大洗牌」。
+  for (let round = 0; round < 3; round++) {
+    const key = new Map();
+    for (const t of order) {
+      const nb = adj.get(t);
+      if (!nb.length) { key.set(t, pos.get(t)); continue; }
+      let sum = 0;
+      for (const m of nb) sum += pos.get(m);
+      key.set(t, sum / nb.length);
+    }
+    order.sort((a, b) => (key.get(a) - key.get(b)) || (pos.get(a) - pos.get(b)));
+    order.forEach((n, i) => pos.set(n, i));
+  }
+
+  g.tables.sort((a, b) => pos.get(a.name) - pos.get(b.name));
 }
 
 // erSquareScore 是「这个宽高比有多不像方形」的代价：0 = 正方。

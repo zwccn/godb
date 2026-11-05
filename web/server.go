@@ -95,6 +95,10 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/query", s.handleQuery)
 	mux.HandleFunc("/api/schema", s.handleSchema)
 	mux.HandleFunc("/api/diagram", s.handleDiagram)
+
+	// 模型：独立于库（存在数据根目录的 models/ 下），所以不按库分路由。
+	mux.HandleFunc("/api/models", s.handleModels)
+	mux.HandleFunc("/api/models/", s.handleModel)
 	mux.HandleFunc("/api/tx", s.handleTx)
 	mux.HandleFunc("/api/reset", s.handleReset)
 	mux.HandleFunc("/api/sample", s.handleSample)

@@ -5282,6 +5282,50 @@ class CDP {
       && subUi.items.indexOf('全部显示') >= 0 && subUi.items.indexOf('全部收起') >= 0,
       subUi ? `${subUi.items.length} 项 · ${subUi.items.slice(0, 3).join(' / ')}` : '二级菜单没展开');
 
+    // 从父项移到二级：以前的坑是「缝里既不在父项上也不在子菜单上」，:hover 一断
+    // 子菜单就 display:none，鼠标到了菜单已经没了 —— 表现成「二级菜单很容易消失」。
+    // 现在缝隙有透明桥顶着，斜着绕出去还有 150ms 宽限。
+    const gapProbe = await cdp.eval(`(() => {
+      const m = document.querySelector('.er-menu');
+      const wrap = m.querySelector('.er-menu-sub');
+      if (!m || !wrap) return null;
+      const b = wrap.querySelector('.er-menu-item');
+      const sub = wrap.querySelector('.er-menu');
+      const br = b.getBoundingClientRect(), sr = sub.getBoundingClientRect();
+      const flip = m.classList.contains('flip');
+      const edge = Math.round(flip ? br.left - 1 : br.right + 1);
+      return {
+        flip,
+        gap: { x: edge, y: Math.round(br.top + br.height / 2) },
+        outside: { x: edge, y: Math.round(br.bottom + 14) },
+        first: { x: Math.round(sr.left + Math.min(30, sr.width / 2)), y: Math.round(sr.top + 12) },
+      };
+    })()`);
+    let gapUi = null;
+    if (gapProbe) {
+      const visible = () => cdp.eval(`(() => {
+        const sub = document.querySelector('.er-menu > .er-menu-sub > .er-menu');
+        return !!sub && getComputedStyle(sub).display !== 'none';
+      })()`);
+      // ① 悬在缝里（桥就盖在这里），等过宽限期：全靠 CSS 撑着
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gapProbe.gap.x, y: gapProbe.gap.y });
+      await sleep(260);
+      const atGap = await visible();
+      // ② 斜着绕到父项下方（离开了桥），宽限期内不该收
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gapProbe.outside.x, y: gapProbe.outside.y });
+      await sleep(60);
+      const inGrace = await visible();
+      // ③ 落进二级菜单，宽限用完也不该收
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gapProbe.first.x, y: gapProbe.first.y });
+      await sleep(320);
+      const landed = await visible();
+      gapUi = { atGap, inGrace, landed, flip: gapProbe.flip };
+    }
+    check('模型图：从父项移到二级菜单不会半路消失（缝里有桥 + 离开后 150ms 宽限）',
+      !!gapUi && gapUi.atGap && gapUi.inGrace && gapUi.landed,
+      gapUi ? `缝里 ${gapUi.atGap ? '在' : '没了'} · 宽限内 ${gapUi.inGrace ? '在' : '没了'}`
+        + ` · 进二级后 ${gapUi.landed ? '在' : '没了'}` : '菜单没开');
+
     // 点掉一张表：卡片少一张，状态栏挂上「已收起」
     const hideUi = await cdp.eval(`(async () => {
       const before = document.querySelectorAll('.er-card').length;

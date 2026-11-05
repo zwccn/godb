@@ -5652,8 +5652,21 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   box-shadow: 0 10px 30px var(--shadow-color, rgba(0, 0, 0, .34));
 }
 /* 二级菜单：靠 :hover 展开（触屏/键盘用点击切 .open）。
-   不用 JS 算位置，「鼠标从父项移到子项」中间那条缝不会把菜单关掉。 */
+   位置交给 CSS，不用 JS 算。 */
 .er-menu-sub { position: relative; }
+
+/* 父项和子菜单之间那条 3px 的缝，**既不属于父项也不属于子菜单**。
+   鼠标横穿过去的那一下 :hover 就断了 → 子菜单 display:none → 鼠标到达时
+   菜单已经没了，表现成「二级菜单很容易消失」。给父项铺一块透明桥把缝吃掉：
+   伪元素算在父项身上，指针压在缝里时父项仍然是 hover 状态。 */
+.er-menu-sub::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 4px;
+}
 
 .er-menu-item.has-sub {
   display: flex;
@@ -5675,11 +5688,12 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
 .er-menu-sub:hover > .er-menu,
 .er-menu-sub.open > .er-menu { display: block; }
 
-/* 顶层菜单贴到右边缘时整棵往左开，二级菜单跟着改到左边 */
+/* 顶层菜单贴到右边缘时整棵往左开，二级菜单跟着改到左边（桥也换边） */
 .er-menu.flip .er-menu-sub > .er-menu {
   left: auto;
   right: calc(100% + 3px);
 }
+.er-menu.flip .er-menu-sub::after { left: -4px; right: auto; }
 
 .er-menu-head {
   padding: 5px 8px 4px;

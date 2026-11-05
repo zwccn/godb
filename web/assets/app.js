@@ -11069,8 +11069,13 @@ function erBuildMenu(items) {
     if (it.head) { m.appendChild(el('div', 'er-menu-head', it.head)); continue; }
     // 自定义内容（颜色板这种放不进「一行一个按钮」的东西）
     if (it.node) { m.appendChild(it.node); continue; }
-    // 二级菜单：靠 CSS 的 :hover 展开（键盘/触屏用点击切 .open），
-    // 不需要 JS 算位置，也就不会有「鼠标一移就收起来」的抖动。
+    // 二级菜单：展开交给 CSS 的 :hover（键盘/触屏用点击切 .open），JS 只负责
+    // **别收得太急**。
+    //
+    // 缝隙有 CSS 的透明桥顶着，但鼠标斜着从父项往子菜单走时，会先离开父项、
+    // 又还没到子菜单（下方可能是父菜单里的别的项）—— :hover 一断就 display:none，
+    // 等鼠标到了，菜单已经不在了。所以离开后给 150ms 宽限，中途回到父项或
+    // 落进子菜单就取消。
     if (it.sub) {
       const wrap = el('div', 'er-menu-sub');
       const b = el('button', 'er-menu-item has-sub', it.label);
@@ -11082,7 +11087,23 @@ function erBuildMenu(items) {
         wrap.classList.toggle('open');
       });
       wrap.appendChild(b);
-      wrap.appendChild(erBuildMenu(it.sub));
+      const subEl = erBuildMenu(it.sub);
+      wrap.appendChild(subEl);
+
+      let closeTimer = 0;
+      const keep = () => {
+        if (closeTimer) { clearTimeout(closeTimer); closeTimer = 0; }
+        wrap.classList.add('open');
+      };
+      const release = () => {
+        if (closeTimer) clearTimeout(closeTimer);
+        closeTimer = setTimeout(() => { closeTimer = 0; wrap.classList.remove('open'); }, 150);
+      };
+      // wrap 的 leave 在「离开父项但还没进子菜单」时就触发；进到子菜单要单独兜一下：
+      // 子菜单是 wrap 的后代，几何上已经在外面，event 不一定再补一次 enter。
+      wrap.addEventListener('pointerenter', keep);
+      wrap.addEventListener('pointerleave', release);
+      subEl.addEventListener('pointerenter', keep);
       m.appendChild(wrap);
       continue;
     }

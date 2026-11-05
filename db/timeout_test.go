@@ -127,17 +127,28 @@ func TestStatementTimeoutInterrupts(t *testing.T) {
 func TestKillInterruptsRunningStatement(t *testing.T) {
 	d := newTestDB(t)
 	s := "victim"
-	seedWide(t, d, s, "t_kill", 50000)
+	seedWide(t, d, s, "t_kill", 100000)
 
 	sess := d.Session(s)
 	done := make(chan error, 1)
 	go func() {
-		_, err := d.Exec(sess, `SELECT count(*) FROM t_kill WHERE v >= 0`)
+		_, err := d.Exec(sess, `SELECT sum(id) FROM t_kill WHERE v >= 0`)
 		done <- err
 	}()
 
-	// 3ms 后发 Kill：此时扫描还在进行（5 万行要十几毫秒）。
-	time.Sleep(3 * time.Millisecond)
+	// 等它**真的开始跑**再 Kill，不靠 sleep 猜时间。
+	//
+	// 测试库的数据全在内存里，10 万行扫一遍只要几毫秒；固定 sleep 3ms 时，
+	// 查询有时已经跑完了（表现为「没被打断」），有时还没进入执行（Cancel 标志
+	// 在 Exec 开头会被清掉，同样打不断）。轮询到 running 再发，两头都不落空。
+	// d.act 是包内字段，同包测试可以直接读快照。
+	waitRunning := time.Now().Add(2 * time.Second)
+	for time.Now().Before(waitRunning) {
+		if a, ok := d.act.snapshotActs()[s]; ok && a.State == ActRunning {
+			break
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
 	if err := d.KillSession(s); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}

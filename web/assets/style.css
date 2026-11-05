@@ -5442,6 +5442,35 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   stroke-opacity: 1;
   stroke-width: 2;
 }
+/* 飞线：鼠标压在连线上时，一串小光点从**主键那一端**流向另一端。
+   路径在 JS 里按方向重排（见 erFlowDir），所以这里只管沿路径正向流动：
+   dashoffset 往负走 = 光点朝路径终点走。
+   两端都不是主键时不画这条路径（没有方向），高亮照旧。 */
+.er-flow {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 5 13;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s;
+}
+.er-hit:hover + .er-flow {
+  opacity: 1;
+  /* 光晕只在悬停时加：每张图可能有几十上百条飞线，全都挂着 filter 会让
+     平移/缩放时多算一堆离屏合成。悬停时只有一条元素被加滤镜。 */
+  filter: drop-shadow(0 0 3px var(--accent));
+  animation: er-flow-dash 1.1s linear infinite;
+}
+@keyframes er-flow-dash {
+  to { stroke-dashoffset: -36; }   /* 一个 dash 周期 18px，两格 = 36，接得上 */
+}
+/* 系统开了「减少动态效果」就不跑动画，只留一条亮着的线 */
+@media (prefers-reduced-motion: reduce) {
+  .er-hit:hover + .er-flow { animation: none; stroke-dasharray: none; }
+}
+
 /* 热区：连线本身 pointer-events:none，点不中，单独铺一条宽的透明路径 */
 .er-hit {
   fill: none;

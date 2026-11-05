@@ -9752,6 +9752,8 @@ function erEdgeGeom(a, b, ay, by, lane, avoid) {
 
   return {
     d: erPolyPath(pts, ER.corner),
+    // 折线点也带出去：飞线要按方向重拼一条路径（反着画才是从主键流向外部）。
+    pts,
     a: { x: ax, y: ay, dir: aSide > 0 ? 'right' : 'left' },
     b: { x: bx, y: by, dir: bSide > 0 ? 'right' : 'left' },
   };
@@ -9857,6 +9859,27 @@ function erRender() {
   erCanvas.appendChild(frag);
 }
 
+// erIsPKCol 判断这条边的一端是不是落在主键上。
+function erIsPKCol(t, colName) {
+  const want = String(colName || '').toLowerCase();
+  for (const c of (t && t.columns) || []) {
+    if (String(c.name).toLowerCase() === want) return !!c.primaryKey;
+  }
+  return false;
+}
+
+// erFlowDir 决定飞线往哪边流：1 = from→to，-1 = to→from，0 = 没有方向。
+//
+// 规则只有一条「从主键流向外键」：一端是主键、另一端不是，就朝不是的那一端流。
+// 两端都是主键（一对一自连接之类）或都不是，就没有方向 —— 那就不画飞线，
+// 只保留原来的高亮。
+function erFlowDir(e) {
+  const fpk = erIsPKCol(e.from, e.fromCol);
+  const tpk = erIsPKCol(e.to, e.toCol);
+  if (fpk === tpk) return 0;
+  return fpk ? 1 : -1;
+}
+
 function erDrawEdges(svg, model) {
   // 先分配通道：同一列、同一侧的线按顺序错开。不这么做的话，一列卡片右侧
   // 的三条线会完全重合，看着像一根粗线 —— 那这张图就没法读了。
@@ -9899,6 +9922,20 @@ function erDrawEdges(svg, model) {
     const hit = erSvg('path', { class: 'er-hit', d: g.d });
     hit.dataset.edge = e.id;
     svg.appendChild(hit);
+
+    // 飞线：鼠标压在线上时，从**主键那一端**流向另一端。
+    // 路径点按方向重排 —— dashoffset 往负走就是沿路径正向流，所以方向对了
+    // 只需要把折线反过来画。两端都不是主键（或都是主键）就没有方向，不画。
+    const dir = erFlowDir(e);
+    if (dir) {
+      const flow = erSvg('path', {
+        class: 'er-flow',
+        d: erPolyPath(dir > 0 ? g.pts : g.pts.slice().reverse(), ER.corner),
+      });
+      flow.dataset.edge = e.id;
+      flow.dataset.dir = dir > 0 ? 'from' : 'to';
+      svg.appendChild(flow);
+    }
 
     // 基数按 From → To 标，不按屏幕左右：一条「1:N」翻个面还是「1:N」，
     // 可它两端谁是一、谁是多是固定的，符号得跟着端点走。

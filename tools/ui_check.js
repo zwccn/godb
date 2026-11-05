@@ -4392,6 +4392,62 @@ class CDP {
     check('模型图：连线是带圆角的直角折线',
       built.corners > 0, `${built.corners} 个圆角`);
 
+    /* 飞线：鼠标压在连线上，一串小光点从**主键那一端**流向另一端。
+       这条是 er_basis.id（主键）→ er_fact.basis_id（外键），方向该是 from → to，
+       所以飞线路径的起点必须和连线起点重合。 */
+    const flowInfo = await cdp.eval(`(() => {
+      const f = document.querySelector('.er-flow');
+      if (!f) return null;
+      const edge = document.querySelector('.er-edge');
+      const p0 = f.getPointAtLength(0);
+      const e0 = edge.getPointAtLength(0);
+      return {
+        dir: f.dataset.dir,
+        dx: Math.round(Math.abs(p0.x - e0.x) * 10) / 10,
+        dy: Math.round(Math.abs(p0.y - e0.y) * 10) / 10,
+      };
+    })()`);
+    const hoverPt = await cdp.eval(`(() => {
+      const h = document.querySelector('.er-hit');
+      if (!h) return null;
+      const L = h.getTotalLength();
+      const svg = h.ownerSVGElement;
+      const m = svg.getScreenCTM();
+      for (let k = 0; k <= 0.45; k += 0.05) {
+        for (const f of [0.5 + k, 0.5 - k]) {
+          if (f <= 0 || f >= 1) continue;
+          const p = h.getPointAtLength(L * f);
+          const pt = svg.createSVGPoint();
+          pt.x = p.x; pt.y = p.y;
+          const sp = pt.matrixTransform(m);
+          const el = document.elementFromPoint(sp.x, sp.y);
+          if (el && el.classList && el.classList.contains('er-hit')) {
+            return { x: Math.round(sp.x), y: Math.round(sp.y) };
+          }
+        }
+      }
+      return null;
+    })()`);
+    let flowOn = 0;
+    if (hoverPt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hoverPt.x, y: hoverPt.y });
+      await sleep(320);
+      flowOn = await cdp.eval(`(() => {
+        const f = document.querySelector('.er-flow');
+        if (!f) return 0;
+        const cs = getComputedStyle(f);
+        return { opacity: parseFloat(cs.opacity), anim: cs.animationName };
+      })()`);
+    }
+    check('模型图：鼠标压在连线上，飞线从主键那一端流出来',
+      !!flowInfo && flowInfo.dir === 'from' && flowInfo.dx <= 1 && flowInfo.dy <= 1
+      && !!flowOn && flowOn.opacity > 0.9 && flowOn.anim === 'er-flow-dash',
+      flowInfo
+        ? `方向 ${flowInfo.dir} · 起点偏差 ${flowInfo.dx}/${flowInfo.dy} · 悬停透明度 ${flowOn && flowOn.opacity}`
+        : '没有飞线路径');
+    // 移开，别把悬停态带给后面的用例
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 10, y: 10 });
+
     /* 连线不许从别的卡片背后穿过去。
        两边隔着别的组时，竖线本来会直接穿过中间那组的卡片（卡片画在连线上面，
        看上去就是「线进了这张表又从另一边出来」）；两端恰好都在第 0 行时，

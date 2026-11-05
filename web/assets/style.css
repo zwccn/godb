@@ -5920,6 +5920,9 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
    位置必须留在卡片内 —— 卡片是 overflow:hidden，压在边框上会被切掉一半。 */
 .er-col-dot {
   position: absolute;
+  /* 圆点画在卡片右侧的内边距里，但**热区**比它大一圈（见下面的 ::after）：
+     9px 的圆点要求瞄准，手一抖就抓空。 */
+  z-index: 2;
   right: -8px;
   top: 50%;
   width: 9px;
@@ -5934,6 +5937,15 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
 }
 /* 三层显隐：平时几乎看不见（不干扰读字段名），鼠标进卡片时整列浮出来
    （一眼知道这张表每个字段都能拉线），落在某一行时那个点变实心。 */
+.er-col-dot::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 20px;
+  height: 20px;
+  transform: translate(-50%, -50%);
+}
 .er-card:hover .er-col-dot { opacity: .55; }
 .er-col:hover .er-col-dot { opacity: 1; }
 .er-col-dot:hover {

@@ -4270,6 +4270,34 @@ class CDP {
         const t = document.querySelector('.er-col.link-target');
         return !!g && (g.getAttribute('d') || '').indexOf('M') === 0 && !!t;
       })()`);
+
+      /* 不用精确压在某一行上：整张卡片都是落点，命中最近的一行。
+         把鼠标移到目标卡片的**表头**（那儿根本没有字段行），标记仍该亮，
+         而且亮的还是同一张卡片里的行。 */
+      const headPt = await cdp.eval(`(() => {
+        const c = document.querySelector('.er-card[data-table="er_fact"]');
+        const r = c.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 6) };
+      })()`);
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', buttons: 1, button: 'left', x: headPt.x, y: headPt.y,
+      });
+      await sleep(120);
+      const looseHit = await cdp.eval(`(() => {
+        const t = document.querySelector('.er-col.link-target');
+        if (!t) return null;
+        const card = t.closest('.er-card');
+        return { table: card ? card.dataset.table : '', col: t.dataset.col || '' };
+      })()`);
+      check('模型图：拉到卡片上任意位置都能连（不压在行上也行）',
+        !!looseHit && looseHit.table === 'er_fact' && !!looseHit.col,
+        looseHit ? `${looseHit.table}.${looseHit.col}` : '没有高亮任何行');
+
+      // 回到目标行，继续原来的流程
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', buttons: 1, button: 'left', x: dragGeom.to.x, y: dragGeom.to.y,
+      });
+      await sleep(80);
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dragGeom.to.x, y: dragGeom.to.y, button: 'left', buttons: 0, clickCount: 1 });
       await sleep(250);
       linkMenu = await cdp.eval(`(() => {
@@ -4490,28 +4518,29 @@ class CDP {
       }
       return null;
     })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: (delPt || {}).x || 0, y: (delPt || {}).y || 0, button: 'left', clickCount: 1 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: (delPt || {}).x || 0, y: (delPt || {}).y || 0, button: 'left' });
-    const delMenu = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
-      { label: '删除菜单', timeout: 2000 });
-    let deleted = null;
-    if (delMenu) {
-      const dPt = await cdp.eval(`(() => {
+    /* 点线打开菜单，再点「删除这条关系」。
+       这里**重试**：线是细的，偶尔一下点不中（或者撞上上一步残留的菜单）。
+       与其让断言随机红，不如点不中再来一次 —— 重试的对象是「打开菜单」这个动作，
+       不是断言本身。 */
+    let dPt = null;
+    for (let attempt = 0; attempt < 3 && !dPt; attempt++) {
+      await cdp.eval(`erCloseMenus()`);
+      await sleep(80);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: (delPt || {}).x || 0, y: (delPt || {}).y || 0, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: (delPt || {}).x || 0, y: (delPt || {}).y || 0, button: 'left' });
+      dPt = await waitFor(cdp, `(() => {
         const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
           .find(x => x.textContent === '删除这条关系');
-        if (!b) {
-          return { items: [...document.querySelectorAll('.er-menu .er-menu-item')].map(x => x.textContent) };
-        }
+        if (!b) return null;
         const r = b.getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
-      })()`);
-      if (dPt && dPt.x) {
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dPt.x, y: dPt.y, button: 'left', clickCount: 1 });
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dPt.x, y: dPt.y, button: 'left' });
-        await sleep(250);
-      } else {
-        console.log('      菜单里没有「删除这条关系」，实际是：', (dPt && dPt.items || []).join(' | '));
-      }
+      })()`, { label: '删除项', timeout: 1200 });
+    }
+    let deleted = null;
+    if (dPt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dPt.x, y: dPt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dPt.x, y: dPt.y, button: 'left' });
+      await sleep(250);
       deleted = await cdp.eval(`({
         edges: document.querySelectorAll('.er-edge').length,
         links: erDoc.links.length,

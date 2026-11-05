@@ -10307,9 +10307,17 @@ function erLinkDragMove(ev) {
 
   // 落点用「鼠标底下是谁」判断，而不是自己算坐标：画布可能被缩放，
   // DOM 命中测试得到的答案永远和用户眼睛看到的一致。
+  //
+  // 但只认「正好压在字段行上」太苛刻：行只有 20px 高，缩小之后更难瞄。
+  // 所以**整张卡片都算落点**，没压到行就取纵向最近的那一行 —— 由行高亮
+  // 告诉用户会连到哪一列，标记仍然是精确的，只是不用瞄准。
   const under = document.elementFromPoint(ev.clientX, ev.clientY);
-  const row = under && under.closest ? under.closest('.er-col') : null;
-  const card = row && row.closest('.er-card');
+  const el = under && under.closest ? under : null;
+  const card = el ? el.closest('.er-card') : null;
+  let row = el && el.closest('.er-col');
+  if (!row && card && card.dataset.table !== d.t.name) {
+    row = erNearestColRow(card, ev.clientY);
+  }
   let hit = null;
   if (row && card && row.dataset.col && card.dataset.table !== d.t.name) {
     const tt = erTableByName(card.dataset.table);
@@ -10335,6 +10343,18 @@ function erLinkDragMove(ev) {
     pts = [{ x: sx, y: sy }, { x: mx, y: sy }, { x: mx, y: gy }, { x: gx, y: gy }];
   }
   d.ghost.setAttribute('d', erPolyPath(pts, ER.corner));
+}
+
+// erNearestColRow 鼠标在卡片上、但没正对某一行时，取纵向最近的那一行。
+// 只看有 data-col 的行（「还有 N 列」那行不是字段）。
+function erNearestColRow(card, y) {
+  let best = null, bestD = Infinity;
+  for (const row of card.querySelectorAll('.er-col[data-col]')) {
+    const r = row.getBoundingClientRect();
+    const d = Math.abs((r.top + r.bottom) / 2 - y);
+    if (d < bestD) { bestD = d; best = row; }
+  }
+  return best;
 }
 
 function erLinkDragEnd(ev) {

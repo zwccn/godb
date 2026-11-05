@@ -5940,7 +5940,12 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
 }
 /* 拖动中连线不跟着重算（每帧重建整张图会丢 pointer capture），先淡掉，
    松手后重绘。淡到 .25 而不是 0：还能看出「这张表和谁连着」。 */
-.er-canvas.er-dragging .er-edges { opacity: .25; transition: opacity .1s; }
+/* 拖动时连线跟着走（见 erRedrawEdges），所以不该再压暗。
+   以前压到 .25 是因为线不跟手，亮着反而像「钉子留在原地」的残影；
+   现在正好相反 —— 要在拖动中看清线接到哪儿，所以比平时更实一点。 */
+.er-canvas.er-dragging .er-edge,
+.er-canvas.er-dragging .er-tick,
+.er-canvas.er-dragging .er-crow { stroke-opacity: .85; }
 /* 选中：和 hover 分开 —— hover 只说明「鼠标在这儿」，选中是「我点了它」。
    用强调色描一圈，换皮肤也认得出来。单击不再进编辑，这圈反馈得有。 */
 .er-card.sel {

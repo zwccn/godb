@@ -9765,27 +9765,26 @@ function erEdgeGeom(a, b, ay, by, lane, avoid) {
 // 看着像爪子扒住这一行。反过来画（脚在外、根贴卡片）会变成一个悬空的「人」字。
 //
 // 画在卡片外面 3px：连线层在卡片下面，画进卡片里会被盖掉（实测过）。
-function erMark(svg, x, y, dir, kind, edgeId) {
+// erMarkGeom 只算端点符号长什么样，不碰 DOM —— 拖动时每帧都要重算，
+// 节点由调用方复用（见 erDrawEdges 里的 take）。
+function erMarkGeom(x, y, dir, kind) {
   const n = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[dir] || [-1, 0];
   const px = x + n[0] * 3, py = y + n[1] * 3;
   const t = { x: -n[1], y: n[0] };    // 线的法向
 
   if (kind === 'one') {
-    const tick = erSvg('path', {
-      class: 'er-tick',
+    return {
+      cls: 'er-tick',
       d: `M ${px - t.x * 5.5} ${py - t.y * 5.5} L ${px + t.x * 5.5} ${py + t.y * 5.5}`,
-    });
-    tick.dataset.edge = edgeId;
-    svg.appendChild(tick);
-    return;
+    };
   }
   const root = { x: px + n[0] * 10, y: py + n[1] * 10 };
-  let d = `M ${root.x} ${root.y} L ${px} ${py} `;
-  d += `M ${root.x} ${root.y} L ${px + t.x * 4.5} ${py + t.y * 4.5} `;
-  d += `M ${root.x} ${root.y} L ${px - t.x * 4.5} ${py - t.y * 4.5}`;
-  const crow = erSvg('path', { class: 'er-crow', d });
-  crow.dataset.edge = edgeId;
-  svg.appendChild(crow);
+  return {
+    cls: 'er-crow',
+    d: `M ${root.x} ${root.y} L ${px} ${py} `
+      + `M ${root.x} ${root.y} L ${px + t.x * 4.5} ${py + t.y * 4.5} `
+      + `M ${root.x} ${root.y} L ${px - t.x * 4.5} ${py - t.y * 4.5}`,
+  };
 }
 
 function erRender() {
@@ -9880,7 +9879,7 @@ function erFlowDir(e) {
   return fpk ? 1 : -1;
 }
 
-function erDrawEdges(svg, model) {
+function erDrawEdges(svg, model, reuse) {
   // 先分配通道：同一列、同一侧的线按顺序错开。不这么做的话，一列卡片右侧
   // 的三条线会完全重合，看着像一根粗线 —— 那这张图就没法读了。
   const lanes = new Map();
@@ -9893,6 +9892,24 @@ function erDrawEdges(svg, model) {
     lanes.set(key, n + 1);
     e.lane = n;
   }
+
+  // take 取一个可以复用的节点：几何每帧都在变，但**节点本身不该重建**。
+  // 拖动时每帧新建几百个 <path> 是主要开销，而改一个 d 属性几乎免费。
+  //
+  // reuse 里的东西被「认领」就从 map 里删掉；调用结束后还留在里面的，
+  // 就是这一帧不再需要的东西（边被删了、飞线没方向了），由调用方统一删。
+  // class 变了（1:1 的「一横」变成 1:N 的「鸦爪」）也不复用 —— 宁可新建一个。
+  const take = (key, cls, d) => {
+    const n = reuse && reuse.get(key);
+    if (n && n.getAttribute('class') === cls) {
+      reuse.delete(key);
+      if (n.getAttribute('d') !== d) n.setAttribute('d', d);
+      return { n, fresh: false };
+    }
+    const el = erSvg('path', { class: cls, d });
+    el.dataset.k = key;          // 下次重绘靠它认领这一块
+    return { n: el, fresh: true };
+  };
 
   const rects = model.tables.map(t => t._er).filter(Boolean);
   let flowSeq = 0;   // 飞线的相位序号，见下面 animationDelay
@@ -9908,37 +9925,48 @@ function erDrawEdges(svg, model) {
     const g = erEdgeGeom(a, b, ay, by, e.lane, avoid);
     if (!g.d) continue;
 
-    const path = erSvg('path', { class: 'er-edge', d: g.d });
-    path.dataset.edge = e.id;
-    // 字段级标识（表名.列名）给悬停高亮用：卡片级的只能点亮「这张表参与
-    // 的线」，落到某一列才知道「到底哪几条接着这一列」。
-    path.dataset.from = e.from.name + '.' + e.fromCol;
-    path.dataset.to = e.to.name + '.' + e.toCol;
-    path.dataset.ft = e.from.name;
-    path.dataset.tt = e.to.name;
-    svg.appendChild(path);
+    const pe = take(e.id + ':edge', 'er-edge', g.d);
+    const path = pe.n;
+    if (pe.fresh) {
+      // 字段级标识（表名.列名）给悬停高亮用：卡片级的只能点亮「这张表参与
+      // 的线」，落到某一列才知道「到底哪几条接着这一列」。
+      path.dataset.edge = e.id;
+      path.dataset.from = e.from.name + '.' + e.fromCol;
+      path.dataset.to = e.to.name + '.' + e.toCol;
+      path.dataset.ft = e.from.name;
+      path.dataset.tt = e.to.name;
+      svg.appendChild(path);
+    }
 
     // 热区：连线本身 pointer-events:none，点不中。单独铺一条宽的透明路径
     // 接点击 —— 基数得能改，不能只靠「双击没人找得到的地方」。
-    const hit = erSvg('path', { class: 'er-hit', d: g.d });
-    hit.dataset.edge = e.id;
-    svg.appendChild(hit);
+    const he = take(e.id + ':hit', 'er-hit', g.d);
+    const hit = he.n;
+    if (he.fresh) {
+      hit.dataset.edge = e.id;
+      svg.appendChild(hit);
+    }
 
     // 飞线：鼠标压在线上时，从**主键那一端**流向另一端。
     // 路径点按方向重排 —— dashoffset 往负走就是沿路径正向流，所以方向对了
     // 只需要把折线反过来画。两端都不是主键（或都是主键）就没有方向，不画。
     const dir = erFlowDir(e);
     if (dir) {
-      const flow = erSvg('path', {
-        class: 'er-flow',
-        d: erPolyPath(dir > 0 ? g.pts : g.pts.slice().reverse(), ER.corner),
-      });
-      flow.dataset.edge = e.id;
-      flow.dataset.dir = dir > 0 ? 'from' : 'to';
-      // 错开相位：一张卡片几条线同时点亮时，全都从 0 开始就成了「一起闪」，
-      // 错开之后看着像几股数据各走各的。负延迟 = 直接从动画中段起步。
-      flow.style.animationDelay = (-(flowSeq++ % 9) * 0.13).toFixed(2) + 's';
-      svg.appendChild(flow);
+      const fe = take(e.id + ':flow', 'er-flow',
+        erPolyPath(dir > 0 ? g.pts : g.pts.slice().reverse(), ER.corner));
+      const flow = fe.n;
+      const dirName = dir > 0 ? 'from' : 'to';
+      // 方向是**数据**，复用的节点也得跟着改：主键列一改，箭头方向就反了
+      if (flow.dataset.dir !== dirName) flow.dataset.dir = dirName;
+      if (fe.fresh) {
+        flow.dataset.edge = e.id;
+        // 错开相位：一张卡片几条线同时点亮时，全都从 0 开始就成了「一起闪」，
+        // 错开之后看着像几股数据各走各的。负延迟 = 直接从动画中段起步。
+        flow.style.animationDelay = (-(flowSeq++ % 9) * 0.13).toFixed(2) + 's';
+        // 必须紧跟在热区后面：悬停在线上是靠 `.er-hit:hover + .er-flow`
+        // 这条相邻选择器点亮的，插到别处就不亮了。
+        svg.insertBefore(flow, hit.nextSibling);
+      }
     }
 
     // 基数按 From → To 标，不按屏幕左右：一条「1:N」翻个面还是「1:N」，
@@ -9948,22 +9976,35 @@ function erDrawEdges(svg, model) {
     // 上级），两个符号叠在卡片边缘上会糊成一个看不懂的记号。
     const laneOff = (e.lane || 0) * ER.laneGap;
     const aSign = g.a.dir === 'right' ? 1 : -1;
-    erMark(svg, g.a.x + aSign * laneOff, g.a.y, g.a.dir,
-      e.card === 'NM' ? 'many' : 'one', e.id);
-    erMark(svg, g.b.x, g.b.y, g.b.dir, e.card === '11' ? 'one' : 'many', e.id);
+    const marks = [
+      ['a', erMarkGeom(g.a.x + aSign * laneOff, g.a.y, g.a.dir,
+        e.card === 'NM' ? 'many' : 'one')],
+      ['b', erMarkGeom(g.b.x, g.b.y, g.b.dir, e.card === '11' ? 'one' : 'many')],
+    ];
+    for (const [k, mk] of marks) {
+      const me = take(e.id + ':m' + k, mk.cls, mk.d);
+      if (me.fresh) {
+        me.n.dataset.edge = e.id;
+        svg.appendChild(me.n);
+      }
+    }
   }
 
-  svg.addEventListener('pointerdown', ev => {
-    // 点在线上时不要开始平移画布。erStage 的 pointerdown 会 setPointerCapture，
-    // 一旦捕获，后续的 click 目标就变成 stage，连线菜单永远打不开 —— 表现成
-    // 「点线没反应」，而且因为捕获了指针，连拖动都变得诡异。
-    if (ev.target.closest && ev.target.closest('.er-hit')) ev.stopPropagation();
-  });
-  svg.addEventListener('click', ev => {
-    const hit = ev.target.closest && ev.target.closest('.er-hit');
-    if (!hit) return;
-    erOpenEdgeMenu(hit.dataset.edge, ev);
-  });
+  // 监听只挂一次：拖动时复用的是同一个 svg，重复挂会一次点击开好几个菜单。
+  if (!svg.dataset.wired) {
+    svg.dataset.wired = '1';
+    svg.addEventListener('pointerdown', ev => {
+      // 点在线上时不要开始平移画布。erStage 的 pointerdown 会 setPointerCapture，
+      // 一旦捕获，后续的 click 目标就变成 stage，连线菜单永远打不开 —— 表现成
+      // 「点线没反应」，而且因为捕获了指针，连拖动都变得诡异。
+      if (ev.target.closest && ev.target.closest('.er-hit')) ev.stopPropagation();
+    });
+    svg.addEventListener('click', ev => {
+      const hit = ev.target.closest && ev.target.closest('.er-hit');
+      if (!hit) return;
+      erOpenEdgeMenu(hit.dataset.edge, ev);
+    });
+  }
 }
 
 function erGroupEl(g) {
@@ -10313,18 +10354,33 @@ function erSnapshotCards() {
 // erRedrawEdges 只重画**连线层**，卡片一个都不碰。
 //
 // 拖卡片时连线必须跟手。整张 erRender 做不到：它会把卡片 DOM 全部重建，
-// 拖到一半拖拽的那个节点就没了，手势直接断。所以单独留一个只画线的入口，
-// 换掉 <svg class="er-edges"> 本身（层级不变：组框 → 线 → 卡片）。
+// 拖到一半拖拽的那个节点就没了，手势直接断。
+//
+// 也不整块换掉 <svg>：那样每帧都要新建几百个 path，拖动会发涩。这里复用
+// 同一个 svg 和里面的节点，只改 d 属性（见 erDrawEdges 的 take）——
+// 顺带的好处是节点的状态不会丢：悬停高亮、飞线相位、动画进度都还在。
 function erRedrawEdges() {
   if (!erModel || !erOpen) return;
   const w = erModel.w, h = erModel.h;
-  const svg = erSvg('svg', {
-    class: 'er-edges', width: w, height: h, viewBox: `0 0 ${w} ${h}`,
-  });
-  erDrawEdges(svg, erModel);
-  const old = erCanvas.querySelector('svg.er-edges');
-  if (old && old.parentNode) old.parentNode.replaceChild(svg, old);
-  else erCanvas.appendChild(svg);
+  let svg = erCanvas.querySelector('svg.er-edges');
+  if (!svg) {
+    svg = erSvg('svg', { class: 'er-edges', width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+    erCanvas.appendChild(svg);
+    erDrawEdges(svg, erModel);
+    return;
+  }
+  if (+svg.getAttribute('width') !== w || +svg.getAttribute('height') !== h) {
+    svg.setAttribute('width', w);
+    svg.setAttribute('height', h);
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  }
+  const reuse = new Map();
+  for (const el of Array.from(svg.children)) {
+    if (el.dataset && el.dataset.k) reuse.set(el.dataset.k, el);
+  }
+  erDrawEdges(svg, erModel, reuse);
+  // 没被认领的：这条边没了、或者飞线不再有方向。留着就是一条画不动的幽灵。
+  for (const el of reuse.values()) el.remove();
 }
 
 // 按帧合并：一次拖动会来几十个 pointermove，一帧画一次就够，画多了只是白烧 CPU。

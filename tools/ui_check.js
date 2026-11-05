@@ -4165,9 +4165,21 @@ class CDP {
       const menuOpen = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
         { label: '卡片菜单', timeout: 2000 });
       if (menuOpen) {
+        // 组名现在收在「移到分组」二级里：先把鼠标移进父项让 CSS :hover 展开
+        const subPt = await cdp.eval(`(() => {
+          const b = [...document.querySelectorAll('.er-menu > .er-menu-sub > .er-menu-item')]
+            .find(x => x.textContent.indexOf('移到分组') === 0);
+          if (!b) return null;
+          const r = b.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()`);
+        if (subPt) {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: subPt.x, y: subPt.y });
+          await sleep(300);
+        }
         const itemPt = await cdp.eval(`(() => {
           const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
-            .find(x => x.textContent === '回归测试组');
+            .find(x => x.textContent.trim() === '回归测试组');
           if (!b) return null;
           const r = b.getBoundingClientRect();
           return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
@@ -4901,26 +4913,45 @@ class CDP {
       deleted ? `${deleted.edges} 条线 · ${deleted.stats}` : '菜单没开');
 
     // ---- 图上的表：收起一张，再放回来 ----
+    // 「收起」的入口是画布右键的「显示 / 隐藏」：卡片菜单现在只管颜色和分组，
+    // 收起这张表摆在那儿只会让人多点两下。
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);
     const cardsBeforeHide = await cdp.eval(`document.querySelectorAll('.er-card').length`);
-    const hidePt = await cdp.eval(`(() => {
-      const card = document.querySelector('.er-card[data-table="er_fact"]');
-      if (!card) return null;
-      const b = card.querySelector('.er-card-more');
-      const r = b.getBoundingClientRect();
-      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    const rclickAt = async (x, y) => {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', buttons: 2, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'right', buttons: 0, clickCount: 1 });
+      await sleep(300);
+    };
+    const hideBlank = await cdp.eval(`(() => {
+      const r = document.getElementById('erStage').getBoundingClientRect();
+      for (let y = r.top + 70; y < r.bottom - 70; y += 18) {
+        for (let x = r.left + 40; x < r.right - 40; x += 18) {
+          const el = document.elementFromPoint(x, y);
+          if (el && !el.closest('.er-group, .er-card, .er-menu, .er-legend')) {
+            return { x: Math.round(x), y: Math.round(y) };
+          }
+        }
+      }
+      return null;
     })()`);
     let hiddenState = null;
-    if (hidePt) {
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hidePt.x, y: hidePt.y, button: 'left', clickCount: 1 });
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hidePt.x, y: hidePt.y, button: 'left' });
-      const mOpen = await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`,
-        { label: '收起菜单', timeout: 2000 });
-      if (mOpen) {
+    if (hideBlank) {
+      await rclickAt(hideBlank.x, hideBlank.y);
+      // 展开「显示 / 隐藏」二级：CSS 靠 :hover，先把鼠标移进去再点里面的表
+      const subHead = await cdp.eval(`(() => {
+        const b = document.querySelector('.er-menu > .er-menu-sub > .er-menu-item');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (subHead) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: subHead.x, y: subHead.y });
+        await sleep(250);
         const hPt = await cdp.eval(`(() => {
-          const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
-            .find(x => x.textContent === '从图上收起');
+          const sub = document.querySelector('.er-menu > .er-menu-sub > .er-menu');
+          const b = sub && [...sub.querySelectorAll('.er-menu-item')]
+            .find(x => x.textContent.replace(/^[✓　\\s]+/, '') === 'er_fact');
           if (!b) return null;
           const r = b.getBoundingClientRect();
           return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
@@ -5087,39 +5118,106 @@ class CDP {
     await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
     await sleep(250);
 
-    // 「进编辑器」这条路还得在：卡片菜单里那一项，点了才关面板、换 SQL
-    const editorPath = await cdp.eval(`(async () => {
+    // 卡片菜单只剩「这张卡片怎么摆」的三件事：改变颜色 / 移除分组 / 移到分组。
+    // 表结构走双击卡片、进编辑器走侧栏、收起走画布右键、删表走表设计页 ——
+    // 四个入口各归其位，菜单里不再摊一堆低频项。
+    const morePt = await cdp.eval(`(() => {
       const card = document.querySelector('.er-card');
       const more = card.querySelector('.er-card-more');
       const r = more.getBoundingClientRect();
-      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), table: card.dataset.table };
     })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: editorPath.x, y: editorPath.y, button: 'left', clickCount: 1 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: editorPath.x, y: editorPath.y, button: 'left' });
-    await sleep(250);
-    const openItem = await cdp.eval(`(() => {
-      const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
-        .find(x => x.textContent === '在编辑器中打开');
+    const menuTopItems = async () => cdp.eval(`(() => {
+      const m = document.querySelector('.er-menu');
+      if (!m) return [];
+      return [...m.querySelectorAll(':scope > .er-menu-item, :scope > .er-menu-sub > .er-menu-item')]
+        .map(b => b.textContent.trim());
+    })()`);
+    const tapPt = async pt => {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+      await sleep(250);
+    };
+    await tapPt(morePt);
+    const cardItems = await menuTopItems();
+    check('模型图：卡片菜单只剩三件事（改变颜色 / 移除分组 / 移到分组）',
+      cardItems.length >= 2 && cardItems[0] === '改变颜色'
+      && cardItems.indexOf('移到分组›') >= 0
+      && cardItems.indexOf('编辑表结构') < 0 && cardItems.indexOf('在编辑器中打开') < 0,
+      cardItems.join(' | '));
+
+    // 改变颜色：菜单里挑一个色，卡片自己换色（不再跟着组色走）
+    const colorPt = await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('.er-menu > .er-menu-item')].find(x => x.textContent.trim() === '改变颜色');
       if (!b) return null;
       const r = b.getBoundingClientRect();
       return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     })()`);
-    if (openItem) {
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: openItem.x, y: openItem.y, button: 'left', clickCount: 1 });
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: openItem.x, y: openItem.y, button: 'left' });
+    let colorUi = null;
+    if (colorPt) {
+      await tapPt(colorPt);
+      const sw = await cdp.eval(`(() => {
+        const b = document.querySelectorAll('.er-menu .er-swatch')[7];
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (sw) {
+        await tapPt(sw);
+        const cardSel = '.er-card[data-table="' + morePt.table + '"]';
+        const own = await cdp.eval(`({
+          cls: document.querySelector(${JSON.stringify(cardSel)}).className,
+          saved: erCardRec(erTableByName(${JSON.stringify(morePt.table)})).color,
+        })`);
+        // 再走一遍菜单，点「跟随分组颜色」把它还回去
+        const morePt2 = await cdp.eval(`(() => {
+          const more = document.querySelector(${JSON.stringify(cardSel + ' .er-card-more')});
+          if (!more) return null;
+          const r = more.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()`);
+        let back = null;
+        if (morePt2) {
+          await tapPt(morePt2);
+          const c2 = await cdp.eval(`(() => {
+            const b = [...document.querySelectorAll('.er-menu > .er-menu-item')].find(x => x.textContent.trim() === '改变颜色');
+            if (!b) return null;
+            const r = b.getBoundingClientRect();
+            return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+          })()`);
+          if (c2) {
+            await tapPt(c2);
+            const f = await cdp.eval(`(() => {
+              const b = [...document.querySelectorAll('.er-menu > .er-menu-item')].find(x => x.textContent.trim() === '跟随分组颜色');
+              if (!b) return null;
+              const r = b.getBoundingClientRect();
+              return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+            })()`);
+            if (f) {
+              await tapPt(f);
+              back = await cdp.eval(`({
+                cls: document.querySelector(${JSON.stringify(cardSel)}).className,
+                saved: erCardRec(erTableByName(${JSON.stringify(morePt.table)})).color,
+              })`);
+            }
+          }
+        }
+        colorUi = { own, back };
+      }
     }
-    const editorUi = await waitFor(cdp, `document.getElementById('erPanel').classList.contains('hidden')
-      ? { sql: editor.value, home: document.getElementById('btnHome').classList.contains('on') } : null`,
-      { label: '菜单进编辑器', timeout: 4000 });
-    check('模型图：要进编辑器走卡片菜单（面板关 + SQL 换成这张表）',
-      !!openItem && !!editorUi && editorUi.sql.includes(firstTable) && editorUi.home,
-      editorUi ? `${firstTable} · 菜单项 ${openItem ? '有' : '无'}` : '菜单没点成');
+    check('模型图：卡片菜单「改变颜色」把这张表单独改色，再能还原成组色',
+      !!colorUi && /\bg7\b/.test(colorUi.own.cls) && colorUi.own.saved === 7
+      && !!colorUi.back && !/\bg7\b/.test(colorUi.back.cls) && colorUi.back.saved === -1,
+      colorUi ? `选中 ${colorUi.own.cls} · 还原 ${colorUi.back ? colorUi.back.cls : '没点成'}` : '色板没打开');
 
     /* 右键菜单：点哪儿弹哪儿的。
-       卡片 = 这张表的事（表结构 / 进编辑器 / 归组），空白 = 整张图的事
+       卡片 = 这张卡片怎么摆（颜色 / 分组），空白 = 整张图的事
        （显示隐藏 / 新建 / 排列）。以前空白右键直接开表清单，卡片右键出的是
        浏览器原生菜单 —— 三个层级只有一层能操作。 */
-    await cdp.eval(`document.getElementById('btnEr').click()`);
+    // 上一个用例可能已经把面板关掉了（老版本是「进编辑器」），这里只保证它是开的
+    await cdp.eval(`(() => {
+      if (document.getElementById('erPanel').classList.contains('hidden')) document.getElementById('btnEr').click();
+    })()`);
     await sleep(600);
     const blankPt = await cdp.eval(`(() => {
       const r = document.getElementById('erStage').getBoundingClientRect();
@@ -5232,9 +5330,10 @@ class CDP {
         return { items: [...m.querySelectorAll('.er-menu-item')].map(b => b.textContent) };
       })()`);
     }
-    check('模型图：卡片上右键弹这张表的菜单',
-      !!cardCtx && cardCtx.items.indexOf('编辑表结构') >= 0
-      && cardCtx.items.indexOf('在编辑器中打开') >= 0,
+    check('模型图：卡片上右键弹这张卡片的菜单（颜色 / 分组，没有画布那套）',
+      !!cardCtx && cardCtx.items[0] === '改变颜色'
+      && cardCtx.items.indexOf('移到分组›') >= 0
+      && cardCtx.items.indexOf('自动排列') < 0,
       cardCtx ? cardCtx.items.join(' | ') : '没有菜单');
     await cdp.eval(`erCloseMenus()`);
 

@@ -61,13 +61,16 @@ type modelColumn struct {
 // modelTable 是模型里的一张表。ID 是模型内部的稳定标识（t1/t2…），
 // 关系、分组都按它引用 —— 改名不会让连线散架。
 type modelTable struct {
-	ID      string        `json:"id"`
-	Name    string        `json:"name"`
-	Comment string        `json:"comment,omitempty"`
-	Hidden  bool          `json:"hidden,omitempty"`
-	X       *float64      `json:"x,omitempty"`
-	Y       *float64      `json:"y,omitempty"`
-	Group   string        `json:"group,omitempty"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Comment string   `json:"comment,omitempty"`
+	Hidden  bool     `json:"hidden,omitempty"`
+	X       *float64 `json:"x,omitempty"`
+	Y       *float64 `json:"y,omitempty"`
+	Group   string   `json:"group,omitempty"`
+	// Color 是这张卡片**自己的**色号（0..15）；null 表示跟随所属分组的颜色。
+	// 用指针而不是 -1：0 号色是合法值，用 int 的零值分不清「没设过」和「选了 0 号」。
+	Color   *int          `json:"color,omitempty"`
 	Columns []modelColumn `json:"columns"`
 }
 
@@ -230,6 +233,11 @@ func (m *modelDoc) normalize() {
 		}
 		if t.Group != "" && !seenGroup[t.Group] {
 			t.Group = ""
+		}
+		// 色号越界就当「没设过」= 跟随分组，而不是夹到边界：
+		// 客户端写坏一个 99 时，用户看到的是「跟我挑的不一样」，夹到 15 只会更费解。
+		if t.Color != nil && (*t.Color < 0 || *t.Color > 15) {
+			t.Color = nil
 		}
 		if r := []rune(t.Comment); len(r) > 200 {
 			t.Comment = string(r[:200])

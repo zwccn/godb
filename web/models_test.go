@@ -154,6 +154,64 @@ func TestModelNormalizesInput(t *testing.T) {
 	}
 }
 
+// 表级颜色：0 号色是合法值，不能被当成「没设过」——Go 那边用 *int 就是为了
+// 分清这两种情况。越界的色号当没设过（跟随分组），而不是夹到边界。
+func TestModelTableColor(t *testing.T) {
+	s, _, dir := newDBServer(t)
+	id := createModel(t, s, "配色")
+	body := `{"name":"配色","tables":[
+		{"id":"t1","name":"a","color":0,"columns":[{"name":"id","type":"INTEGER"}]},
+		{"id":"t2","name":"b","color":7,"columns":[{"name":"id","type":"INTEGER"}]},
+		{"id":"t3","name":"c","color":99,"columns":[{"name":"id","type":"INTEGER"}]},
+		{"id":"t4","name":"d","columns":[{"name":"id","type":"INTEGER"}]}]}`
+	if code, b := modelReq(t, s, http.MethodPost, "/api/models/"+id, body); code != http.StatusOK {
+		t.Fatalf("save = %d %s", code, b)
+	}
+	m := mustModel(t, s, "/api/models/"+id)
+
+	want := map[string]int{"a": 0, "b": 7} // -1 = 没设过
+	for _, tb := range m.Tables {
+		got := -1
+		if tb.Color != nil {
+			got = *tb.Color
+		}
+		if exp, ok := want[tb.Name]; ok {
+			if got != exp {
+				t.Fatalf("%s 的色号应存成 %d，现在是 %d", tb.Name, exp, got)
+			}
+			continue
+		}
+		if got != -1 {
+			t.Fatalf("%s 的色号越界（或没写）应当成没设过，现在 %d", tb.Name, got)
+		}
+	}
+
+	// 落盘的文件里不该出现 "color": -1 这种噪音；0 号色必须写出来
+	raw, err := os.ReadFile(filepath.Join(dir, modelsDirName, id, modelFileName))
+	if err != nil {
+		t.Fatalf("读模型文件: %v", err)
+	}
+	var disk struct {
+		Tables []map[string]any `json:"tables"`
+	}
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatalf("decode 落盘文件: %v", err)
+	}
+	for _, tb := range disk.Tables {
+		name, _ := tb["name"].(string)
+		_, has := tb["color"]
+		if name == "a" && (!has || tb["color"].(float64) != 0) {
+			t.Fatalf("0 号色必须落盘（否则重开就丢）: %v", tb)
+		}
+		if name == "b" && (!has || tb["color"].(float64) != 7) {
+			t.Fatalf("7 号色必须落盘: %v", tb)
+		}
+		if (name == "c" || name == "d") && has {
+			t.Fatalf("%s 没设过色，文件里不该有 color 字段: %v", name, tb)
+		}
+	}
+}
+
 func createModel(t *testing.T, s *Server, name string) string {
 	t.Helper()
 	code, b := modelReq(t, s, http.MethodPost, "/api/models", `{"name":"`+name+`"}`)

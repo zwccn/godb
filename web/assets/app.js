@@ -7904,6 +7904,7 @@ function openModelDesigner(tableId, focusCol) {
   hint.textContent = '';
   hint.className = 'modal-hint';
   document.getElementById('btnSqlPreview').disabled = true;
+  document.getElementById('btnDelTable').classList.remove('hidden');
   designerModalEl().classList.add('model-mode');
   designerModalEl().classList.remove('hidden');
   setSqlPreviewOpen(false);
@@ -7961,6 +7962,7 @@ function openDesigner(name) {
   }
 
   document.getElementById('designerTitle').textContent = t ? '表设计器 · ' + t.name : '新建表';
+  document.getElementById('btnDelTable').classList.add('hidden');   // 库里的表不走模型这套
   document.getElementById('designerTableName').value = t ? t.name : '';
   document.getElementById('designerMeta').textContent = t
     ? `${t.rows} 行 · ${t.columns.length} 列`
@@ -7983,6 +7985,7 @@ function closeDesigner() {
   designerModalEl().classList.add('hidden');
   designerModalEl().classList.remove('model-mode');
   document.getElementById('btnSqlPreview').disabled = false;
+  document.getElementById('btnDelTable').classList.add('hidden');
   designer = null;
 }
 
@@ -8442,6 +8445,18 @@ window.addEventListener('resize', hideCtxMenu);
 document.getElementById('btnDesignerClose').addEventListener('click', closeDesigner);
 document.getElementById('btnDesignerCancel').addEventListener('click', closeDesigner);
 document.getElementById('btnDesignerSave').addEventListener('click', saveDesigner);
+
+// 从模型里删表：入口只在表设计页（模型模式）。菜单里那条挪过来的原因是
+// 卡片菜单只留卡片摆放相关的事，而「删掉这张表」属于改结构，跟着结构页走更好找。
+document.getElementById('btnDelTable').addEventListener('click', () => {
+  if (!designer || designer.mode !== 'model' || !erModelDoc) return;
+  const mt = (erModelDoc.tables || []).find(t => t.id === designer.modelId);
+  if (!mt) return;
+  if (!confirm(`从模型里删除表「${mt.name}」？\n\n只删模型里的这张表，库里的不受影响。`)) return;
+  closeDesigner();
+  erDropModelTable(mt.id);
+  toast('已从模型里删除「' + mt.name + '」');
+});
 document.getElementById('btnSqlPreview').addEventListener('click', () => {
   const pre = document.getElementById('designerSql');
   setSqlPreviewOpen(pre.classList.contains('hidden'));
@@ -9243,11 +9258,15 @@ function erNormalizeDoc(d) {
       if (!c || typeof c !== 'object') continue;
       // 坐标可以是 null：表被移进某个分组但还没被拖过，这时有归属没位置。
       const hasPos = Number.isFinite(c.x) && Number.isFinite(c.y);
+      // 表自己的色号：-1 = 跟随所属分组（没设过也是它）
+      let tcolor = Number.isFinite(c.color) ? c.color : -1;
+      if (tcolor < 0 || tcolor > ER_TONES - 1) tcolor = -1;
       out.tables[k] = {
         group: gids.has(c.group) ? c.group : '',
         x: hasPos ? c.x : null,
         y: hasPos ? c.y : null,
         hidden: c.hidden === true,
+        color: tcolor,
       };
     }
   }
@@ -9299,10 +9318,11 @@ function erCardRec(t) {
   const k = erTKey(t);
   let c = erDoc.tables[k];
   if (!c) {
-    c = { group: '', x: null, y: null, hidden: false };
+    c = { group: '', x: null, y: null, hidden: false, color: -1 };
     erDoc.tables[k] = c;
   }
   if (typeof c.hidden !== 'boolean') c.hidden = false;
+  if (!Number.isFinite(c.color)) c.color = -1;
   return c;
 }
 
@@ -10263,7 +10283,11 @@ function erEndGroupDrag(ev) {
 
 function erCardEl(t, g) {
   const r = t._er;
-  const card = el('div', 'er-card g' + g.tone);
+  // 色号：这张表自己挑过就用自己的，没挑过跟随所在分组 —— 「一组一色」还是默认，
+  // 单独挑色只是为了在图里把某几张表拎出来（比如核心表），不该逼着人建新分组。
+  const own = erCardRec(t).color;
+  const tone = own >= 0 ? own : g.tone;
+  const card = el('div', 'er-card g' + tone);
   card.style.left = r.x + 'px';
   card.style.top = r.y + 'px';
   card.style.width = r.w + 'px';
@@ -10283,7 +10307,7 @@ function erCardEl(t, g) {
 
   const more = el('button', 'er-card-more', '⋯');
   more.type = 'button';
-  more.title = '分组与显示';
+  more.title = '颜色与分组';
   more.addEventListener('pointerdown', ev => ev.stopPropagation());
   more.addEventListener('click', ev => {
     ev.stopPropagation();
@@ -10801,9 +10825,15 @@ function erNewModelTable() {
 function erDeleteModelTable(t) {
   if (!erModelDoc || !t) return;
   if (!confirm(`从模型里删除表「${t.name}」？\n\n只删模型里的这张表，库里的不受影响。`)) return;
-  erModelDoc.tables = (erModelDoc.tables || []).filter(x => x.id !== t.id);
-  delete erDoc.tables[t.id];
-  erDoc.links = erDoc.links.filter(l => l.from.table !== t.id && l.to.table !== t.id);
+  erDropModelTable(t.id);
+}
+
+// erDropModelTable 是真正动手的那一半（不带确认）：表设计页已经问过一次了。
+function erDropModelTable(id) {
+  if (!erModelDoc || !id) return;
+  erModelDoc.tables = (erModelDoc.tables || []).filter(x => x.id !== id);
+  delete erDoc.tables[id];
+  erDoc.links = erDoc.links.filter(l => l.from.table !== id && l.to.table !== id);
   erSchema = erCardsOf(erModelDoc);
   erRender();
   erSave();
@@ -10909,19 +10939,21 @@ function erDeleteGroup(g) {
   erSave();
 }
 
-// 分组配色：16 个马卡龙色块，点一下就定，不再「点一下换下一个」。
+// 色板：16 个马卡龙色块，点一下就定，不再「点一下换下一个」。
 //
 // 循环切换的问题：想要的颜色在第 11 个，就得连点 11 下，而且顺序固定、记不住。
-function erColorGrid(g) {
+// 组和卡片共用这一块，所以把「当前色号」和「选中后干什么」都交出去，
+// 免得同一份色板写两遍、改一处漏一处。
+function erColorGrid(tone, pick) {
   const wrap = el('div', 'er-palette');
   for (let i = 0; i < ER_TONES; i++) {
-    const b = el('button', 'er-swatch g' + i + (g.tone === i ? ' on' : ''));
+    const b = el('button', 'er-swatch g' + i + (tone === i ? ' on' : ''));
     b.type = 'button';
     b.title = '用这个颜色';
     b.setAttribute('aria-label', '颜色 ' + (i + 1));
     b.addEventListener('click', ev => {
       ev.stopPropagation();
-      erSetGroupColor(g, i);
+      pick(i);
     });
     wrap.appendChild(b);
   }
@@ -10934,8 +10966,36 @@ function erOpenGroupColor(g, anchorEl) {
   const sr = erStage.getBoundingClientRect();
   erShowMenu(r.left - sr.left, r.bottom - sr.top + 6, [
     { head: '分组颜色' },
-    { node: erColorGrid(g) },
+    { node: erColorGrid(g.tone, i => erSetGroupColor(g, i)) },
   ]);
+}
+
+// 卡片自己挑色。默认跟随分组（-1），挑过之后单独生效；
+// 菜单里留一条「跟随分组颜色」把这张表还回组色，否则挑错一次就没回头路。
+function erOpenTableColor(t, anchorEl) {
+  if (!anchorEl) return;
+  const rec = erCardRec(t);
+  const r = anchorEl.getBoundingClientRect();
+  const sr = erStage.getBoundingClientRect();
+  const items = [
+    { head: '这张卡片的颜色' },
+    { node: erColorGrid(rec.color, i => erSetTableColor(t, i)) },
+  ];
+  if (rec.color >= 0) {
+    items.push({ sep: true });
+    items.push({ label: '跟随分组颜色', run: () => erSetTableColor(t, -1) });
+  }
+  // 和卡片菜单同一处弹出（卡片右侧对齐），免得「点颜色 → 菜单跳到别处」
+  erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
+}
+
+function erSetTableColor(t, tone) {
+  if (!erDoc || !t) return;
+  const rec = erCardRec(t);
+  rec.color = tone < 0 ? -1 : ((tone % ER_TONES) + ER_TONES) % ER_TONES;
+  erCloseMenus();
+  erRender();
+  erSave();
 }
 
 function erSetGroupColor(g, tone) {
@@ -11058,28 +11118,33 @@ function erShowMenu(x, y, items) {
   return m;
 }
 
+// 卡片菜单只留「这张卡片在图上怎么摆」的三件事：自己挑色、从组里拿出去、换到别的组。
+//
+// 表结构（双击卡片）、进编辑器（侧栏点表名）、收起（画布右键的显示/隐藏）、
+// 删表（表设计页里那个按钮）都有各自更顺手的入口，摊在这份菜单里只会
+// 让「我只是想挪个组」多扫四行无关的东西。
 function erOpenCardMenu(t, cardEl, ev) {
   const r = cardEl.getBoundingClientRect();
   const sr = erStage.getBoundingClientRect();
   const cur = erGroupOf(t);
   const items = [
-    { label: '编辑表结构', run: () => openModelDesigner(t.id) },
-    { label: '在编辑器中打开', run: () => erOpenTable(t) },
-    { sep: true },
-    { head: '移到分组' },
+    { label: '改变颜色', run: () => erOpenTableColor(t, cardEl) },
   ];
+  // 不在组里就没有「移除」可言。宁可少一行，也不要放一条点了没反应的项。
+  if (cur) items.push({ label: '移除分组', run: () => erMoveToGroup(t, '') });
+
+  const sub = [];
   for (const g of erDoc.groups) {
-    items.push({
+    sub.push({
       label: g.name || '未命名分组',
       on: cur === g.id,
       run: () => erMoveToGroup(t, g.id),
     });
   }
-  items.push({ label: '未分组', on: !cur, run: () => erMoveToGroup(t, '') });
-  items.push({ label: '+ 新建分组并移入', run: () => erMoveToGroup(t, erAddGroup()) });
-  items.push({ sep: true });
-  items.push({ label: '从图上收起', run: () => erSetShown(t, false) });
-  items.push({ label: '从模型里删除', danger: true, run: () => erDeleteModelTable(t) });
+  if (sub.length) sub.push({ sep: true });
+  sub.push({ label: '+ 新建分组并移入', run: () => erMoveToGroup(t, erAddGroup()) });
+  items.push({ label: '移到分组', sub });
+
   // 右键时按指针位置弹，和系统菜单的习惯一致；点 ⋯ 仍贴着卡片右上角。
   if (ev) erShowMenu(ev.clientX - sr.left + 2, ev.clientY - sr.top + 2, items);
   else erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
@@ -11307,6 +11372,7 @@ function erDocFromModel(m) {
     out.tables[t.id] = {
       group: t.group || '', x: t.x == null ? null : t.x,
       y: t.y == null ? null : t.y, hidden: !!t.hidden,
+      color: Number.isFinite(t.color) ? t.color : -1,
     };
   }
   for (const l of (m.links || [])) {
@@ -11337,6 +11403,9 @@ function erDocToModel(doc, m) {
     t.y = rec.y;
     t.group = rec.group || '';
     t.hidden = !!rec.hidden;
+    // -1 表示跟随分组：这时把字段删掉，模型文件里不留一条 "color": -1 的噪音
+    if (rec.color >= 0) t.color = rec.color;
+    else delete t.color;
   }
   for (const l of doc.links) {
     out.links.push({

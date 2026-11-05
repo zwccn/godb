@@ -1158,6 +1158,8 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
       <button id="btnDelCol" class="btn btn-ghost btn-sm">－ 删除字段</button>
       <button id="btnSetPk" class="btn btn-ghost btn-sm">设为主键</button>
       <span class="spacer"></span>
+      <!-- 只在「模型里的表」时出现：库里那张表的删除得写 DROP TABLE，是另一回事 -->
+      <button id="btnDelTable" class="btn btn-ghost btn-sm btn-danger-text hidden">从模型删除</button>
       <button id="btnSqlPreview" class="btn btn-ghost btn-sm">SQL 预览</button>
     </div>
     <div class="designer-name">

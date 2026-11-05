@@ -8944,6 +8944,7 @@ let erLinkDrag = null;   // 从字段行拉关系的临时状态
 let erDoc = null;        // null = 还没从服务端拉过
 let erSaveTimer = 0;     // 保存的防抖句柄
 let erHotGroup = '';     // 最近操作过的那一组，画在最上层
+let erSelTable = '';     // 当前选中的卡片（只是选中，不等于打开这张表）
 let erMenuEl = null;     // 当前打开的浮层菜单
 
 function erTKey(t) { return String(t.id || 0); }
@@ -9915,11 +9916,12 @@ function erCardEl(t, g) {
   card.style.height = r.h + 'px';
   card.dataset.table = t.name;
   t._el = card;   // 整组拖动时按这张卡片的 DOM 一起挪（重绘后重建）
+  if (t.name === erSelTable) card.classList.add('sel');
   card.setAttribute('role', 'button');
   card.tabIndex = 0;
   card.title = `${t.name} · ${t.rows} 行 · ${t.columns.length} 列`
     + (t.comment ? `\n${t.comment}` : '')
-    + '\n点一下打开这张表，拖动可以摆位置';
+    + '\n单击选中，双击打开这张表；拖动可以摆位置';
 
   const head = el('div', 'er-card-head');
   head.appendChild(el('span', 'er-card-name', t.name));
@@ -10019,10 +10021,13 @@ function erCardEl(t, g) {
     if (!erDrag || erDrag.id !== ev.pointerId) return;
     const moved = erDrag.moved;
     erEndDrag(ev);
-    if (!moved) {
-      toggleER(false);
-      openTable(t.name);
-    }
+    // 单击只选中。以前这一下会关掉模型图、把 SQL 换成这张表 —— 图是用来
+    // 读结构的，看一眼就进编辑太容易误触，正在写的东西也跟着没了。
+    if (!moved) erSelectCard(t);
+  });
+  card.addEventListener('dblclick', ev => {
+    ev.stopPropagation();
+    erOpenTable(t);
   });
   card.addEventListener('pointercancel', ev => {
     if (erDrag && erDrag.id === ev.pointerId) erEndDrag(ev);
@@ -10030,11 +10035,34 @@ function erCardEl(t, g) {
   card.addEventListener('keydown', ev => {
     if (ev.key === 'Enter' || ev.key === ' ') {
       ev.preventDefault();
-      toggleER(false);
-      openTable(t.name);
+      erOpenTable(t);
     }
   });
   return card;
+}
+
+// erSelectCard 只标记「点中了哪张卡片」，不切面板、不动 SQL。
+//
+// 为什么要有这一步：单击总得有点反馈，否则用户点一下以为卡了。但它不能是
+// 「打开这张表」—— 那会把正在看/正在写的东西换掉。
+function erSelectCard(t) {
+  erSelTable = t.name;
+  for (const el of erCanvas.querySelectorAll('.er-card.sel')) {
+    if (el !== t._el) el.classList.remove('sel');
+  }
+  if (t._el) t._el.classList.add('sel');
+}
+
+function erClearSel() {
+  erSelTable = '';
+  for (const el of erCanvas.querySelectorAll('.er-card.sel')) el.classList.remove('sel');
+}
+
+// erOpenTable 从模型图进编辑这张表：双击卡片、卡片菜单、键盘 Enter 都走这里。
+function erOpenTable(t) {
+  erClearSel();
+  toggleER(false);
+  openTable(t.name);
 }
 
 // erEndDrag 收尾：松手时才落盘 + 重绘。
@@ -10457,7 +10485,11 @@ function erOpenCardMenu(t, cardEl) {
   const r = cardEl.getBoundingClientRect();
   const sr = erStage.getBoundingClientRect();
   const cur = erGroupOf(t);
-  const items = [{ head: '移到分组' }];
+  const items = [
+    { label: '打开这张表', run: () => erOpenTable(t) },
+    { sep: true },
+    { head: '移到分组' },
+  ];
   for (const g of erDoc.groups) {
     items.push({
       label: g.name || '未命名分组',
@@ -10809,6 +10841,7 @@ erStage.addEventListener('pointerdown', ev => {
   if (erMenuEl && !ev.target.closest('.er-menu')) erCloseMenus();
   if (ev.button === 0 && ev.target.closest('.er-card, .er-group-label, .er-menu, .er-legend')) return;
   if (ev.button === 1) ev.preventDefault();   // 中键别唤出浏览器的自动滚动
+  erClearSel();                               // 点空白 = 取消选中
   erPan = { x: ev.clientX, y: ev.clientY, px: erView.panX, py: erView.panY };
   erStage.setPointerCapture(ev.pointerId);
   erStage.classList.add('panning');

@@ -5765,6 +5765,12 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
 /* 拖动中连线不跟着重算（每帧重建整张图会丢 pointer capture），先淡掉，
    松手后重绘。淡到 .25 而不是 0：还能看出「这张表和谁连着」。 */
 .er-canvas.er-dragging .er-edges { opacity: .25; transition: opacity .1s; }
+/* 选中：和 hover 分开 —— hover 只说明「鼠标在这儿」，选中是「我点了它」。
+   用强调色描一圈，换皮肤也认得出来。单击不再进编辑，这圈反馈得有。 */
+.er-card.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 3px 12px var(--shadow-color, rgba(0, 0, 0, .3));
+}
 .er-card:hover,
 .er-card.hot {
   border-color: hsl(var(--g-h) var(--g-s) 55% / .95);

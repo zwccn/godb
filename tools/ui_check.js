@@ -4408,24 +4408,42 @@ class CDP {
       cleaned.demo === 0 && cleaned.cards === cleaned.tables && cleaned.links === 0,
       `${cleaned.cards} 卡片 / ${cleaned.tables} 张表 · ${cleaned.links} 条关系`);
 
-    // 点卡片 → 回到编辑器并打开这张表（和侧栏点表名是同一个动作）。
-    // 必须用真实鼠标：点开和拖动共用 pointerdown/up，直接 dispatchEvent('click')
-    // 绕过了这一层，测的就不是用户实际走的那条路。
+    /* 单击卡片：**只选中，不进编辑**。
+       以前这一下会关掉模型图、把编辑器里的 SQL 换成这张表 —— 图是用来读结构的，
+       看一眼就跳走太容易误触，正在写的东西也跟着没了。
+       必须用真实鼠标：点选和拖动共用 pointerdown/up，直接 dispatchEvent('click')
+       绕过了这一层，测的就不是用户实际走的那条路。 */
     const firstTable = await cdp.eval(`document.querySelector('.er-card').dataset.table`);
     const clickPt = await cdp.eval(`(() => { const r = document.querySelector('.er-card').getBoundingClientRect();
       return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 12) }; })()`);
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: clickPt.x, y: clickPt.y, button: 'left', clickCount: 1 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: clickPt.x, y: clickPt.y, button: 'left' });
+    const sqlBefore = await cdp.eval(`editor.value`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: clickPt.x, y: clickPt.y, button: 'left', buttons: 1, clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: clickPt.x, y: clickPt.y, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(250);
+    const afterClick = await cdp.eval(`({
+      closed: document.getElementById('erPanel').classList.contains('hidden'),
+      sql: editor.value,
+      sel: (document.querySelector('.er-card.sel') || { dataset: {} }).dataset.table || '',
+    })`);
+    check('模型图：单击卡片只选中，不关面板、不改 SQL',
+      !afterClick.closed && afterClick.sql === sqlBefore && afterClick.sel === firstTable,
+      `面板${afterClick.closed ? '关了' : '还在'} · 选中=${afterClick.sel || '无'}`);
+
+    // 双击才是「打开这张表」。给 CDP 送两次 clickCount（第二次是 2），它才会合成 dblclick。
+    for (const clickCount of [1, 2]) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: clickPt.x, y: clickPt.y, button: 'left', buttons: 1, clickCount });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: clickPt.x, y: clickPt.y, button: 'left', buttons: 0, clickCount });
+    }
     await waitFor(cdp, `document.getElementById('erPanel').classList.contains('hidden')`,
-      { label: '模型图关闭', timeout: 4000 });
-    const afterCard = await cdp.eval(`({
+      { label: '双击打开表', timeout: 4000 });
+    const afterDbl = await cdp.eval(`({
       closed: document.getElementById('erPanel').classList.contains('hidden'),
       sql: editor.value,
       home: document.getElementById('btnHome').classList.contains('on'),
     })`);
-    check('模型图：点卡片回到编辑器并查询这张表',
-      afterCard.closed && afterCard.sql.includes(firstTable) && afterCard.home,
-      `${firstTable} · 面板关 ${afterCard.closed}`);
+    check('模型图：双击卡片才进编辑（面板关 + SQL 换成这张表）',
+      afterDbl.closed && afterDbl.sql.includes(firstTable) && afterDbl.home,
+      `${firstTable} · 面板关 ${afterDbl.closed}`);
 
     // 收拾干净：这一组断言往开发库里写了布局和分组，别留给下一次
     await cdp.eval(`fetch('/api/diagram', { method: 'POST',

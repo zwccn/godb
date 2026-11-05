@@ -10086,6 +10086,7 @@ function erGroupDragMove(ev) {
   d.g.box.y = d.by + dy;
   d.box.style.left = d.g.box.x + 'px';
   d.box.style.top = d.g.box.y + 'px';
+  erQueueEdgeRedraw();       // 整组一起挪，组里每张表的线都得跟着
   ev.preventDefault();
 }
 
@@ -10218,6 +10219,7 @@ function erCardEl(t, g) {
     card.style.left = erDrag.t._er.x + 'px';
     card.style.top = erDrag.t._er.y + 'px';
     erSyncBoxStyles();
+    erQueueEdgeRedraw();     // 连线跟着这一张走（见 erRedrawEdges 的注释）
     ev.preventDefault();
   });
   card.addEventListener('pointerup', ev => {
@@ -10308,6 +10310,33 @@ function erSnapshotCards() {
 
 // erSyncBoxStyles 在拖动过程中把组框收缩到成员卡片的包围盒。
 // 只改 style，不动 DOM 结构。
+// erRedrawEdges 只重画**连线层**，卡片一个都不碰。
+//
+// 拖卡片时连线必须跟手。整张 erRender 做不到：它会把卡片 DOM 全部重建，
+// 拖到一半拖拽的那个节点就没了，手势直接断。所以单独留一个只画线的入口，
+// 换掉 <svg class="er-edges"> 本身（层级不变：组框 → 线 → 卡片）。
+function erRedrawEdges() {
+  if (!erModel || !erOpen) return;
+  const w = erModel.w, h = erModel.h;
+  const svg = erSvg('svg', {
+    class: 'er-edges', width: w, height: h, viewBox: `0 0 ${w} ${h}`,
+  });
+  erDrawEdges(svg, erModel);
+  const old = erCanvas.querySelector('svg.er-edges');
+  if (old && old.parentNode) old.parentNode.replaceChild(svg, old);
+  else erCanvas.appendChild(svg);
+}
+
+// 按帧合并：一次拖动会来几十个 pointermove，一帧画一次就够，画多了只是白烧 CPU。
+let erEdgeRaf = 0;
+function erQueueEdgeRedraw() {
+  if (erEdgeRaf) return;
+  erEdgeRaf = requestAnimationFrame(() => {
+    erEdgeRaf = 0;
+    erRedrawEdges();
+  });
+}
+
 function erSyncBoxStyles() {
   if (!erModel) return;
   erRelayoutBoxes(erModel.groups);

@@ -4546,6 +4546,55 @@ class CDP {
       marks.ticks === 2 && marks.crows === 0,
       `一横 ${marks.ticks} · 鸦爪 ${marks.crows}`);
 
+    /* 拖卡片的过程中，连线要**跟手**。
+       以前只有松手才重绘，拖动时线钉在原地，看着像「连线和表脱开了」。
+       这里按住卡片走两步（不松手）就量一次：贴着这张表的那个端点必须
+       跟着走同样的屏幕位移。 */
+    const edgeProbe = `(() => {
+      const c = document.querySelector('.er-card[data-table="er_fact"]');
+      const p = document.querySelector('.er-edge');
+      if (!c || !p) return null;
+      const cr = c.getBoundingClientRect();
+      const ccx = cr.left + cr.width / 2, ccy = cr.top + cr.height / 2;
+      const svg = p.ownerSVGElement, m = svg.getScreenCTM();
+      const at = len => {
+        const q = p.getPointAtLength(len);
+        const pt = svg.createSVGPoint(); pt.x = q.x; pt.y = q.y;
+        const g = pt.matrixTransform(m);
+        return { x: g.x, y: g.y };
+      };
+      const a = at(0), b = at(p.getTotalLength());
+      const da = (a.x - ccx) ** 2 + (a.y - ccy) ** 2;
+      const db = (b.x - ccx) ** 2 + (b.y - ccy) ** 2;
+      const near = da < db ? a : b;
+      return { end: da < db ? 'from' : 'to', x: near.x, y: near.y, cardL: cr.left, cardT: cr.top };
+    })()`;
+    const dragStart = await cdp.eval(edgeProbe);
+    let midDrag = null;
+    if (dragStart) {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: Math.round(dragStart.cardL + 40), y: Math.round(dragStart.cardT + 8),
+        button: 'left', buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 6; i++) {
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved', x: Math.round(dragStart.cardL + 40 + i * 10),
+          y: Math.round(dragStart.cardT + 8 + i * 5), button: 'left', buttons: 1 });
+      }
+      await sleep(120);   // 等一帧（重画是按 requestAnimationFrame 合并的）
+      midDrag = await cdp.eval(edgeProbe);
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: Math.round(dragStart.cardL + 100), y: Math.round(dragStart.cardT + 38),
+        button: 'left', buttons: 0, clickCount: 1 });
+      await sleep(350);
+    }
+    check('模型图：拖动卡片时连线跟着走（不用等松手）',
+      !!midDrag && midDrag.end === dragStart.end
+      && Math.abs((midDrag.x - dragStart.x) - 60) <= 3
+      && Math.abs((midDrag.y - dragStart.y) - 30) <= 3,
+      midDrag
+        ? `${dragStart.end} 端 Δ=${Math.round(midDrag.x - dragStart.x)}/${Math.round(midDrag.y - dragStart.y)}（应 60/30）`
+        : '量不到连线端点');
+
     const fkUnchanged = await cdp.eval(`fetch('/api/schema').then(r => r.json()).then(s =>
       s.tables.reduce((n, t) => n + (t.foreignKeys || []).length, 0))`);
     check('模型图：画关系不会改库（外键数不变）',

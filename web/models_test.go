@@ -115,7 +115,7 @@ func mustFirstID(t *testing.T, s *Server) string {
 func TestModelNormalizesInput(t *testing.T) {
 	s, _, _ := newDBServer(t)
 	id := createModel(t, s, "脏数据")
-	body := `{"name":"脏数据","groups":[{"id":"g1","color":9},{"id":"g1"}],
+	body := `{"name":"脏数据","groups":[{"id":"g1","color":99},{"id":"g1"},{"id":"g2","color":15}],
 		"tables":[
 			{"id":"t1","name":" orders ","x":1e12,"y":3,"group":"nope","columns":[
 				{"name":"id","type":"INTEGER"},
@@ -149,8 +149,8 @@ func TestModelNormalizesInput(t *testing.T) {
 	if len(m.Links) != 0 {
 		t.Fatalf("悬空端点的关系应整条丢掉: %+v", m.Links)
 	}
-	if len(m.Groups) != 1 || m.Groups[0].Color != -1 {
-		t.Fatalf("重复组 id 丢掉、越界色号归 -1: %+v", m.Groups)
+	if len(m.Groups) != 2 || m.Groups[0].Color != -1 || m.Groups[1].Color != 15 {
+		t.Fatalf("重复组 id 丢掉、越界色号归 -1、色板到 15 为止: %+v", m.Groups)
 	}
 }
 

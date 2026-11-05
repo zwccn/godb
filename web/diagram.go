@@ -309,7 +309,7 @@ func (doc *diagramDoc) normalize() {
 			continue
 		}
 		seenGroup[g.ID] = true
-		if g.Color < -1 || g.Color > 7 {
+		if g.Color < -1 || g.Color > 15 {
 			g.Color = -1
 		}
 		if r := []rune(g.Name); len(r) > diagramMaxName {

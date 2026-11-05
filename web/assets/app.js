@@ -9056,6 +9056,10 @@ const ER = {
   corner: 7,           // 折角圆角半径
 };
 
+// 分组色板的大小。色号 0..ER_TONES-1，-1 表示「按顺序取」。
+// 和 style.css 里的 .g0…g15 一一对应，改一处必须改另一处。
+const ER_TONES = 16;
+
 // 视图状态（缩放 / 平移），和面板开合分开存：关了再开，
 // 除非手动缩放否则每次都重新适应画布。
 let erView = { zoom: 1, panX: 0, panY: 0 };
@@ -9124,7 +9128,7 @@ function erNormalizeDoc(d) {
       if (seen.has(id)) continue;
       seen.add(id);
       let color = Number.isFinite(g.color) ? g.color : -1;
-      if (color < -1 || color > 7) color = -1;
+      if (color < -1 || color > ER_TONES - 1) color = -1;
       // 组坐标只对空组有意义：有成员的组，框由卡片包围盒算。
       const hasPos = Number.isFinite(g.x) && Number.isFinite(g.y);
       out.groups.push({
@@ -9208,8 +9212,13 @@ function erCardRec(t) {
 // 失败不弹提示 —— 布局存不下来不影响用库，弹个红条反而打断看图。
 function erSave() {
   if (erSaveTimer) clearTimeout(erSaveTimer);
+  // 记下这次改的是哪个模型：防抖 300ms 里可能已经切到别的模型了，
+  // 那时再写就会把 A 的布局灌进 B（踩过：切模型/删模型之后，残留的定时器
+  // 把上一个模型的分组写进了当前模型的文件）。
+  const mid = erModelDoc ? erModelDoc.id : '';
   erSaveTimer = setTimeout(() => {
     erSaveTimer = 0;
+    if (!erModelDoc || erModelDoc.id !== mid) return;
     erSaveNow();
   }, 300);
 }
@@ -9338,7 +9347,8 @@ function erBuckets(tables) {
     g.idx = i;
     // tone 是实际用的色相：手工组用自己定的色，未分组固定中性色 ——
     // 两边各算一次迟早会算出两种颜色。
-    g.tone = g.loose ? 7 : (g.color >= 0 ? g.color : i % 8);
+    // 未分组固定用色板最后一个「雾霭」：它是中性色，不会和用户手工选的颜色撞。
+    g.tone = g.loose ? ER_TONES - 1 : (g.color >= 0 ? g.color : i % ER_TONES);
   });
   return out;
 }
@@ -9925,14 +9935,14 @@ function erGroupEl(g) {
   const label = el('div', 'er-group-label');
   if (!g.loose) {
     const dot = el('span', 'er-group-dot');
-    dot.title = '点击换颜色';
+    dot.title = '点击选颜色';
     dot.setAttribute('role', 'button');
     // 色点是「点一下就完事」的按钮，不参与整组拖动：一旦让组框拿到指针捕获，
     // 这一下就成了拖动的开始，改色反而要看运气。
     dot.addEventListener('pointerdown', ev => ev.stopPropagation());
     dot.addEventListener('click', ev => {
       ev.stopPropagation();
-      erCycleGroupColor(g);
+      erOpenGroupColor(g, dot);
     });
     label.appendChild(dot);
   }
@@ -10634,12 +10644,42 @@ function erDeleteGroup(g) {
   erSave();
 }
 
-function erCycleGroupColor(g) {
-  if (g.loose) return;
+// 分组配色：16 个马卡龙色块，点一下就定，不再「点一下换下一个」。
+//
+// 循环切换的问题：想要的颜色在第 11 个，就得连点 11 下，而且顺序固定、记不住。
+function erColorGrid(g) {
+  const wrap = el('div', 'er-palette');
+  for (let i = 0; i < ER_TONES; i++) {
+    const b = el('button', 'er-swatch g' + i + (g.tone === i ? ' on' : ''));
+    b.type = 'button';
+    b.title = '用这个颜色';
+    b.setAttribute('aria-label', '颜色 ' + (i + 1));
+    b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      erSetGroupColor(g, i);
+    });
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+function erOpenGroupColor(g, anchorEl) {
+  if (g.loose || !anchorEl) return;
+  const r = anchorEl.getBoundingClientRect();
+  const sr = erStage.getBoundingClientRect();
+  erShowMenu(r.left - sr.left, r.bottom - sr.top + 6, [
+    { head: '分组颜色' },
+    { node: erColorGrid(g) },
+  ]);
+}
+
+function erSetGroupColor(g, tone) {
+  if (!erDoc || g.loose) return;
   const rec = erDoc.groups.find(x => x.id === g.gid);
   if (!rec) return;
-  rec.color = ((rec.color >= 0 ? rec.color : g.tone) + 1) % 8;
+  rec.color = ((tone % ER_TONES) + ER_TONES) % ER_TONES;
   erHotGroup = g.gid;      // 被操作的组留在上层，改完不跳动
+  erCloseMenus();
   erRender();
   erSave();
 }
@@ -10701,6 +10741,8 @@ function erShowMenu(x, y, items) {
   for (const it of items) {
     if (it.sep) { m.appendChild(el('div', 'er-menu-sep')); continue; }
     if (it.head) { m.appendChild(el('div', 'er-menu-head', it.head)); continue; }
+    // 自定义内容（颜色板这种放不进「一行一个按钮」的东西）
+    if (it.node) { m.appendChild(it.node); continue; }
     const b = el('button', 'er-menu-item' + (it.on ? ' on' : '') + (it.danger ? ' danger' : ''), it.label);
     b.type = 'button';
     b.addEventListener('click', ev => {
@@ -10755,7 +10797,7 @@ function erOpenGroupMenu(g, anchorEl) {
   const sr = erStage.getBoundingClientRect();
   const items = [
     { label: '重命名', run: () => { if (g._nameEl) erRenameGroup(g, g._nameEl); } },
-    { label: '换个颜色', run: () => erCycleGroupColor(g) },
+    { label: '换个颜色', run: () => erOpenGroupColor(g, anchorEl) },
     { sep: true },
     {
       label: g.tables.length ? `删除分组（${g.tables.length} 张表回到未分组）` : '删除分组',
@@ -10974,6 +11016,10 @@ async function erLoadModelList() {
 
 // erOpenModel 打开一个模型：结构进 erSchema，布局进 erDoc，然后重画。
 async function erOpenModel(id) {
+  // 切模型之前先把上一个模型没落盘的改动写掉，并清掉它的防抖定时器。
+  if (erModelDoc && erModelDoc.id !== id && erSaveTimer) {
+    await erSaveNow();
+  }
   const m = await api('/api/models/' + encodeURIComponent(id));
   if (!m || !m.id) throw new Error('模型不存在');
   erModelDoc = m;

@@ -3743,6 +3743,14 @@ class CDP {
     })()`);
     check('模型图：一张表一张卡片，没有折叠', erUi.cards === demo.tables,
       `${erUi.cards} 卡片 / ${demo.tables} 张表`);
+    // 画布必须开在刚建的那个模型上：开错模型的话，后面所有断言都会「对，
+    // 但对的不是那个东西」，还会把测试分组写进用户的模型文件。
+    {
+      const cur = await cdp.eval(`({ id: erModelDoc ? erModelDoc.id : '', want: window.__modelId,
+        name: erModelDoc ? erModelDoc.name : '' })`);
+      check('模型图：画布开的就是这次建的模型（不会串到别的模型上）',
+        !!cur.id && cur.id === cur.want, `${cur.name || '无'}`);
+    }
     check('模型图：没有手工分组时只有一个「未分组」',
       erUi.groups === 1 && /未分组/.test(erUi.looseName),
       `${erUi.groups} 个组框 · ${erUi.looseName}`);
@@ -3992,7 +4000,8 @@ class CDP {
       !!movedCard && movedCard.inThat === true,
       movedCard ? `归属=${movedCard.group}` : '菜单没打开');
 
-    // 点色点换分组颜色
+    /* 分组配色：点色点弹出 16 个马卡龙色块，点哪个就是哪个（不再「点一下换下一个」）。
+       以前要连点 N 下才能拿到想要的颜色，顺序固定还记不住。 */
     const dotPt = await cdp.eval(`(() => {
       const d = [...document.querySelectorAll('.er-group')]
         .map(g => ({ g, n: (g.querySelector('.er-group-name') || {}).textContent }))
@@ -4010,13 +4019,28 @@ class CDP {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dotPt.x, y: dotPt.y, button: 'left' });
       await sleep(200);
     }
+    const swatches = await cdp.eval(`document.querySelectorAll('.er-menu .er-swatch').length`);
+    // 点第 5 个色块（色号 4）
+    const swPt = await cdp.eval(`(() => {
+      const b = document.querySelectorAll('.er-menu .er-swatch')[4];
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), cls: b.className };
+    })()`);
+    if (swPt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: swPt.x, y: swPt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: swPt.x, y: swPt.y, button: 'left' });
+      await sleep(250);
+    }
     const toneAfter = await cdp.eval(`(() => {
       const g = [...document.querySelectorAll('.er-group')]
         .find(x => (x.querySelector('.er-group-name') || {}).textContent === '回归测试组');
       return g ? g.className : '';
     })()`);
-    check('模型图：点色点换分组颜色', !!dotPt && toneAfter && toneAfter !== dotPt.tone,
-      `${dotPt ? dotPt.tone : '无'} → ${toneAfter}`);
+    check('模型图：点色点弹出 16 色板，点哪个就是哪个',
+      !!dotPt && swatches === 16 && /(^|\s)g4(\s|$)/.test(toneAfter)
+      && toneAfter !== dotPt.tone,
+      `${swatches} 个色块 · ${dotPt ? dotPt.tone : '无'} → ${toneAfter}`);
 
     /* 侧车是 300ms 防抖写的（erSave），点完色点立刻 fetch 会拿到上一版 ——
        颜色还是 -1。所以这里等「服务端真的存下了这个颜色」，而不是 sleep 一段时间

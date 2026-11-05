@@ -312,7 +312,7 @@ func TestDiagramNormalizesInput(t *testing.T) {
 	a, b, c := itoa(ids["a"]), itoa(ids["b"]), itoa(ids["c"])
 
 	body := `{"version":3,
-		"groups":[{"id":"g1","color":9},{"id":"g1","color":1}],
+		"groups":[{"id":"g1","color":99},{"id":"g1","color":1}],
 		"tables":{"` + a + `":{"x":1e12,"y":0},
 		          "` + b + `":{"x":50.4,"y":60.6},
 		          "` + c + `":{"group":"nope"},

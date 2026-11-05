@@ -5,12 +5,14 @@ import (
 	"godb/hrtime"
 	"net/http"
 	"strings"
+	"time"
 
 	"strconv"
 
 	"godb/config"
 	"godb/db"
 	"godb/storage"
+	"godb/syscat"
 )
 
 // 本文件是监控面板的 HTTP 接口。
@@ -21,12 +23,22 @@ import (
 //   - POST /api/monitor/kill     按会话 Kill（回滚事务、放弃等锁/排队）
 //   - POST /api/monitor/timeouts 改四个超时开关（写 config.json）
 
+// 进程启动时间。总览要显示「已运行多久」——这是**进程**的属性，不是某个库的，
+// 所以放包级：多库共用一个进程，挂在 DB 上会算出 N 个不同的运行时长。
+var procStart = time.Now()
+
 // handleMonitor 返回当前库的监控快照。
 func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 	d := s.currentDB(r)
 	snap := d.Monitor(d.Timeouts())
 	snap.ClockGranNs = int64(hrtime.Granularity())
-	writeJSON(w, http.StatusOK, snap)
+	// startedAtMs / version 用匿名嵌入挂上去：它们不属于某个库的快照，
+	// 但总览页要和水位一起读，多发一个请求换两个常量不值得。
+	writeJSON(w, http.StatusOK, struct {
+		db.Monitor
+		StartedAtMs int64  `json:"startedAtMs"`
+		Version     string `json:"version"`
+	}{snap, procStart.UnixMilli(), syscat.GodbVersion})
 }
 
 // handleSpace 返回空间构成；带 ?table= 时下钻到单张表的页级构成。

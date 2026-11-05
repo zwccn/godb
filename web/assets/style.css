@@ -2238,6 +2238,282 @@ body.sidebar-collapsed .sidebar {
    从上到下排。所有颜色走 CSS 变量，四套皮肤都能用。 */
 .mono { font-family: var(--mono); }
 
+/* ================= 总览（大屏） =================
+   固定深色，自带一套变量（--hm-*），**不读 --bg / --text**。
+   为什么不复用：那套变量会被皮肤覆盖，切到淡蓝皮肤大屏就跟着变浅 ——
+   而这一页的「科技感」完全来自深底 + 亮数字，浅底上只剩一张普通仪表盘。
+   代价是它成为 6 套皮肤之外的例外，这是有意的取舍，不是漏改。 */
+.home {
+  --hm-bg: #070a0f;
+  --hm-bg-1: #0c1219;
+  --hm-bg-2: #101821;
+  --hm-line: #1b2431;
+  --hm-grid: rgba(90, 169, 240, .055);
+  --hm-text: #e9eff6;
+  --hm-dim: #7f8c9b;
+  --hm-faint: #4c5867;
+  --hm-accent: #5aa9f0;
+  --hm-ok: #46b95c;
+  --hm-warn: #d9a441;
+  --hm-danger: #f0616d;
+
+  position: fixed;
+  top: 52px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 29;               /* 低于监控的 30：从总览进监控时，监控盖在上面 */
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 24px 18px;
+  overflow: auto;
+  background-color: var(--hm-bg);
+  /* 极淡网格：56px 一格、透明度 5.5%。不用光晕渐变 —— 深底上的柔光会糊成一片雾，
+     网格给的是「刻度感」，眼睛能估面积又不抢数字。 */
+  background-image:
+    linear-gradient(var(--hm-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--hm-grid) 1px, transparent 1px);
+  background-size: 56px 56px;
+  color: var(--hm-text);
+}
+
+/* ---- 顶部状态条 ---- */
+.home-top {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+}
+.home-top .spacer { flex: 1 1 auto; }
+.home-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--hm-ok);
+  /* 一圈同色低透明度的「环」当柔光：只有 8px 的点在深底上太轻，加环不用发光效果 */
+  box-shadow: 0 0 0 3px rgba(70, 185, 92, .15);
+}
+.home-dot.yellow { background: var(--hm-warn); box-shadow: 0 0 0 3px rgba(217, 164, 65, .16); }
+.home-dot.red { background: var(--hm-danger); box-shadow: 0 0 0 3px rgba(240, 97, 109, .18); }
+.home-name {
+  font-size: calc(16px * var(--fs));
+  font-weight: 500;
+  letter-spacing: .01em;
+}
+.home-ver {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--hm-faint);
+}
+.home-state {
+  margin-left: 4px;
+  font-size: calc(12px * var(--fs));
+  color: var(--hm-dim);
+}
+.home-uptime,
+.home-clock {
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  font-variant-numeric: tabular-nums;
+  color: var(--hm-faint);
+}
+.home-clock { color: var(--hm-dim); }
+.home-more {
+  padding: 4px 10px;
+  border: 1px solid var(--hm-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--hm-dim);
+  font-family: inherit;
+  font-size: calc(11.5px * var(--fs));
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+}
+.home-more:hover { color: var(--hm-text); border-color: var(--hm-accent); }
+
+/* ---- 六个数字 ---- */
+.home-kpis {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+.home-kpi {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-height: 140px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--hm-line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--hm-bg-2), var(--hm-bg-1));
+}
+.home-kpi-val {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: calc(40px * var(--fs));
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+}
+.home-kpi-val .u {
+  font-size: calc(12px * var(--fs));
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--hm-dim);
+}
+.home-kpi-name {
+  font-size: calc(11.5px * var(--fs));
+  letter-spacing: .03em;
+  color: var(--hm-dim);
+}
+.home-kpi-sub {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--hm-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 只有异常才变色。正常时六个数字是同一种白 —— 扫一眼就知道没事，
+   这也是「体检报告」和「监控面板」的区别：后者一片彩色，前者只在有事时出声。 */
+.home-kpi[data-level="warn"] .home-kpi-val { color: var(--hm-warn); }
+.home-kpi[data-level="red"] .home-kpi-val { color: var(--hm-danger); }
+
+/* ---- 两条走势 ---- */
+.home-charts {
+  flex: 1 1 auto;
+  min-height: 190px;
+  /* 不给上限的话，1920×1080 上会吃掉 700px，一条 QPS 拉成心电图；
+     给太小又会让卡片里空着。460 是「图占满卡片且不算离谱」的折中，
+     高度超出的部分留给页面底部（foot 贴底，空白在中间）。 */
+  max-height: 520px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.home-chart {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--hm-line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--hm-bg-1), var(--hm-bg));
+  overflow: hidden;
+}
+.hc-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 11px 14px 8px;
+}
+.hc-title {
+  font-size: calc(12.5px * var(--fs));
+  font-weight: 500;
+}
+.hc-sub {
+  font-family: var(--mono);
+  font-size: calc(11.5px * var(--fs));
+  color: var(--hm-faint);
+}
+.hc-range {
+  margin-left: auto;
+  font-size: calc(11px * var(--fs));
+  color: var(--hm-faint);
+}
+.hc-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 14px 12px;
+}
+.home-plot {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+.home-plot svg { display: block; width: 100%; height: 100%; }
+.home-legend {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--hm-dim);
+}
+.home-lg { display: inline-flex; align-items: center; gap: 5px; }
+.home-lg i { display: block; width: 9px; height: 2px; border-radius: 1px; }
+.home-lg b {
+  font-weight: 400;
+  color: var(--hm-text);
+  font-variant-numeric: tabular-nums;
+}
+.home-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(11.5px * var(--fs));
+  color: var(--hm-faint);
+}
+
+/* ---- 一句话结论 ---- */
+.home-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--hm-line);
+  border-radius: 10px;
+  background: var(--hm-bg-1);
+  font-size: calc(12.5px * var(--fs));
+}
+.home-foot .fv {
+  flex: 0 0 auto;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.home-foot .ft {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--hm-dim);
+}
+.home-foot .fm {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  color: var(--hm-faint);
+  white-space: nowrap;
+}
+.home-foot[data-level="warn"] .fv { color: var(--hm-warn); }
+.home-foot[data-level="red"] .fv { color: var(--hm-danger); }
+
+@media (max-width: 1240px) {
+  .home-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .home-charts { grid-template-columns: 1fr; }
+  .home-chart { min-height: 150px; }
+}
+@media (max-width: 820px) {
+  .home { padding: 14px; gap: 10px; }
+  .home-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-uptime { display: none; }
+}
+
 .mon {
   position: fixed;
   top: 52px;

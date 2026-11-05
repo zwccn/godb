@@ -12,7 +12,15 @@ const http = require('http');
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const PORT = 9333;
-const URL = 'http://127.0.0.1:8080/?theme=sky';
+// 默认落地页改成「总览」之后，回归仍然从编辑器起步：#console 深链就是干这个的。
+// 三百多条断言都是「编辑器在前台」写的，全改成「先点控制台」既啰嗦又容易漏。
+// 总览自己那一段在文件末尾单独导航过去测。
+//
+// BASE 和 URL 分开，是因为后面有几条断言要在查询串上加参数（?pmblock=64）。
+// 直接对 URL 拼 '&pmblock=64' 会拼到 # 后面 —— 那个位置是 hash，服务端收不到，
+// 块视图静默退回自适应，断言就莫名其妙地红了。
+const BASE = 'http://127.0.0.1:8080/?theme=sky';
+const URL = BASE + '#console';
 
 function get(path) {
   return new Promise((res, rej) => {
@@ -2950,7 +2958,7 @@ class CDP {
     /* 块级页地图：几十万页的表不能「一格一页」交给浏览器（20 万个 DOM 节点布局就卡死），
        所以后端按 step 页聚合成块，点进去才是逐页。这里用 ?pmblock=64 把 big_demo
        的 785 页压成 13 块来验证整条下钻链路 —— 真造一张二十万页的表跑不动测试。 */
-    await cdp.send('Page.navigate', { url: URL + '&pmblock=64' });
+    await cdp.send('Page.navigate', { url: BASE + '&pmblock=64#console' });
     await waitFor(cdp, `typeof cm !== 'undefined' && cm && !!document.querySelector('.CodeMirror')`,
       { label: '刷新后控制台就绪', timeout: 15000 });
     await cdp.eval(`toggleMonitor(true)`);
@@ -3005,7 +3013,7 @@ class CDP {
        前端只负责说清「这块值得整理」和「VACUUM 是整表动作，只填不执行」。
        这里不去造一张真能留洞的表 —— checkpoint 有时会把页紧凑重写，洞不稳定；
        直接喂一块带 advice 的块数据，验证渲染、文案和按钮这条链路。 */
-    await cdp.send('Page.navigate', { url: URL + '&pmblock=64' });
+    await cdp.send('Page.navigate', { url: BASE + '&pmblock=64#console' });
     await waitFor(cdp, `typeof cm !== 'undefined' && cm && !!document.querySelector('.CodeMirror')`,
       { label: '刷新后控制台就绪', timeout: 15000 });
     await cdp.eval(`toggleMonitor(true)`);
@@ -3063,18 +3071,18 @@ class CDP {
       open: !document.getElementById('monPanel').classList.contains('hidden'),
       order: [...document.querySelectorAll('.top-actions .btn')].map(b => b.id),
     }))()`);
-    check('顶栏有「首页」：监控打开时点它回编辑器，选中态跟着换',
+    check('顶栏有「控制台」：监控打开时点它回编辑器，选中态跟着换',
       navBefore.open && !navBefore.home && navBefore.mon
       && !navAfter.open && navAfter.home && !navAfter.mon
-      && navAfter.order[0] === 'btnHome',
+      && navAfter.order[0] === 'btnOverview' && navAfter.order[1] === 'btnHome',
       `监控 ${navBefore.open} → 编辑器 ${!navAfter.open} · 顶栏 ${navAfter.order.join('/')}`);
 
     /* 顶栏顺序 + 皮肤切换：模型图挪到设置后面（低频的结构视图不该夹在两个
        高频入口中间），皮肤收成最右一个小圆点图标 —— 顶栏已经很挤，
        而换皮肤是低频操作，摊开六个点不值当。 */
     const navOrder = await cdp.eval(`[...document.querySelectorAll('.top-actions .btn')].map(b => b.id)`);
-    check('顶栏顺序：首页 / 监控 / 设置 / 模型图（皮肤在最右）',
-      navOrder.join(',') === 'btnHome,btnMonitor,btnSettings,btnEr',
+    check('顶栏顺序：总览 / 控制台 / 监控 / 设置 / 模型图（皮肤在最右）',
+      navOrder.join(',') === 'btnOverview,btnHome,btnMonitor,btnSettings,btnEr',
       navOrder.join(' / '));
 
     await cdp.eval(`document.getElementById('btnSkin').click()`);
@@ -6012,6 +6020,97 @@ class CDP {
     await sleep(200);
     check('关系图：Esc 关闭',
       await cdp.eval(`document.getElementById('erPanel').classList.contains('hidden')`));
+
+    /* ---------------- 总览（大屏） ----------------
+       这一段放最后：它会导航到**不带 #console** 的地址（模拟「打开控制台第一眼」），
+       而前面三百多条断言全都依赖编辑器在前台 —— 中途跳会把它们全带红。 */
+    await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8080/?theme=sky' });
+    await waitFor(cdp, `document.querySelectorAll('.home-kpi').length === 6`,
+      { label: '总览渲染', timeout: 15000 });
+    await sleep(600); // 等第一趟 /api/monitor 回来填数字
+
+    const home = await cdp.eval(`(async () => {
+      const t = s => (document.querySelector(s) || {}).textContent || '';
+      const vis = s => { const e = document.querySelector(s); return !!e && !e.classList.contains('hidden'); };
+      const m = await fetch('/api/monitor').then(r => r.json());
+      return {
+        open: vis('#homePanel'),
+        cells: [...document.querySelectorAll('.home-kpi')].map(c => ({
+          k: c.dataset.kpi,
+          v: ((c.querySelector('.home-kpi-val') || {}).textContent || '').replace(/\\s+/g, ' ').trim(),
+          lvl: c.dataset.level || '',
+        })),
+        water: { exec: (m.water || {}).exec || 0, queue: (m.water || {}).queue || 0,
+                 wait: (m.water || {}).wait || 0, level: (m.water || {}).level || 'green' },
+        dot: (document.querySelector('#homeDot') || {}).className || '',
+        foot: t('#homeFoot'),
+        plots: document.querySelectorAll('.home-plot svg').length,
+        ovOn: document.getElementById('btnOverview').classList.contains('on'),
+        homeOn: document.getElementById('btnHome').classList.contains('on'),
+        clock: t('#homeClock'),
+        ver: t('#homeVer'),
+        uptime: t('#homeUptime'),
+      };
+    })()`);
+
+    check('总览是默认落地页（六个数字，不用点任何按钮）',
+      !!home && home.open && home.cells.length === 6,
+      home ? `${home.cells.length} 格 · 可见 ${home.open}` : '没渲染');
+    check('总览：「总览」亮着、「控制台」不亮（两页二选一）',
+      !!home && home.ovOn && !home.homeOn,
+      home ? `总览 ${home.ovOn} · 控制台 ${home.homeOn}` : '');
+
+    const homeCell = k => (home.cells.find(c => c.k === k) || {});
+    check('总览：执行 / 排队 / 等锁三个数和接口对得上',
+      !!home
+      && homeCell('exec').v.indexOf(String(home.water.exec)) === 0
+      && homeCell('queue').v === String(home.water.queue)
+      && homeCell('wait').v === String(home.water.wait),
+      home ? `执行 ${homeCell('exec').v} · 排队 ${homeCell('queue').v} · 等锁 ${homeCell('wait').v}` : '');
+    check('总览：健康灯跟着水位走（不是写死的绿点）',
+      !!home && home.dot.indexOf(home.water.level) >= 0,
+      home ? `${home.dot} / 水位 ${home.water.level}` : '');
+    check('总览：两条走势都画出来了（QPS 与资源各一）',
+      !!home && home.plots === 2, home ? `${home.plots} 条` : '');
+    check('总览：版本号 / 运行时长 / 时钟都有内容（不是占位符）',
+      !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
+      && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),
+      home ? `${home.ver} · ${home.uptime} · ${home.clock}` : '');
+    check('总览：结论条给出了「能不能走开」的判断',
+      !!home && /走开|有点忙|撑不住/.test(home.foot),
+      home ? home.foot.slice(0, 40) : '');
+
+    // 进监控：总览让位，不是叠在上面
+    await cdp.eval(`document.getElementById('btnHomeToMonitor').click()`);
+    await sleep(500);
+    const toMon = await cdp.eval(`({
+      mon: !document.getElementById('monPanel').classList.contains('hidden'),
+      home: document.getElementById('homePanel').classList.contains('hidden'),
+    })`);
+    check('总览点「详细监控」进监控，总览同时收起（不叠两层）',
+      toMon.mon && toMon.home, `监控 ${toMon.mon} · 总览隐藏 ${toMon.home}`);
+
+    // 回控制台：总览必须真的让开，否则编辑器点不动
+    await cdp.eval(`document.getElementById('btnMonitor').click()`);
+    await sleep(300);
+    await cdp.eval(`document.getElementById('btnHome').click()`);
+    await sleep(400);
+    const backConsole = await cdp.eval(`({
+      home: document.getElementById('homePanel').classList.contains('hidden'),
+      mon: document.getElementById('monPanel').classList.contains('hidden'),
+      homeOn: document.getElementById('btnHome').classList.contains('on'),
+      editor: !!document.querySelector('.CodeMirror'),
+    })`);
+    check('点「控制台」回到编辑器，总览 / 监控都收起',
+      backConsole.home && backConsole.mon && backConsole.homeOn && backConsole.editor,
+      JSON.stringify(backConsole));
+
+    // #console 深链：存了书签的人打开就该直接写 SQL，不该先看到总览
+    await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8080/?theme=sky#console' });
+    await waitFor(cdp, `!!document.querySelector('.CodeMirror')`, { label: '编辑器就绪', timeout: 15000 });
+    await sleep(400);
+    check('带 #console 的地址直接进编辑器（不先显示总览）',
+      await cdp.eval(`document.getElementById('homePanel').classList.contains('hidden')`));
 
     const bad = results.filter(r => !r.ok);
     console.log(`\n${results.length - bad.length}/${results.length} 通过`);

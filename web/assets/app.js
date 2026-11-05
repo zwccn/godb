@@ -2548,13 +2548,23 @@ if (monEls.sort) {
 // syncTopNav 在启动阶段就会被调到，那时末尾的 let 还在 TDZ 里，读到就抛错。
 let erOpen = false;
 
+// 总览是否打开。同样是为了 TDZ：syncTopNav 启动时就读它。
+// 初始 true，和 index.html 里 #homePanel 默认可见保持一致 —— 两边不一致的话，
+// 用 #console 落地时 closeHome() 会因为 homeOpen 已是 false 而什么都不做，
+// 总览留在那儿盖住编辑器，看着像编辑器坏了。
+let homeOpen = true;
+
 function syncTopNav() {
+  const ov = document.getElementById('btnOverview');
   const home = document.getElementById('btnHome');
   const mon = document.getElementById('btnMonitor');
   const er = document.getElementById('btnEr');
   const set = document.getElementById('btnSettings');
   const setOpen = !settingsPanel.classList.contains('hidden');
-  if (home) home.classList.toggle('on', !monOpen && !setOpen && !erOpen);
+  // 总览和控制台是「二选一」的两页：总览亮着的时候控制台不亮。
+  // 监控 / 模型图 / 设置是覆盖层，开着时总览和控制台都不亮（它们盖在上面）。
+  if (ov) ov.classList.toggle('on', homeOpen && !monOpen && !setOpen && !erOpen);
+  if (home) home.classList.toggle('on', !homeOpen && !monOpen && !setOpen && !erOpen);
   if (mon) mon.classList.toggle('on', monOpen);
   if (er) er.classList.toggle('on', erOpen);
   if (set) set.classList.toggle('on', setOpen);
@@ -2817,6 +2827,9 @@ async function pollMonitor() {
   monData = m;
   renderMonBadge(m);
   if (monOpen) renderMonitor(m);
+  // 总览和监控共用这一趟请求：同一份快照画两页，数字必然一致，
+  // 而且任一页开着都只有一路轮询。
+  if (homeOpen) renderHome(m);
 }
 
 // 顶栏的小圆点 + 待处理计数：面板关着也要能看出「现在不对劲」。
@@ -6135,15 +6148,322 @@ document.getElementById('btnMonitor').addEventListener('click', () => {
 // 回首页 = 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
 // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
 function goHome() {
-  toggleMonitor(false);
-  toggleER(false);
+  // 先问设置页（有未保存改动时它可能拒绝关闭），确认真关了再动别的 ——
+  // 原来是先关监控再问，用户选「不关」就会留下「监控关了、设置还开着」的中间态。
   if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
-    return;
+    if (!settingsPanel.classList.contains('hidden')) return;
   }
+  closeHome();
+  toggleMonitor(false);
+  toggleER(false);
   editor.focus();
 }
 document.getElementById('btnHome').addEventListener('click', goHome);
+document.getElementById('btnOverview').addEventListener('click', openHome);
+document.getElementById('btnHomeToMonitor').addEventListener('click', () => {
+  closeHome();
+  toggleMonitor(true);
+});
+
+/* ---------------- 总览（大屏） ----------------
+   数据库大部分时间是安稳的，这一页只回答一个问题：现在能不能走开。
+   所以只有四层 —— 状态条、六个数字、两条走势、一句话结论。证据（锁明细、
+   慢 SQL、页地图、逐表空间）全在监控里，点右下角过去。
+
+   数据复用 pollMonitor 那一路：全局 2 秒一次 /api/monitor，这里只负责画。
+   不另开定时器 —— 两路轮询不只是多一份开销，数字还会差半个周期，
+   同一块屏上两个地方显示同一个 QPS 却对不上，是最难解释的那种 bug。 */
+
+const homeEls = {
+  panel: document.getElementById('homePanel'),
+  dot: document.getElementById('homeDot'),
+  db: document.getElementById('homeDB'),
+  ver: document.getElementById('homeVer'),
+  state: document.getElementById('homeState'),
+  uptime: document.getElementById('homeUptime'),
+  clock: document.getElementById('homeClock'),
+  kpis: document.getElementById('homeKpis'),
+  chartRate: document.getElementById('homeChartRate'),
+  chartRes: document.getElementById('homeChartRes'),
+  resSub: document.getElementById('homeChartResSub'),
+  foot: document.getElementById('homeFoot'),
+};
+
+// 六个数字。顺序有讲究：QPS 是业务量的锚，中间三个是「请求卡在流水线哪一段」
+// （执行中 / 排队 / 等锁），最后两个是资源。眼睛从左往右读，正好是
+// 「多少请求 → 卡在哪 → 机器扛不扛得住」。
+//
+// level 只在异常时返回非空 —— 正常时六个数字是同一种白。监控面板满屏彩色
+// 是因为它专门用来看异常；总览反过来，它要的是「没事的时候看起来很安静」。
+const HOME_KPIS = [
+  {
+    id: 'qps', name: 'QPS',
+    value: m => (m.rates && m.rates.sampled) ? { n: m.rates.qps } : { n: '—' },
+    hint: m => '峰值 ' + ((m.rates && m.rates.peakQps) || 0),
+  },
+  {
+    id: 'exec', name: '执行中',
+    value: m => {
+      const w = m.water || {};
+      return { n: w.exec || 0, u: w.execMax ? '/ ' + w.execMax : '' };
+    },
+    hint: m => {
+      const w = m.water || {};
+      return w.execMax ? '上限 ' + w.execMax : '不限并发';
+    },
+    level: m => {
+      const w = m.water || {};
+      return (w.execMax && w.exec >= w.execMax) ? 'warn' : '';
+    },
+  },
+  {
+    id: 'queue', name: '排队',
+    value: m => ({ n: (m.water || {}).queue || 0 }),
+    hint: m => {
+      const w = m.water || {};
+      return w.queueMax ? '上限 ' + w.queueMax : '不限';
+    },
+    level: m => (((m.water || {}).queue || 0) > 0 ? 'warn' : ''),
+  },
+  {
+    id: 'wait', name: '等待锁',
+    value: m => ({ n: (m.water || {}).wait || 0 }),
+    hint: m => '锁结构 ' + ((m.locks || []).length),
+    level: m => (((m.water || {}).wait || 0) > 0 ? 'warn' : ''),
+  },
+  {
+    id: 'mem', name: '内存',
+    value: m => homeBytes((m.proc || {}).totalBytes),
+    hint: m => 'heap ' + fmtBytes((m.proc || {}).heapObjects),
+  },
+  {
+    // 带宽来自 PG 连接的收发字节（netsrv 里计的数）。没接上时显示破折号，
+    // 而不是 0 —— 0 会被读成「真的一点流量都没有」，那是另一回事。
+    id: 'net', name: '带宽',
+    value: m => (m.rates && m.rates.netOut != null) ? homeBytes(m.rates.netOut) : { n: '—' },
+    hint: m => (m.rates && m.rates.netOut != null)
+      ? '收 ' + fmtBytes(m.rates.netIn || 0) : '未统计',
+  },
+];
+
+// fmtBytes 返回的是 "156 MB" 这种连单位的一整串。大屏里数字和单位要分开排版
+// （数字大、单位小一号灰一档），所以在最后一个空格处劈开。
+function homeBytes(n) {
+  if (n == null) return { n: '—' };
+  const s = fmtBytes(n);
+  const i = s.lastIndexOf(' ');
+  return i < 0 ? { n: s } : { n: s.slice(0, i), u: s.slice(i + 1) };
+}
+
+function ensureHomeKpis() {
+  if (!homeEls.kpis || homeEls.kpis.childElementCount) return;
+  for (const k of HOME_KPIS) {
+    const cell = el('div', 'home-kpi');
+    cell.dataset.kpi = k.id;
+    const val = el('div', 'home-kpi-val');
+    val.appendChild(el('span', 'n', '—'));
+    val.appendChild(el('span', 'u', ''));
+    cell.appendChild(val);
+    cell.appendChild(el('div', 'home-kpi-name', k.name));
+    cell.appendChild(el('div', 'home-kpi-sub', ''));
+    homeEls.kpis.appendChild(cell);
+  }
+}
+
+function openHome() {
+  if (homeOpen) return;
+  homeOpen = true;
+  // 三层页面都是 fixed 覆盖全屏，叠着只会互相遮挡，不能同时开。
+  if (monOpen) toggleMonitor(false);
+  if (erOpen) toggleER(false);
+  if (!settingsPanel.classList.contains('hidden')) closeSettings();
+  homeEls.panel.classList.remove('hidden');
+  document.body.classList.add('home-open');
+  ensureHomeKpis();
+  tickHomeClock();
+  pollMonitor(); // 立刻拉一次，别让第一屏空等一个周期
+  syncTopNav();
+}
+
+function closeHome() {
+  if (!homeOpen) return;
+  homeOpen = false;
+  homeEls.panel.classList.add('hidden');
+  document.body.classList.remove('home-open');
+  syncTopNav();
+}
+
+// 时钟单独 1 秒一跳：轮询是 2 秒，拿它驱动的话秒数会一次跳两格，很怪。
+function tickHomeClock() {
+  if (!homeEls.clock) return;
+  const d = new Date();
+  homeEls.clock.textContent = [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':');
+}
+setInterval(tickHomeClock, 1000);
+
+// 运行时长只到分钟：秒位在动反而会让人盯着看，而这个数字的意义是「多久没重启了」。
+function fmtUptime(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + ' 天 ' + h + ' 小时';
+  if (h > 0) return h + ' 小时 ' + m + ' 分';
+  return m + ' 分钟';
+}
+
+function renderHome(m) {
+  if (!homeOpen || !homeEls.panel) return;
+  ensureHomeKpis();
+  const w = m.water || {};
+  const lvl = w.level === 'red' ? 'red' : (w.level === 'yellow' ? 'yellow' : 'green');
+  homeEls.dot.className = 'home-dot ' + lvl;
+  if (w.db && homeEls.db.textContent !== w.db) homeEls.db.textContent = w.db;
+  if (m.version && homeEls.ver.textContent !== 'v' + m.version) {
+    homeEls.ver.textContent = 'v' + m.version;
+  }
+  if (m.startedAtMs) {
+    const up = '已运行 ' + fmtUptime(Date.now() - m.startedAtMs);
+    if (homeEls.uptime.textContent !== up) homeEls.uptime.textContent = up;
+  }
+  // 顶栏那格只说状态，结论和建议放底部一条 —— 两处都写「运行正常」等于占两次地方。
+  const stateText = lvl === 'red' ? '已触顶' : (lvl === 'yellow' ? '有排队' : '健康');
+  if (homeEls.state.textContent !== stateText) homeEls.state.textContent = stateText;
+
+  for (const k of HOME_KPIS) {
+    const cell = homeEls.kpis.querySelector('[data-kpi="' + k.id + '"]');
+    if (!cell) continue;
+    const v = k.value(m) || {};
+    const nEl = cell.querySelector('.home-kpi-val .n');
+    const uEl = cell.querySelector('.home-kpi-val .u');
+    const nText = v.n == null ? '—' : String(v.n);
+    // 只在变了才写：每 2 秒给六个格子写同样的字符串，浏览器还是会走一遍
+    // 文本节点的替换，光标和选中状态会受影响（虽然这里没有输入框，但没必要）。
+    if (nEl.textContent !== nText) nEl.textContent = nText;
+    if (uEl.textContent !== (v.u || '')) uEl.textContent = v.u || '';
+    const sub = k.hint(m);
+    const subEl = cell.querySelector('.home-kpi-sub');
+    if (subEl.textContent !== sub) subEl.textContent = sub;
+    cell.dataset.level = (k.level && k.level(m)) || '';
+  }
+
+  const title = lvl === 'red' ? '撑不住了' : (lvl === 'yellow' ? '有点忙' : '没事，可以走开');
+  const sub = lvl === 'green'
+    ? '没人排队、没人在等锁，这几个数字可以不用管'
+    : '点「详细监控」看是谁在挡谁';
+  homeEls.foot.dataset.level = lvl;
+  homeEls.foot.innerHTML = '';
+  homeEls.foot.appendChild(el('span', 'fv', title));
+  homeEls.foot.appendChild(el('span', 'ft', sub));
+  const slowN = (m.slowSql || []).reduce((s, x) => s + (x.n || 0), 0);
+  // 「累计」两个字不能省：这个数是自启动以来的总和，不标的话会被人当成
+  // 「现在有 700 条慢 SQL」—— 而左边的结论正说着「没事」。
+  homeEls.foot.appendChild(el('span', 'fm',
+    '累计慢 SQL ' + slowN + ' · 连接 ' + ((m.rates || {}).conns || 0)
+    + ' · Kill ' + ((m.counters || {}).kills || 0)));
+
+  renderHomeCharts(m);
+}
+
+function renderHomeCharts(m) {
+  const r = m.rates || {};
+  homeChart(homeEls.chartRate, r.series, [
+    {
+      label: 'QPS', color: 'var(--hm-accent)', minSpan: 4,
+      get: p => p.qps || 0, fmt: v => String(Math.round(v)),
+    },
+    {
+      label: '连接', color: 'var(--hm-dim)', width: 1.2, minSpan: 2,
+      get: p => p.conns || 0, fmt: v => String(Math.round(v)),
+    },
+  ]);
+  const p = m.proc || {};
+  homeChart(homeEls.chartRes, p.series, [
+    {
+      label: '内存', color: 'var(--hm-ok)', minSpan: 32 * 1024 * 1024,
+      get: x => x.heapBytes || 0, fmt: fmtBytes,
+    },
+    {
+      label: 'CPU', color: 'var(--hm-warn)', width: 1.2, minSpan: 0.4,
+      get: x => x.cpuCore || 0, fmt: v => v.toFixed(2) + ' 核',
+    },
+  ]);
+}
+
+// 大屏的折线。和监控页 sparkline 一个画法（每条线各自归一化），只是配色走
+// --hm-*、不带悬浮读数 —— 总览是"远看"的页面，鼠标悬停那一套不属于这里。
+//
+// 为什么每条线单独归一化：QPS 是几百、连接数是几，共用一根轴会把连接数
+// 压成贴着底边的直线，等于没画。代价是看不出两者谁高，所以底部图例直接
+// 报当前值，要精确对比去监控页。
+function homeChart(host, pts, lines) {
+  if (!host) return;
+  if (!pts || pts.length < 2) {
+    host.innerHTML = '';
+    host.appendChild(el('div', 'home-empty', '正在采样…'));
+    return;
+  }
+  const W = 600, H = 120, padT = 10, padB = 8;
+  const inner = H - padT - padB;
+  const ranges = lines.map(l => {
+    let lo = Infinity, hi = -Infinity;
+    for (const p of pts) {
+      const v = l.get(p) || 0;
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    }
+    if (!isFinite(lo)) { lo = 0; hi = 1; }
+    // 变化幅度小于 minSpan 时按 minSpan 撑开：内存本来只在几 MB 内浮动，
+    // 逐像素归一化会把噪声放大成过山车，看着像内存要炸了。
+    const span = l.minSpan || 0;
+    if (hi - lo < span) {
+      const mid = (hi + lo) / 2;
+      lo = mid - span / 2;
+      hi = mid + span / 2;
+    }
+    if (hi <= lo) hi = lo + 1;
+    return { lo, hi };
+  });
+  const x = i => (i / (pts.length - 1)) * W;
+  const y = (v, r) => H - padB - Math.max(0, Math.min(1, (v - r.lo) / (r.hi - r.lo))) * inner;
+
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">';
+  // 三条极淡的横线：给眼睛一个高度参照，否则两条线悬在空里，看不出「现在是高还是低」
+  for (let i = 0; i <= 2; i++) {
+    const yy = (padT + (inner / 2) * i).toFixed(1);
+    svg += '<line x1="0" y1="' + yy + '" x2="' + W + '" y2="' + yy
+      + '" stroke="var(--hm-line)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+  }
+  lines.forEach((l, k) => {
+    let d = '';
+    for (let i = 0; i < pts.length; i++) {
+      d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(l.get(pts[i]) || 0, ranges[k]).toFixed(1);
+    }
+    svg += '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="' + (l.width || 1.6)
+      + '" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
+  });
+  svg += '</svg>';
+
+  host.innerHTML = '';
+  const plot = el('div', 'home-plot');
+  plot.innerHTML = svg;
+  host.appendChild(plot);
+
+  const legend = el('div', 'home-legend');
+  const last = pts[pts.length - 1] || {};
+  for (const l of lines) {
+    const item = el('span', 'home-lg');
+    const sw = el('i');
+    sw.style.background = l.color;
+    item.appendChild(sw);
+    item.appendChild(el('span', '', l.label));
+    item.appendChild(el('b', '', l.fmt(l.get(last) || 0)));
+    legend.appendChild(item);
+  }
+  host.appendChild(legend);
+}
 
 // 左上角的 logo + 字标也回首页。做成 role=button 的 div 是因为里面装着 h1 字标
 // （button 里放块级元素是非法嵌套），所以键盘那两个键要自己接。
@@ -12425,3 +12745,17 @@ erStage.addEventListener('contextmenu', ev => {
 });
 
 erApplyView();
+
+/* 落地页：默认进总览。
+   带 #console 的深链仍然直接进编辑器 —— 那是给「存了书签、打开就想写 SQL」用的，
+   也是前端回归的入口（三百多条断言都假设编辑器在前台）。 */
+if (location.hash === '#console') {
+  closeHome();
+} else {
+  // 不走 openHome()：homeOpen 初始就是 true（和 HTML 默认可见对齐），
+  // 那个函数会 early return。这里直接做它该做的几件事。
+  ensureHomeKpis();
+  tickHomeClock();
+  pollMonitor();
+  syncTopNav();
+}

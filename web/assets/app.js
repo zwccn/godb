@@ -9895,6 +9895,7 @@ function erDrawEdges(svg, model) {
   }
 
   const rects = model.tables.map(t => t._er).filter(Boolean);
+  let flowSeq = 0;   // 飞线的相位序号，见下面 animationDelay
 
   for (const e of model.edges) {
     const a = e.from._er, b = e.to._er;
@@ -9934,6 +9935,9 @@ function erDrawEdges(svg, model) {
       });
       flow.dataset.edge = e.id;
       flow.dataset.dir = dir > 0 ? 'from' : 'to';
+      // 错开相位：一张卡片几条线同时点亮时，全都从 0 开始就成了「一起闪」，
+      // 错开之后看着像几股数据各走各的。负延迟 = 直接从动画中段起步。
+      flow.style.animationDelay = (-(flowSeq++ % 9) * 0.13).toFixed(2) + 's';
       svg.appendChild(flow);
     }
 

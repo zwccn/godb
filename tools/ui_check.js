@@ -3522,6 +3522,45 @@ class CDP {
         !/秒|\d+:\d+/.test(all) && /(ns|µs|ms)/.test(all), units.legend.slice(0, 64));
     }
 
+    /* 全屏：算子一多（十几行 × 三段数字）半屏根本读不完。⛶ 把**整张卡**搬进
+       覆盖层（不是复制 —— 复制会把「原始文本」这些展开状态丢掉），Esc 收回。 */
+    const fullUi = await cdp.eval(`(async () => {
+      const btn = document.querySelector('.probe-card .probe-expand');
+      if (!btn) return null;
+      const card = btn.closest('.probe-card');
+      const icon0 = btn.textContent;
+      const inPane0 = !!document.querySelector('#resultPane .probe-card');
+      btn.click();
+      await new Promise(r => setTimeout(r, 260));
+      const ov = document.getElementById('probeFull');
+      const r = ov.getBoundingClientRect();
+      return {
+        icon0, inPane0,
+        inOverlay: ov.contains(card),
+        hidden: ov.classList.contains('hidden'),
+        icon: btn.textContent,
+        w: Math.round(r.width), h: Math.round(r.height),
+        win: [window.innerWidth, window.innerHeight],
+      };
+    })()`);
+    check('探测卡能全屏查看（整张卡搬进覆盖层，图标变成退出）',
+      !!fullUi && fullUi.inPane0 && fullUi.inOverlay && !fullUi.hidden
+      && fullUi.icon0 === '⛶' && fullUi.icon === '⤡'
+      && fullUi.w >= fullUi.win[0] - 2 && fullUi.h >= fullUi.win[1] - 2,
+      fullUi ? `覆盖层 ${fullUi.w}×${fullUi.h}（窗口 ${fullUi.win.join('×')}）· ${fullUi.icon0}→${fullUi.icon}` : '没有全屏按钮');
+
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(260);
+    const fullBack = await cdp.eval(`(() => ({
+      inPane: !!document.querySelector('#resultPane .probe-card'),
+      hidden: document.getElementById('probeFull').classList.contains('hidden'),
+      icon: (document.querySelector('.probe-expand') || {}).textContent,
+    }))()`);
+    check('全屏按 Esc 退出，卡片回到结果区（节点没重建）',
+      fullBack.inPane && fullBack.hidden && fullBack.icon === '⛶',
+      `在结果区 ${fullBack.inPane} · 覆盖层隐藏 ${fullBack.hidden}`);
+
     check('最贵的一步被标出来，并有一句结论',
       /HashAggregate/.test(probe.worst) && /占 \d+%/.test(probe.verdict),
       `${probe.worst} · ${probe.verdict.slice(0, 40)}`);

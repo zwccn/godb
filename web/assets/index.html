@@ -1264,6 +1264,19 @@ SELECT pg_size_pretty(pg_database_size(current_database()));</pre>
 <script src="/vendor/codemirror/lib/codemirror.js"></script>
 <script src="/vendor/codemirror/mode/sql.js"></script>
 <script src="/vendor/codemirror/addon/hint/show-hint.js"></script>
+<!-- 执行探测的全屏查看：算子一多（十几行）+ 每行三段数字，半屏根本读不完。
+     点卡片右上角的 ⛶ 把整张探测卡搬进来，退出时原样搬回去（节点不重建，
+     展开状态、原始文本开关都还在）。 -->
+<div id="probeFull" class="probe-full hidden" role="dialog" aria-modal="true"
+     aria-label="执行探测（全屏）">
+  <div class="probe-full-bar">
+    <span class="probe-full-title">执行探测 · 全屏</span>
+    <span class="spacer"></span>
+    <button id="probeFullClose" class="icon-btn" type="button" title="退出全屏（Esc）">×</button>
+  </div>
+  <div class="probe-full-body" id="probeFullBody"></div>
+</div>
+
 <script src="/vendor/codemirror/addon/display/placeholder.js"></script>
 <script src="/sql-hint.js"></script>
 <script src="/sql-format.js"></script>

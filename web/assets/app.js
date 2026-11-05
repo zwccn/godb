@@ -1317,6 +1317,9 @@ function renderResultTabs(data) {
 function renderResultPane(data) {
   const pane = document.getElementById('resultPane');
   if (!pane) return;
+  // 上一次的探测卡如果在全屏里，这里先收回来：pane.innerHTML 清不掉已经搬走的节点，
+  // 不收回的话覆盖层会一直挂着一份「上一次的」结果。
+  closeProbeFull();
   const models = resultTabModels(data);
   const cur = models[resultTab] || models[0];
   pane.innerHTML = '';
@@ -1528,6 +1531,63 @@ function probePhaseBar(r) {
   return box;
 }
 
+/* ---- 探测结果全屏 ---- */
+
+// 做法是**把整张卡搬进覆盖层**，不是 clone：卡里有「原始文本」「? 说明」这些
+// 展开状态，clone 出来是另一份节点，展开的东西全丢。搬过去再搬回来，
+// 事件、状态、滚动位置都是原装的。
+const probeFullEl = document.getElementById('probeFull');
+const probeFullBody = document.getElementById('probeFullBody');
+let probeFullCard = null;
+let probeFullHome = null;
+
+function openProbeFull(card) {
+  if (probeFullCard) closeProbeFull();
+  probeFullHome = { parent: card.parentNode, next: card.nextSibling };
+  probeFullCard = card;
+  card.classList.add('full');
+  probeFullBody.appendChild(card);
+  probeFullEl.classList.remove('hidden');
+}
+
+function closeProbeFull() {
+  if (!probeFullCard) return;
+  const card = probeFullCard;
+  const home = probeFullHome;
+  probeFullCard = null;
+  probeFullHome = null;
+  card.classList.remove('full');
+  // 结果区如果已经被下一次执行重画过，原来的位置就没了 —— 那就别再搬回去，
+  // 让它跟着旧节点一起丢掉（节点已经不在文档里，搬回去也是幽灵）。
+  if (home && home.parent && home.parent.isConnected) {
+    const next = home.next && home.next.parentNode === home.parent ? home.next : null;
+    home.parent.insertBefore(card, next);
+  }
+  probeFullEl.classList.add('hidden');
+}
+
+// 关按钮 + Esc。Esc 用**捕获**阶段：模型图/设置那些面板也在 document 上听 Esc，
+// 全屏开着的时候按 Esc 应该先退全屏，而不是把底下的面板一起关掉。
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape' || !probeFullCard) return;
+  ev.stopPropagation();
+  ev.preventDefault();
+  const btn = probeFullCard.querySelector('.probe-expand');
+  if (btn) setProbeFullBtn(btn, false);
+  closeProbeFull();
+}, true);
+document.getElementById('probeFullClose').addEventListener('click', () => {
+  const btn = probeFullCard && probeFullCard.querySelector('.probe-expand');
+  if (btn) setProbeFullBtn(btn, false);
+  closeProbeFull();
+});
+
+function setProbeFullBtn(btn, on) {
+  btn.textContent = on ? '⤡' : '⛶';
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+}
+
 function probeCard(r, idx, stmts, count) {
   const card = el('div', 'probe-card');
   const head = el('div', 'probe-head');
@@ -1575,6 +1635,17 @@ function probeCard(r, idx, stmts, count) {
     helpBtn.setAttribute('aria-expanded', String(!nowHidden));
   });
   head.appendChild(helpBtn);
+
+  // 全屏：算子多的时候这半屏高不够看（实测十几行 + 三段数字就顶到边了）
+  const fullBtn = el('button', 'plan-btn probe-expand', '⛶');
+  fullBtn.type = 'button';
+  fullBtn.title = '全屏查看（Esc 退出）';
+  fullBtn.setAttribute('aria-pressed', 'false');
+  fullBtn.addEventListener('click', () => {
+    if (probeFullCard === card) { setProbeFullBtn(fullBtn, false); closeProbeFull(); }
+    else { openProbeFull(card); setProbeFullBtn(fullBtn, true); }
+  });
+  head.appendChild(fullBtn);
 
   card.appendChild(head);
   card.appendChild(pre);

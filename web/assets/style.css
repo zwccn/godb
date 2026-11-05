@@ -1522,6 +1522,49 @@ a[href]:focus-visible {
   overflow: hidden;
   flex: 0 0 auto;
 }
+
+/* ---- 探测结果全屏 ----
+   结果区只占屏幕下半截，算子一多（十几行 × 三段数字）就得一直滚。⛶ 把整张卡
+   搬进这层覆盖层：铺满视口、自己滚，其他什么都不变。 */
+.probe-full {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.probe-full-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  font-size: calc(12px * var(--fs));
+  color: var(--text-2);
+}
+.probe-full-bar .spacer { flex: 1 1 auto; }   /* 撑开，× 贴右边 */
+.probe-full-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px 28px;
+}
+/* 全屏里卡片撑满可用宽度（但仍留一个阅读上限，太宽了一眼扫不完一行） */
+.probe-card.full {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+/* ⛶ / ⤡：和「原始文本」同一套按钮，只是更窄 */
+.probe-expand {
+  min-width: 26px;
+  padding: 1px 6px;
+  font-size: calc(12px * var(--fs));
+  line-height: 1.25;
+}
 /* 多语句时的「第几条 / 共几条」。卡头和内文完全一样，只有它能把三张卡分开。 */
 .probe-idx {
   flex: 0 0 auto;

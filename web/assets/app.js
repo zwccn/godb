@@ -10908,6 +10908,11 @@ function erHighlight(table, col, on) {
   for (const p of erCanvas.querySelectorAll('.er-tick, .er-crow')) {
     if (hits.has(p.dataset.edge)) p.classList.toggle('hot', on);
   }
+  // 飞线一起点亮：鼠标移到卡片上就能看出「这些线是往外流还是往里流」，
+  // 不用一条一条去碰。悬停单条线那条路（CSS 相邻选择器）照旧，两条互不干扰。
+  for (const p of erCanvas.querySelectorAll('.er-flow')) {
+    if (hits.has(p.dataset.edge)) p.classList.toggle('hot', on);
+  }
   if (col) return;
   for (const nm of touched) {
     if (!nm) continue;

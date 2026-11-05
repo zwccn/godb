@@ -4447,6 +4447,45 @@ class CDP {
         : '没有飞线路径');
     // 移开，别把悬停态带给后面的用例
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 10, y: 10 });
+    await sleep(120);
+
+    /* 鼠标移到卡片上：这张表参与的**每条**连线都要跑飞线。
+       不用一条条去碰线 —— 一张表有几条关系、分别是往外流还是往里流，
+       停一下就该看清。 */
+    const cardPt = await cdp.eval(`(() => {
+      const c = document.querySelector('.er-card[data-table="er_basis"]');
+      if (!c) return null;
+      const r = c.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 8) };
+    })()`);
+    let cardFlow = null;
+    if (cardPt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: cardPt.x, y: cardPt.y });
+      await sleep(320);
+      cardFlow = await cdp.eval(`(() => {
+        const all = [...document.querySelectorAll('.er-flow')];
+        const on = all.filter(f => f.classList.contains('hot'));
+        const cs = on[0] ? getComputedStyle(on[0]) : null;
+        return {
+          total: all.length, hot: on.length,
+          opacity: cs ? parseFloat(cs.opacity) : 0,
+          anim: cs ? cs.animationName : '',
+          dirs: on.map(f => f.dataset.dir),
+        };
+      })()`);
+    }
+    check('模型图：鼠标移到卡片上，这张表参与的连线全跑飞线',
+      !!cardPt && !!cardFlow && cardFlow.total > 0 && cardFlow.hot === 1
+      && cardFlow.opacity > 0.9 && cardFlow.anim === 'er-flow-dash',
+      cardFlow
+        ? `er_basis 的 ${cardFlow.hot}/${cardFlow.total} 条亮 · 方向 ${cardFlow.dirs.join('/')} · 透明度 ${cardFlow.opacity}`
+        : '找不到 er_basis 卡片');
+
+    // 移开之后要收干净（否则图上会一直亮着，看不出当前指的是哪张表）
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 10, y: 10 });
+    await sleep(320);
+    const flowOff = await cdp.eval(`document.querySelectorAll('.er-flow.hot').length`);
+    check('模型图：鼠标移开卡片，飞线全部熄灭', flowOff === 0, `还亮着 ${flowOff} 条`);
 
     /* 连线不许从别的卡片背后穿过去。
        两边隔着别的组时，竖线本来会直接穿过中间那组的卡片（卡片画在连线上面，

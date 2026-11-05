@@ -4473,6 +4473,53 @@ class CDP {
       lay.bad.length === 0 && lay.stalePos === 0 && (lay.minGap === null || lay.minGap >= 20),
       `${lay.n} 组 · 重叠 ${lay.bad.join(',') || '无'} · 最小间距 ${lay.minGap}px · 残留坐标 ${lay.stalePos}`);
 
+    /* 自动排列的形状：组内这堆表要摊成**近似方形**，不是一条竖线或一排横条；
+       卡片之间 48px，组与组 84px（组间更松，跨组的线要从缝里走）。 */
+    const shape = await cdp.eval(`(async () => {
+      const pick = erSchema.slice(0, 4);
+      const bak = pick.map(t => erDoc.tables[erTKey(t)].group);
+      const gid = erAddGroup();
+      const rec = erDoc.groups.find(x => x.id === gid);
+      rec.name = '形状探针';
+      for (const t of pick) erMoveToGroup(t, gid);
+      erAutoLayout();
+      await new Promise(r => setTimeout(r, 250));
+
+      const g = erModel.groups.find(x => x.gid === gid);
+      const cards = g.tables.map(t => t._er);
+      const rows = new Map();
+      for (const c of cards) {
+        const k = Math.round(c.x);
+        if (!rows.has(k)) rows.set(k, []);
+        rows.get(k).push(c);
+      }
+      const colGaps = [];
+      for (const list of rows.values()) {
+        list.sort((a, b) => a.y - b.y);
+        for (let i = 1; i < list.length; i++) colGaps.push(Math.round(list[i].y - (list[i - 1].y + list[i - 1].h)));
+      }
+      const cols = rows.size;
+      const ratio = g.box.w / g.box.h;
+      const out = {
+        cols, ratio: +ratio.toFixed(2),
+        colGaps, groupGap: ER.groupGap, cardGap: ER.gap,
+        box: { w: Math.round(g.box.w), h: Math.round(g.box.h) },
+      };
+
+      // 还原：组员回原来的组，探针组删掉，再排一次
+      pick.forEach((t, i) => { erDoc.tables[erTKey(t)].group = bak[i]; });
+      erDoc.groups = erDoc.groups.filter(x => x.id !== gid);
+      erAutoLayout();
+      await new Promise(r => setTimeout(r, 250));
+      return out;
+    })()`);
+    check('模型图：自动排列把组内摊成近似方形（不是一条竖线/横条），间距按设计值',
+      !!shape && shape.cols >= 2 && shape.ratio > 0.55 && shape.ratio < 1.8
+      && shape.colGaps.every(v => Math.abs(v - shape.cardGap) <= 1)
+      && shape.groupGap > shape.cardGap,
+      shape ? `${shape.cols} 列 · 宽高比 ${shape.ratio}（${shape.box.w}×${shape.box.h}）`
+        + ` · 卡片间距 ${shape.colGaps.join('/') || '—'} · 组间距 ${shape.groupGap}` : '没摆出来');
+
     // ---- 拖字段建一条关系（这次改动的核心交互）----
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);

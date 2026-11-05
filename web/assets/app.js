@@ -9155,13 +9155,14 @@ const ER = {
   headH: 28,           // 标题栏高
   rowH: 20,            // 每行字段高
   cardPad: 8,          // 卡片底部留白
-  gap: 26,             // 组内卡片间距
+  // 卡片之间的间距。26 太挤（两张表像连成一张），再大又会让一组占满屏；
+  // 48 时「两张表之间」的空当比卡片内边距厚一倍，一眼能分开又不散。
+  gap: 48,
   groupPad: 18,        // 组框内边距
   groupHead: 30,       // 组标题色带高
-  groupGap: 46,        // 组与组之间的水平间距
-  rowMax: 1520,        // 一行最多摆多宽，超了换行
+  // 组与组之间要比组内松：跨组的线要从这条缝里穿过去，还得能看出「这是两组」。
+  groupGap: 84,
   maxRows: 14,         // 卡片最多显示多少行字段，多了折成「还有 N 列」
-  colH: 820,           // 组内一列最多多高，超了就分列
   colGap: 64,          // 列间距：两侧对接的线在这里竖着走
   chanW: 44,           // 组框左侧的走线通道：往左出线的卡片要留出这段
   stub: 20,            // 连线离开字段行后先横着走这么一段，再拐弯
@@ -9638,56 +9639,105 @@ function erOrderGroup(g, edges) {
     (depth.get(a.name) || 0) - (depth.get(b.name) || 0) || a.name.localeCompare(b.name));
 }
 
+// erSquareScore 是「这个宽高比有多不像方形」的代价：0 = 正方。
+// 取对数再平方，2:1 和 1:2 罚得一样重 —— 竖着一条和横着一条都难读。
+function erSquareScore(w, h) {
+  if (!w || !h) return 0;
+  const r = Math.log(w / h);
+  return r * r;
+}
+
 // erGroupPlan 把组内成员分成若干列，并算出这一组的净宽净高。
 //
-// 分列按「总高度 / colH 得到目标列数，再均分成员」，不是固定每列几张：
-// 卡片高度差得很多（3 列的表和 12 列的表差一倍），按张数分会一列很长、
-// 一列很短。先算总高再均分，两列长度才接近。
+// 列数不是「总高 / 定值」，而是**枚举一遍挑最像方形的那个**：
+// 一张表的组当然是一列；十张表的组排成一条竖线或者一条横排都很难读，
+// 摊成 3×3 才一眼看得全。列高也不按张数硬分（卡片高度能差一倍），
+// 而是「下一张放进当前最矮的那一列」，把列高压平。
 function erGroupPlan(g) {
   const n = g.tables.length;
-  let totalH = n > 1 ? (n - 1) * ER.gap : 0;
-  for (const t of g.tables) totalH += erCardHeight(t);
+  if (!n) return { cols: [[]], w: 0, h: g.empty ? 24 : 0 };
 
-  const target = Math.max(1, Math.ceil(totalH / ER.colH));
-  const perCol = Math.max(1, Math.ceil(n / target));
-  const cols = [];
-  for (let i = 0; i < n; i += perCol) cols.push(g.tables.slice(i, i + perCol));
-  if (!cols.length) cols.push([]);
-
-  let maxH = 0;
-  for (const c of cols) {
-    let h = 0;
-    for (const t of c) h += erCardHeight(t) + ER.gap;
-    maxH = Math.max(maxH, h - ER.gap);
-  }
-  const nc = cols.length;
-  return {
-    cols,
-    w: nc * ER.cardW + (nc - 1) * ER.colGap,
-    h: Math.max(maxH, g.empty ? 24 : 0),
+  const hs = new Map(g.tables.map(t => [t, erCardHeight(t)]));
+  const tryCols = c => {
+    const cols = Array.from({ length: c }, () => []);
+    const hts = new Array(c).fill(0);
+    for (const t of g.tables) {
+      let k = 0;
+      for (let i = 1; i < c; i++) if (hts[i] < hts[k]) k = i;
+      cols[k].push(t);
+      hts[k] += hs.get(t) + ER.gap;
+    }
+    const h = Math.max(...hts.map(x => Math.max(0, x - ER.gap)));
+    return { cols, w: c * ER.cardW + (c - 1) * ER.colGap, h };
   };
+
+  let best = tryCols(1);
+  let bestScore = erSquareScore(best.w, best.h);
+  for (let c = 2; c <= n; c++) {
+    const p = tryCols(c);
+    const score = erSquareScore(p.w, p.h);
+    // 0.02 的阈值：2% 以内的改善不值得换列数，免得 6 张表在 2/3 列之间来回横跳
+    if (score < bestScore - 0.02) { best = p; bestScore = score; }
+  }
+  return best;
+}
+
+// erPickGroupCols 决定「一行摆几个组」。
+//
+// 组也是一个一个的块：组少的时候一排铺开会很宽，组多的时候又排成一条竖线。
+// 和组内一样，枚举每行几个，挑整张图最接近方形的那个。
+function erPickGroupCols(sizes) {
+  const n = sizes.length;
+  if (n < 2) return Math.max(1, n);
+  let best = n, bestScore = Infinity;
+  for (let k = 1; k <= n; k++) {
+    let totalW = 0, totalH = 0, rowW = 0, rowH = 0, cnt = 0;
+    for (let i = 0; i < n; i++) {
+      rowW += (cnt ? ER.groupGap : 0) + sizes[i].w;
+      rowH = Math.max(rowH, sizes[i].h);
+      if (++cnt === k || i === n - 1) {
+        totalW = Math.max(totalW, rowW);
+        totalH += (totalH ? ER.groupGap : 0) + rowH;
+        rowW = 0; rowH = 0; cnt = 0;
+      }
+    }
+    const score = erSquareScore(totalW, totalH);
+    if (score < bestScore - 0.02) { bestScore = score; best = k; }
+  }
+  return best;
 }
 
 // erAutoPlace 只摆卡片和组框的外接尺寸，不动用户的坐标。
 function erAutoPlace(groups) {
-  let rowX = 0, rowY = 0, rowH = 0;
-  for (const g of groups) {
+  const plans = new Map();
+  const sizes = groups.map(g => {
     const plan = erGroupPlan(g);
+    plans.set(g, plan);
     // 组内的线在卡片右侧还要竖着走一段，占的宽度由 erMeasureEdgeOverhang 量出来。
     // 这里把它算进占位，下一个组才会让开 —— 否则框是大了，却和旁边的组叠在一起。
     const padR = g._padR || 0;
     // 空组的框由 erRelayoutBoxes 定死成「一张卡片的宽 + 内边距」（没有 chanW，
     // 也没有卡片可包），这里必须用同一个尺寸占位，不然预留的和画出来的对不上。
-    const boxW = (g.empty ? ER.cardW + ER.groupPad * 2
+    const w = (g.empty ? ER.cardW + ER.groupPad * 2
       : ER.groupPad * 2 + ER.chanW + plan.w) + padR;
-    const padB = g._padB || 0;
-    const boxH = (g.empty ? ER.groupHead + ER.groupPad * 2 + 24
-      : ER.groupHead + ER.groupPad * 2 + plan.h) + padB;
-    if (rowX > 0 && rowX + boxW > ER.rowMax) {
+    const h = (g.empty ? ER.groupHead + ER.groupPad * 2 + 24
+      : ER.groupHead + ER.groupPad * 2 + plan.h) + (g._padB || 0);
+    return { w, h };
+  });
+
+  // 每行几个组由整张图的宽高比定；换行之后行高按本行最高的那一组算。
+  const perRow = erPickGroupCols(sizes);
+  let rowX = 0, rowY = 0, rowH = 0, inRow = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const { w: boxW, h: boxH } = sizes[i];
+    if (inRow === perRow) {
       rowX = 0;
       rowY += rowH + ER.groupGap;
       rowH = 0;
+      inRow = 0;
     }
+    const plan = plans.get(g);
     let x = rowX + ER.groupPad + ER.chanW;
     const y0 = rowY + ER.groupHead + ER.groupPad;
     for (const col of plan.cols) {
@@ -9711,6 +9761,7 @@ function erAutoPlace(groups) {
     }
     rowX += boxW + ER.groupGap;
     rowH = Math.max(rowH, boxH);
+    inRow++;
   }
 }
 

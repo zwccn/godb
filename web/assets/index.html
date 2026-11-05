@@ -555,12 +555,9 @@ try {
     <div class="er-actions">
       <button id="btnErRev" class="btn btn-ghost btn-sm" type="button"
               title="定版并查看历史版本">版本</button>
-      <button id="btnErTables" class="btn btn-ghost btn-sm" type="button"
-              title="这个模型里有哪些表">表</button>
-      <button id="btnErNewTable" class="btn btn-ghost btn-sm" type="button"
-              title="在模型里新建一张表（不一定库里得有）">+ 表</button>
-      <button id="btnErGroup" class="btn btn-ghost btn-sm" type="button"
-              title="新建一个空分组">+ 分组</button>
+      <!-- 表 / +表 / +分组 三个按钮撤掉了：它们都在画布右键里（显示 / 隐藏、
+           新建 / 导入 ▸），顶栏留给「版本 / 自动排列 / 适应画布 / 缩放」这些
+           和「整张图」有关的动作。 -->
       <button id="btnErAuto" class="btn btn-ghost btn-sm er-wide" type="button"
               title="按关系重新摆放所有卡片（分组和颜色保留）">自动排列</button>
       <button id="btnErFit" class="btn btn-ghost btn-sm er-wide" type="button"

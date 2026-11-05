@@ -5824,7 +5824,7 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   .er-actions { gap: 6px; }
 }
 @media (max-width: 620px) {
-  #btnErGroup, #btnErLink {
+  #btnErLink {
     padding: 3px 7px;
     font-size: calc(11px * var(--fs));
   }

@@ -3902,7 +3902,7 @@ class CDP {
       `当前 ${emptyUi.model} · ${emptyUi.note.slice(0, 24)}`);
 
     // 表清单里「从当前库加进模型」：空白模型靠它长出第一张表
-    await cdp.eval(`document.getElementById('btnErTables').click()`);
+    await cdp.eval(`erOpenTablePicker()`);
     await waitFor(cdp, `!document.getElementById('erTablesModal').classList.contains('hidden')`,
       { label: '表清单', timeout: 2000 });
     const addRows = await cdp.eval(`document.querySelectorAll('.er-tables-add').length`);
@@ -3919,7 +3919,7 @@ class CDP {
     /* 在模型里手工建表：表不必是库里已有的。
        复用表设计器那张网格，但保存写回模型、不执行 DDL；「引用（外键）」列
        在模型模式下整列隐藏 —— 模型里的关系是画布上的线。 */
-    await cdp.eval(`document.getElementById('btnErNewTable').click()`);
+    await cdp.eval(`erNewModelTable()`);
     const dOpen = await waitFor(cdp,
       `!document.getElementById('designerModal').classList.contains('hidden')`,
       { label: '表结构设计器', timeout: 3000 });
@@ -3963,7 +3963,7 @@ class CDP {
     /* 表结构弹窗的高度：以前是「贴着内容缩」，一进来只有一行字段，弹窗就
        三百来像素高，网格区更小 —— 加几个字段就得在一条缝里滚。现在高度定了
        （min(视口-80, 800)），网格区把剩下的空间吃满。 */
-    await cdp.eval(`document.getElementById('btnErNewTable').click()`);
+    await cdp.eval(`erNewModelTable()`);
     await sleep(450);
     const dgSize = await cdp.eval(`(() => {
       const c = document.querySelector('#designerModal .modal-card').getBoundingClientRect();
@@ -4040,7 +4040,7 @@ class CDP {
 
     // ---- 分组：建、改名、把表移进去 ----
     const groupsBefore = await cdp.eval(`document.querySelectorAll('.er-group').length`);
-    await cdp.eval(`document.getElementById('btnErGroup').click()`);
+    await cdp.eval(`erNewGroup()`);
     await sleep(150);
     const groupsAfter = await cdp.eval(`document.querySelectorAll('.er-group').length`);
     check('模型图：新建分组立刻出现一个空组框',
@@ -4311,7 +4311,7 @@ class CDP {
        2) 整块组框都能拖 → 拖空白也能把整组拽走，不是人想要的。
        现在：标题条 = 抓手；组里别的地方吃掉左键、什么都不做。
        起点先「自动排列」清掉所有坐标 —— 没摆过的图最容易露馅。 */
-    await cdp.eval(`document.getElementById('btnErAuto').click()`);
+    await cdp.eval(`erAutoLayout()`);
     await sleep(300);
 
     const gSnap = `(() => {
@@ -4406,7 +4406,7 @@ class CDP {
     /* ---- 空组也要拖得动 ----
        刚建的组一张表都没有，框没有任何东西可依附：位置只能记在组的记录里。
        不记的话拖完一渲染就弹回自动布局，用户看到的是「这个组拖不走」。 */
-    await cdp.eval(`document.getElementById('btnErGroup').click()`);
+    await cdp.eval(`erNewGroup()`);
     await sleep(400);
     const emptyInfo = await cdp.eval(`(() => {
       const g = erModel.groups.find(x => x.empty && !x.loose);
@@ -4439,7 +4439,7 @@ class CDP {
     }
 
     // 摆过之后回到自动布局，后面的连线用例从一个规整的图开始
-    await cdp.eval(`document.getElementById('btnErAuto').click()`);
+    await cdp.eval(`erAutoLayout()`);
     await sleep(400);
 
     /* 自动排列之后，组框之间必须留出设计间距（46px），不许挨在一起。
@@ -5255,6 +5255,22 @@ class CDP {
       && ctxUi.top.some(t => t.indexOf('新建 / 导入') === 0)
       && ctxUi.top.indexOf('自动排列') >= 0,
       ctxUi ? ctxUi.top.join(' | ') : '没有菜单');
+
+    // 顶栏不再有「表 / +表 / +分组」：这三件事都收进画布右键的「新建 / 导入」和
+    // 「显示 / 隐藏」里了，顶栏只留和「整张图」有关的动作。
+    const noTopBtns = await cdp.eval(`['btnErTables','btnErNewTable','btnErGroup']
+      .map(id => !!document.getElementById(id))`);
+    const buildItems = await cdp.eval(`(() => {
+      const wrap = [...document.querySelectorAll('.er-menu > .er-menu-sub')][1];
+      if (!wrap) return null;
+      return [...wrap.querySelectorAll('.er-menu-item')].map(b => b.textContent);
+    })()`);
+    check('模型图：顶栏撤掉「表 / +表 / +分组」，这几件事只在右键菜单里',
+      noTopBtns.length === 3 && noTopBtns.every(v => v === false)
+      && !!buildItems && buildItems.indexOf('创建分组') >= 0
+      && buildItems.indexOf('创建新表') >= 0
+      && buildItems.some(t => t.indexOf('从库选表') === 0),
+      `顶栏残留 ${noTopBtns.filter(Boolean).length} 个 · 二级 ${buildItems ? buildItems.join(' / ') : '没展开'}`);
 
     // 悬停展开第一个二级：应该列出模型里每张表 + 全显示/全收起
     const sub1Pt = await cdp.eval(`(() => {

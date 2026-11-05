@@ -10822,6 +10822,48 @@ function erNewModelTable() {
   openModelDesigner(id);
 }
 
+// erNewGroup 新建一个空组，并把视野挪到它身上。
+//
+// 顶栏的三个按钮（表 / +表 / +分组）撤掉之后，这是画布右键「新建 / 导入 ▸」
+// 里的那一条 —— 逻辑只留这一份，菜单和别处都调它。
+function erNewGroup() {
+  if (!erDoc) erDoc = erNormalizeDoc(null);
+  const id = erAddGroup();
+  erHotGroup = id;
+  erRender();
+  // 落在别人框里的（自动布局时包围盒会变），挪到图下面再画一次
+  const fresh = erModel.groups.find(x => x.gid === id);
+  if (fresh && erPlaceNewGroup(fresh)) erRender();
+  // 新组在末尾，画面可能已经滚过去了 —— 直接把它送到视野中间，
+  // 否则点完「新建分组」什么都没发生。
+  const g = erModel.groups.find(x => x.gid === id);
+  if (g) {
+    erView.panX = erStage.clientWidth / 2 - (g.box.x + g.box.w / 2) * erView.zoom;
+    erView.panY = erStage.clientHeight / 2 - (g.box.y + g.box.h / 2) * erView.zoom;
+    erApplyView();
+  }
+  erSave();
+}
+
+// erAutoLayout 只清坐标，分组名、颜色、关系全留着 —— 那些是设计信息，不是布局。
+function erAutoLayout() {
+  if (!erDoc) return;
+  for (const k in erDoc.tables) {
+    erDoc.tables[k].x = null;
+    erDoc.tables[k].y = null;
+  }
+  // **空组的落脚点也要清**：空组没有卡片，位置只存在组记录里。不清的话，
+  // 它留在拖动后的原地，新布局排过来正好压在它身上 —— 表现为「组和组重叠」。
+  for (const g of erDoc.groups) {
+    g.x = null;
+    g.y = null;
+  }
+  erHotGroup = '';
+  erRender();
+  erFit();
+  erSave();
+}
+
 function erDeleteModelTable(t) {
   if (!erModelDoc || !t) return;
   if (!confirm(`从模型里删除表「${t.name}」？\n\n只删模型里的这张表，库里的不受影响。`)) return;
@@ -11210,15 +11252,14 @@ function erOpenCanvasMenu(ev) {
     {
       label: '新建 / 导入',
       sub: [
-        // 直接点顶栏那个按钮：建组之后要把视野挪到新组上，那段逻辑只写一份
-        { label: '创建分组', run: () => document.getElementById('btnErGroup').click() },
+        { label: '创建分组', run: erNewGroup },
         { label: '创建新表', run: erNewModelTable },
         { label: '从库选表…', run: erOpenTablePicker },
       ],
     },
     { sep: true },
-    { label: '自动排列', run: () => document.getElementById('btnErAuto').click() },
-    { label: '适应画布', run: () => document.getElementById('btnErFit').click() },
+    { label: '自动排列', run: erAutoLayout },
+    { label: '适应画布', run: erFit },
   ]);
 }
 
@@ -11740,29 +11781,7 @@ document.getElementById('erRevNote').addEventListener('keydown', ev => {
 });
 document.getElementById('btnErFit').addEventListener('click', erFit);
 
-document.getElementById('btnErNewTable').addEventListener('click', erNewModelTable);
 
-document.getElementById('btnErGroup').addEventListener('click', () => {
-  if (!erDoc) erDoc = erNormalizeDoc(null);
-  const id = erAddGroup();
-  erHotGroup = id;
-  erRender();
-  // 落在别人框里的（自动化时包围盒会变），挪到图下面再画一次
-  const fresh = erModel.groups.find(x => x.gid === id);
-  if (fresh && erPlaceNewGroup(fresh)) erRender();
-  // 新组在末尾，画面可能已经滚过去了 —— 直接把它送到视野中间，
-  // 否则用户点完「+ 分组」什么都没发生。
-  const g = erModel.groups.find(x => x.gid === id);
-  if (g) {
-    erView.panX = erStage.clientWidth / 2 - (g.box.x + g.box.w / 2) * erView.zoom;
-    erView.panY = erStage.clientHeight / 2 - (g.box.y + g.box.h / 2) * erView.zoom;
-    erApplyView();
-  }
-  erSave();
-});
-
-
-document.getElementById('btnErTables').addEventListener('click', erOpenTablePicker);
 document.getElementById('btnErTablesClose').addEventListener('click', erCloseTablePicker);
 document.getElementById('btnErTablesDone').addEventListener('click', erCloseTablePicker);
 erTablesSearch.addEventListener('input', erRenderTablePicker);
@@ -11782,24 +11801,8 @@ document.getElementById('btnErTablesNone').addEventListener('click', () => {
   erRenderTablePicker();
 });
 
-// 自动排列：只清坐标，分组名、颜色、关系全留着 —— 那些是设计信息，不是布局。
-document.getElementById('btnErAuto').addEventListener('click', () => {
-  if (!erDoc) return;
-  for (const k in erDoc.tables) {
-    erDoc.tables[k].x = null;
-    erDoc.tables[k].y = null;
-  }
-  // **空组的落脚点也要清**：空组没有卡片，位置只存在组记录里。不清的话，
-  // 它留在拖动后的原地，新布局排过来正好压在它身上 —— 表现为「组和组重叠」。
-  for (const g of erDoc.groups) {
-    g.x = null;
-    g.y = null;
-  }
-  erHotGroup = '';
-  erRender();
-  erFit();
-  erSave();
-});
+// 自动排列：顶栏按钮和画布右键的「自动排列」调的是同一个 erAutoLayout。
+document.getElementById('btnErAuto').addEventListener('click', erAutoLayout);
 
 document.getElementById('btnErIn').addEventListener('click', () => {
   erZoomAt(1.2, erStage.clientWidth / 2, erStage.clientHeight / 2);

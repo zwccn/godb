@@ -4099,6 +4099,53 @@ class CDP {
       check('模型图：双击组标题就地改名', false, '没找到空组标题');
     }
 
+    // 分组标题右边那个 ⋯：菜单里的三项以前是「弹得出来、点了没反应」的重灾区
+    // （重命名拿的是渲染时记下的节点，改色/删除要先按 gid 找回记录）。这里从菜单
+    // 真点一次「重命名」，确认输入框真的挂到了组标题上。
+    await cdp.eval(`document.getElementById('btnErFit').click()`);
+    await sleep(320);
+    const gmorePt = await cdp.eval(`(() => {
+      const g = [...document.querySelectorAll('.er-group:not(.loose)')]
+        .find(x => ((x.querySelector('.er-group-name') || {}).textContent || '') === '回归测试组');
+      const b = g && g.querySelector('.er-group-more');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    let gmenuUi = null;
+    if (gmorePt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: gmorePt.x, y: gmorePt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: gmorePt.x, y: gmorePt.y, button: 'left', clickCount: 1 });
+      await waitFor(cdp, `!!document.querySelector('.er-menu .er-menu-item')`, { label: '分组菜单', timeout: 2000 });
+      const rnPt = await cdp.eval(`(() => {
+        const b = [...document.querySelectorAll('.er-menu .er-menu-item')].find(x => x.textContent.trim() === '重命名');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (rnPt) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: rnPt.x, y: rnPt.y, button: 'left', clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rnPt.x, y: rnPt.y, button: 'left', clickCount: 1 });
+        const inp = await waitFor(cdp, `(() => {
+          const i = document.querySelector('.er-group-input');
+          return i ? i.closest('.er-group') && i.isConnected : null;
+        })()`, { label: '菜单改名输入框', timeout: 2000 });
+        // 挂到组标题上而不是游离节点：顺便确认它就在那份 .er-group-name 里
+        const inside = await cdp.eval(`(() => {
+          const i = document.querySelector('.er-group-input');
+          return !!(i && i.closest('.er-group-name'));
+        })()`);
+        gmenuUi = { inp: !!inp, inside };
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await sleep(250);
+        gmenuUi.back = await cdp.eval(`[...document.querySelectorAll('.er-group-name')]
+          .some(x => x.textContent === '回归测试组')`);
+      }
+    }
+    check('模型图：组标题 ⋯ 菜单里点「重命名」真的进改名（输入框挂在组标题上）',
+      !!gmenuUi && gmenuUi.inp && gmenuUi.inside && gmenuUi.back,
+      gmenuUi ? `输入框 ${gmenuUi.inp ? '有' : '无'} · 在标题内 ${gmenuUi.inside} · Esc 后标题复员 ${gmenuUi.back}` : '⋯ 没点开菜单');
+
     // 把 er_basis 移进新组：点卡片右上角 ⋯ → 菜单里选组名。
     // 先「适应画布」：新建分组会把视图移到新组上，别的卡片可能落在视口外，
     // 真实鼠标点不到 —— 用户遇到这种情况也是先点这个按钮。
@@ -5189,6 +5236,36 @@ class CDP {
       !!cardCtx && cardCtx.items.indexOf('编辑表结构') >= 0
       && cardCtx.items.indexOf('在编辑器中打开') >= 0,
       cardCtx ? cardCtx.items.join(' | ') : '没有菜单');
+    await cdp.eval(`erCloseMenus()`);
+
+    // 未分组右键：出的是画布菜单。以前 DOM 上没有 loose 这个类名，判定走的是
+    // 「不是 loose 就是真分组」，于是未分组也弹出「重命名 / 换个颜色 / 删除分组」，
+    // 而这三条对未分组全都提前 return —— 菜单弹得出来、每一条都点不动。
+    await cdp.eval(`(() => {
+      const t = erSchema[0];
+      if (t) erMoveToGroup(t, '');        // 保证画布上一定有「未分组」这一组
+    })()`);
+    await sleep(400);
+    const loosePt = await cdp.eval(`(() => {
+      const el = document.querySelector('.er-group.loose .er-group-label');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.left + 24), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    let looseCtx = null;
+    if (loosePt) {
+      await rightClick(loosePt.x, loosePt.y);
+      looseCtx = await cdp.eval(`(() => {
+        const m = document.querySelector('.er-menu');
+        if (!m) return null;
+        return { items: [...m.querySelectorAll(':scope > .er-menu-item, :scope > .er-menu-sub > .er-menu-item')]
+          .map(b => b.textContent), more: !!document.querySelector('.er-group.loose .er-group-more') };
+      })()`);
+    }
+    check('模型图：右键「未分组」出画布菜单（不是那一套点不动的组操作）',
+      !!looseCtx && looseCtx.items.indexOf('自动排列') >= 0
+      && looseCtx.items.indexOf('重命名') < 0 && !looseCtx.more,
+      looseCtx ? looseCtx.items.join(' | ') : '未分组标题没找到');
     await cdp.eval(`erCloseMenus()`);
     await cdp.eval(`toggleER(false)`);
     await sleep(300);

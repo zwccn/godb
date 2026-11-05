@@ -10113,7 +10113,11 @@ function erDrawEdges(svg, model, reuse) {
 }
 
 function erGroupEl(g) {
-  const box = el('div', 'er-group g' + g.tone);
+  // `loose` 这个类名是**语义标记**，不是样式（CSS 里没有它）：右键菜单要据此
+  // 判断「这是未分组，没有组操作」，以前只有 JS 对象里那个 loose 字段，DOM 上
+  // 没留痕，于是右键未分组也弹出「重命名 / 换个颜色 / 删除分组」——
+  // 而这三条对未分组都提前 return，表现成「菜单点了没反应」。
+  const box = el('div', 'er-group g' + g.tone + (g.loose ? ' loose' : ''));
   box.style.left = g.box.x + 'px';
   box.style.top = g.box.y + 'px';
   box.style.width = g.box.w + 'px';
@@ -11133,10 +11137,19 @@ function erOpenCanvasMenu(ev) {
 }
 
 function erOpenGroupMenu(g, anchorEl) {
+  if (!g || g.loose) return;              // 未分组没有组操作，别弹一个全是空转的菜单
   const r = anchorEl.getBoundingClientRect();
   const sr = erStage.getBoundingClientRect();
   const items = [
-    { label: '重命名', run: () => { if (g._nameEl) erRenameGroup(g, g._nameEl); } },
+    {
+      label: '重命名',
+      // 名字那个 span 以当场这一份 DOM 为准：菜单是异步点开的，中途要是重渲染过，
+      // 记在 g 上的 _nameEl 可能已经不在文档里 —— 在游离节点上插输入框＝没反应。
+      run: () => {
+        const nameEl = (g._box && g._box.querySelector('.er-group-name')) || g._nameEl;
+        if (nameEl && nameEl.isConnected) erRenameGroup(g, nameEl);
+      },
+    },
     { label: '换个颜色', run: () => erOpenGroupColor(g, anchorEl) },
     { sep: true },
     {
@@ -11784,9 +11797,11 @@ erStage.addEventListener('contextmenu', ev => {
     if (t) { erOpenCardMenu(t, cardEl, ev); return; }
   }
   const groupEl = ev.target.closest('.er-group');
-  if (groupEl && erModel && !groupEl.classList.contains('loose')) {
+  if (groupEl && erModel) {
+    // 以模型对象上的 loose 为准，DOM 类名只作辅助 —— 判错一次就是「菜单弹了但
+    // 每条都点不动」，比不弹更让人困惑。
     const g = erModel.groups.find(x => x._box === groupEl);
-    if (g) { erOpenGroupMenu(g, groupEl.querySelector('.er-group-label') || groupEl); return; }
+    if (g && !g.loose) { erOpenGroupMenu(g, groupEl.querySelector('.er-group-label') || groupEl); return; }
   }
   erOpenCanvasMenu(ev);
 });

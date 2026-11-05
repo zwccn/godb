@@ -11193,6 +11193,131 @@ function erNewModelTable() {
   openModelDesigner(id);
 }
 
+// erCopyName 给复制出来的表挑个名字：原名 + `_copy`，撞了就往 `_copy2`、`_copy3` 走。
+//
+// 不做成「原名副本」那种中文后缀：模型最终要生成 DDL，表名跟着走成中文标识符
+// 会逼着人到处加双引号。`_copy` 一眼能看出是从哪张复制来的，改起来也快。
+function erCopyName(base) {
+  const used = new Set((erModelDoc.tables || []).map(t => t.name.toLowerCase()));
+  let name = base + '_copy';
+  let n = 1;
+  while (used.has(name.toLowerCase())) {
+    n++;
+    name = base + '_copy' + n;
+  }
+  return name;
+}
+
+// erFreeSpot 从 (x0, y0) 往下找一块不压别人的地方。
+//
+// 复制品必须挨着原表才看得出「复制了」；但原表右边往往就是同一组的下一张卡片，
+// 直接放会盖上去。所以按 ER.gap 的间距往下试，撞了就再下一格。
+function erFreeSpot(x0, y0, w, h) {
+  const boxes = erSchema.map(t => t._er).filter(Boolean);
+  const hits = (x, y) => boxes.some(b =>
+    x < b.x + b.w + ER.gap && b.x < x + w + ER.gap &&
+    y < b.y + b.h + ER.gap && b.y < y + h + ER.gap);
+  let x = x0, y = y0;
+  for (let i = 0; i < 20 && hits(x, y); i++) y += h + ER.gap;
+  return { x, y };
+}
+
+// erEnsureVisible 把一张卡片滚进视野（不在视野里才动，否则画布会突然跳一下）。
+function erEnsureVisible(t) {
+  const c = t && t._er;
+  if (!c || !erStage) return;
+  const vw = erStage.clientWidth, vh = erStage.clientHeight;
+  const sx = c.x * erView.zoom + erView.panX;
+  const sy = c.y * erView.zoom + erView.panY;
+  if (sx >= 0 && sy >= 0 && sx + c.w * erView.zoom <= vw && sy + c.h * erView.zoom <= vh) return;
+  erView.panX = vw / 2 - (c.x + c.w / 2) * erView.zoom;
+  erView.panY = vh / 2 - (c.y + c.h / 2) * erView.zoom;
+  erApplyView();
+}
+
+// erCopyTable 复制一张表：结构和**它参与的连线**一起带走。
+//
+// 模型里的表就是一段 JSON（id / 名字 / 列 / 坐标 / 分组 / 色号），复制等于把这段
+// 深拷贝一遍、换个 id 和名字再塞回去 —— 不碰库，也不生成任何 DDL。
+//
+// 连线跟着复制，否则复制一张挂着 5 条关系的表得手画 5 次。自连接（一端指向自己）
+// 复制后**两端都换成新表**，得到新表自己的自连接；只换一端会变成「新表指着原表」，
+// 那是另一条关系了。新表挂在同一个分组、同一个色号，但不会复制成隐藏状态。
+//
+// 不自动打开表设计器：结构已经完整，弹窗只会打断。选中新卡片，位置不够就滚过来，
+// 名字不满意双击就能改。
+function erCopyTable(t) {
+  if (!erModelDoc || !t) return null;
+  const src = t._model || (erModelDoc.tables || []).find(x => x.id === t.id);
+  if (!src) return null;
+
+  const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  const name = erCopyName(src.name);
+
+  // 坐标：原表摆过就贴着它右边放（撞了往下让），没摆过就交给自动布局 ——
+  // 给一张没摆过的表写死坐标会把整组的自动布局带偏。
+  const rec = erDoc.tables[erTKey(src)] || {};
+  let x = null, y = null;
+  if (typeof rec.x === 'number' && typeof rec.y === 'number') {
+    const box = t._er || { w: ER.cardW, h: 0 };
+    const p = erFreeSpot(rec.x + box.w + ER.gap, rec.y, box.w, box.h || 60);
+    x = p.x;
+    y = p.y;
+  }
+
+  erModelDoc.tables.push({
+    id,
+    name,
+    comment: src.comment || '',
+    group: src.group || '',
+    color: Number.isFinite(src.color) ? src.color : undefined,
+    // 位置不写在这里：坐标的唯一真相是 erDoc.tables，保存时 erDocToModel
+    // 会把这份的值盖上去。两处都写等于留一个永远对不上的影子。
+    // 列逐个展开成新对象：直接 {...src.columns} 还是共享同一批引用，
+    // 之后改新表的列会把原表的也改掉。
+    columns: (src.columns || []).map(c => ({ ...c })),
+  });
+
+  // 连线要写进 erDoc.links，不是 erModelDoc.links：保存时 erDocToModel 是从
+  // erDoc 合成整份文件的，另一份只在加载时当过原始副本 —— 推给它等于白推，
+  // 界面上多了两条线，存下去的还是原来那些。
+  //
+  // 先收集再追加：边遍历边 push 同一个数组会一直往后长，永不结束。
+  const t0 = Date.now().toString(36);
+  const addLinks = [];
+  if (!erDoc.links) erDoc.links = [];
+  erDoc.links.forEach((ln, i) => {
+    const f = String(ln.from.table) === String(src.id);
+    const o = String(ln.to.table) === String(src.id);
+    if (!f && !o) return;
+    addLinks.push({
+      id: 'm' + t0 + i.toString(36) + Math.random().toString(36).slice(2, 4),
+      from: { table: f ? id : String(ln.from.table), columns: ln.from.columns.slice() },
+      to: { table: o ? id : String(ln.to.table), columns: ln.to.columns.slice() },
+      card: ln.card,
+    });
+  });
+  for (const ln of addLinks) erDoc.links.push(ln);
+
+  erSchema = erCardsOf(erModelDoc);
+  erDoc.tables[id] = {
+    group: src.group || '',
+    x, y,
+    hidden: false,
+    color: Number.isFinite(src.color) ? src.color : -1,
+  };
+  erRender();
+  erSave();
+
+  const fresh = erSchema.find(s => s.id === id);
+  if (fresh) {
+    erSelectCard(fresh);
+    erEnsureVisible(fresh);
+  }
+  toast(`已复制出 ${name}`);
+  return fresh;
+}
+
 // erNewGroup 新建一个空组，并把视野挪到它身上。
 //
 // 顶栏的三个按钮（表 / +表 / +分组）撤掉之后，这是画布右键「新建 / 导入 ▸」
@@ -11557,7 +11682,10 @@ function erShowMenu(x, y, items) {
   return m;
 }
 
-// 卡片菜单只留「这张卡片在图上怎么摆」的三件事：自己挑色、从组里拿出去、换到别的组。
+// 卡片菜单只留「拿这张表能做的事」：复制一份、自己挑色、从组里拿出去、换到别的组。
+//
+// 复制放在最上面：它造的是**另一张表**，和后面三项「调这张卡片的样子」不是一类事，
+// 排在中间容易顺手点到。它也不改这张表本身，最安全的一项放最前没有代价。
 //
 // 表结构（双击卡片）、进编辑器（侧栏点表名）、收起（画布右键的显示/隐藏）、
 // 删表（表设计页里那个按钮）都有各自更顺手的入口，摊在这份菜单里只会
@@ -11567,6 +11695,8 @@ function erOpenCardMenu(t, cardEl, ev) {
   const sr = erStage.getBoundingClientRect();
   const cur = erGroupOf(t);
   const items = [
+    { label: '复制这张表', run: () => erCopyTable(t) },
+    { sep: true },
     { label: '改变颜色', run: () => erOpenTableColor(t, cardEl) },
   ];
   // 不在组里就没有「移除」可言。宁可少一行，也不要放一条点了没反应的项。

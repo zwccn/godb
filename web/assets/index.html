@@ -76,9 +76,9 @@ try {
     <button id="btnSettings" class="btn btn-ghost">设置</button>
     <!-- 模型图：把表和关系摊开成一张图。和监控同级（页面级视图），
          因为它回答的是 schema 的结构问题，不是运行时指标。
-         名字叫「模型图」而不是「关系图」：它现在表达的不只是外键，
-         还有你划的分组、标注的基数和库里还没建的关系。 -->
-    <button id="btnEr" class="btn btn-ghost" title="模型图：分组、关系与基数（逻辑视图 + 物理视图）"
+         名字叫「模型图」而不是「关系图」：模型是**独立的设计**，不跟库走 ——
+         库里有外键它也不画，图上的每条关系都是人画上去的。 -->
+    <button id="btnEr" class="btn btn-ghost" title="模型图：分组、关系与基数（独立模型，不读库里的外键）"
             aria-label="模型图">
       <span class="lbl-full">模型图</span><span class="lbl-short">模型</span>
     </button>

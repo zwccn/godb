@@ -5129,6 +5129,102 @@ class CDP {
     check('模型图：画关系不会改库（外键数不变）',
       fkUnchanged === demo.fk, `外键 ${demo.fk} → ${fkUnchanged}`);
 
+    // 复制一张表：结构和**它参与的连线**一起带走。这里选 er_basis —— 它有一条
+    // 1 : 1 关系（er_basis.id → er_fact.basis_id），正好用来盯「连线也跟着复制」。
+    // 复制品测完就删掉，恢复成 6 张 / 1 条 —— 后面那些把数字写死的断言才不受影响。
+    const clickAt = async pt => {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+      await sleep(250);
+    };
+    // 卡片要是被挪到视野外，算出来的坐标点了也没反应 —— 先适应画布
+    await cdp.eval(`document.getElementById('btnErFit').click()`);
+    await sleep(300);
+    const beforeCopy = await cdp.eval(`({
+      cards: document.querySelectorAll('.er-card').length,
+      links: document.querySelectorAll('.er-hit').length,
+    })`);
+    const copyOnce = async () => {
+      const morePt2 = await cdp.eval(`(() => {
+        const more = document.querySelector('.er-card[data-table="er_basis"] .er-card-more');
+        if (!more) return null;
+        const r = more.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (!morePt2) return false;
+      await clickAt(morePt2);
+      const btn = await cdp.eval(`(() => {
+        const b = [...document.querySelectorAll('.er-menu > .er-menu-item')]
+          .find(x => x.textContent.trim() === '复制这张表');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      if (!btn) return false;
+      await clickAt(btn);
+      await sleep(500);
+      return true;
+    };
+    await copyOnce();
+    const copyUi = await cdp.eval(`(() => {
+      const cards = [...document.querySelectorAll('.er-card')];
+      const made = cards.filter(c => /_copy/.test(c.dataset.table || ''));
+      const sel = cards.filter(c => c.classList.contains('sel'));
+      const src = document.querySelector('.er-card[data-table="er_basis"]');
+      const madeCard = made.length ? made[0] : null;
+      const rows = madeCard
+        ? [...madeCard.querySelectorAll('.er-col')].map(r => r.dataset.col)
+        : [];
+      const srcRows = src
+        ? [...src.querySelectorAll('.er-col')].map(r => r.dataset.col)
+        : [];
+      const a = madeCard ? madeCard.getBoundingClientRect() : null;
+      const b = src ? src.getBoundingClientRect() : null;
+      const overlap = !!(a && b)
+        && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+      return {
+        cards: cards.length, made: made.length, overlap, rows, srcRows,
+        name: sel.length ? sel[0].dataset.table : '',
+        edges: document.querySelectorAll('.er-hit').length,
+        stats: (document.getElementById('erStats') || {}).textContent || '',
+      };
+    })()`);
+    check('模型图：卡片菜单能复制这张表，新表叫 xxx_copy 并自动选中',
+      copyUi.made === 1 && /_copy$/.test(copyUi.name) && copyUi.cards === beforeCopy.cards + 1,
+      `${beforeCopy.cards} → ${copyUi.cards} 张 · 选中 ${copyUi.name || '(无)'}`);
+    check('模型图：复制品的列和原表一模一样（逐列对照，不是只数个数）',
+      copyUi.rows.length > 0 && copyUi.rows.join(',') === copyUi.srcRows.join(','),
+      `复制 ${copyUi.rows.length} 列 / 原表 ${copyUi.srcRows.length} 列`);
+    check('模型图：复制品摆得下那张卡片，不压在原表上',
+      copyUi.made === 1 && !copyUi.overlap, copyUi.overlap ? '两块矩形重叠' : '不重叠');
+    check('模型图：原表参与的连线跟着复制一条（一端换成新表）',
+      copyUi.edges === beforeCopy.links + 1 && /2 条关系/.test(copyUi.stats),
+      `线 ${beforeCopy.links} → ${copyUi.edges} · ${copyUi.stats}`);
+
+    // 同一张表再复制一次：不能跟第一个撞名，得走 _copy2
+    await copyOnce();
+    const twice = await cdp.eval(`([...document.querySelectorAll('.er-card')]
+      .map(c => c.dataset.table || '').filter(n => /_copy/.test(n)).sort())`);
+    check('模型图：同一张表连复制两次，第二个不跟第一个撞名（走 _copy2）',
+      twice.length === 2 && twice.some(n => /_copy$/.test(n)) && twice.some(n => /_copy2$/.test(n)),
+      twice.join(' · '));
+
+    // 收尾：删掉复制品（连着它们复制来的那两条线），回到 6 张 / 1 条
+    const droppedCopy = await cdp.eval(`(() => {
+      const losers = (erModelDoc.tables || []).filter(t => /_copy/.test(t.name));
+      for (const t of losers) erDropModelTable(t.id);
+      return losers.map(t => t.name);
+    })()`);
+    await sleep(400);
+    const afterDrop = await cdp.eval(`({
+      cards: document.querySelectorAll('.er-card').length,
+      edges: document.querySelectorAll('.er-hit').length,
+      stats: (document.getElementById('erStats') || {}).textContent || '',
+    })`);
+    check('模型图：删掉复制品之后回到原样（表和线都不多不少）',
+      afterDrop.cards === beforeCopy.cards && afterDrop.edges === beforeCopy.links,
+      `${droppedCopy.length} 个复制品删掉 · ${afterDrop.cards} 张 · ${afterDrop.stats}`);
+
     // 点线改基数：1 : 1 → M : N，两端都该变成鸦爪
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);
@@ -5494,8 +5590,9 @@ class CDP {
     };
     await tapPt(morePt);
     const cardItems = await menuTopItems();
-    check('模型图：卡片菜单只剩三件事（改变颜色 / 移除分组 / 移到分组）',
-      cardItems.length >= 2 && cardItems[0] === '改变颜色'
+    check('模型图：卡片菜单第一项是「复制这张表」，其余只留摆放相关',
+      cardItems.indexOf('复制这张表') === 0 && cardItems.length >= 3
+      && cardItems.indexOf('改变颜色') >= 0
       && cardItems.indexOf('移到分组›') >= 0
       && cardItems.indexOf('编辑表结构') < 0 && cardItems.indexOf('在编辑器中打开') < 0,
       cardItems.join(' | '));
@@ -5818,8 +5915,9 @@ class CDP {
         return { items: [...m.querySelectorAll('.er-menu-item')].map(b => b.textContent) };
       })()`);
     }
-    check('模型图：卡片上右键弹这张卡片的菜单（颜色 / 分组，没有画布那套）',
-      !!cardCtx && cardCtx.items[0] === '改变颜色'
+    check('模型图：卡片上右键弹这张卡片的菜单（复制 / 颜色 / 分组，没有画布那套）',
+      !!cardCtx && cardCtx.items[0] === '复制这张表'
+      && cardCtx.items.indexOf('改变颜色') >= 0
       && cardCtx.items.indexOf('移到分组›') >= 0
       && cardCtx.items.indexOf('自动排列') < 0,
       cardCtx ? cardCtx.items.join(' | ') : '没有菜单');

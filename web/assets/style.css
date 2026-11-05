@@ -5468,8 +5468,12 @@ html[data-theme="sky"], html[data-theme="taro"], html[data-theme="mint"] {
   bottom: 14px;
   z-index: 4;
   display: flex;
-  gap: 14px;
-  padding: 6px 10px;
+  /* 竖着排：三项各占一行，宽度只有原来三分之一 —— 图例是贴在右下角的
+     辅助信息，横着摊开占的正是最容易被卡片压住的那条带。 */
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-1);

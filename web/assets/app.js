@@ -9481,12 +9481,86 @@ function erBuildModel(tables) {
   erPlaceModel(groups);
   erRelayoutBoxes(groups);
 
+  // 组框要把**组内的线**也包进去：卡片右侧出线后要竖着走一段（stub + 通道偏移），
+  // 绕行时还会在卡片下方横着走 —— 这些都在卡片包围盒外面。先量一遍差多少，
+  // 再带着这个余量重摆一次：组内连线的形状只跟卡片相对位置有关，平移不影响，
+  // 所以量一次就够，不会越量越大。
+  const extra = erMeasureEdgeOverhang(groups, edges);
+  if (extra.size) {
+    for (const g of groups) {
+      const e = extra.get(erGroupKey(g));
+      g._padR = e ? e.r : 0;
+      g._padB = e ? e.b : 0;
+    }
+    erPlaceModel(groups);
+    erRelayoutBoxes(groups);
+  }
+
   return {
     tables: shown,
     groups, edges,
     hidden: tables.length - shown.length,
     w: erModelW(groups), h: erModelH(groups),
   };
+}
+
+// erMeasureEdgeOverhang 量出「组内的线比卡片包围盒多出去多少」。
+//
+// 只算两端在同一组里的线：跨组的线走组与组之间的通道，那条通道谁都不属于，
+// 算进任何一边都会把两个框挤到一起。返回 Map<组 key, {r, b}>（右 / 下 的额外量）。
+function erMeasureEdgeOverhang(groups, edges) {
+  const rects = [];
+  const groupOf = new Map();
+  for (const g of groups) {
+    for (const t of g.tables) {
+      if (!t._er) continue;
+      rects.push(t._er);
+      groupOf.set(t, g);
+    }
+  }
+  // 通道号必须和画线时一致，否则量的是另一条线
+  erAssignLanes(edges);
+
+  const box = new Map();   // 组 key → {minX,minY,maxX,maxY}
+  for (const e of edges) {
+    const a = e.from._er, b = e.to._er;
+    if (!a || !b) continue;
+    const g = groupOf.get(e.from);
+    if (!g || g !== groupOf.get(e.to)) continue;
+    const ay = erColY(a, e.from, e.fromCol);
+    const by = erColY(b, e.to, e.toCol);
+    const geom = erEdgeGeom(a, b, ay, by, e.lane, rects.filter(r => r !== a && r !== b));
+    const key = erGroupKey(g);
+    let cur = box.get(key);
+    if (!cur) { cur = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; box.set(key, cur); }
+    for (const p of geom.pts) {
+      if (p.x < cur.minX) cur.minX = p.x;
+      if (p.y < cur.minY) cur.minY = p.y;
+      if (p.x > cur.maxX) cur.maxX = p.x;
+      if (p.y > cur.maxY) cur.maxY = p.y;
+    }
+    // 爪子 / 一横画在卡片外 10px 左右，再留一点气口
+    cur.maxX += 12;
+    cur.maxY += 6;
+  }
+
+  const over = new Map();
+  for (const g of groups) {
+    const cur = box.get(erGroupKey(g));
+    if (!cur) continue;
+    let right = -Infinity, bottom = -Infinity;
+    for (const t of g.tables) {
+      if (!t._er) continue;
+      right = Math.max(right, t._er.x + t._er.w);
+      bottom = Math.max(bottom, t._er.y + t._er.h);
+    }
+    if (right === -Infinity) continue;
+    const r = Math.max(0, Math.round(cur.maxX - right));
+    const b = Math.max(0, Math.round(cur.maxY - bottom));
+    if (!r && !b) continue;
+    over.set(erGroupKey(g), { r, b });
+  }
+  return over;
 }
 
 // erBuckets 按用户划的分组放表，不猜。
@@ -9599,12 +9673,16 @@ function erAutoPlace(groups) {
   let rowX = 0, rowY = 0, rowH = 0;
   for (const g of groups) {
     const plan = erGroupPlan(g);
+    // 组内的线在卡片右侧还要竖着走一段，占的宽度由 erMeasureEdgeOverhang 量出来。
+    // 这里把它算进占位，下一个组才会让开 —— 否则框是大了，却和旁边的组叠在一起。
+    const padR = g._padR || 0;
     // 空组的框由 erRelayoutBoxes 定死成「一张卡片的宽 + 内边距」（没有 chanW，
     // 也没有卡片可包），这里必须用同一个尺寸占位，不然预留的和画出来的对不上。
-    const boxW = g.empty ? ER.cardW + ER.groupPad * 2
-      : ER.groupPad * 2 + ER.chanW + plan.w;
-    const boxH = g.empty ? ER.groupHead + ER.groupPad * 2 + 24
-      : ER.groupHead + ER.groupPad * 2 + plan.h;
+    const boxW = (g.empty ? ER.cardW + ER.groupPad * 2
+      : ER.groupPad * 2 + ER.chanW + plan.w) + padR;
+    const padB = g._padB || 0;
+    const boxH = (g.empty ? ER.groupHead + ER.groupPad * 2 + 24
+      : ER.groupHead + ER.groupPad * 2 + plan.h) + padB;
     if (rowX > 0 && rowX + boxW > ER.rowMax) {
       rowX = 0;
       rowY += rowH + ER.groupGap;
@@ -9721,8 +9799,9 @@ function erRelayoutBoxes(groups) {
       // 右边只留内边距：chanW 是**左侧**的走线通道（往左出线的卡片要那段）。
       // 以前两边都加 chanW，框比自动布局预留的宽出一个 chanW（44px），
       // 组间距 46 被吃掉只剩 2px —— 看起来就是「组和组挨在一起/重叠」。
-      w: maxX - minX + ER.groupPad * 2 + ER.chanW,
-      h: maxY - minY + ER.groupHead + ER.groupPad * 2,
+      // _padR 是组内连线伸出去的那一段（见 erMeasureEdgeOverhang）。
+      w: maxX - minX + ER.groupPad * 2 + ER.chanW + (g._padR || 0),
+      h: maxY - minY + ER.groupHead + ER.groupPad * 2 + (g._padB || 0),
     };
   }
 }
@@ -10059,11 +10138,13 @@ function erFlowDir(e) {
   return fpk ? 1 : -1;
 }
 
-function erDrawEdges(svg, model, reuse) {
-  // 先分配通道：同一列、同一侧的线按顺序错开。不这么做的话，一列卡片右侧
-  // 的三条线会完全重合，看着像一根粗线 —— 那这张图就没法读了。
+// erAssignLanes 给每条线分一个「通道号」：同一列、同一侧的线按顺序错开。
+// 不这么做的话，一列卡片右侧的三条线会完全重合，看着像一根粗线 —— 那这张图就没法读了。
+//
+// 布局阶段量组框也要用它：量的时候用的是另一套通道号，量出来的就是另一条线。
+function erAssignLanes(edges) {
   const lanes = new Map();
-  for (const e of model.edges) {
+  for (const e of edges) {
     const a = e.from._er, b = e.to._er;
     if (!a || !b) continue;
     const [side] = erEdgeSides(a, b);
@@ -10072,6 +10153,10 @@ function erDrawEdges(svg, model, reuse) {
     lanes.set(key, n + 1);
     e.lane = n;
   }
+}
+
+function erDrawEdges(svg, model, reuse) {
+  erAssignLanes(model.edges);
 
   // take 取一个可以复用的节点：几何每帧都在变，但**节点本身不该重建**。
   // 拖动时每帧新建几百个 <path> 是主要开销，而改一个 d 属性几乎免费。

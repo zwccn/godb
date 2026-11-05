@@ -4723,6 +4723,62 @@ class CDP {
       marks.ticks === 2 && marks.crows === 0,
       `一横 ${marks.ticks} · 鸦爪 ${marks.crows}`);
 
+    // 组框要把「组内的卡片 + 它们之间的线」一起包住：线在卡片右侧还要竖着走
+    // 一段，那一段以前落在框外面，看着像框没画完。
+    // 到这个用例时手画的线是跨组的（两端不在同一组），量不到东西 —— 临时在同一组里
+    // 连一条，量完删掉。
+    const boxFit = await cdp.eval(`(async () => {
+      const g = erModel.groups.find(x => x.tables.length >= 2);
+      if (!g) return { checked: 0, bad: 0, wide: false };
+      const a = g.tables[0], b = g.tables[1];
+      erDoc.links.push({
+        id: 'l-boxprobe',
+        from: { table: String(a.id), columns: [a.columns[0].name] },
+        to: { table: String(b.id), columns: [b.columns[0].name] },
+        card: '1N',
+      });
+      erRender();
+      await new Promise(r => setTimeout(r, 250));
+
+      const gOf = new Map();
+      for (const gg of erModel.groups) for (const t of gg.tables) gOf.set(t, gg);
+      const rects = erModel.tables.map(t => t._er).filter(Boolean);
+      erAssignLanes(erModel.edges);
+      let checked = 0, bad = 0;
+      for (const e of erModel.edges) {
+        const ra = e.from._er, rb = e.to._er;
+        if (!ra || !rb) continue;
+        const g2 = gOf.get(e.from);
+        if (!g2 || g2 !== gOf.get(e.to)) continue;   // 跨组的线走组间通道，不归任何一边
+        checked++;
+        const ay = erColY(ra, e.from, e.fromCol), by = erColY(rb, e.to, e.toCol);
+        const geom = erEdgeGeom(ra, rb, ay, by, e.lane, rects.filter(r => r !== ra && r !== rb));
+        for (const p of geom.pts) {
+          if (!g2.box) { bad++; break; }
+          if (p.x < g2.box.x - 1 || p.x > g2.box.x + g2.box.w + 1
+            || p.y < g2.box.y - 1 || p.y > g2.box.y + g2.box.h + 1) { bad++; break; }
+        }
+      }
+      // 框也得比卡片本身宽：右侧要留出走线通道
+      const wide = erModel.groups.filter(x => x.tables.length).every(x => {
+        let maxX = -Infinity, minX = Infinity;
+        for (const t of x.tables) {
+          if (!t._er) continue;
+          maxX = Math.max(maxX, t._er.x + t._er.w);
+          minX = Math.min(minX, t._er.x);
+        }
+        return x.box.w > maxX - minX;
+      });
+
+      erDoc.links = erDoc.links.filter(l => l.id !== 'l-boxprobe');
+      erRender();
+      await new Promise(r => setTimeout(r, 200));
+      return { checked, bad, wide };
+    })()`);
+    check('模型图：组框把组内的表和线一起包住（框右侧留出走线通道）',
+      boxFit.checked > 0 && boxFit.bad === 0 && boxFit.wide,
+      `组内线 ${boxFit.checked} 条 · 出框 ${boxFit.bad} 条 · 框比卡片宽 ${boxFit.wide}`);
+
     /* 拖卡片的过程中，连线要**跟手**。
        以前只有松手才重绘，拖动时线钉在原地，看着像「连线和表脱开了」。
        这里按住卡片走两步（不松手）就量一次：贴着这张表的那个端点必须

@@ -4913,7 +4913,7 @@ class CDP {
       deleted ? `${deleted.edges} 条线 · ${deleted.stats}` : '菜单没开');
 
     // ---- 图上的表：收起一张，再放回来 ----
-    // 「收起」的入口是画布右键的「显示 / 隐藏」：卡片菜单现在只管颜色和分组，
+    // 「收起」走表清单（画布右键「表清单 / 从库导入…」）。卡片菜单只管颜色和分组，
     // 收起这张表摆在那儿只会让人多点两下。
     await cdp.eval(`document.getElementById('btnErFit').click()`);
     await sleep(300);
@@ -4938,30 +4938,32 @@ class CDP {
     let hiddenState = null;
     if (hideBlank) {
       await rclickAt(hideBlank.x, hideBlank.y);
-      // 展开「显示 / 隐藏」二级：CSS 靠 :hover，先把鼠标移进去再点里面的表
-      const subHead = await cdp.eval(`(() => {
-        const b = document.querySelector('.er-menu > .er-menu-sub > .er-menu-item');
+      const listPt = await cdp.eval(`(() => {
+        const b = [...document.querySelectorAll('.er-menu > .er-menu-item')]
+          .find(x => x.textContent.indexOf('表清单') === 0);
         if (!b) return null;
         const r = b.getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
       })()`);
-      if (subHead) {
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: subHead.x, y: subHead.y });
-        await sleep(250);
-        const hPt = await cdp.eval(`(() => {
-          const sub = document.querySelector('.er-menu > .er-menu-sub > .er-menu');
-          const b = sub && [...sub.querySelectorAll('.er-menu-item')]
-            .find(x => x.textContent.replace(/^[✓　\\s]+/, '') === 'er_fact');
-          if (!b) return null;
-          const r = b.getBoundingClientRect();
-          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
-        })()`);
-        if (hPt) {
-          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hPt.x, y: hPt.y, button: 'left', clickCount: 1 });
-          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hPt.x, y: hPt.y, button: 'left' });
-          await sleep(250);
-        }
+      if (listPt) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: listPt.x, y: listPt.y, button: 'left', clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: listPt.x, y: listPt.y, button: 'left' });
       }
+      await waitFor(cdp, `!document.getElementById('erTablesModal').classList.contains('hidden')`,
+        { label: '表清单弹窗', timeout: 2000 });
+      // 在清单里取消勾选 er_fact = 从图上收起
+      await cdp.eval(`(() => {
+        const rows = [...document.querySelectorAll('.er-tables-row')];
+        const row = rows.find(r => (r.querySelector('.er-tables-name') || {}).textContent === 'er_fact');
+        if (!row) return false;
+        const cb = row.querySelector('input');
+        cb.checked = false;
+        cb.dispatchEvent(new Event('change'));
+        return true;
+      })()`);
+      await sleep(250);
+      await cdp.eval(`document.getElementById('btnErTablesDone').click()`);
+      await sleep(150);
       hiddenState = await cdp.eval(`({
         cards: document.querySelectorAll('.er-card').length,
         chip: (document.querySelector('.er-hidden-chip') || {}).textContent || '',
@@ -5249,15 +5251,16 @@ class CDP {
         };
       })()`);
     }
-    check('模型图：右键空白处弹菜单（显示/隐藏 + 新建/导入 两路二级）',
+    check('模型图：右键空白处弹菜单（显示详略 + 新建/导入 两路二级 + 表清单）',
       !!ctxUi && ctxUi.subs === 2
-      && ctxUi.top.some(t => t.indexOf('显示 / 隐藏') === 0)
+      && ctxUi.top.some(t => t.indexOf('显示详略') === 0)
       && ctxUi.top.some(t => t.indexOf('新建 / 导入') === 0)
+      && ctxUi.top.some(t => t.indexOf('表清单') === 0)
       && ctxUi.top.indexOf('自动排列') >= 0,
       ctxUi ? ctxUi.top.join(' | ') : '没有菜单');
 
-    // 顶栏不再有「表 / +表 / +分组」：这三件事都收进画布右键的「新建 / 导入」和
-    // 「显示 / 隐藏」里了，顶栏只留和「整张图」有关的动作。
+    // 顶栏不再有「表 / +表 / +分组」：这三件事都收进画布右键里了，
+    // 顶栏只留和「整张图」有关的动作。
     const noTopBtns = await cdp.eval(`['btnErTables','btnErNewTable','btnErGroup']
       .map(id => !!document.getElementById(id))`);
     const buildItems = await cdp.eval(`(() => {
@@ -5268,8 +5271,7 @@ class CDP {
     check('模型图：顶栏撤掉「表 / +表 / +分组」，这几件事只在右键菜单里',
       noTopBtns.length === 3 && noTopBtns.every(v => v === false)
       && !!buildItems && buildItems.indexOf('创建分组') >= 0
-      && buildItems.indexOf('创建新表') >= 0
-      && buildItems.some(t => t.indexOf('从库选表') === 0),
+      && buildItems.indexOf('创建新表') >= 0,
       `顶栏残留 ${noTopBtns.filter(Boolean).length} 个 · 二级 ${buildItems ? buildItems.join(' / ') : '没展开'}`);
 
     // 悬停展开第一个二级：应该列出模型里每张表 + 全显示/全收起
@@ -5292,19 +5294,122 @@ class CDP {
         };
       })()`);
     }
-    check('模型图：右键「显示 / 隐藏」展开成表清单（带勾）+ 全显示/全收起',
+    check('模型图：右键「显示详略」展开三档（只表名 / 表名 + 字段 / 表名 + 外键）',
       !!subUi && subUi.inside
-      && subUi.items.length >= 3
-      && subUi.items.indexOf('全部显示') >= 0 && subUi.items.indexOf('全部收起') >= 0,
-      subUi ? `${subUi.items.length} 项 · ${subUi.items.slice(0, 3).join(' / ')}` : '二级菜单没展开');
+      && subUi.items.length === 3
+      && subUi.items[0] === '只显示表名'
+      && subUi.items[1] === '表名 + 字段'
+      && subUi.items[2] === '表名 + 外键',
+      subUi ? subUi.items.join(' / ') : '二级菜单没展开');
+
+    // 从菜单里真的点一次「只显示表名」：卡片只剩标题条，字段行一个都不画
+    const namePt = await cdp.eval(`(() => {
+      const sub = document.querySelector('.er-menu > .er-menu-sub > .er-menu');
+      const b = sub && [...sub.querySelectorAll('.er-menu-item')]
+        .find(x => x.textContent === '只显示表名');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    let nameUi = null;
+    if (namePt) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: namePt.x, y: namePt.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: namePt.x, y: namePt.y, button: 'left' });
+      await sleep(300);
+      nameUi = await cdp.eval(`({
+        cols: [...document.querySelectorAll('.er-card')].map(c => c.querySelectorAll('.er-col[data-col]').length),
+        h: Math.round(document.querySelector('.er-card').getBoundingClientRect().height),
+        saved: localStorage.getItem('godb.erDetail'),
+      })`);
+    }
+    check('模型图：切到「只显示表名」，卡片只剩标题条（字段行全不画，选择记在本机）',
+      !!nameUi && nameUi.cols.every(n => n === 0) && nameUi.h <= 40 && nameUi.saved === 'name',
+      nameUi ? `${nameUi.cols.length} 张卡片 0 字段 · 高 ${nameUi.h}px · 记住 ${nameUi.saved}` : '菜单项没点到');
+
+    // 「表名 + 外键」：只画有连线连着的列（外键 = 图上的关系，不看库里的 REFERENCES）
+    // 这段之前的用例把线都删干净了，没有线就测不出「外键列」—— 先造一条最短的，
+    // 用完删掉。
+    const fkUi = await cdp.eval(`(async () => {
+      const a = erSchema[0], b = erSchema[1];
+      const link = {
+        id: 'l-fkprobe',
+        from: { table: String(a.id), columns: [a.columns[0].name] },
+        to: { table: String(b.id), columns: [b.columns[0].name] },
+        card: '1N',
+      };
+      erDoc.links.push(link);
+      erRender();
+      erSetDetail('fk');
+      await new Promise(r => setTimeout(r, 200));
+      const cards = [...document.querySelectorAll('.er-card')].map(c => ({
+        t: c.dataset.table,
+        cols: [...c.querySelectorAll('.er-col[data-col]')].map(r => r.dataset.col),
+      }));
+      return {
+        cards,
+        from: { t: a.name, col: a.columns[0].name },
+        to: { t: b.name, col: b.columns[0].name },
+        total: erSchema.length,
+        links: erDoc.links.length,
+      };
+    })()`);
+    const fkOf = name => fkUi.cards.find(c => c.t === name) || { cols: [] };
+    const fkOk = !!fkUi && fkUi.cards.length > 0
+      && fkOf(fkUi.from.t).cols.length === 1 && fkOf(fkUi.from.t).cols[0] === fkUi.from.col
+      && fkOf(fkUi.to.t).cols.length === 1 && fkOf(fkUi.to.t).cols[0] === fkUi.to.col
+      // 没有线的表一列都不画
+      && fkUi.cards.filter(c => c.t !== fkUi.from.t && c.t !== fkUi.to.t)
+        .every(c => c.cols.length === 0);
+    check('模型图：切到「表名 + 外键」，只画有连线连着的字段（其余表只剩表名）',
+      !!fkUi && fkOk,
+      fkUi ? `${fkUi.from.t}.${fkUi.from.col} / ${fkUi.to.t}.${fkUi.to.col}`
+        + ` · ${fkUi.cards.filter(c => c.cols.length).length}/${fkUi.cards.length} 张有外键列`
+        : '没切过去');
+
+    // 拆掉探针关系，别把后面的用例带跑偏
+    await cdp.eval(`(() => {
+      erDoc.links = erDoc.links.filter(l => l.id !== 'l-fkprobe');
+      erRender();
+    })()`);
+    await sleep(200);
+
+    // 切回「表名 + 字段」，字段行恢复
+    const fieldUi = await cdp.eval(`(async () => {
+      erSetDetail('field');
+      await new Promise(r => setTimeout(r, 150));
+      return {
+        cols: [...document.querySelectorAll('.er-card')].map(c => c.querySelectorAll('.er-col[data-col]').length),
+        total: Math.max(0, ...[...document.querySelectorAll('.er-card')].map(c => c.querySelectorAll('.er-col[data-col]').length)),
+        saved: localStorage.getItem('godb.erDetail'),
+      };
+    })()`);
+    check('模型图：切回「表名 + 字段」，字段行全回来',
+      fieldUi.cols.every(n => n > 0) && fieldUi.saved === 'field',
+      `${fieldUi.total} 列/卡片 · 记住 ${fieldUi.saved}`);
 
     // 从父项移到二级：以前的坑是「缝里既不在父项上也不在子菜单上」，:hover 一断
     // 子菜单就 display:none，鼠标到了菜单已经没了 —— 表现成「二级菜单很容易消失」。
     // 现在缝隙有透明桥顶着，斜着绕出去还有 150ms 宽限。
+    // 点详略那几项会把菜单关掉，这里重新弹一次（探针要一个开着的菜单）。
+    if (blankPt) await rightClick(blankPt.x, blankPt.y);
+    await sleep(250);
+    // 先把鼠标放到父项上让二级显示出来 —— 隐藏状态下 getBoundingClientRect 全是 0，
+    // 后面按它算出来的点会落在左上角，测的就不是这条缝了。
+    const gapHead = await cdp.eval(`(() => {
+      const b = document.querySelector('.er-menu > .er-menu-sub > .er-menu-item');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    if (gapHead) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: gapHead.x, y: gapHead.y });
+      await sleep(250);
+    }
     const gapProbe = await cdp.eval(`(() => {
       const m = document.querySelector('.er-menu');
+      if (!m) return null;
       const wrap = m.querySelector('.er-menu-sub');
-      if (!m || !wrap) return null;
+      if (!wrap) return null;
       const b = wrap.querySelector('.er-menu-item');
       const sub = wrap.querySelector('.er-menu');
       const br = b.getBoundingClientRect(), sr = sub.getBoundingClientRect();
@@ -5342,37 +5447,8 @@ class CDP {
       gapUi ? `缝里 ${gapUi.atGap ? '在' : '没了'} · 宽限内 ${gapUi.inGrace ? '在' : '没了'}`
         + ` · 进二级后 ${gapUi.landed ? '在' : '没了'}` : '菜单没开');
 
-    // 点掉一张表：卡片少一张，状态栏挂上「已收起」
-    const hideUi = await cdp.eval(`(async () => {
-      const before = document.querySelectorAll('.er-card').length;
-      const item = [...document.querySelectorAll('.er-menu-sub .er-menu-item')]
-        .find(b => /^✓ /.test(b.textContent));
-      if (!item) return null;
-      const name = item.textContent.replace(/^✓ /, '');
-      item.click();
-      await new Promise(r => setTimeout(r, 350));
-      return {
-        name, before, after: document.querySelectorAll('.er-card').length,
-        stats: document.getElementById('erStats').textContent,
-      };
-    })()`);
-    check('模型图：右键里点一张表就能收起（卡片少一张，状态栏提示已收起）',
-      !!hideUi && hideUi.after === hideUi.before - 1 && /已收起/.test(hideUi.stats),
-      hideUi ? `${hideUi.name}：${hideUi.before} → ${hideUi.after} · ${hideUi.stats}` : '二级菜单里没有可勾的表');
-
-    // 再点回来，别把后面的用例带跑偏（走同一套 erSetShown，和菜单里那一项同源）
-    if (hideUi) {
-      await cdp.eval(`(async () => {
-        for (const t of erSchema) if (erCardRec(t).hidden) erSetShown(t, true);
-        await new Promise(r => setTimeout(r, 300));
-      })()`);
-      const back = await cdp.eval(`({
-        cards: document.querySelectorAll('.er-card').length,
-        stats: document.getElementById('erStats').textContent,
-      })`);
-      check('模型图：右键收起之后能恢复（状态栏不再提示已收起）',
-        !/已收起/.test(back.stats), back.stats);
-    }
+    // 收起 / 恢复已经在「图上的表：收起一张，再放回来」那段里走过一遍
+    // （画布右键 → 表清单 → 勾选框），这里不再重复一遍同样的动作。
     await cdp.eval(`erCloseMenus()`);
 
     // 卡片上右键：弹的是这张表的菜单（不是画布菜单）

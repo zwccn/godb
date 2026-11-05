@@ -9357,13 +9357,55 @@ const erCanvas = document.getElementById('erCanvas');
 const erNote = document.getElementById('erNote');
 const erLegend = document.getElementById('erLegend');
 
+// 「显示详略」：卡片上画多少东西。
+//
+// 这是**看图的粒度**，不是「哪些表在图上」（那是收起）。表多的时候先只看表名
+// 认结构，要看字段再切回来 —— 比一张张收起省事，也不会改任何数据。
+const ER_DETAIL_KEY = 'godb.erDetail';
+const ER_DETAILS = ['name', 'field', 'fk'];
+let erDetail = (() => {
+  let v = '';
+  try { v = localStorage.getItem(ER_DETAIL_KEY) || ''; } catch (e) { /* 隐私模式 */ }
+  return ER_DETAILS.indexOf(v) >= 0 ? v : 'field';
+})();
+
+// erFkCols 收集这张表里**参与关系**的列（小写）。
+//
+// 用户说的「外键」在图上是「有连线连着的字段」：连线是手画的，库里的
+// REFERENCES 不上图 —— 所以这里只读 erDoc.links，不看 catalog。
+function erFkCols(t) {
+  const id = erTKey(t);
+  const set = new Set();
+  const links = (erDoc && erDoc.links) || [];
+  for (const ln of links) {
+    if (String(ln.from.table) === id) for (const c of ln.from.columns) set.add(String(c).toLowerCase());
+    if (String(ln.to.table) === id) for (const c of ln.to.columns) set.add(String(c).toLowerCase());
+  }
+  return set;
+}
+
+// erColVisible 是卡片上真正画出来的列。索引必须和 erColY 对齐 ——
+// 连线的落点按「第几行」算，两个地方各算一次就会错行。
+function erColVisible(t) {
+  if (erDetail === 'name') return [];
+  let cols = t.columns;
+  if (erDetail === 'fk') {
+    const fk = erFkCols(t);
+    cols = cols.filter(c => fk.has(String(c.name).toLowerCase()));
+  }
+  return cols.slice(0, ER.maxRows);
+}
+
 function erRowsOf(t) {
-  return Math.min(t.columns.length, ER.maxRows);
+  return erColVisible(t).length;
 }
 
 function erCardHeight(t) {
-  const extra = t.columns.length > ER.maxRows ? 1 : 0;
-  return ER.headH + (erRowsOf(t) + extra) * ER.rowH + ER.cardPad;
+  const rows = erRowsOf(t);
+  // 还有没画出来的列时补一行提示；一列都不画（只显示表名）就不提示了，
+  // 那时卡片本来就是一条，提示行反而成了唯一内容。
+  const extra = rows && t.columns.length > rows ? 1 : 0;
+  return ER.headH + (rows + extra) * ER.rowH + ER.cardPad;
 }
 
 function erColIndex(t, name) {
@@ -9374,12 +9416,25 @@ function erColIndex(t, name) {
   return -1;
 }
 
+// erColRow 是这一列**画在第几行**（-1 = 这一列现在没画出来）。
+function erColRow(t, name) {
+  const want = String(name || '').toLowerCase();
+  const cols = erColVisible(t);
+  for (let i = 0; i < cols.length; i++) {
+    if (String(cols[i].name).toLowerCase() === want) return i;
+  }
+  return -1;
+}
+
 // erColY 是某一列在图上的中心 y —— 连线就是接在这个高度上。
+//
+// 只按**画出来的行**算：某一列在当前详略下没画出来（比如「只显示表名」），
+// 线就落在卡片中心，而不是凭空指着一个不存在的位置。
 //
 // 找不到那一列时返回卡片**中心**而不是第一行：宁可线落在卡片中间，
 // 也不要落在第一行上，那是在骗人说「接的就是这一列」。
 function erColY(card, t, name) {
-  let i = erColIndex(t, name);
+  let i = erColRow(t, name);
   if (i < 0) return card.y + card.h / 2;
   if (i >= ER.maxRows) i = ER.maxRows - 1;
   return card.y + ER.headH + i * ER.rowH + ER.rowH / 2;
@@ -10317,9 +10372,10 @@ function erCardEl(t, g) {
   card.appendChild(head);
 
   const cols = el('div', 'er-card-cols');
-  const shown = erRowsOf(t);
-  for (let i = 0; i < shown; i++) {
-    const c = t.columns[i];
+  // 画哪几列由「显示详略」决定（见 erColVisible）：只表名 → 一列都不画；
+  // 只表名 + 外键 → 只画连着线的那些列。行序必须和 erColY 算的一致。
+  const visible = erColVisible(t);
+  for (const c of visible) {
     const row = el('div', 'er-col');
     row.dataset.col = c.name;
 
@@ -10348,10 +10404,11 @@ function erCardEl(t, g) {
     });
     cols.appendChild(row);
   }
-  if (t.columns.length > shown) {
-    cols.appendChild(el('div', 'er-col er-more', `还有 ${t.columns.length - shown} 列`));
+  if (visible.length && t.columns.length > visible.length) {
+    cols.appendChild(el('div', 'er-col er-more', `还有 ${t.columns.length - visible.length} 列`));
   }
-  card.appendChild(cols);
+  // 「只显示表名」时不要那个空盒子：它有上下 padding，会撑出一条空行
+  if (visible.length) card.appendChild(cols);
 
   // 悬停高亮：把「这张表参与的连线」和「另一端的卡片」一起点亮。
   // 表一多，光靠颜色找一条线比找一根针还难。
@@ -11215,32 +11272,31 @@ function erOpenCardMenu(t, cardEl, ev) {
 
 // 空白处右键：这里只放「对着整张图做的事」。
 //
-// 「显示 / 隐藏」给一张表一个勾选项 —— 以前只有表清单一个入口（顶栏「表」），
-// 想临时收起一张表得先开弹窗、再找那一行；右键顺手点一下就行。
+// 「显示详略」是三档：只表名 / 表名 + 字段 / 表名 + 外键。表一多，先只看表名
+// 认结构，需要时再切回字段 —— 比逐张收起省事，也不改任何数据。
+// （「表名 + 外键」里的外键 = 图上有连线连着的字段，只认 erDoc.links，
+//   库里的 REFERENCES 不上图。）
 //
-// 「新建」那几条收成二级：它们是低频动作，摊在顶层会把「显示 / 隐藏」和
-// 「自动排列」挤开，而这两个才是右键时最常要的。
-function erVisibilityItems() {
-  const items = [];
-  const tables = erSchema.slice().sort((a, b) => a.name.localeCompare(b.name));
-  for (const t of tables) {
-    const hidden = !!erCardRec(t).hidden;
-    items.push({
-      label: (hidden ? '　' : '✓ ') + t.name,
-      run: () => erSetShown(t, hidden),   // 现在是隐藏的就显示回来
-    });
-  }
-  if (!tables.length) items.push({ label: '（这个模型还没有表）', run: () => {} });
-  items.push({ sep: true });
-  items.push({
-    label: '全部显示',
-    run: () => { for (const t of erSchema) if (erCardRec(t).hidden) erSetShown(t, true); },
-  });
-  items.push({
-    label: '全部收起',
-    run: () => { for (const t of erSchema) if (!erCardRec(t).hidden) erSetShown(t, false); },
-  });
-  return items;
+// 「收起某些表」不在这里：那是往表清单里勾的事，菜单里再摊一份等于两套开关。
+function erDetailItems() {
+  return [
+    ['name', '只显示表名'],
+    ['field', '表名 + 字段'],
+    ['fk', '表名 + 外键'],
+  ].map(([k, label]) => ({
+    label,
+    on: erDetail === k,
+    run: () => erSetDetail(k),
+  }));
+}
+
+// erSetDetail 换详略：卡片高度、组框、连线全要重算，所以直接重画一次。
+// 记在 localStorage 里 —— 这是「我喜欢怎么看图」，不属于某个模型。
+function erSetDetail(k) {
+  if (ER_DETAILS.indexOf(k) < 0 || erDetail === k) return;
+  erDetail = k;
+  try { localStorage.setItem(ER_DETAIL_KEY, k); } catch (e) { /* 隐私模式 */ }
+  erRender();
 }
 
 function erOpenCanvasMenu(ev) {
@@ -11248,15 +11304,17 @@ function erOpenCanvasMenu(ev) {
   const x = ev.clientX - sr.left + 2, y = ev.clientY - sr.top + 2;
   erShowMenu(x, y, [
     { head: '整张图' },
-    { label: '显示 / 隐藏', sub: erVisibilityItems() },
+    { label: '显示详略', sub: erDetailItems() },
     {
       label: '新建 / 导入',
       sub: [
         { label: '创建分组', run: erNewGroup },
         { label: '创建新表', run: erNewModelTable },
-        { label: '从库选表…', run: erOpenTablePicker },
       ],
     },
+    // 「收起某几张表」和「从库里挑表进来」是同一个弹窗（图上的表 + 从当前库加进模型），
+    // 收成一条入口，别再分两份。收起之后卡片不在画布上，这个入口是把它找回来的路。
+    { label: '表清单 / 从库导入…', run: erOpenTablePicker },
     { sep: true },
     { label: '自动排列', run: erAutoLayout },
     { label: '适应画布', run: erFit },

@@ -7873,7 +7873,10 @@ function typeGroup(t) {
 // 为什么复用设计器的界面而不是另做一个：字段名的重复校验、类型 + 长度/精度、
 // 主键单选、默认值这些输入规则，两处一模一样；做两个界面迟早会长出两种行为。
 // 差别只在**保存写哪儿**：这里写回模型，不执行任何 DDL。
-function openModelDesigner(tableId) {
+//
+// focusCol：从某个字段行双击进来时，直接把那一行选中并把光标放进去 ——
+// 用户点的是「departments.budget」，弹出来却停在第一行，还得自己再找一遍。
+function openModelDesigner(tableId, focusCol) {
   const mt = erModelDoc && (erModelDoc.tables || []).find(t => t.id === tableId);
   if (!mt) return;
   designer = {
@@ -7888,6 +7891,11 @@ function openModelDesigner(tableId) {
     }),
   };
   if (!designer.rows.length) designer.rows = [newDesignerRow()];
+  if (focusCol) {
+    const want = String(focusCol).toLowerCase();
+    const idx = designer.rows.findIndex(r => String(r.name).toLowerCase() === want);
+    if (idx >= 0) designer.sel = idx;
+  }
 
   document.getElementById('designerTitle').textContent = '表结构 · ' + mt.name;
   document.getElementById('designerTableName').value = mt.name;
@@ -7901,8 +7909,13 @@ function openModelDesigner(tableId) {
   setSqlPreviewOpen(false);
   renderDesigner();
   setTimeout(() => {
-    const first = document.getElementById('designerRows').querySelector('input');
-    if (first) first.focus();
+    const rows = document.getElementById('designerRows').querySelectorAll('tr');
+    const row = designer.sel >= 0 ? rows[designer.sel] : null;
+    const target = (row && row.querySelector('input')) || document.querySelector('#designerRows input');
+    if (target) {
+      target.focus();
+      target.select && target.select();
+    }
   }, 30);
 }
 
@@ -10242,7 +10255,7 @@ function erCardEl(t, g) {
   card.tabIndex = 0;
   card.title = `${t.name} · ${t.columns.length} 列`
     + (t.comment ? `\n${t.comment}` : '')
-    + '\n单击选中，双击打开这张表；拖动可以摆位置';
+    + '\n单击选中，双击看表结构；拖动可以摆位置';
 
   const head = el('div', 'er-card-head');
   head.appendChild(el('span', 'er-card-name', t.name));
@@ -10347,9 +10360,18 @@ function erCardEl(t, g) {
     // 读结构的，看一眼就进编辑太容易误触，正在写的东西也跟着没了。
     if (!moved) erSelectCard(t);
   });
+  // 双击卡片 = 看这张表的结构。以前是「进编辑器」—— 但模型图里主要在想结构，
+  // 双击一张表却跳去写 SQL，还得再切回来；要看数据走卡片菜单里的那一项。
+  //
+  // 「双击的是哪一列」只能在**卡片这一层**判断，字段行自己挂 dblclick 收不到：
+  // pointerdown 里调了 setPointerCapture，后续的 click / dblclick 都会被重定向到
+  // 这张卡片上（实测 ev.target 永远是 card）。所以这里按坐标问一次 DOM。
   card.addEventListener('dblclick', ev => {
     ev.stopPropagation();
-    erOpenTable(t);
+    const under = document.elementFromPoint(ev.clientX, ev.clientY);
+    const row = under && under.closest ? under.closest('.er-col[data-col]') : null;
+    const col = row && card.contains(row) ? row.dataset.col : '';
+    openModelDesigner(t.id, col);
   });
   card.addEventListener('pointercancel', ev => {
     if (erDrag && erDrag.id === ev.pointerId) erEndDrag(ev);
@@ -10357,7 +10379,7 @@ function erCardEl(t, g) {
   card.addEventListener('keydown', ev => {
     if (ev.key === 'Enter' || ev.key === ' ') {
       ev.preventDefault();
-      erOpenTable(t);
+      openModelDesigner(t.id);   // 和双击同一个动作
     }
   });
   return card;
@@ -10966,8 +10988,8 @@ function erOpenCardMenu(t, cardEl) {
   const sr = erStage.getBoundingClientRect();
   const cur = erGroupOf(t);
   const items = [
-    { label: '打开这张表', run: () => erOpenTable(t) },
     { label: '编辑表结构', run: () => openModelDesigner(t.id) },
+    { label: '在编辑器中打开', run: () => erOpenTable(t) },
     { sep: true },
     { head: '移到分组' },
   ];

@@ -4924,21 +4924,90 @@ class CDP {
       !afterClick.closed && afterClick.sql === sqlBefore && afterClick.sel === firstTable,
       `面板${afterClick.closed ? '关了' : '还在'} · 选中=${afterClick.sel || '无'}`);
 
-    // 双击才是「打开这张表」。给 CDP 送两次 clickCount（第二次是 2），它才会合成 dblclick。
+    /* 双击卡片 = 打开**表结构**（模型设计器），不是进代码编辑器。
+       以前双击直接跳去写 SQL：在模型图里想的是结构，一双击却换了工作内容，
+       还得再切回来。要数据走卡片菜单里的「在编辑器中打开」。
+       给 CDP 送两次 clickCount（第二次是 2），它才会合成 dblclick。 */
     for (const clickCount of [1, 2]) {
       await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: clickPt.x, y: clickPt.y, button: 'left', buttons: 1, clickCount });
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: clickPt.x, y: clickPt.y, button: 'left', buttons: 0, clickCount });
     }
-    await waitFor(cdp, `document.getElementById('erPanel').classList.contains('hidden')`,
-      { label: '双击打开表', timeout: 4000 });
-    const afterDbl = await cdp.eval(`({
-      closed: document.getElementById('erPanel').classList.contains('hidden'),
-      sql: editor.value,
-      home: document.getElementById('btnHome').classList.contains('on'),
-    })`);
-    check('模型图：双击卡片才进编辑（面板关 + SQL 换成这张表）',
-      afterDbl.closed && afterDbl.sql.includes(firstTable) && afterDbl.home,
-      `${firstTable} · 面板关 ${afterDbl.closed}`);
+    const dblUi = await waitFor(cdp, `(() => {
+      const m = document.getElementById('designerModal');
+      if (m.classList.contains('hidden')) return null;
+      return {
+        title: document.getElementById('designerTitle').textContent,
+        model: m.classList.contains('model-mode'),
+        table: document.getElementById('designerTableName').value,
+        erOpen: !document.getElementById('erPanel').classList.contains('hidden'),
+        sql: editor.value,
+        rows: document.querySelectorAll('#designerRows tr').length,
+      };
+    })()`, { label: '双击开表结构', timeout: 4000 });
+    check('模型图：双击卡片打开表结构（不是进编辑器）',
+      !!dblUi && dblUi.model && dblUi.table === firstTable && dblUi.erOpen
+      && dblUi.sql === sqlBefore && dblUi.rows > 0,
+      dblUi ? `${dblUi.title} · 模型模式 ${dblUi.model} · 面板还在 ${dblUi.erOpen}` : '没打开设计器');
+
+    // 双击字段行：同一个设计器，但要**停在刚点的那一列**
+    await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
+    await sleep(250);
+    const colPt = await cdp.eval(`(() => {
+      const row = document.querySelector('.er-card[data-table="er_fact"] .er-col[data-col="basis_id"]');
+      if (!row) return null;
+      const r = row.getBoundingClientRect();
+      return { x: Math.round(r.left + 40), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    let colUi = null;
+    if (colPt) {
+      for (const clickCount of [1, 2]) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: colPt.x, y: colPt.y, button: 'left', buttons: 1, clickCount });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: colPt.x, y: colPt.y, button: 'left', buttons: 0, clickCount });
+      }
+      colUi = await waitFor(cdp, `(() => {
+        const m = document.getElementById('designerModal');
+        if (m.classList.contains('hidden')) return null;
+        const sel = document.querySelector('#designerRows tr.sel');
+        return {
+          table: document.getElementById('designerTableName').value,
+          col: sel ? (sel.querySelector('.c-name input') || {}).value || '' : '',
+          opened: m.classList.contains('model-mode'),
+        };
+      })()`, { label: '双击字段开表结构', timeout: 4000 });
+    }
+    check('模型图：双击字段行也开表结构，且停在刚点的那一列',
+      !!colUi && colUi.opened && colUi.table === 'er_fact' && colUi.col === 'basis_id',
+      colUi ? `${colUi.table}.${colUi.col || '?'}` : '没打开设计器');
+    await cdp.eval(`document.getElementById('btnDesignerCancel').click()`);
+    await sleep(250);
+
+    // 「进编辑器」这条路还得在：卡片菜单里那一项，点了才关面板、换 SQL
+    const editorPath = await cdp.eval(`(async () => {
+      const card = document.querySelector('.er-card');
+      const more = card.querySelector('.er-card-more');
+      const r = more.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: editorPath.x, y: editorPath.y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: editorPath.x, y: editorPath.y, button: 'left' });
+    await sleep(250);
+    const openItem = await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('.er-menu .er-menu-item')]
+        .find(x => x.textContent === '在编辑器中打开');
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    if (openItem) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: openItem.x, y: openItem.y, button: 'left', clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: openItem.x, y: openItem.y, button: 'left' });
+    }
+    const editorUi = await waitFor(cdp, `document.getElementById('erPanel').classList.contains('hidden')
+      ? { sql: editor.value, home: document.getElementById('btnHome').classList.contains('on') } : null`,
+      { label: '菜单进编辑器', timeout: 4000 });
+    check('模型图：要进编辑器走卡片菜单（面板关 + SQL 换成这张表）',
+      !!openItem && !!editorUi && editorUi.sql.includes(firstTable) && editorUi.home,
+      editorUi ? `${firstTable} · 菜单项 ${openItem ? '有' : '无'}` : '菜单没点成');
 
     // 收拾干净：这次建的模型是测试数据，删掉；别人的模型不动
     await cdp.eval(`fetch('/api/models/' + window.__modelId, { method: 'DELETE' })`);

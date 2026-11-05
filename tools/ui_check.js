@@ -2022,7 +2022,10 @@ class CDP {
           if (!db || !bar) return false;
           return db.compareDocumentPosition(bar) === Node.DOCUMENT_POSITION_FOLLOWING;
         })(),
-        barHasTheme: !!bar.querySelector('.theme-pick, .theme-dot, .fs-ctl'),
+        // 皮肤留了一个**图标入口**（.skin-pick），但「圆点 + 名字」那种卡片和字号
+        // 控件仍然只该在设置页里 —— 顶栏塞不下，也不该塞。
+        barHasTheme: !!bar.querySelector('.theme-pick, .fs-ctl'),
+        skinEntries: bar.querySelectorAll('.skin-pick').length,
         barHasData: !!document.getElementById('btnSample') || !!document.getElementById('btnReset'),
         picks: picks.length,
         pickNames: picks.map(p => p.textContent.trim()),
@@ -2049,8 +2052,9 @@ class CDP {
         })(),
       };
     })()`);
-    check('顶栏清瘦：不再挂皮肤/字号/示例数据/清库',
-      !setUi.barHasTheme && !setUi.barHasData, setUi.barText);
+    check('顶栏清瘦：皮肤只留一个图标入口，字号/示例数据/清库都在设置里',
+      !setUi.barHasTheme && !setUi.barHasData && setUi.skinEntries === 1,
+      `${setUi.barText} · 皮肤入口 ${setUi.skinEntries} 个`);
     // 0.2.0 起「锁状态」换成「监控」（面板里带锁/慢 SQL/超时开关）
     check('顶栏仍保留 库/监控/设置',
       ['库', '监控', '设置'].every(k => setUi.barText.indexOf(k) >= 0), setUi.barText);
@@ -3021,6 +3025,61 @@ class CDP {
       && !navAfter.open && navAfter.home && !navAfter.mon
       && navAfter.order[0] === 'btnHome',
       `监控 ${navBefore.open} → 编辑器 ${!navAfter.open} · 顶栏 ${navAfter.order.join('/')}`);
+
+    /* 顶栏顺序 + 皮肤切换：模型图挪到设置后面（低频的结构视图不该夹在两个
+       高频入口中间），皮肤收成最右一个小圆点图标 —— 顶栏已经很挤，
+       而换皮肤是低频操作，摊开六个点不值当。 */
+    const navOrder = await cdp.eval(`[...document.querySelectorAll('.top-actions .btn')].map(b => b.id)`);
+    check('顶栏顺序：首页 / 监控 / 设置 / 模型图（皮肤在最右）',
+      navOrder.join(',') === 'btnHome,btnMonitor,btnSettings,btnEr',
+      navOrder.join(' / '));
+
+    await cdp.eval(`document.getElementById('btnSkin').click()`);
+    const skinUi = await waitFor(cdp, `(() => {
+      const m = document.getElementById('skinMenu');
+      if (!m || m.classList.contains('hidden')) return null;
+      const items = [...m.querySelectorAll('.skin-item')];
+      const box = m.getBoundingClientRect();
+      return {
+        n: items.length,
+        checked: (items.find(b => b.getAttribute('aria-checked') === 'true') || {}).title || '',
+        top: Math.round(box.top),
+        headerBottom: Math.round(document.querySelector('.topbar').getBoundingClientRect().bottom),
+        dot: document.getElementById('skinDot').className,
+        inside: box.right <= window.innerWidth + 1,
+      };
+    })()`, { label: '皮肤菜单', timeout: 2000 });
+    check('皮肤切换：顶栏一个小图标，点开是六套皮肤的圆点',
+      !!skinUi && skinUi.n === 6 && !!skinUi.checked
+      && skinUi.top >= skinUi.headerBottom,
+      skinUi ? `${skinUi.n} 个 · 当前 ${skinUi.checked} · 菜单顶 ${skinUi.top} / 顶栏底 ${skinUi.headerBottom}` : '菜单没开');
+    check('皮肤切换：菜单不出屏，入口圆点跟当前皮肤一致',
+      !!skinUi && skinUi.inside && /theme-dot-(dark|steel|aurora|sky|taro|mint)/.test(skinUi.dot),
+      skinUi ? skinUi.dot : '没有入口');
+
+    // 点第 5 个（芋紫）：换肤 + 菜单收起 + 入口圆点跟着换
+    const themeBefore = await cdp.eval(`document.documentElement.getAttribute('data-theme') || 'dark'`);
+    await cdp.eval(`document.querySelectorAll('.skin-item')[4].click()`);
+    await sleep(300);
+    const skinAfter = await cdp.eval(`({
+      theme: document.documentElement.getAttribute('data-theme') || 'dark',
+      open: !document.getElementById('skinMenu').classList.contains('hidden'),
+      dot: document.getElementById('skinDot').className,
+    })`);
+    check('皮肤切换：点一个圆点就换肤，菜单收起，入口圆点同步',
+      skinAfter.theme === 'taro' && !skinAfter.open && /theme-dot-taro/.test(skinAfter.dot),
+      `${themeBefore} → ${skinAfter.theme} · 菜单${skinAfter.open ? '还开着' : '已收起'}`);
+
+    // Esc 收菜单；再切回原来的皮肤，别把后面的用例带跑偏
+    await cdp.eval(`document.getElementById('btnSkin').click()`);
+    await sleep(150);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(200);
+    const escClosed = await cdp.eval(`document.getElementById('skinMenu').classList.contains('hidden')`);
+    check('皮肤切换：Esc 收起菜单', escClosed, escClosed ? 'ok' : '菜单还在');
+    await cdp.eval(`applyTheme(${JSON.stringify(themeBefore)}, false)`);
+    await sleep(200);
 
     /* 「科技灰」的四项增强：顶栏光带、十字准星光标、右键拦截、皮肤名。
        这些只在 steel 上开（其它皮肤一行都不该变），所以先切皮肤再断言，

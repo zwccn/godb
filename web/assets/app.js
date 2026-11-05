@@ -79,16 +79,92 @@ function applyTheme(name, save) {
   for (const pick of document.querySelectorAll('.theme-pick')) {
     pick.setAttribute('aria-pressed', String(pick.dataset.theme === name));
   }
+  syncSkinDot();
   // 只有用户点按钮时才记为偏好；链接参数（?theme=）只是当次预览
   if (save) {
     try { localStorage.setItem(THEME_KEY, name); } catch (e) {}
   }
 }
 
+/* 顶栏那个皮肤圆点：左半是皮肤底色、右半是主色（CSS 里 `.theme-dot-*` 的斜切），
+   点开是一排六套的圆点。为什么不把六个点直接摊在顶栏：顶栏本来就挤，
+   而换皮肤是低频操作 —— 收一层，不占地方，也不用为了看一眼颜色跑进设置页。 */
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') || 'dark';
+}
+
+// syncSkinDot 让顶栏那颗圆点跟着当前皮肤走。这里用 id 查而不是模块级常量：
+// applyTheme 在文件顶部就会被调用一次，那时 const 还在 TDZ 里，取不到就抛。
+function syncSkinDot() {
+  const dot = document.getElementById('skinDot');
+  const btn = document.getElementById('btnSkin');
+  const cur = currentTheme();
+  if (dot) dot.className = 'theme-dot theme-dot-' + cur;
+  if (btn) {
+    const t = THEME_LIST.find(x => x.id === cur);
+    btn.title = '切换皮肤（当前：' + (t ? t.name : cur) + '）';
+  }
+  // 菜单若已经渲染过，选中环也要跟着换
+  const menu = document.getElementById('skinMenu');
+  if (menu && !menu.classList.contains('hidden')) renderSkinMenu();
+}
+
+function renderSkinMenu() {
+  const menu = document.getElementById('skinMenu');
+  if (!menu) return;
+  const cur = currentTheme();
+  menu.innerHTML = '';
+  for (const t of THEME_LIST) {
+    const b = el('button', 'skin-item');
+    b.type = 'button';
+    b.dataset.theme = t.id;
+    b.title = t.name;
+    b.setAttribute('role', 'menuitemradio');
+    b.setAttribute('aria-checked', String(t.id === cur));
+    b.setAttribute('aria-label', t.name + (t.id === cur ? '（当前）' : ''));
+    b.appendChild(el('span', 'theme-dot theme-dot-' + t.id));
+    menu.appendChild(b);
+  }
+}
+
+// openSkinMenu 不传参数就是「开/关切换」。
+function openSkinMenu(open) {
+  const menu = document.getElementById('skinMenu');
+  const btn = document.getElementById('btnSkin');
+  if (!menu || !btn) return;
+  const want = open === undefined ? menu.classList.contains('hidden') : !!open;
+  if (want) renderSkinMenu();
+  menu.classList.toggle('hidden', !want);
+  btn.setAttribute('aria-expanded', String(want));
+}
+
+document.getElementById('btnSkin').addEventListener('click', ev => {
+  ev.stopPropagation();       // 别让下面那条「点外面就关」立刻又把它关上
+  openSkinMenu();
+});
+
 // 用事件委托：设置页每次打开都会重建皮肤按钮，逐个绑会绑到已经销毁的节点上
 document.addEventListener('click', ev => {
-  const pick = ev.target.closest && ev.target.closest('.theme-pick');
+  const target = ev.target;
+  const pick = target.closest && target.closest('.theme-pick');
   if (pick) applyTheme(pick.dataset.theme, true);
+  const skin = target.closest && target.closest('.skin-item');
+  if (skin) {
+    applyTheme(skin.dataset.theme, true);
+    openSkinMenu(false);
+    return;
+  }
+  // 点在这套控件之外的任何地方都收起（下拉菜单的通行做法）
+  if (!target.closest || !target.closest('#skinPick')) openSkinMenu(false);
+});
+
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  const menu = document.getElementById('skinMenu');
+  if (menu && !menu.classList.contains('hidden')) {
+    openSkinMenu(false);
+    ev.stopPropagation();
+  }
 });
 // 进入页面时按上次的选择点亮按钮（属性已经由 head 里的内联脚本设好了）。
 // 兜底是 'dark' 而不是 DEFAULT_THEME：属性缺省等于深色（:root 就是那套变量），

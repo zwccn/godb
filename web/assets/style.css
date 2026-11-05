@@ -428,6 +428,59 @@ html[data-theme="steel"] {
   box-shadow: 0 0 0 2px var(--accent-soft-bg), 0 0 0 3px var(--accent);
 }
 
+/* 顶栏的皮肤切换：一个圆点入口 + 一排六套色点。
+   圆点本身复用设置页那套 `.theme-dot-*`（左半皮肤底色、右半主色），
+   所以换皮肤时入口自己会变色 —— 不用额外画一个「当前是什么」。 */
+.skin-pick { position: relative; display: flex; align-items: center; }
+
+.skin-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-2);
+  cursor: pointer;
+  transition: border-color .12s;
+}
+
+.skin-btn:hover { border-color: var(--border-hover); }
+.skin-btn .theme-dot { width: 14px; height: 14px; }
+
+.skin-menu {
+  position: absolute;
+  right: 0;
+  /* 下沿要落在顶栏**之下**：这个入口是 26px 高的圆钮，居中在 52px 顶栏里，
+     所以 100% + 20px 才刚好越过那条分隔线（9px 时菜单会压在线上）。 */
+  top: calc(100% + 20px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-1);
+  box-shadow: 0 10px 28px var(--shadow-color);
+  z-index: 60;
+}
+
+.skin-item {
+  display: grid;
+  place-items: center;
+  padding: 1px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+
+/* 当前皮肤：圆点外面一圈环。用选中色而不是阴影，深浅皮肤上都看得见 */
+.skin-item[aria-checked="true"] .theme-dot {
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3px var(--accent);
+}
+
 .fs-ctl {
   display: flex;
   align-items: center;
@@ -490,6 +543,10 @@ body {
 
 /* ---------- 顶栏 ---------- */
 .topbar {
+  /* 顶栏里的下拉（皮肤菜单）要能盖住下面的正文：正文里有些组件带 z-index，
+     不把顶栏抬成一层就会漏到菜单上面来。40 低于各种浮层弹窗（60+）。 */
+  position: relative;
+  z-index: 40;
   flex: 0 0 auto;
   height: 52px;
   display: flex;

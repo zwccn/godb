@@ -68,6 +68,11 @@ try {
     <!-- 首页 = 回到编辑器：监控面板和设置弹窗都收掉。顶栏三个入口里，
          它在编辑器时是「当前」，进了监控就换成「监控」亮 —— 和页面级 Tab 同一套选中语言。 -->
     <button id="btnHome" class="btn btn-ghost on" title="回到编辑器（关掉监控 / 设置）">首页</button>
+    <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
+    <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务 / 基准">
+      <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span><span id="benchBadge" class="badge bench-badge hidden"></span>
+    </button>
+    <button id="btnSettings" class="btn btn-ghost">设置</button>
     <!-- 模型图：把表和关系摊开成一张图。和监控同级（页面级视图），
          因为它回答的是 schema 的结构问题，不是运行时指标。
          名字叫「模型图」而不是「关系图」：它现在表达的不只是外键，
@@ -76,11 +81,16 @@ try {
             aria-label="模型图">
       <span class="lbl-full">模型图</span><span class="lbl-short">模型</span>
     </button>
-    <!-- 窄屏把「监控」缩成「监控」两字，省下来的宽度留给库下拉和执行 -->
-    <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务 / 基准">
-      <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span><span id="benchBadge" class="badge bench-badge hidden"></span>
-    </button>
-    <button id="btnSettings" class="btn btn-ghost">设置</button>
+    <!-- 皮肤切换：一个小圆点（左半当前皮肤底色、右半主色），点开是六套的色点。
+         不把六个点直接摊在顶栏：顶栏已经够挤，而换皮肤是低频操作，
+         收进一层不占地方，也不用为了看一眼颜色跑进设置页。 -->
+    <div class="skin-pick" id="skinPick">
+      <button id="btnSkin" class="skin-btn" type="button"
+              title="切换皮肤" aria-haspopup="true" aria-expanded="false" aria-label="切换皮肤">
+        <span class="theme-dot" id="skinDot" aria-hidden="true"></span>
+      </button>
+      <div class="skin-menu hidden" id="skinMenu" role="menu" aria-label="皮肤"></div>
+    </div>
   </div>
 </header>
 

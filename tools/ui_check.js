@@ -3530,16 +3530,23 @@ class CDP {
       const card = btn.closest('.probe-card');
       const icon0 = btn.textContent;
       const inPane0 = !!document.querySelector('#resultPane .probe-card');
+      const wHalf = Math.round(card.getBoundingClientRect().width);
       btn.click();
       await new Promise(r => setTimeout(r, 260));
       const ov = document.getElementById('probeFull');
       const r = ov.getBoundingClientRect();
+      const body = document.getElementById('probeFullBody');
+      const cs = getComputedStyle(body);
       return {
-        icon0, inPane0,
+        icon0, inPane0, wHalf,
         inOverlay: ov.contains(card),
         hidden: ov.classList.contains('hidden'),
         icon: btn.textContent,
         w: Math.round(r.width), h: Math.round(r.height),
+        cardW: Math.round(card.getBoundingClientRect().width),
+        // body 的可用宽度：撑满时卡片应该正好是它减去左右内边距
+        bodyW: Math.round(body.getBoundingClientRect().width)
+          - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
         win: [window.innerWidth, window.innerHeight],
       };
     })()`);
@@ -3548,6 +3555,12 @@ class CDP {
       && fullUi.icon0 === '⛶' && fullUi.icon === '⤡'
       && fullUi.w >= fullUi.win[0] - 2 && fullUi.h >= fullUi.win[1] - 2,
       fullUi ? `覆盖层 ${fullUi.w}×${fullUi.h}（窗口 ${fullUi.win.join('×')}）· ${fullUi.icon0}→${fullUi.icon}` : '没有全屏按钮');
+    /* 「全屏」不能比半屏还窄。这里原来有个 max-width: 1180px，宽屏上表现成
+       「点全屏 → 内容缩到中间一窄条，左右各空 400px」，看着像走进了手机版。
+       断言量的是卡片的**实际**宽度，所以把 max-width 加回去就会红。 */
+    check('全屏后卡片真的铺开（不比结果区里的窄）',
+      !!fullUi && fullUi.cardW >= fullUi.wHalf - 1 && fullUi.cardW >= fullUi.bodyW - 2,
+      fullUi ? `${fullUi.wHalf} → ${fullUi.cardW}px（可用 ${fullUi.bodyW}px）` : '没有全屏按钮');
 
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });

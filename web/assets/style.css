@@ -2022,12 +2022,29 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
 /* ---------- 窄屏：左侧表结构变成可收起的抽屉 ---------- */
 /* 手机上 390px 宽时侧栏要吃掉 210px，主区只剩一条缝，SQL 都没法看。
    这里把它改成覆盖式抽屉：默认收起，点顶栏的 ☰ 拉开，点遮罩/选完表自动收起。 */
-.sidebar-toggle { display: none; }
+.sidebar-toggle { display: inline-flex; flex: 0 0 auto; }
 .sidebar-scrim { display: none; }
 .lbl-short { display: none; }
 
+/* ---------- 宽屏：侧栏可以折叠 ---------- */
+/* 表结构栏占 268px，写长 SQL 时把它收起来能多出一整屏宽。
+   宽度走 flex-basis，收起时归 0；过渡放在 .sidebar 上，展开/收起是滑动而不是跳变。 */
+.sidebar { transition: flex-basis .16s ease; }
+
+body.sidebar-collapsed .sidebar {
+  flex: 0 0 0;
+  width: 0;
+  overflow: hidden;
+  border-right-color: transparent;
+}
+
+/* 收起之后只剩顶栏那个 ☰ 能把它拉回来，所以它对宽屏也得可见（见上面的 .sidebar-toggle）。
+   侧栏头里的 ‹ 只在宽屏出现 —— 窄屏已经有抽屉那套。 */
+.sidebar-fold { width: 20px; height: 20px; font-size: calc(15px * var(--fs)); line-height: 1; color: var(--text-3); }
+.sidebar-fold:hover { color: var(--text); }
+
 @media (max-width: 720px) {
-  .sidebar-toggle { display: inline-flex; flex: 0 0 auto; }
+  .sidebar-fold { display: none; }
 
   .sidebar {
     position: fixed;
@@ -2039,6 +2056,14 @@ table.grid td.long:hover .cell-clip { color: var(--accent); }
     transform: translateX(-100%);
     transition: transform .18s ease;
     box-shadow: 12px 0 36px var(--shadow-color);
+  }
+
+  /* 窄屏是抽屉，「折叠」这个概念不适用：宽度归 0 会把抽屉也弄没 */
+  body.sidebar-collapsed .sidebar {
+    flex: 0 0 auto;
+    width: min(280px, 84vw);
+    overflow: visible;
+    border-right-color: var(--border);
   }
 
   body.sidebar-open .sidebar { transform: none; }

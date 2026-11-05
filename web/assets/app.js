@@ -7492,6 +7492,7 @@ window.addEventListener('scroll', () => {
 // 手机上侧栏默认收起（布局见 CSS 的 max-width:720px 段），这里只管状态与交互。
 const sidebarToggle = document.getElementById('btnSidebar');
 const sidebarScrim = document.getElementById('sidebarScrim');
+const sidebarFold = document.getElementById('btnSidebarFold');
 const narrowMQ = window.matchMedia('(max-width: 720px)');
 
 function setSidebarOpen(open) {
@@ -7499,9 +7500,33 @@ function setSidebarOpen(open) {
   sidebarToggle.setAttribute('aria-expanded', String(!!open));
 }
 
+/* ---------------- 宽屏：侧栏折叠 ---------------- */
+
+// 收起来是把 268px 让给编辑器（写长 SQL、看宽表时很值），状态记在本机。
+// 和上面的抽屉是两件事：窄屏宽度归 0 会把抽屉也弄没，所以 CSS 里窄屏那段
+// 专门把折叠样式覆盖回去了。
+const SIDEBAR_FOLD_KEY = 'godb.sidebarFold';
+
+function setSidebarCollapsed(on) {
+  document.body.classList.toggle('sidebar-collapsed', !!on);
+  if (!narrowMQ.matches) sidebarToggle.setAttribute('aria-expanded', String(!on));
+  try { localStorage.setItem(SIDEBAR_FOLD_KEY, on ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+  // 侧栏宽度变了，但窗口没 resize —— CodeMirror 量不到新宽度，得手动刷一次。
+  // 过渡 160ms，等它走完再量一次，否则量到的是动画中间态。
+  const refresh = () => { if (typeof cm !== 'undefined' && cm) cm.refresh(); };
+  refresh();
+  setTimeout(refresh, 220);
+}
+
 sidebarToggle.addEventListener('click', () => {
-  setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+  // 窄屏：☰ 开抽屉；宽屏：☰ 收/展侧栏
+  if (narrowMQ.matches) {
+    setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+    return;
+  }
+  setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
 });
+sidebarFold.addEventListener('click', () => setSidebarCollapsed(true));
 sidebarScrim.addEventListener('click', () => setSidebarOpen(false));
 
 // 点表就把抽屉收起来：手机上紧接着要看的是查询结果，不是继续挑表
@@ -7509,9 +7534,18 @@ treeEl.addEventListener('click', ev => {
   if (narrowMQ.matches && ev.target.closest('.table-row')) setSidebarOpen(false);
 });
 
-// 转回宽屏时清掉状态，否则 body 上还挂着 class、☰ 的 aria-expanded 也对不上
+// 转回宽屏时清掉抽屉状态，否则 body 上还挂着 class、☰ 的 aria-expanded 也对不上；
+// 同时把宽屏自己的折叠偏好恢复回来。
 narrowMQ.addEventListener('change', e => {
-  if (!e.matches) setSidebarOpen(false);
+  if (!e.matches) {
+    setSidebarOpen(false);
+    let fold = false;
+    try { fold = localStorage.getItem(SIDEBAR_FOLD_KEY) === '1'; } catch (err) { /* 隐私模式 */ }
+    setSidebarCollapsed(fold);
+  } else {
+    // 转窄屏：抽屉语义接管，折叠类要先摘掉，否则侧栏宽度会被压成 0
+    document.body.classList.remove('sidebar-collapsed');
+  }
 });
 
 document.addEventListener('keydown', e => {
@@ -7521,6 +7555,14 @@ document.addEventListener('keydown', e => {
 /* ---------------- 启动 ---------------- */
 
 (function init() {
+  // 侧栏折叠状态先恢复：放在建编辑器之前，避免先按展开宽度量一遍再跳一下
+  try {
+    if (localStorage.getItem(SIDEBAR_FOLD_KEY) === '1') {
+      document.body.classList.add('sidebar-collapsed');
+      sidebarToggle.setAttribute('aria-expanded', 'false');
+    }
+  } catch (e) { /* 隐私模式 */ }
+
   const saved = localStorage.getItem('godb.sql');
   if (saved) {
     editor.value = saved;

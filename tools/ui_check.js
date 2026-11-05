@@ -2698,6 +2698,47 @@ class CDP {
       await loadSchema();
     })()`);
 
+    // 4.5) 宽屏：侧栏可以折起来（把宽度让给编辑器）
+    {
+      const wide0 = await cdp.eval(`(() => {
+        const sb = document.getElementById('sidebar').getBoundingClientRect();
+        const main = document.querySelector('.main').getBoundingClientRect();
+        return {
+          side: Math.round(sb.width), main: Math.round(main.width),
+          fold: getComputedStyle(document.getElementById('btnSidebarFold')).display,
+          toggle: getComputedStyle(document.getElementById('btnSidebar')).display,
+        };
+      })()`);
+      await cdp.eval(`document.getElementById('btnSidebarFold').click()`);
+      await sleep(450);
+      const folded = await cdp.eval(`(() => {
+        const sb = document.getElementById('sidebar').getBoundingClientRect();
+        const main = document.querySelector('.main').getBoundingClientRect();
+        return {
+          side: Math.round(sb.width), main: Math.round(main.width),
+          cls: document.body.classList.contains('sidebar-collapsed'),
+          stored: localStorage.getItem('godb.sidebarFold'),
+          expanded: document.getElementById('btnSidebar').getAttribute('aria-expanded'),
+        };
+      })()`);
+      await cdp.eval(`document.getElementById('btnSidebar').click()`);
+      await sleep(450);
+      const unfolded = await cdp.eval(`(() => {
+        const sb = document.getElementById('sidebar').getBoundingClientRect();
+        return {
+          side: Math.round(sb.width),
+          cls: document.body.classList.contains('sidebar-collapsed'),
+          stored: localStorage.getItem('godb.sidebarFold'),
+        };
+      })()`);
+      check('宽屏：侧栏能折叠（宽度让给编辑器，状态记在本机，☰ 能拉回来）',
+        wide0.fold !== 'none' && wide0.toggle !== 'none'
+        && folded.cls && folded.side <= 2 && folded.main > wide0.main + 100
+        && folded.stored === '1' && folded.expanded === 'false'
+        && !unfolded.cls && unfolded.side === wide0.side && unfolded.stored === '0',
+        `${wide0.side}px → ${folded.side}px（主区 ${wide0.main}→${folded.main}）→ ${unfolded.side}px`);
+    }
+
     // 5) 窄屏：左侧表结构默认收起成抽屉，点 ☰ 拉开
     //    注意 headless 的 --window-size 会把宽度钳到 500，所以这里显式设视口
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 1, mobile: true });
@@ -2751,7 +2792,8 @@ class CDP {
     check('窄屏点表后抽屉自动收起',
       await cdp.eval(`!document.body.classList.contains('sidebar-open')`));
 
-    // 转回宽屏：侧栏恢复常驻、☰ 消失、状态复位
+    // 转回宽屏：侧栏恢复常驻、抽屉状态复位（☰ 现在宽屏也留着 ——
+    // 它是折叠侧栏的开关，见「宽屏：侧栏能折叠」那条）
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(700);
     const wide = await cdp.eval(`(() => {
@@ -2762,8 +2804,9 @@ class CDP {
         cls: document.body.classList.contains('sidebar-open'),
       };
     })()`);
-    check('转回宽屏：侧栏常驻、☰ 隐藏、状态复位',
-      wide.w > 200 && wide.toggle === 'none' && !wide.cls,
+    check('转回宽屏：侧栏常驻、抽屉状态复位（☰ 保留，用来折叠）',
+      wide.w > 200 && wide.toggle !== 'none' && !wide.cls
+      && !(await cdp.eval(`document.body.classList.contains('sidebar-collapsed')`)),
       `侧栏 ${wide.w}px，☰ ${wide.toggle}`);
 
     // 诊断区三张表：10 行一页，空态和满页一样高 —— 高度不一致，切 Tab / 翻页就会跳。

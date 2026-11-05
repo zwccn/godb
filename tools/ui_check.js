@@ -4795,6 +4795,71 @@ class CDP {
     check('模型图：连线不穿过别的卡片（跨组时从卡片之间的缝里绕）',
       crossings.length === 0, crossings.length ? '穿过 ' + crossings.join(' / ') : '0 处穿越');
 
+    /* 并列的竖段要分得开：同一侧几条线如果落在同一个 x 上，视觉上就变成一根
+       粗线，「哪条线接哪行」直接读不出来（曾经因为竖线取两端中点而重合）。
+       这个用例跑的时候图上只有一条线，量不出并行 —— 临时造三条跨列的线，
+       量完删掉。 */
+    const parallel = await cdp.eval(`(async () => {
+      const cols = [...erModel.tables].sort((p, q) => p._er.x - q._er.x);
+      const xs = [...new Set(cols.map(t => Math.round(t._er.x)))];
+      const left = cols.filter(t => Math.round(t._er.x) === xs[0]);
+      const right = cols.filter(t => Math.round(t._er.x) === xs[xs.length - 1]);
+      const probes = [];
+      const pair = (a, b) => {
+        if (!a || !b || a === b) return;
+        probes.push({
+          id: 'l-laneprobe' + probes.length,
+          from: { table: String(a.id), columns: [a.columns[0].name] },
+          to: { table: String(b.id), columns: [b.columns[0].name] },
+          card: '1N',
+        });
+      };
+      pair(left[0], right[0]);
+      pair(left[0], right[1] || right[0]);
+      pair(left[1] || left[0], right[0]);
+      erDoc.links.push(...probes);
+      erRender();
+      await new Promise(r => setTimeout(r, 250));
+
+      const rects = erModel.tables.map(t => t._er).filter(Boolean);
+      erAssignLanes(erModel.edges);
+      const segs = [];
+      for (const e of erModel.edges) {
+        const a = e.from._er, b = e.to._er;
+        if (!a || !b) continue;
+        const ay = erColY(a, e.from, e.fromCol), by = erColY(b, e.to, e.toCol);
+        const g = erEdgeGeom(a, b, ay, by, e.lane, rects.filter(r => r !== a && r !== b));
+        for (let i = 0; i < g.pts.length - 1; i++) {
+          const p = g.pts[i], q = g.pts[i + 1];
+          if (Math.abs(p.x - q.x) < 0.5) {
+            segs.push({ id: e.id, x: p.x, y0: Math.min(p.y, q.y), y1: Math.max(p.y, q.y) });
+          }
+        }
+      }
+      let minD = Infinity, pairs = 0;
+      for (let i = 0; i < segs.length; i++) {
+        for (let j = i + 1; j < segs.length; j++) {
+          const A = segs[i], B = segs[j];
+          if (A.id === B.id) continue;
+          if (Math.min(A.y1, B.y1) - Math.max(A.y0, B.y0) < 8) continue;   // 没并行，不算
+          pairs++;
+          minD = Math.min(minD, Math.abs(A.x - B.x));
+        }
+      }
+      const out = {
+        n: segs.length, pairs,
+        minD: minD === Infinity ? null : Math.round(minD),
+        gap: ER.laneGap,
+      };
+      erDoc.links = erDoc.links.filter(l => l.id.indexOf('l-laneprobe') !== 0);
+      erRender();
+      await new Promise(r => setTimeout(r, 200));
+      return out;
+    })()`);
+    check('模型图：并行的竖段按 laneGap 分开（不会两条重合/挤成一束）',
+      parallel.pairs > 0 && parallel.minD >= parallel.gap - 1,
+      `${parallel.n} 段竖线 · ${parallel.pairs} 组并行 · 最小间距 ${parallel.minD}px（laneGap ${parallel.gap}）`);
+
     check('模型图：状态栏跟着报 1 条关系',
       /1 条关系/.test(built.stats), built.stats);
 

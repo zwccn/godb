@@ -9163,10 +9163,10 @@ const ER = {
   // 组与组之间要比组内松：跨组的线要从这条缝里穿过去，还得能看出「这是两组」。
   groupGap: 84,
   maxRows: 14,         // 卡片最多显示多少行字段，多了折成「还有 N 列」
-  colGap: 64,          // 列间距：两侧对接的线在这里竖着走
+  colGap: 96,          // 列间距：两侧对接的线在这里竖着走，通道要够宽才不挤成一束
   chanW: 44,           // 组框左侧的走线通道：往左出线的卡片要留出这段
   stub: 20,            // 连线离开字段行后先横着走这么一段，再拐弯
-  laneGap: 7,          // 同一侧多条线之间的通道间距
+  laneGap: 12,         // 同一侧多条线之间的通道间距
   corner: 7,           // 折角圆角半径
 };
 
@@ -10033,8 +10033,13 @@ function erEdgeGeom(a, b, ay, by, lane, avoid) {
     pts = [p0, p1, { x: mx, y: ay }, { x: mx, y: by }, { x: p2.x, y: by }, p3];
   } else {
     // 两侧对接：竖线走缝里的通道，两条横线各自挑一个不压卡片的高度。
+    //
+    // 竖线该落哪一列：**优先贴着出线那端的卡片**（p1.x，里面已经含 lane 偏移），
+    // 不要取「两端的中点」。取中点的话，同一个缝里的几条线各算各的中点，
+    // 最后会挤在同一两个 x 上（实测出现过两条线完全重合）—— 看着就是一束。
+    // 贴着出线端走，每条线各自在自己的通道上竖下去，间距正好是 laneGap。
     const lo = Math.min(p1.x, p2.x), hi = Math.max(p1.x, p2.x);
-    let mx = erFreeRunX(solid, ay, by, (p1.x + p2.x) / 2, lo, hi);
+    let mx = erFreeRunX(solid, ay, by, p1.x, lo, hi);
     let ya = erFreeRunY(solid, p1.x, mx, ay);
     let yb = erFreeRunY(solid, mx, p2.x, by);
     // 绕行之后竖线变长，可能又压上别的卡片，按新的两端再校一轮。
@@ -10194,15 +10199,26 @@ function erFlowDir(e) {
 //
 // 布局阶段量组框也要用它：量的时候用的是另一套通道号，量出来的就是另一条线。
 function erAssignLanes(edges) {
-  const lanes = new Map();
+  // 先按「从哪张卡片的哪一侧出线」分组，再在组内排序。
+  //
+  // 排序很关键：lane 0 离卡片最近，lane n 最外。按边出现的顺序分配时，
+  // 一条几乎水平的直连也可能被推到最外圈，绕着别的线拐两个弯；反过来让
+  // **越直的线走越靠里**，内圈是顺畅的直线，外圈才是需要绕的，一眼能看出
+  // 谁连谁（不这么排，几条竖段会挤成一束，读者只能顺着线一根根找）。
+  const groups = new Map();
   for (const e of edges) {
     const a = e.from._er, b = e.to._er;
     if (!a || !b) continue;
     const [side] = erEdgeSides(a, b);
     const key = (side > 0 ? 'R' : 'L') + Math.round(side > 0 ? a.x + a.w : a.x);
-    const n = lanes.get(key) || 0;
-    lanes.set(key, n + 1);
-    e.lane = n;
+    const ay = erColY(a, e.from, e.fromCol);
+    const by = erColY(b, e.to, e.toCol);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ e, dy: Math.abs(ay - by) });
+  }
+  for (const list of groups.values()) {
+    list.sort((p, q) => p.dy - q.dy);
+    for (let i = 0; i < list.length; i++) list[i].e.lane = i;
   }
 }
 

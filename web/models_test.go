@@ -212,6 +212,35 @@ func TestModelTableColor(t *testing.T) {
 	}
 }
 
+// 默认分组（未分组）只存外观：名字要 trim，色号越界当没设过，
+// 什么都没设就别在文件里留一个空壳。
+func TestModelDefaultGroup(t *testing.T) {
+	s, _, _ := newDBServer(t)
+	id := createModel(t, s, "默认组")
+	body := `{"name":"默认组","defaultGroup":{"name":"  默认表  ","color":6},
+		"tables":[{"id":"t1","name":"a","columns":[{"name":"id","type":"INTEGER"}]}]}`
+	if code, b := modelReq(t, s, http.MethodPost, "/api/models/"+id, body); code != http.StatusOK {
+		t.Fatalf("save = %d %s", code, b)
+	}
+	m := mustModel(t, s, "/api/models/"+id)
+	if m.DefaultGroup == nil || m.DefaultGroup.Name != "默认表" {
+		t.Fatalf("默认组名字应 trim 后保留: %+v", m.DefaultGroup)
+	}
+	if m.DefaultGroup.Color == nil || *m.DefaultGroup.Color != 6 {
+		t.Fatalf("默认组色号应保留 6: %+v", m.DefaultGroup.Color)
+	}
+
+	// 越界色号 + 空名字 → 整个字段消失，不留空壳
+	body2 := `{"name":"默认组","defaultGroup":{"name":"","color":99},
+		"tables":[{"id":"t1","name":"a","columns":[{"name":"id","type":"INTEGER"}]}]}`
+	if code, b := modelReq(t, s, http.MethodPost, "/api/models/"+id, body2); code != http.StatusOK {
+		t.Fatalf("save2 = %d %s", code, b)
+	}
+	if m2 := mustModel(t, s, "/api/models/"+id); m2.DefaultGroup != nil {
+		t.Fatalf("没设过就不该留记录: %+v", m2.DefaultGroup)
+	}
+}
+
 func createModel(t *testing.T, s *Server, name string) string {
 	t.Helper()
 	code, b := modelReq(t, s, http.MethodPost, "/api/models", `{"name":"`+name+`"}`)

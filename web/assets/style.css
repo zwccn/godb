@@ -5414,6 +5414,16 @@ html[data-theme="steel"] .ctx-menu {
 .er-card.g14, .er-group.g14, .er-swatch.g14 { --g-h: 65; --g-s0: 45%; --g-l0: 74%; } /* 开心果 */
 .er-card.g15, .er-group.g15, .er-swatch.g15 { --g-h: 190; --g-s0: 22%; --g-l0: 74%; } /* 雾霭 */
 
+/* 默认色：没在用色板挑过的卡片 / 分组（tone = -1，类名 .gd）。
+   两组各有一套 —— 卡片是「表」，分组是「框」，本来就该分开：
+   以前卡片跟着组色走，给组换个色会把组里所有表一起染了。
+
+   科技灰（steel）下：卡片是蓝色标题条（和截图里那套科技感一致），
+   分组是中性灰框。浅色皮肤用「雾霭」那种浅灰，不会抢马卡龙色。 */
+.er-card.gd, .er-group.gd, .er-swatch.gd { --g-h: 205; --g-s0: 20%; --g-l0: 74%; }
+html[data-theme="steel"] .er-card.gd { --g-h: 218; --g-s0: 55%; --g-l0: 76%; }
+html[data-theme="steel"] .er-group.gd { --g-h: 216; --g-s0: 12%; --g-l0: 58%; }
+
 :root {
   --er-tint: .34;      /* 卡片标题栏 / 组底色的不透明度 */
   --er-line: .70;      /* 组框描边的不透明度 */

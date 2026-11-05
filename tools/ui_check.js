@@ -5484,7 +5484,7 @@ class CDP {
           cls: document.querySelector(${JSON.stringify(cardSel)}).className,
           saved: erCardRec(erTableByName(${JSON.stringify(morePt.table)})).color,
         })`);
-        // 再走一遍菜单，点「跟随分组颜色」把它还回去
+        // 再走一遍菜单，点「恢复默认色」把它还回去
         const morePt2 = await cdp.eval(`(() => {
           const more = document.querySelector(${JSON.stringify(cardSel + ' .er-card-more')});
           if (!more) return null;
@@ -5503,7 +5503,7 @@ class CDP {
           if (c2) {
             await tapPt(c2);
             const f = await cdp.eval(`(() => {
-              const b = [...document.querySelectorAll('.er-menu > .er-menu-item')].find(x => x.textContent.trim() === '跟随分组颜色');
+              const b = [...document.querySelectorAll('.er-menu > .er-menu-item')].find(x => x.textContent.trim() === '恢复默认色');
               if (!b) return null;
               const r = b.getBoundingClientRect();
               return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
@@ -5520,7 +5520,7 @@ class CDP {
         colorUi = { own, back };
       }
     }
-    check('模型图：卡片菜单「改变颜色」把这张表单独改色，再能还原成组色',
+    check('模型图：卡片菜单「改变颜色」把这张表单独改色，再能恢复默认色',
       !!colorUi && /\bg7\b/.test(colorUi.own.cls) && colorUi.own.saved === 7
       && !!colorUi.back && !/\bg7\b/.test(colorUi.back.cls) && colorUi.back.saved === -1,
       colorUi ? `选中 ${colorUi.own.cls} · 还原 ${colorUi.back ? colorUi.back.cls : '没点成'}` : '色板没打开');
@@ -5786,9 +5786,9 @@ class CDP {
       cardCtx ? cardCtx.items.join(' | ') : '没有菜单');
     await cdp.eval(`erCloseMenus()`);
 
-    // 未分组右键：出的是画布菜单。以前 DOM 上没有 loose 这个类名，判定走的是
-    // 「不是 loose 就是真分组」，于是未分组也弹出「重命名 / 换个颜色 / 删除分组」，
-    // 而这三条对未分组全都提前 return —— 菜单弹得出来、每一条都点不动。
+    /* 默认分组（未分组）也能改名 / 换色。
+       以前它没有 ⋯、没有色点，右键还退化成画布菜单 —— 想改都点不到；
+       也不能删：这些表本来就是「没有归属」，删了它们没地方待。 */
     await cdp.eval(`(() => {
       const t = erSchema[0];
       if (t) erMoveToGroup(t, '');        // 保证画布上一定有「未分组」这一组
@@ -5806,14 +5806,48 @@ class CDP {
       looseCtx = await cdp.eval(`(() => {
         const m = document.querySelector('.er-menu');
         if (!m) return null;
-        return { items: [...m.querySelectorAll(':scope > .er-menu-item, :scope > .er-menu-sub > .er-menu-item')]
-          .map(b => b.textContent), more: !!document.querySelector('.er-group.loose .er-group-more') };
+        const g = document.querySelector('.er-group.loose');
+        return {
+          items: [...m.querySelectorAll(':scope > .er-menu-item, :scope > .er-menu-sub > .er-menu-item')]
+            .map(b => b.textContent),
+          dot: !!g.querySelector('.er-group-dot'),
+          more: !!g.querySelector('.er-group-more'),
+        };
       })()`);
     }
-    check('模型图：右键「未分组」出画布菜单（不是那一套点不动的组操作）',
-      !!looseCtx && looseCtx.items.indexOf('自动排列') >= 0
-      && looseCtx.items.indexOf('重命名') < 0 && !looseCtx.more,
+    check('模型图：默认分组也能改名/换色（有色点和 ⋯，但没有「删除分组」）',
+      !!looseCtx && looseCtx.dot && looseCtx.more
+      && looseCtx.items.indexOf('重命名') >= 0
+      && looseCtx.items.indexOf('换个颜色') >= 0
+      && !looseCtx.items.some(t => t.indexOf('删除分组') >= 0),
       looseCtx ? looseCtx.items.join(' | ') : '未分组标题没找到');
+
+    // 真改一次：走菜单 → 改名 → 换色，两条都要落到 defaultGroup 里
+    const looseEdit = await cdp.eval(`(async () => {
+      const g = erModel.groups.find(x => x.loose);
+      const el = g._box.querySelector('.er-group-name');
+      erRenameGroup(g, el);
+      await new Promise(r => setTimeout(r, 120));
+      const inp = el.querySelector('input');
+      if (!inp) return null;
+      inp.value = '默认表';
+      inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise(r => setTimeout(r, 250));
+      const g2 = erModel.groups.find(x => x.loose);
+      erSetGroupColor(g2, 6);
+      await new Promise(r => setTimeout(r, 250));
+      return {
+        title: (document.querySelector('.er-group.loose .er-group-name') || {}).textContent,
+        cls: document.querySelector('.er-group.loose').className,
+        saved: JSON.parse(JSON.stringify(erDoc.defaultGroup)),
+      };
+    })()`);
+    check('模型图：默认分组改名/换色真的生效并落盘（defaultGroup）',
+      !!looseEdit && looseEdit.title === '默认表'
+      && /\bg6\b/.test(looseEdit.cls)
+      && looseEdit.saved.name === '默认表' && looseEdit.saved.color === 6,
+      looseEdit ? `${looseEdit.title} · ${looseEdit.cls} · ${JSON.stringify(looseEdit.saved)}` : '没改成');
+
     await cdp.eval(`erCloseMenus()`);
     await cdp.eval(`toggleER(false)`);
     await sleep(300);

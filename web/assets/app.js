@@ -9273,8 +9273,16 @@ function erCleanEndpoint(e) {
 // 服务端已经清洗过一遍，这里再洗一遍是因为 erDoc 也会被本地的交互改写，
 // 与其在十几处调用点各写一遍校验，不如进出口各洗一次。
 function erNormalizeDoc(d) {
-  const out = { version: 3, groups: [], tables: {}, links: [] };
+  const out = { version: 3, groups: [], defaultGroup: { name: '', color: -1 }, tables: {}, links: [] };
   if (!d) return out;
+
+  // 默认分组（未分组）的外观：没有它也能跑，有就洗一遍
+  if (d.defaultGroup && typeof d.defaultGroup === 'object') {
+    const dg = d.defaultGroup;
+    let c = Number.isFinite(dg.color) ? dg.color : -1;
+    if (c < 0 || c > ER_TONES - 1) c = -1;
+    out.defaultGroup = { name: String(dg.name || '').slice(0, 40), color: c };
+  }
 
   if (Array.isArray(d.groups)) {
     const seen = new Set();
@@ -9621,7 +9629,14 @@ function erBuckets(tables) {
     byId.set(g.id, ng);
   }
 
-  const loose = { gid: '', name: '', color: -1, tables: [], loose: true, empty: false };
+  // 「默认分组」：没归组的表都在这儿。它不是 groups 里的记录，但用户可以给它
+  // 改名、挑色（存在 erDoc.defaultGroup）—— 于是它也能像真组一样被操作，
+  // 只是不能删（删了这些表就没地方呆了）。
+  const dg = (erDoc && erDoc.defaultGroup) || {};
+  const loose = {
+    gid: '', name: dg.name || '', color: Number.isFinite(dg.color) ? dg.color : -1,
+    tables: [], loose: true, empty: false,
+  };
   for (const t of tables) {
     const c = erDoc.tables[erTKey(t)];
     const g = c && c.group ? byId.get(c.group) : null;
@@ -9635,10 +9650,10 @@ function erBuckets(tables) {
   if (loose.tables.length) out.push(loose);
   out.forEach((g, i) => {
     g.idx = i;
-    // tone 是实际用的色相：手工组用自己定的色，未分组固定中性色 ——
-    // 两边各算一次迟早会算出两种颜色。
-    // 未分组固定用色板最后一个「雾霭」：它是中性色，不会和用户手工选的颜色撞。
-    g.tone = g.loose ? ER_TONES - 1 : (g.color >= 0 ? g.color : i % ER_TONES);
+    // tone = -1 表示「没挑过色」，渲染成皮肤的默认色（.gd）。
+    // 以前没挑过就按序号轮流取马卡龙色，一组一个颜色 —— 组一多满屏花花绿绿，
+    // 而且「默认长什么样」变成碰运气。
+    g.tone = g.color >= 0 ? g.color : -1;
   });
   return out;
 }
@@ -9942,6 +9957,10 @@ function erModelH(groups) {
 
 function erGroupKey(g) { return g.loose ? 'loose' : g.gid; }
 
+// 色号 → 类名。tone < 0 是「没挑过色」，走皮肤的默认色 .gd；
+// 以前这种情况按序号给一个马卡龙色，现在统一由皮肤决定。
+function erToneCls(tone) { return tone >= 0 ? 'g' + tone : 'gd'; }
+
 // DOM 顺序就是层级：后画的压在上面。卡片拖到别的组旁边时，如果它还沉在
 // 下面，会被别人的卡片盖住 —— 明明是自己正在摆的那张，却看不见。
 function erDrawOrder(groups) {
@@ -9955,6 +9974,14 @@ function erGroupTitle(g) {
   if (g.name) return g.name;
   if (g.loose) return `未分组 · ${g.tables.length} 张表`;
   return '未命名分组';
+}
+
+// 默认分组的名字/颜色存在 erDoc.defaultGroup 里：它不是 groups 的成员，
+// 但和真组一样要能改名换色。
+function erDefaultGroupRec() {
+  if (!erDoc) erDoc = erNormalizeDoc(null);
+  if (!erDoc.defaultGroup) erDoc.defaultGroup = { name: '', color: -1 };
+  return erDoc.defaultGroup;
 }
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -10415,52 +10442,44 @@ function erGroupEl(g) {
   // 判断「这是未分组，没有组操作」，以前只有 JS 对象里那个 loose 字段，DOM 上
   // 没留痕，于是右键未分组也弹出「重命名 / 换个颜色 / 删除分组」——
   // 而这三条对未分组都提前 return，表现成「菜单点了没反应」。
-  const box = el('div', 'er-group g' + g.tone + (g.loose ? ' loose' : ''));
+  const box = el('div', 'er-group ' + erToneCls(g.tone) + (g.loose ? ' loose' : ''));
   box.style.left = g.box.x + 'px';
   box.style.top = g.box.y + 'px';
   box.style.width = g.box.w + 'px';
   box.style.height = g.box.h + 'px';
 
   const label = el('div', 'er-group-label');
-  if (!g.loose) {
-    const dot = el('span', 'er-group-dot');
-    dot.title = '点击选颜色';
-    dot.setAttribute('role', 'button');
-    // 色点是「点一下就完事」的按钮，不参与整组拖动：一旦让组框拿到指针捕获，
-    // 这一下就成了拖动的开始，改色反而要看运气。
-    dot.addEventListener('pointerdown', ev => ev.stopPropagation());
-    dot.addEventListener('click', ev => {
-      ev.stopPropagation();
-      erOpenGroupColor(g, dot);
-    });
-    label.appendChild(dot);
-  }
+  // 默认分组（未分组）也能改色改名 —— 它只是「没归组的表待的地方」，
+  // 不代表不能用来看图。以前它没有色点和 ⋯，用户想改都点不到。
+  const dot = el('span', 'er-group-dot');
+  dot.title = '点击选颜色';
+  dot.setAttribute('role', 'button');
+  // 色点是「点一下就完事」的按钮，不参与整组拖动：一旦让组框拿到指针捕获，
+  // 这一下就成了拖动的开始，改色反而要看运气。
+  dot.addEventListener('pointerdown', ev => ev.stopPropagation());
+  dot.addEventListener('click', ev => {
+    ev.stopPropagation();
+    erOpenGroupColor(g, dot);
+  });
+  label.appendChild(dot);
 
   const nameEl = el('span', 'er-group-name', erGroupTitle(g));
-  if (!g.loose) {
-    nameEl.title = '拖动移动整组，双击改名';
-    nameEl.addEventListener('dblclick', ev => {
-      ev.stopPropagation();
-      erRenameGroup(g, nameEl);
-    });
-  }
+  nameEl.title = '拖动移动整组，双击改名';
+  nameEl.addEventListener('dblclick', ev => {
+    ev.stopPropagation();
+    erRenameGroup(g, nameEl);
+  });
   label.appendChild(nameEl);
 
-  if (g.loose) {
-    // 提示不放在标题行里：未分组这一组的宽度正好一列，标题 + 计数就把位置占满了，
-    // 再塞一句提示会被压成 0 宽（flex 里 ellipsis 也救不回来）。挂到 title 上。
-    label.title = '拖动这一组可整体移动；在卡片右上角的 ⋯ 里把表移进分组';
-  } else {
-    const more = el('button', 'er-group-more', '⋯');
-    more.type = 'button';
-    more.title = '分组操作';
-    more.addEventListener('pointerdown', ev => ev.stopPropagation());
-    more.addEventListener('click', ev => {
-      ev.stopPropagation();
-      erOpenGroupMenu(g, more);
-    });
-    label.appendChild(more);
-  }
+  const more = el('button', 'er-group-more', '⋯');
+  more.type = 'button';
+  more.title = '分组操作';
+  more.addEventListener('pointerdown', ev => ev.stopPropagation());
+  more.addEventListener('click', ev => {
+    ev.stopPropagation();
+    erOpenGroupMenu(g, more);
+  });
+  label.appendChild(more);
 
   box.appendChild(label);
   if (g.empty) {
@@ -10561,11 +10580,12 @@ function erEndGroupDrag(ev) {
 
 function erCardEl(t, g) {
   const r = t._er;
-  // 色号：这张表自己挑过就用自己的，没挑过跟随所在分组 —— 「一组一色」还是默认，
-  // 单独挑色只是为了在图里把某几张表拎出来（比如核心表），不该逼着人建新分组。
+  // 色号：只认这张表自己挑的颜色，没挑过就是皮肤默认色。
+  //
+  // 以前没挑过就跟随所在分组 —— 于是「给组换个颜色」会把组里每张表一起染了，
+  // 那不是用户要的：分组色是**框**的颜色，表是自己的颜色。
   const own = erCardRec(t).color;
-  const tone = own >= 0 ? own : g.tone;
-  const card = el('div', 'er-card g' + tone);
+  const card = el('div', 'er-card ' + erToneCls(own));
   card.style.left = r.x + 'px';
   card.style.top = r.y + 'px';
   card.style.width = r.w + 'px';
@@ -11283,13 +11303,18 @@ function erColorGrid(tone, pick) {
 }
 
 function erOpenGroupColor(g, anchorEl) {
-  if (g.loose || !anchorEl) return;
+  if (!anchorEl) return;
   const r = anchorEl.getBoundingClientRect();
   const sr = erStage.getBoundingClientRect();
-  erShowMenu(r.left - sr.left, r.bottom - sr.top + 6, [
+  const items = [
     { head: '分组颜色' },
     { node: erColorGrid(g.tone, i => erSetGroupColor(g, i)) },
-  ]);
+  ];
+  if (g.color >= 0) {
+    items.push({ sep: true });
+    items.push({ label: '恢复默认色', run: () => erSetGroupColor(g, -1) });
+  }
+  erShowMenu(r.left - sr.left, r.bottom - sr.top + 6, items);
 }
 
 // 卡片自己挑色。默认跟随分组（-1），挑过之后单独生效；
@@ -11305,7 +11330,7 @@ function erOpenTableColor(t, anchorEl) {
   ];
   if (rec.color >= 0) {
     items.push({ sep: true });
-    items.push({ label: '跟随分组颜色', run: () => erSetTableColor(t, -1) });
+    items.push({ label: '恢复默认色', run: () => erSetTableColor(t, -1) });
   }
   // 和卡片菜单同一处弹出（卡片右侧对齐），免得「点颜色 → 菜单跳到别处」
   erShowMenu(r.right - sr.left + 6, r.top - sr.top, items);
@@ -11321,11 +11346,11 @@ function erSetTableColor(t, tone) {
 }
 
 function erSetGroupColor(g, tone) {
-  if (!erDoc || g.loose) return;
-  const rec = erDoc.groups.find(x => x.id === g.gid);
+  if (!erDoc) return;
+  const rec = g.loose ? erDefaultGroupRec() : erDoc.groups.find(x => x.id === g.gid);
   if (!rec) return;
-  rec.color = ((tone % ER_TONES) + ER_TONES) % ER_TONES;
-  erHotGroup = g.gid;      // 被操作的组留在上层，改完不跳动
+  rec.color = tone < 0 ? -1 : ((tone % ER_TONES) + ER_TONES) % ER_TONES;
+  erHotGroup = g.loose ? 'loose' : g.gid;   // 被操作的组留在上层，改完不跳动
   erCloseMenus();
   erRender();
   erSave();
@@ -11334,7 +11359,7 @@ function erSetGroupColor(g, tone) {
 // erRenameGroup 把组标题换成输入框就地改名。
 // 不用 prompt：原生弹窗在某些内嵌浏览器里会被拦掉，而且拿不到「回车提交」。
 function erRenameGroup(g, nameEl) {
-  if (g.loose || nameEl.querySelector('input')) return;
+  if (nameEl.querySelector('input')) return;
   const old = g.name || '';
   const inp = el('input', 'er-group-input');
   inp.type = 'text';
@@ -11355,9 +11380,9 @@ function erRenameGroup(g, nameEl) {
       nameEl.textContent = erGroupTitle(g);
       return;
     }
-    const rec = erDoc.groups.find(x => x.id === g.gid);
+    const rec = g.loose ? erDefaultGroupRec() : erDoc.groups.find(x => x.id === g.gid);
     if (rec) rec.name = val;
-    erHotGroup = g.gid;
+    erHotGroup = g.loose ? 'loose' : g.gid;
     erRender();
     erSave();
   };
@@ -11545,7 +11570,7 @@ function erOpenCanvasMenu(ev) {
 }
 
 function erOpenGroupMenu(g, anchorEl) {
-  if (!g || g.loose) return;              // 未分组没有组操作，别弹一个全是空转的菜单
+  if (!g) return;
   const r = anchorEl.getBoundingClientRect();
   const sr = erStage.getBoundingClientRect();
   const items = [
@@ -11559,13 +11584,16 @@ function erOpenGroupMenu(g, anchorEl) {
       },
     },
     { label: '换个颜色', run: () => erOpenGroupColor(g, anchorEl) },
-    { sep: true },
-    {
+  ];
+  // 默认分组不能删：删了这些表就没地方待了（它们本来就是「没有归属」）
+  if (!g.loose) {
+    items.push({ sep: true });
+    items.push({
       label: g.tables.length ? `删除分组（${g.tables.length} 张表回到未分组）` : '删除分组',
       danger: true,
       run: () => erDeleteGroup(g),
-    },
-  ];
+    });
+  }
   erShowMenu(r.left - sr.left, r.bottom - sr.top + 4, items);
 }
 
@@ -11704,7 +11732,13 @@ function erCardsOf(m) {
 }
 
 function erDocFromModel(m) {
-  const out = { version: 3, groups: [], tables: {}, links: [] };
+  const out = { version: 3, groups: [], defaultGroup: { name: '', color: -1 }, tables: {}, links: [] };
+  if (m.defaultGroup) {
+    out.defaultGroup = {
+      name: m.defaultGroup.name || '',
+      color: Number.isFinite(m.defaultGroup.color) ? m.defaultGroup.color : -1,
+    };
+  }
   for (const g of (m.groups || [])) {
     out.groups.push({
       id: g.id, name: g.name || '', color: g.color,
@@ -11738,6 +11772,14 @@ function erDocToModel(doc, m) {
   }));
   for (const g of doc.groups) {
     out.groups.push({ id: g.id, name: g.name, color: g.color, x: g.x, y: g.y });
+  }
+  // 默认分组只存外观；没改过就不写，别在文件里留空壳
+  const dg = doc.defaultGroup;
+  if (dg && (dg.name || dg.color >= 0)) {
+    out.defaultGroup = { name: dg.name || '', color: dg.color >= 0 ? dg.color : undefined };
+    if (out.defaultGroup.color === undefined) delete out.defaultGroup.color;
+  } else {
+    delete out.defaultGroup;
   }
   for (const t of out.tables) {
     const rec = doc.tables[t.id];
@@ -12175,7 +12217,8 @@ erStage.addEventListener('contextmenu', ev => {
     // 以模型对象上的 loose 为准，DOM 类名只作辅助 —— 判错一次就是「菜单弹了但
     // 每条都点不动」，比不弹更让人困惑。
     const g = erModel.groups.find(x => x._box === groupEl);
-    if (g && !g.loose) { erOpenGroupMenu(g, groupEl.querySelector('.er-group-label') || groupEl); return; }
+    // 默认分组也有组菜单（改名 / 换色），只是没有「删除分组」
+    if (g) { erOpenGroupMenu(g, groupEl.querySelector('.er-group-label') || groupEl); return; }
   }
   erOpenCanvasMenu(ev);
 });

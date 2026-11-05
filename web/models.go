@@ -86,15 +86,25 @@ type modelLink struct {
 	Card string        `json:"card"`
 }
 
+// modelDefaultGroup 是「默认分组」的外观：没归组的表都待在这里。
+//
+// 它不是一个真正的组（成员是「group 为空」的那些表，不走 groups 列表），
+// 但用户可以给它改名、挑色 —— 所以名字和颜色得存下来。
+type modelDefaultGroup struct {
+	Name  string `json:"name,omitempty"`
+	Color *int   `json:"color,omitempty"`
+}
+
 type modelDoc struct {
-	Version   int            `json:"version"`
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	CreatedAt string         `json:"createdAt,omitempty"`
-	UpdatedAt string         `json:"updatedAt,omitempty"`
-	Groups    []diagramGroup `json:"groups,omitempty"`
-	Tables    []modelTable   `json:"tables"`
-	Links     []modelLink    `json:"links,omitempty"`
+	Version      int                `json:"version"`
+	ID           string             `json:"id"`
+	Name         string             `json:"name"`
+	CreatedAt    string             `json:"createdAt,omitempty"`
+	UpdatedAt    string             `json:"updatedAt,omitempty"`
+	Groups       []diagramGroup     `json:"groups,omitempty"`
+	DefaultGroup *modelDefaultGroup `json:"defaultGroup,omitempty"`
+	Tables       []modelTable       `json:"tables"`
+	Links        []modelLink        `json:"links,omitempty"`
 }
 
 // modelSummary 是列表页要的那些数：不把整份模型带上，模型多了列表也不卡。
@@ -196,6 +206,20 @@ func (m *modelDoc) normalize() {
 		groups = append(groups, g)
 	}
 	m.Groups = groups
+
+	// 默认分组：只有外观，成员是「group 为空」的那些表
+	if dg := m.DefaultGroup; dg != nil {
+		dg.Name = strings.TrimSpace(dg.Name)
+		if r := []rune(dg.Name); len(r) > diagramMaxName {
+			dg.Name = string(r[:diagramMaxName])
+		}
+		if dg.Color != nil && (*dg.Color < 0 || *dg.Color > 15) {
+			dg.Color = nil
+		}
+		if dg.Name == "" && dg.Color == nil {
+			m.DefaultGroup = nil // 什么都没设，别在文件里留一个空壳
+		}
+	}
 
 	// 表：ID 补齐、表名去重（大小写不敏感 —— DDL 里本来就是不敏感的）、
 	// 列名同表内去重、类型必填。

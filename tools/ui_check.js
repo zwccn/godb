@@ -6056,6 +6056,11 @@ class CDP {
     check('总览是默认落地页（六个数字，不用点任何按钮）',
       !!home && home.open && home.cells.length === 6,
       home ? `${home.cells.length} 格 · 可见 ${home.open}` : '没渲染');
+    /* 中间三格要按**一个请求的行走路线**排：排队（等槽位）→ 等待锁 → 执行中。
+       执行中是流水线的末端，排在最前面会把因果读反（像是「先执行、再排队」）。 */
+    check('总览六个数字按请求的行走路线排（QPS · 排队 · 等待锁 · 执行中 · 内存 · 带宽）',
+      !!home && home.cells.map(c => c.k).join(',') === 'qps,queue,wait,exec,mem,net',
+      home ? home.cells.map(c => c.k).join(' · ') : '没渲染');
     check('总览：「总览」亮着、「控制台」不亮（两页二选一）',
       !!home && home.ovOn && !home.homeOn,
       home ? `总览 ${home.ovOn} · 控制台 ${home.homeOn}` : '');

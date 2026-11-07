@@ -6190,9 +6190,12 @@ const homeEls = {
   foot: document.getElementById('homeFoot'),
 };
 
-// 六个数字。顺序有讲究：QPS 是业务量的锚，中间三个是「请求卡在流水线哪一段」
-// （执行中 / 排队 / 等锁），最后两个是资源。眼睛从左往右读，正好是
-// 「多少请求 → 卡在哪 → 机器扛不扛得住」。
+// 六个数字。顺序有讲究：QPS 是业务量的锚，中间三个是「请求卡在流水线哪一段」，
+// 最后两个是资源。眼睛从左往右读，正好是「多少请求 → 卡在哪 → 机器扛不扛得住」。
+//
+// 中间三个按**一个请求的行走路线**排：排队（等执行槽位）→ 等待锁 → 执行中。
+// 原来把「执行中」放在最前，可它恰恰是流水线的**末端** —— 前面堵了才轮到它，
+// 从前往后读会把因果读反（看起来像「先有执行，再排队」）。
 //
 // level 只在异常时返回非空 —— 正常时六个数字是同一种白。监控面板满屏彩色
 // 是因为它专门用来看异常；总览反过来，它要的是「没事的时候看起来很安静」。
@@ -6201,21 +6204,6 @@ const HOME_KPIS = [
     id: 'qps', name: 'QPS',
     value: m => (m.rates && m.rates.sampled) ? { n: m.rates.qps } : { n: '—' },
     hint: m => '峰值 ' + ((m.rates && m.rates.peakQps) || 0),
-  },
-  {
-    id: 'exec', name: '执行中',
-    value: m => {
-      const w = m.water || {};
-      return { n: w.exec || 0, u: w.execMax ? '/ ' + w.execMax : '' };
-    },
-    hint: m => {
-      const w = m.water || {};
-      return w.execMax ? '上限 ' + w.execMax : '不限并发';
-    },
-    level: m => {
-      const w = m.water || {};
-      return (w.execMax && w.exec >= w.execMax) ? 'warn' : '';
-    },
   },
   {
     id: 'queue', name: '排队',
@@ -6231,6 +6219,21 @@ const HOME_KPIS = [
     value: m => ({ n: (m.water || {}).wait || 0 }),
     hint: m => '锁结构 ' + ((m.locks || []).length),
     level: m => (((m.water || {}).wait || 0) > 0 ? 'warn' : ''),
+  },
+  {
+    id: 'exec', name: '执行中',
+    value: m => {
+      const w = m.water || {};
+      return { n: w.exec || 0, u: w.execMax ? '/ ' + w.execMax : '' };
+    },
+    hint: m => {
+      const w = m.water || {};
+      return w.execMax ? '上限 ' + w.execMax : '不限并发';
+    },
+    level: m => {
+      const w = m.water || {};
+      return (w.execMax && w.exec >= w.execMax) ? 'warn' : '';
+    },
   },
   {
     id: 'mem', name: '内存',

@@ -6556,6 +6556,119 @@ function homeChart(host, pts, lines, opts) {
 
   host.appendChild(plot);
 
+  /* ---- 悬停读数（十字光标）----
+   *
+   * 图只有一百多像素高，靠图例只能看到「最新值」。想知道「二十秒前那个尖峰是
+   * 多少」，得把鼠标放上去。
+   *
+   * 竖线**吸附到最近的采样点**：1 秒一个点，不吸附的话读数落在两个点中间，
+   * 显示出来的数值其实不存在。横线不吸附，就是鼠标位置 —— 双轴图里「某个高度」
+   * 没有共同含义，硬吸到某条线上反而误导。
+   *
+   * 所有位置都按 svg 的实际渲染尺寸现算（图是 preserveAspectRatio=none 拉伸的，
+   * 逻辑坐标 600×120 和像素不是一回事），所以卡片变宽、窗口缩放都不用重建。
+   */
+  const svgEl = plot.querySelector('svg');
+  const cross = el('div', 'hp-cross');
+  const vline = el('i', 'hp-v');
+  const hline = el('i', 'hp-h');
+  cross.appendChild(vline);
+  cross.appendChild(hline);
+  const dots = lines.map(l => {
+    const d = el('i', 'hp-dot');
+    d.style.background = l.color;
+    cross.appendChild(d);
+    return d;
+  });
+  const tip = el('div', 'hp-tip');
+  plot.appendChild(cross);
+  plot.appendChild(tip);
+
+  // 悬停状态挂在 host 上：renderHome 每 2 秒重画一遍图，宿主节点是静态的，
+  // 状态只有存在它身上才能跨重画活着 —— 否则鼠标不动，读数牌每两秒闪掉一下。
+  const hp = host._hp || (host._hp = { on: false, ratio: 0, yFrac: 0.5 });
+
+  const place = (ratio, yFrac) => {
+    const sr = svgEl.getBoundingClientRect();
+    const pr = plot.getBoundingClientRect();
+    if (!sr.width || !sr.height || !pr.width) return;
+    hp.on = true;
+    // 存的是**鼠标**的相对位置（不是采样点的），重画后十字线还在鼠标底下
+    hp.ratio = ratio;
+    hp.yFrac = yFrac;
+
+    const idx = Math.max(0, Math.min(pts.length - 1, Math.round(ratio * (pts.length - 1))));
+    const p = pts[idx] || {};
+
+    const x0 = sr.left - pr.left, y0 = sr.top - pr.top;
+    // 竖线画在**那个采样点**上，不是鼠标位置：读数报的是它，线也得指着它。
+    // 采样点密的时候差不到 1px，可数据只有几个点时能差半格 —— 那时「点在曲线上」
+    // 却读着另一个数，一眼就看出对不上。
+    const snap = pts.length > 1 ? idx / (pts.length - 1) : 0;
+    const cx = x0 + snap * sr.width;
+    const cy = y0 + yFrac * sr.height;
+    vline.style.left = cx + 'px';
+    vline.style.top = y0 + 'px';
+    vline.style.height = sr.height + 'px';
+    hline.style.top = cy + 'px';
+    hline.style.left = x0 + 'px';
+    hline.style.width = sr.width + 'px';
+    cross.classList.add('on');
+
+    const lastAt = pts[pts.length - 1].atMs || 0;
+    const off = Math.max(0, Math.round((lastAt - (p.atMs || 0)) / 1000));
+
+    lines.forEach((l, i) => {
+      const r = axisOf(l) === 'r' ? (rangeR || rangeL) : rangeL;
+      const d = dots[i];
+      if (!r) { d.style.display = 'none'; return; }
+      d.style.display = '';
+      d.style.left = cx + 'px';
+      d.style.top = (y0 + (yOf(l.get(p) || 0, r) / H) * sr.height) + 'px';
+    });
+
+    tip.innerHTML = '';
+    tip.appendChild(el('div', 'hp-tip-h', off === 0 ? '现在' : '-' + off + 's'));
+    for (const l of lines) {
+      const row = el('div', 'hp-tip-row');
+      const sw = el('i');
+      sw.style.background = l.color;
+      row.appendChild(sw);
+      row.appendChild(el('span', '', l.label));
+      row.appendChild(el('b', '', l.fmt(l.get(p) || 0)));
+      tip.appendChild(row);
+    }
+    tip.classList.add('on');
+    // 读数牌跟着竖线走：靠右放不下就翻到左边，上下夹在画布里（卡片 overflow:hidden）
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let left = cx + 10;
+    if (left + tw > pr.width - 4) left = cx - 10 - tw;
+    left = Math.max(4, Math.min(Math.max(4, pr.width - tw - 4), left));
+    let top = cy - th - 12;
+    if (top < 4) top = cy + 14;
+    top = Math.max(4, Math.min(Math.max(4, pr.height - th - 4), top));
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+  };
+
+  const clearHp = () => {
+    hp.on = false;
+    cross.classList.remove('on');
+    tip.classList.remove('on');
+  };
+
+  plot.addEventListener('pointermove', ev => {
+    const sr = svgEl.getBoundingClientRect();
+    if (!sr.width) return;
+    place(
+      Math.max(0, Math.min(1, (ev.clientX - sr.left) / sr.width)),
+      Math.max(0, Math.min(1, (ev.clientY - sr.top) / sr.height)),
+    );
+  });
+  plot.addEventListener('pointerleave', clearHp);
+  // 重画之后把上一次的悬停位置接回来（见 hp 的注释）
+  if (hp.on) place(hp.ratio, hp.yFrac);
+
   const legend = el('div', 'home-legend');
   const last = pts[pts.length - 1] || {};
   for (const l of lines) {

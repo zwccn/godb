@@ -2476,6 +2476,48 @@ body.sidebar-collapsed .sidebar {
 .hp-y span { text-shadow: 0 0 4px var(--hm-bg); }   /* 压在曲线上也读得清 */
 /* 没有 x 轴的那张（资源卡的上半），刻度铺到最底 */
 .home-plot.no-x .hp-y { bottom: 0; }
+
+/* ---- 悬停读数：十字光标 + 线上的点 + 读数牌 ----
+   图只有一百多像素高，图例只报最新值；把鼠标放上去才看得到「二十秒前那一下多少」。
+   层级：十字线压在曲线上面、刻度字下面；读数牌最上。 */
+.home-plot { cursor: crosshair; }
+.hp-cross { position: absolute; inset: 0; z-index: 1; opacity: 0; transition: opacity .1s; }
+.hp-cross.on { opacity: 1; }
+.hp-y { z-index: 2; }
+.hp-v, .hp-h { position: absolute; display: block; }
+.hp-v { width: 0; border-left: 1px dashed var(--hm-faint); }
+.hp-h { height: 0; border-top: 1px dashed var(--hm-faint); opacity: .7; }
+.hp-dot {
+  position: absolute;
+  width: 6px; height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--hm-bg);
+}
+
+.hp-tip {
+  position: absolute;
+  z-index: 3;
+  min-width: 86px;
+  padding: 5px 8px 6px;
+  border: 1px solid var(--hm-line);
+  border-radius: 6px;
+  background: var(--hm-bg-2);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  color: var(--hm-dim);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .1s;
+}
+.hp-tip.on { opacity: 1; }
+.hp-tip-h { color: var(--hm-faint); margin-bottom: 2px; }
+.hp-tip-row { display: flex; align-items: center; gap: 6px; line-height: 1.55; }
+.hp-tip-row span { flex: 1 1 auto; }
+.hp-tip-row b { color: var(--hm-text); font-weight: 600; }
+.hp-tip-row i { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 2px; }
 .hp-y.r { text-align: right; }
 /* 资源卡里上下叠两张小图（内存 / CPU）：各自一根轴，互不干扰。
    塞进一张双轴图的话，两条线的交叉会被误读成「有因果关系」——

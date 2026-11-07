@@ -6159,6 +6159,59 @@ class CDP {
       axisIssue.length === 0 && !!chartOf('请求').axisL,
       axisIssue.length ? axisIssue.join(' · ')
         : `请求 ${chartOf('请求').axisL} / ${chartOf('请求').axisR} · 内存 ${halves[0] && halves[0].axisL} · CPU ${halves[1] && halves[1].axisL}`);
+    /* 悬停读数：图例只报「最新值」，想知道二十秒前那一下多少得靠鼠标。
+       要的是十字光标 + 那一刻各条线的数值，而且竖线要**吸附到采样点**上
+       —— 线画在鼠标位置、数值却取最近的点，点数稀时一眼就看出对不上。 */
+    const plotPt = await cdp.eval(`(() => {
+      const r = document.querySelectorAll('.home-plot')[0].getBoundingClientRect();
+      return { x: Math.round(r.left + r.width * 0.52), y: Math.round(r.top + r.height * 0.42) };
+    })()`);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: plotPt.x, y: plotPt.y });
+    await sleep(220);
+    const hoverUi = await cdp.eval(`(() => {
+      const plot = document.querySelectorAll('.home-plot')[0];
+      const pr = plot.getBoundingClientRect();
+      const svg = plot.querySelector('svg');
+      const sr = svg.getBoundingClientRect();
+      const v = plot.querySelector('.hp-v').getBoundingClientRect();
+      const tip = plot.querySelector('.hp-tip');
+      const tr = tip.getBoundingClientRect();
+      // 采样点数从路径里数（点都在 d 里：M 之后每个 L 一个点）
+      const d = (svg.querySelector('path') || {}).getAttribute ? svg.querySelector('path').getAttribute('d') : '';
+      return {
+        n: d ? d.split('L').length : 0,
+        cross: plot.querySelector('.hp-cross').classList.contains('on'),
+        tipOn: tip.classList.contains('on'),
+        head: (tip.querySelector('.hp-tip-h') || {}).textContent || '',
+        rows: [...tip.querySelectorAll('.hp-tip-row')].map(r => r.textContent),
+        dots: plot.querySelectorAll('.hp-dot').length,
+        vx: v.left - sr.left, w: sr.width,
+        tipIn: tr.left >= pr.left - 1 && tr.right <= pr.right + 1
+          && tr.top >= pr.top - 1 && tr.bottom <= pr.bottom + 1,
+      };
+    })()`);
+    // 竖线落在「第 k 个采样点」的 x 上：间距 w/(n-1)，偏差应小于 1px
+    const pitch = hoverUi && hoverUi.n > 1 ? hoverUi.w / (hoverUi.n - 1) : 0;
+    const snapErr = pitch ? Math.abs(hoverUi.vx - Math.round(hoverUi.vx / pitch) * pitch) : 999;
+    check('总览：鼠标移上去出十字光标 + 读数牌，报那一刻的数值（不是最新值）',
+      !!hoverUi && hoverUi.cross && hoverUi.tipOn
+      && /^(现在|-\d+s)$/.test(hoverUi.head)
+      && hoverUi.rows.length === 2 && hoverUi.dots === 2
+      && /QPS/.test(hoverUi.rows.join('')) && /连接/.test(hoverUi.rows.join(''))
+      && hoverUi.tipIn && snapErr < 1.5,
+      hoverUi ? `${hoverUi.head} · ${hoverUi.rows.join(' / ')} · 吸附误差 ${snapErr.toFixed(2)}px · 牌在框内 ${hoverUi.tipIn}` : '没出读数');
+
+    // 移开就收起，别留一根线挂在那儿
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 8, y: 8 });
+    await sleep(200);
+    const hoverOff = await cdp.eval(`(() => {
+      const plot = document.querySelectorAll('.home-plot')[0];
+      return { cross: plot.querySelector('.hp-cross').classList.contains('on'),
+               tip: plot.querySelector('.hp-tip').classList.contains('on') };
+    })()`);
+    check('总览：鼠标移开，十字线和读数牌都收起来', !hoverOff.cross && !hoverOff.tip,
+      `十字线 ${hoverOff.cross} · 读数牌 ${hoverOff.tip}`);
+
     check('总览：版本号 / 运行时长 / 时钟都有内容（不是占位符）',
       !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
       && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),

@@ -6190,21 +6190,19 @@ const homeEls = {
   foot: document.getElementById('homeFoot'),
 };
 
-// 六个数字。顺序有讲究：QPS 是业务量的锚，中间三个是「请求卡在流水线哪一段」，
-// 最后两个是资源。眼睛从左往右读，正好是「多少请求 → 卡在哪 → 机器扛不扛得住」。
+// 三个数字：只有「请求卡在流水线哪一段」这一段。
 //
-// 中间三个按**一个请求的行走路线**排：排队（等执行槽位）→ 等待锁 → 执行中。
-// 原来把「执行中」放在最前，可它恰恰是流水线的**末端** —— 前面堵了才轮到它，
-// 从前往后读会把因果读反（看起来像「先有执行，再排队」）。
+// 原来还有 QPS / 内存 / 带宽三格，但**下面两条走势里本来就有**
+// （第一条 QPS + 连接 + 带宽，第二条 内存 + CPU）—— 同一份数据在屏幕上下各说一遍，
+// 上面那一排反而把「现在堵在哪」这个唯一要秒读的东西稀释了。
+// 走势回答「趋势」，这三格回答「此刻」，分工清楚。
 //
-// level 只在异常时返回非空 —— 正常时六个数字是同一种白。监控面板满屏彩色
+// 顺序按**一个请求的行走路线**排：排队（等执行槽位）→ 等待锁 → 执行中。
+// 执行中是流水线的**末端**，放在最前面会把因果读反（看起来像「先执行、再排队」）。
+//
+// level 只在异常时返回非空 —— 正常时三个数字是同一种白。监控面板满屏彩色
 // 是因为它专门用来看异常；总览反过来，它要的是「没事的时候看起来很安静」。
 const HOME_KPIS = [
-  {
-    id: 'qps', name: 'QPS',
-    value: m => (m.rates && m.rates.sampled) ? { n: m.rates.qps } : { n: '—' },
-    hint: m => '峰值 ' + ((m.rates && m.rates.peakQps) || 0),
-  },
   {
     id: 'queue', name: '排队',
     value: m => ({ n: (m.water || {}).queue || 0 }),
@@ -6233,27 +6231,6 @@ const HOME_KPIS = [
     level: m => {
       const w = m.water || {};
       return (w.execMax && w.exec >= w.execMax) ? 'warn' : '';
-    },
-  },
-  {
-    id: 'mem', name: '内存',
-    value: m => homeBytes((m.proc || {}).totalBytes),
-    hint: m => 'heap ' + fmtBytes((m.proc || {}).heapObjects),
-  },
-  {
-    // 带宽来自 PG 连接的收发字节（netsrv 在 listener 层计的数，见 netio 包）。
-    // 没采到第二个点之前显示破折号，而不是 0 —— 0 会被读成「真的一点流量都没有」，
-    // 那是另一回事；刚启动那两秒确实还判断不出速率。
-    id: 'net', name: '带宽',
-    value: m => {
-      const r = m.rates || {};
-      if (!r.sampled) return { n: '—' };
-      return homeRate((r.netIn || 0) + (r.netOut || 0));
-    },
-    hint: m => {
-      const r = m.rates || {};
-      if (!r.sampled) return '未统计';
-      return '↓收 ' + fmtRate(r.netIn || 0) + ' · ↑发 ' + fmtRate(r.netOut || 0);
     },
   },
 ];

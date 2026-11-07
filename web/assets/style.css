@@ -2336,11 +2336,13 @@ body.sidebar-collapsed .sidebar {
 }
 .home-more:hover { color: var(--hm-text); border-color: var(--hm-accent); }
 
-/* ---- 六个数字 ---- */
+/* ---- 三个数字（流水线三段）---- */
+/* 只有三个数字（排队 / 等待锁 / 执行中）—— QPS、内存、带宽交给下面两条走势，
+   同一份数据不在上下各说一遍。三格分满一整行，数字比原来更大更醒目。 */
 .home-kpis {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .home-kpi {
@@ -2506,7 +2508,6 @@ body.sidebar-collapsed .sidebar {
 .home-foot[data-level="red"] .fv { color: var(--hm-danger); }
 
 @media (max-width: 1240px) {
-  .home-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .home-charts { grid-template-columns: 1fr; }
   .home-chart { min-height: 150px; }
 }

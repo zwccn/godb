@@ -6025,7 +6025,7 @@ class CDP {
        这一段放最后：它会导航到**不带 #console** 的地址（模拟「打开控制台第一眼」），
        而前面三百多条断言全都依赖编辑器在前台 —— 中途跳会把它们全带红。 */
     await cdp.send('Page.navigate', { url: 'http://127.0.0.1:8080/?theme=sky' });
-    await waitFor(cdp, `document.querySelectorAll('.home-kpi').length === 6`,
+    await waitFor(cdp, `document.querySelectorAll('.home-kpi').length === 3`,
       { label: '总览渲染', timeout: 15000 });
     await sleep(600); // 等第一趟 /api/monitor 回来填数字
 
@@ -6053,14 +6053,27 @@ class CDP {
       };
     })()`);
 
-    check('总览是默认落地页（六个数字，不用点任何按钮）',
-      !!home && home.open && home.cells.length === 6,
+    check('总览是默认落地页（三个数字，不用点任何按钮）',
+      !!home && home.open && home.cells.length === 3,
       home ? `${home.cells.length} 格 · 可见 ${home.open}` : '没渲染');
     /* 中间三格要按**一个请求的行走路线**排：排队（等槽位）→ 等待锁 → 执行中。
        执行中是流水线的末端，排在最前面会把因果读反（像是「先执行、再排队」）。 */
-    check('总览六个数字按请求的行走路线排（QPS · 排队 · 等待锁 · 执行中 · 内存 · 带宽）',
-      !!home && home.cells.map(c => c.k).join(',') === 'qps,queue,wait,exec,mem,net',
+    check('总览三个数字按请求的行走路线排（排队 · 等待锁 · 执行中）',
+      !!home && home.cells.map(c => c.k).join(',') === 'queue,wait,exec',
       home ? home.cells.map(c => c.k).join(' · ') : '没渲染');
+    /* 从数字格里拿掉的 QPS / 带宽 / 内存，必须还能在下面两条走势里看到 ——
+       否则就是把数据删了，不是「换个地方说」。等图例出现（≥2 个采样点才有）。 */
+    let legends = [];
+    for (let i = 0; i < 20; i++) {
+      legends = await cdp.eval(`[...document.querySelectorAll('#homePanel .home-legend .home-lg')]
+        .map(x => x.textContent)`);
+      if (legends.length >= 4) break;
+      await sleep(400);
+    }
+    check('总览：QPS / 带宽 / 内存不在数字格里，但走势图的图例里都还在',
+      legends.some(t => /QPS/.test(t)) && legends.some(t => /带宽/.test(t))
+      && legends.some(t => /内存/.test(t)),
+      legends.join(' | ') || '图例还没出来');
     check('总览：「总览」亮着、「控制台」不亮（两页二选一）',
       !!home && home.ovOn && !home.homeOn,
       home ? `总览 ${home.ovOn} · 控制台 ${home.homeOn}` : '');
@@ -6078,19 +6091,23 @@ class CDP {
     check('总览：两条走势都画出来了（QPS 与资源各一）',
       !!home && home.plots === 2, home ? `${home.plots} 条` : '');
 
-    // 带宽：数字必须带 /s（它是速率不是总量），副标题要拆开收 / 发。
-    // 这两条一起盯着「接的是真数据」—— 后端没接上时这里会退回破折号。
-    const netCell = await cdp.eval(`(() => {
-      const c = document.querySelector('[data-kpi="net"]');
-      if (!c) return null;
+    /* 带宽原来占一个数字格（带 /s、副标题拆收/发）。它已经撤出数字格 ——
+       走势里有一条带宽线替它说话。这里守两件事：接口仍然分别给收/发两个字段
+       （netio 的契约没变），且走势图例里的带宽是「速率」而不是裸字节。 */
+    const netUi = await cdp.eval(`(async () => {
+      const m = await fetch('/api/monitor').then(r => r.json());
+      const r = m.rates || {};
+      const lg = [...document.querySelectorAll('#homePanel .home-legend .home-lg')]
+        .map(x => x.textContent);
       return {
-        v: ((c.querySelector('.home-kpi-val') || {}).textContent || '').replace(/\\s+/g, ''),
-        sub: (c.querySelector('.home-kpi-sub') || {}).textContent || '',
+        hasIn: Object.prototype.hasOwnProperty.call(r, 'netIn'),
+        hasOut: Object.prototype.hasOwnProperty.call(r, 'netOut'),
+        legend: lg.find(t => t.indexOf('带宽') >= 0) || '',
       };
     })()`);
-    check('总览：带宽格显示「每秒多少」，并拆开收 / 发',
-      !!netCell && netCell.v.endsWith('/s') && /收/.test(netCell.sub) && /发/.test(netCell.sub),
-      netCell ? `${netCell.v} · ${netCell.sub}` : '没有带宽格');
+    check('总览：带宽撤出数字格，但接口仍分别给收 / 发，走势里带宽是速率',
+      netUi.hasIn && netUi.hasOut && /B\/s|KB\/s|MB\/s/.test(netUi.legend),
+      netUi ? `netIn=${netUi.hasIn} netOut=${netUi.hasOut} · 图例「${netUi.legend}」` : '取不到');
 
     const rateChart = await cdp.eval(`(() => {
       const c = document.querySelectorAll('.home-chart')[0];

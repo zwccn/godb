@@ -231,18 +231,28 @@ try {
   <div class="home-kpis" id="homeKpis"></div>
 
   <div class="home-charts">
+    <!-- 三张卡按「量纲」分，不按重要性：同一张图里的线必须共用一根轴（或者明确
+         左右双轴），否则归一化画出来的高低是在撒谎。 -->
     <section class="home-chart">
       <div class="hc-head">
-        <span class="hc-title">吞吐</span>
-        <span class="hc-sub">QPS · 连接 · 带宽</span>
+        <span class="hc-title">请求</span>
+        <span class="hc-sub">QPS · 连接</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartRate"></div>
     </section>
     <section class="home-chart">
       <div class="hc-head">
+        <span class="hc-title">存储 I/O</span>
+        <span class="hc-sub">带宽 · 读 · 写</span>
+        <span class="hc-range">最近 5 分钟</span>
+      </div>
+      <div class="hc-body" id="homeChartIO"></div>
+    </section>
+    <section class="home-chart">
+      <div class="hc-head">
         <span class="hc-title">资源</span>
-        <span class="hc-sub" id="homeChartResSub">内存 · CPU</span>
+        <span class="hc-sub">内存 · CPU</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartRes"></div>

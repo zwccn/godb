@@ -6185,8 +6185,8 @@ const homeEls = {
   clock: document.getElementById('homeClock'),
   kpis: document.getElementById('homeKpis'),
   chartRate: document.getElementById('homeChartRate'),
+  chartIO: document.getElementById('homeChartIO'),
   chartRes: document.getElementById('homeChartRes'),
-  resSub: document.getElementById('homeChartResSub'),
   foot: document.getElementById('homeFoot'),
 };
 
@@ -6369,22 +6369,43 @@ function renderHome(m) {
 
 function renderHomeCharts(m) {
   const r = m.rates || {};
+  // 三张图按量纲分：
+  //   请求 —— QPS（次/秒，左轴）+ 连接（个，右轴）
+  //   I/O  —— 带宽 + 磁盘读 + 磁盘写，全是字节/秒，共用一根轴
+  //   资源 —— 内存（字节，左轴）+ CPU（核，右轴）
+  // 每张图里的线都必须能量纲一致，或者明确分左右轴；三条不同单位的线塞进
+  // 一张图各自归一化，画出来的高低就没有意义了（以前就是这样）。
   homeChart(homeEls.chartRate, r.series, [
     {
       label: 'QPS', color: 'var(--hm-accent)', minSpan: 4,
       get: p => p.qps || 0, fmt: v => String(Math.round(v)),
     },
     {
-      label: '连接', color: 'var(--hm-dim)', width: 1.2, minSpan: 2,
+      label: '连接', color: 'var(--hm-dim)', width: 1.2, minSpan: 2, axis: 'r',
       get: p => p.conns || 0, fmt: v => String(Math.round(v)),
     },
+  ], {
+    // 左轴是「每秒多少条」，右轴是「几个连接」—— 刻度各标各的，不共用一个数
+    axisL: v => String(Math.round(v)),
+    axisR: v => String(Math.round(v)),
+  });
+
+  homeChart(homeEls.chartIO, r.series, [
     {
-      // 收 + 发合成一条：分两条画的话，两条几乎重合的线反而看不清。
-      // 想拆开看就去监控页 —— 大屏只要「有没有在吐数据」这个结论。
-      label: '带宽', color: 'var(--hm-alt)', width: 1.2, minSpan: 64 * 1024,
+      // 收 + 发合成一条：分两条画几乎重合，看不清。要拆开看就去监控页。
+      label: '带宽', color: 'var(--hm-alt)', minSpan: 64 * 1024,
       get: p => (p.netIn || 0) + (p.netOut || 0), fmt: fmtRate,
     },
-  ]);
+    {
+      label: '磁盘读', color: 'var(--hm-ok)', width: 1.2, minSpan: 64 * 1024,
+      get: p => p.diskRead || 0, fmt: fmtRate,
+    },
+    {
+      label: '磁盘写', color: 'var(--hm-warn)', width: 1.2, minSpan: 64 * 1024,
+      get: p => p.diskWrite || 0, fmt: fmtRate,
+    },
+  ], { axisL: v => fmtRate(v) });
+
   const p = m.proc || {};
   homeChart(homeEls.chartRes, p.series, [
     {
@@ -6392,28 +6413,40 @@ function renderHomeCharts(m) {
       get: x => x.heapBytes || 0, fmt: fmtBytes,
     },
     {
-      label: 'CPU', color: 'var(--hm-warn)', width: 1.2, minSpan: 0.4,
+      label: 'CPU', color: 'var(--hm-warn)', width: 1.2, minSpan: 0.4, axis: 'r',
       get: x => x.cpuCore || 0, fmt: v => v.toFixed(2) + ' 核',
     },
-  ]);
+  ], { axisL: v => fmtBytes(v), axisR: v => v.toFixed(1) + ' 核' });
 }
 
-// 大屏的折线。和监控页 sparkline 一个画法（每条线各自归一化），只是配色走
-// --hm-*、不带悬浮读数 —— 总览是"远看"的页面，鼠标悬停那一套不属于这里。
+// 大屏的折线。配色走 --hm-*，不带悬浮读数 —— 总览是"远看"的页面。
 //
-// 为什么每条线单独归一化：QPS 是几百、连接数是几，共用一根轴会把连接数
-// 压成贴着底边的直线，等于没画。代价是看不出两者谁高，所以底部图例直接
-// 报当前值，要精确对比去监控页。
-function homeChart(host, pts, lines) {
+// 两条硬规矩（2026-11 重做时定下的）：
+//
+// 1. **同一根轴上的线共用一个量程**。以前每条线各自归一化到 0..1，三条不同
+//    量纲的线画在同一块画布上，QPS 300 和连接 3 一样高 —— 那是假的高低。
+// 2. **量纲不同就分左右轴**，并且各自标刻度。只有一个共同量程时，读者才知道
+//    「这条线在上面」意味着数值更大。
+//
+// 刻度用 HTML 覆盖在画布上，不放进 SVG：SVG 是 preserveAspectRatio="none"
+// 拉伸到容器宽度的，文字放进去会被横向拉变形。
+function homeChart(host, pts, lines, opts) {
   if (!host) return;
   if (!pts || pts.length < 2) {
     host.innerHTML = '';
     host.appendChild(el('div', 'home-empty', '正在采样…'));
     return;
   }
+  opts = opts || {};
   const W = 600, H = 120, padT = 10, padB = 8;
   const inner = H - padT - padB;
-  const ranges = lines.map(l => {
+
+  // 每条线先按自己的 minSpan 撑开量程，再**按轴合并**成一个共同量程。
+  // 变化幅度小于 minSpan 时撑开：内存本来只在几 MB 内浮动，逐像素归一化会把
+  // 噪声放大成过山车，看着像要炸了。
+  const axisOf = l => (l.axis === 'r' ? 'r' : 'l');
+  const own = new Map();
+  for (const l of lines) {
     let lo = Infinity, hi = -Infinity;
     for (const p of pts) {
       const v = l.get(p) || 0;
@@ -6421,40 +6454,90 @@ function homeChart(host, pts, lines) {
       hi = Math.max(hi, v);
     }
     if (!isFinite(lo)) { lo = 0; hi = 1; }
-    // 变化幅度小于 minSpan 时按 minSpan 撑开：内存本来只在几 MB 内浮动，
-    // 逐像素归一化会把噪声放大成过山车，看着像内存要炸了。
     const span = l.minSpan || 0;
     if (hi - lo < span) {
       const mid = (hi + lo) / 2;
       lo = mid - span / 2;
       hi = mid + span / 2;
     }
+    // 这些都是「多少个 / 多少字节 / 几个核」，没有负数。撑开量程时下界会被压到
+    // 0 以下（CPU 0.4 的跨度、中心是 0 时就是 -0.2），刻度上出现「-0.2 核」
+    // 只会让人怀疑读数坏了 —— 钳回 0。
+    if (lo < 0) lo = 0;
     if (hi <= lo) hi = lo + 1;
-    return { lo, hi };
-  });
+    own.set(l, { lo, hi });
+  }
+  const rangeOf = axis => {
+    let lo = Infinity, hi = -Infinity;
+    for (const l of lines) {
+      if (axisOf(l) !== axis) continue;
+      const r = own.get(l);
+      lo = Math.min(lo, r.lo);
+      hi = Math.max(hi, r.hi);
+    }
+    return isFinite(lo) ? { lo, hi } : null;
+  };
+  const rangeL = rangeOf('l');
+  const rangeR = rangeOf('r');
+
   const x = i => (i / (pts.length - 1)) * W;
-  const y = (v, r) => H - padB - Math.max(0, Math.min(1, (v - r.lo) / (r.hi - r.lo))) * inner;
+  const yOf = (v, r) => H - padB - Math.max(0, Math.min(1, (v - r.lo) / (r.hi - r.lo))) * inner;
 
   let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">';
-  // 三条极淡的横线：给眼睛一个高度参照，否则两条线悬在空里，看不出「现在是高还是低」
+  // 三条极淡的横线：给眼睛一个高度参照，否则线悬在空里，看不出「现在算高还是低」
   for (let i = 0; i <= 2; i++) {
     const yy = (padT + (inner / 2) * i).toFixed(1);
     svg += '<line x1="0" y1="' + yy + '" x2="' + W + '" y2="' + yy
       + '" stroke="var(--hm-line)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
   }
-  lines.forEach((l, k) => {
+  for (const l of lines) {
+    const r = axisOf(l) === 'r' ? (rangeR || rangeL) : rangeL;
+    if (!r) continue;
     let d = '';
     for (let i = 0; i < pts.length; i++) {
-      d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(l.get(pts[i]) || 0, ranges[k]).toFixed(1);
+      d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + yOf(l.get(pts[i]) || 0, r).toFixed(1);
     }
     svg += '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="' + (l.width || 1.6)
       + '" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
-  });
+  }
   svg += '</svg>';
 
   host.innerHTML = '';
   const plot = el('div', 'home-plot');
   plot.innerHTML = svg;
+
+  // y 轴刻度：各标各的，颜色跟这条轴上的线走（双轴时一眼能对上）
+  const axisTag = (cls, range, fmt, color) => {
+    if (!range || typeof fmt !== 'function') return;
+    const box = el('div', 'hp-y ' + cls);
+    if (color) box.style.color = color;
+    // 三档（上 / 中 / 下）：只有两端的话，中间那段就完全靠猜。重复的文本去掉
+    // （量程很小时 hi 和 mid 可能format 成同一个数）。
+    const seen = new Set();
+    for (const v of [range.hi, (range.lo + range.hi) / 2, range.lo]) {
+      const text = fmt(v);
+      if (seen.has(text)) continue;
+      seen.add(text);
+      box.appendChild(el('span', '', text));
+    }
+    plot.appendChild(box);
+  };
+  const colorOf = axis => {
+    const l = lines.find(z => axisOf(z) === axis);
+    return l ? l.color : '';
+  };
+  axisTag('l', rangeL, opts.axisL, colorOf('l'));
+  if (rangeR) axisTag('r', rangeR, opts.axisR, colorOf('r'));
+
+  // x 轴：只标两端（起点多久以前、现在）。中间刻度在小卡片里放不下，
+  // 而且曲线是均分采样的，中间刻度也不带更多信息。
+  const xRow = el('div', 'hp-x');
+  const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
+  const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
+  xRow.appendChild(el('span', '', label));
+  xRow.appendChild(el('span', '', '现在'));
+  plot.appendChild(xRow);
+
   host.appendChild(plot);
 
   const legend = el('div', 'home-legend');

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"godb/netio"
+	"godb/storage"
 	"godb/syscat"
 )
 
@@ -35,6 +36,14 @@ type RatePoint struct {
 	// 合成一个数就看不出「是在拖数据还是在灌数据」了。
 	NetIn  int64 `json:"netIn"`
 	NetOut int64 `json:"netOut"`
+
+	// DiskRead / DiskWrite 是这一秒的磁盘字节数（每秒增量）。
+	//
+	// 读 = 页文件 pread 的字节（含顺序预取、含大字段 blob），写 = WAL 追加的字节。
+	// 都是**本进程**的 I/O，不是操作系统级的磁盘吞吐 —— 共用一块盘时，
+	// 后者没法归因到 godb 头上。
+	DiskRead  int64 `json:"diskRead"`
+	DiskWrite int64 `json:"diskWrite"`
 }
 
 // RateStats 是「吞吐与连接」卡片的完整数据。
@@ -50,12 +59,19 @@ type RateStats struct {
 	NetIn  int64 `json:"netIn"`
 	NetOut int64 `json:"netOut"`
 
+	// DiskRead / DiskWrite 是当前磁盘速率（字节/秒，同样取最近 5 秒平均）。
+	DiskRead  int64 `json:"diskRead"`
+	DiskWrite int64 `json:"diskWrite"`
+
 	// 峰值取整个窗口（5 分钟），用来回答「忙到什么程度过」。
 	PeakQPS    int   `json:"peakQps"`
 	PeakTPS    int   `json:"peakTps"`
 	PeakConns  int   `json:"peakConns"`
 	PeakNetIn  int64 `json:"peakNetIn"`
 	PeakNetOut int64 `json:"peakNetOut"`
+
+	PeakDiskRead  int64 `json:"peakDiskRead"`
+	PeakDiskWrite int64 `json:"peakDiskWrite"`
 
 	// Sampled 为 false 表示还没采到第二个点（刚启动），速率暂时无意义。
 	Sampled bool `json:"sampled"`
@@ -78,6 +94,7 @@ func (d *DB) sessionCount() int {
 func (p *procSampler) tickRates(d *DB, now time.Time) {
 	qps, tps, conns := 0, 0, 0
 	var netIn, netOut int64
+	var diskRead, diskWrite int64
 	if d != nil {
 		stmts := d.stmtTotal.Load()
 		ds := syscat.GetDBStats()
@@ -107,11 +124,28 @@ func (p *procSampler) tickRates(d *DB, now time.Time) {
 		p.lastStmts, p.lastXact = stmts, xact
 		p.lastNetIn, p.lastNetOut = cin, cout
 		p.curConns = conns
+
+		// 磁盘：读走 storage 的字节累计（页文件 pread），写走 WAL 追加字节。
+		// 和上面同一套基线约定 —— 首轮不能算，否则会把「进程启动至今」全算进一秒。
+		if d.Store != nil {
+			_, _, rb := storage.IOSnapshot()
+			wb := d.Store.FsyncProfile().Bytes
+			if p.thruPos > 0 || p.thruFilled {
+				if dv := rb - p.lastDiskRead; dv > 0 {
+					diskRead = dv
+				}
+				if dv := wb - p.lastDiskWrite; dv > 0 {
+					diskWrite = dv
+				}
+			}
+			p.lastDiskRead, p.lastDiskWrite = rb, wb
+		}
 	}
 
 	p.thruSeries[p.thruPos] = RatePoint{
 		AtMs: now.UnixMilli(), QPS: qps, TPS: tps, Conns: conns,
 		NetIn: netIn, NetOut: netOut,
+		DiskRead: diskRead, DiskWrite: diskWrite,
 	}
 	p.thruPos = (p.thruPos + 1) % len(p.thruSeries)
 	if p.thruPos == 0 {
@@ -136,7 +170,7 @@ func (p *procSampler) rateStatsLocked() RateStats {
 		start = p.thruPos
 	}
 	var sumQ, sumT int
-	var sumIn, sumOut int64
+	var sumIn, sumOut, sumDR, sumDW int64
 	tail := n
 	if tail > rateWindow {
 		tail = rateWindow
@@ -159,16 +193,26 @@ func (p *procSampler) rateStatsLocked() RateStats {
 		if pt.NetOut > out.PeakNetOut {
 			out.PeakNetOut = pt.NetOut
 		}
+		if pt.DiskRead > out.PeakDiskRead {
+			out.PeakDiskRead = pt.DiskRead
+		}
+		if pt.DiskWrite > out.PeakDiskWrite {
+			out.PeakDiskWrite = pt.DiskWrite
+		}
 		if i >= n-tail {
 			sumQ += pt.QPS
 			sumT += pt.TPS
 			sumIn += pt.NetIn
 			sumOut += pt.NetOut
+			sumDR += pt.DiskRead
+			sumDW += pt.DiskWrite
 		}
 	}
 	out.QPS = sumQ / tail
 	out.TPS = sumT / tail
 	out.NetIn = sumIn / int64(tail)
 	out.NetOut = sumOut / int64(tail)
+	out.DiskRead = sumDR / int64(tail)
+	out.DiskWrite = sumDW / int64(tail)
 	return out
 }

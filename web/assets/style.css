@@ -2399,9 +2399,10 @@ body.sidebar-collapsed .sidebar {
   /* 不给上限的话，1920×1080 上会吃掉 700px，一条 QPS 拉成心电图；
      给太小又会让卡片里空着。460 是「图占满卡片且不算离谱」的折中，
      高度超出的部分留给页面底部（foot 贴底，空白在中间）。 */
-  max-height: 520px;
+  max-height: 620px;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* 三张卡按量纲分：请求 / 存储 I/O / 资源。三列并排，窄屏在下面的媒体查询里降列。 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .home-chart {
@@ -2446,8 +2447,40 @@ body.sidebar-collapsed .sidebar {
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
-.home-plot svg { display: block; width: 100%; height: 100%; }
+.home-plot svg { display: block; width: 100%; flex: 1 1 auto; min-height: 0; }
+
+/* 坐标刻度：HTML 绝对定位叠在图上，不放进 SVG —— 图是 preserveAspectRatio="none"
+   横向拉满卡片的，SVG 里的 <text> 会跟着被拉扁。 */
+.hp-y {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 14px;                 /* 给 x 轴那行让位 */
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--fs));
+  line-height: 1;
+  opacity: .75;
+  pointer-events: none;
+}
+.hp-y span { text-shadow: 0 0 4px var(--hm-bg); }   /* 压在曲线上也读得清 */
+.hp-y.r { text-align: right; }
+.hp-x {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--fs));
+  line-height: 1;
+  color: var(--hm-faint);
+}
 .home-legend {
   flex: 0 0 auto;
   display: flex;

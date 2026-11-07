@@ -143,7 +143,11 @@ type procSampler struct {
 	// 网络字节的基线（netio.PG 的累计值）。和语句数同理，只增不减。
 	lastNetIn  int64
 	lastNetOut int64
-	curConns   int
+
+	// 磁盘字节的基线（读=页文件 pread 累计，写=WAL 追加累计）
+	lastDiskRead  int64
+	lastDiskWrite int64
+	curConns      int
 	// thru 是 throughput 的缩写，避开上面 IO 速率用的 ratePos。
 	thruSeries []RatePoint
 	thruPos    int

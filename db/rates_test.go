@@ -134,3 +134,70 @@ func TestNetBytesRate(t *testing.T) {
 		t.Fatalf("平均 in=%d out=%d，期望 341 / 2730", rs.NetIn, rs.NetOut)
 	}
 }
+
+// 磁盘：读 = 页文件 pread 的字节，写 = WAL 追加的字节。首点同样只立基线。
+//
+// 构造上是「写一次、冷读一次」：第一次 Open 建表插数据后关掉，第二次 Open
+// 的缓冲池是空的，接下来的 SELECT 必然要 pread 页文件。
+func TestDiskBytesRate(t *testing.T) {
+	dir := t.TempDir()
+	d1, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	run(t, d1, "s", `CREATE TABLE dsk (id int4, s text)`)
+	// 数据要够多：只有一两行时，数据页还在 WAL 里、Open 时从 WAL 回放进内存，
+	// 一次 SELECT 下来一个字节的 pread 都不会发生（踩过，断言直接红）。
+	// 翻倍到几千行，页已经 checkpoint 到页文件，冷读必然 pread。
+	for i := 0; i < 7; i++ {
+		run(t, d1, "s", `INSERT INTO dsk VALUES (1, 'abcdefghijklmnopqrstuvwxyz')`)
+		if i > 0 {
+			run(t, d1, "s", `INSERT INTO dsk SELECT * FROM dsk`)
+		}
+	}
+	for i := 0; i < 6; i++ {
+		run(t, d1, "s", `INSERT INTO dsk SELECT * FROM dsk`)
+	}
+	d1.Close()
+
+	d2, err := Open(dir, testOptions())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d2.Close()
+
+	p := &procSampler{thruSeries: make([]RatePoint, rateSeriesCap)}
+	now := time.Now()
+
+	// 第一个点只立基线：不能把「进程启动至今」的字节全算成这一秒
+	p.tickRates(d2, now)
+	if pt := p.thruSeries[0]; pt.DiskRead != 0 || pt.DiskWrite != 0 {
+		t.Fatalf("第一个采样点 diskRead=%d diskWrite=%d，期望都是 0（只立基线）", pt.DiskRead, pt.DiskWrite)
+	}
+
+	run(t, d2, "s", `INSERT INTO dsk VALUES (1, 'x')`) // 写：WAL 追加
+	run(t, d2, "s", `SELECT * FROM dsk`)               // 读：冷读页文件
+	p.tickRates(d2, now.Add(time.Second))
+	pt := p.thruSeries[1]
+	if pt.DiskWrite <= 0 {
+		t.Fatalf("插入后 diskWrite = %d，期望 > 0（WAL 追加）", pt.DiskWrite)
+	}
+	if pt.DiskRead <= 0 {
+		t.Fatalf("冷读整表后 diskRead = %d，期望 > 0（pread 页文件）", pt.DiskRead)
+	}
+
+	// 没有新 I/O 的一秒必须是 0 —— 不能把上一秒的值再报一遍
+	p.tickRates(d2, now.Add(2*time.Second))
+	if pt := p.thruSeries[2]; pt.DiskRead != 0 || pt.DiskWrite != 0 {
+		t.Fatalf("空闲的一秒 diskRead=%d diskWrite=%d，期望 0 / 0", pt.DiskRead, pt.DiskWrite)
+	}
+
+	rs := p.rateStatsLocked()
+	if rs.PeakDiskWrite <= 0 || rs.PeakDiskRead <= 0 {
+		t.Fatalf("峰值 read=%d write=%d，期望都 > 0", rs.PeakDiskRead, rs.PeakDiskWrite)
+	}
+	if rs.DiskWrite != pt.DiskWrite/3 || rs.DiskRead != pt.DiskRead/3 {
+		t.Fatalf("三点平均 read=%d write=%d，期望 %d / %d",
+			rs.DiskRead, rs.DiskWrite, pt.DiskRead/3, pt.DiskWrite/3)
+	}
+}

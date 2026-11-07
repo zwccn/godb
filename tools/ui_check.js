@@ -6088,8 +6088,8 @@ class CDP {
     check('总览：健康灯跟着水位走（不是写死的绿点）',
       !!home && home.dot.indexOf(home.water.level) >= 0,
       home ? `${home.dot} / 水位 ${home.water.level}` : '');
-    check('总览：两条走势都画出来了（QPS 与资源各一）',
-      !!home && home.plots === 2, home ? `${home.plots} 条` : '');
+    check('总览：三张走势都画出来了（请求 / 存储 I/O / 资源）',
+      !!home && home.plots === 3, home ? `${home.plots} 张` : '');
 
     /* 带宽原来占一个数字格（带 /s、副标题拆收/发）。它已经撤出数字格 ——
        走势里有一条带宽线替它说话。这里守两件事：接口仍然分别给收/发两个字段
@@ -6109,17 +6109,44 @@ class CDP {
       netUi.hasIn && netUi.hasOut && /B\/s|KB\/s|MB\/s/.test(netUi.legend),
       netUi ? `netIn=${netUi.hasIn} netOut=${netUi.hasOut} · 图例「${netUi.legend}」` : '取不到');
 
-    const rateChart = await cdp.eval(`(() => {
-      const c = document.querySelectorAll('.home-chart')[0];
-      if (!c) return null;
-      return {
-        paths: c.querySelectorAll('svg path').length,
-        legend: [...c.querySelectorAll('.home-lg span')].map(s => s.textContent).join('/'),
-      };
+    /* 三张图按**量纲**分：请求（QPS + 连接，双轴）、存储 I/O（带宽 + 读 + 写，
+       全是 B/s）、资源（内存 + CPU，双轴）。同一张图里量纲必须一致，
+       否则归一化画出来的高低没有意义。 */
+    const charts = await cdp.eval(`(() => {
+      const cards = [...document.querySelectorAll('.home-chart')];
+      return cards.map(c => {
+        const ys = [...c.querySelectorAll('.hp-y')];
+        return {
+          title: (c.querySelector('.hc-title') || {}).textContent || '',
+          paths: c.querySelectorAll('svg path').length,
+          legend: [...c.querySelectorAll('.home-lg span')].map(s => s.textContent).join('/'),
+          axisL: ys.filter(e => !e.classList.contains('r')).map(e => e.textContent).join('|'),
+          axisR: ys.filter(e => e.classList.contains('r')).map(e => e.textContent).join('|'),
+        };
+      });
     })()`);
-    check('总览：吞吐曲线真的画了三条线（QPS / 连接 / 带宽）',
-      !!rateChart && rateChart.paths === 3 && /带宽/.test(rateChart.legend),
-      rateChart ? `${rateChart.paths} 条 · ${rateChart.legend}` : '没有曲线');
+    const chartOf = t => charts.find(c => c.title === t) || {};
+    check('总览：请求图有 QPS + 连接（双轴），存储 I/O 图有带宽 + 读 + 写',
+      !!charts.length && chartOf('请求').paths === 2 && /QPS/.test(chartOf('请求').legend)
+      && /连接/.test(chartOf('请求').legend)
+      && chartOf('存储 I/O').paths === 3
+      && /带宽/.test(chartOf('存储 I/O').legend)
+      && /磁盘读/.test(chartOf('存储 I/O').legend) && /磁盘写/.test(chartOf('存储 I/O').legend),
+      charts.map(c => `${c.title}:${c.paths}条`).join(' · '));
+
+    /* 坐标：三张图都要有 y 刻度，双轴的两张还要左右各一套；
+       而且刻度里不能出现负数（CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */
+    const axisIssue = [];
+    for (const c of charts) {
+      if (!c.axisL) axisIssue.push(c.title + ' 没有 y 刻度');
+      if (/^-|\|\-|\s-/.test(c.axisL + '|' + c.axisR)) axisIssue.push(c.title + ' 刻度含负数：' + c.axisL + ' / ' + c.axisR);
+    }
+    if (!chartOf('请求').axisR) axisIssue.push('请求图缺右轴');
+    if (!chartOf('资源').axisR) axisIssue.push('资源图缺右轴');
+    check('总览：三张图都有 y 刻度，双轴图左右各一套，且没有负数刻度',
+      axisIssue.length === 0 && !!chartOf('请求').axisL,
+      axisIssue.length ? axisIssue.join(' · ')
+        : `请求 ${chartOf('请求').axisL} / ${chartOf('请求').axisR} · 资源 ${chartOf('资源').axisL} / ${chartOf('资源').axisR}`);
     check('总览：版本号 / 运行时长 / 时钟都有内容（不是占位符）',
       !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
       && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),

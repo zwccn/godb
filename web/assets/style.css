@@ -2401,12 +2401,16 @@ body.sidebar-collapsed .sidebar {
      高度超出的部分留给页面底部（foot 贴底，空白在中间）。 */
   max-height: 620px;
   display: grid;
-  /* 三张卡按量纲分：请求 / 存储 I/O / 资源。三列并排，窄屏在下面的媒体查询里降列。 */
+  /* 三张卡按量纲分：请求 / 存储 I/O / 资源。三列并排，窄屏在下面的媒体查询里降列。
+     行高必须由容器决定（minmax(0,1fr)）——用 auto 的话，资源卡里「上下两张小图」
+     会按内容各撑 200 多像素，把三张卡一起顶高。 */
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
 }
 .home-chart {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--hm-line);
@@ -2470,7 +2474,30 @@ body.sidebar-collapsed .sidebar {
   pointer-events: none;
 }
 .hp-y span { text-shadow: 0 0 4px var(--hm-bg); }   /* 压在曲线上也读得清 */
+/* 没有 x 轴的那张（资源卡的上半），刻度铺到最底 */
+.home-plot.no-x .hp-y { bottom: 0; }
 .hp-y.r { text-align: right; }
+/* 资源卡里上下叠两张小图（内存 / CPU）：各自一根轴，互不干扰。
+   塞进一张双轴图的话，两条线的交叉会被误读成「有因果关系」——
+   其实只是两套刻度画在同一个框里。 */
+.hc-split {
+  display: grid;
+  /* 必须 minmax(0,1fr)：裸 1fr 的最小尺寸是 auto，卡片里的图会把两半撑到
+     各自 200 多像素，三张卡就跟着一起变高。 */
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  min-height: 0;
+}
+/* 两半之间一条淡线：不加的话，上面那张的「0 B」和下面那张的「0.3 核」会贴在一起，
+   看着像同一套刻度 */
+.hc-half + .hc-half { border-top: 1px solid var(--hm-line); padding-top: 8px; }
+.hc-half {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hc-half .home-legend { font-size: calc(10px * var(--fs)); }
+
 .hp-x {
   flex: 0 0 auto;
   display: flex;

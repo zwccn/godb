@@ -255,7 +255,12 @@ try {
         <span class="hc-sub">内存 · CPU</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
-      <div class="hc-body" id="homeChartRes"></div>
+      <!-- 内存和 CPU 拆成上下两张小图：它们没有「一起看形状」的关系，
+           硬塞进一张双轴图，两条线的交叉会让人以为有含义（其实只是刻度不同）。 -->
+      <div class="hc-body hc-split">
+        <div class="hc-half" id="homeChartMem"></div>
+        <div class="hc-half" id="homeChartCPU"></div>
+      </div>
     </section>
   </div>
 

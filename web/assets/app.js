@@ -6186,7 +6186,8 @@ const homeEls = {
   kpis: document.getElementById('homeKpis'),
   chartRate: document.getElementById('homeChartRate'),
   chartIO: document.getElementById('homeChartIO'),
-  chartRes: document.getElementById('homeChartRes'),
+  chartMem: document.getElementById('homeChartMem'),
+  chartCPU: document.getElementById('homeChartCPU'),
   foot: document.getElementById('homeFoot'),
 };
 
@@ -6407,16 +6408,21 @@ function renderHomeCharts(m) {
   ], { axisL: v => fmtRate(v) });
 
   const p = m.proc || {};
-  homeChart(homeEls.chartRes, p.series, [
+  homeChart(homeEls.chartMem, p.series, [
     {
       label: '内存', color: 'var(--hm-ok)', minSpan: 32 * 1024 * 1024,
       get: x => x.heapBytes || 0, fmt: fmtBytes,
     },
+  ], { axisL: v => fmtBytes(v), levels: 2, noX: true });
+
+  // CPU 单独一张。内存（字节）和 CPU（核）没有「一起看形状」的关系，
+  // 双轴画在一个框里，两条线的交叉会让人以为有含义 —— 其实只是两套刻度。
+  homeChart(homeEls.chartCPU, p.series, [
     {
-      label: 'CPU', color: 'var(--hm-warn)', width: 1.2, minSpan: 0.4, axis: 'r',
+      label: 'CPU', color: 'var(--hm-warn)', width: 1.4, minSpan: 0.4,
       get: x => x.cpuCore || 0, fmt: v => v.toFixed(2) + ' 核',
     },
-  ], { axisL: v => fmtBytes(v), axisR: v => v.toFixed(1) + ' 核' });
+  ], { axisL: v => v.toFixed(1) + ' 核', levels: 2 });
 }
 
 // 大屏的折线。配色走 --hm-*，不带悬浮读数 —— 总览是"远看"的页面。
@@ -6514,7 +6520,11 @@ function homeChart(host, pts, lines, opts) {
     // 三档（上 / 中 / 下）：只有两端的话，中间那段就完全靠猜。重复的文本去掉
     // （量程很小时 hi 和 mid 可能format 成同一个数）。
     const seen = new Set();
-    for (const v of [range.hi, (range.lo + range.hi) / 2, range.lo]) {
+    // 小图（上下叠的两张）只标两端：三档在 60px 里会和曲线挤在一起
+    const vs = (opts.levels === 2)
+      ? [range.hi, range.lo]
+      : [range.hi, (range.lo + range.hi) / 2, range.lo];
+    for (const v of vs) {
       const text = fmt(v);
       if (seen.has(text)) continue;
       seen.add(text);
@@ -6531,12 +6541,18 @@ function homeChart(host, pts, lines, opts) {
 
   // x 轴：只标两端（起点多久以前、现在）。中间刻度在小卡片里放不下，
   // 而且曲线是均分采样的，中间刻度也不带更多信息。
-  const xRow = el('div', 'hp-x');
-  const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
-  const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
-  xRow.appendChild(el('span', '', label));
-  xRow.appendChild(el('span', '', '现在'));
-  plot.appendChild(xRow);
+  // 时间轴只在整张卡的最后一张图上标：资源卡上下两张共用同一条时间轴，
+  // 两张都标就是同一句话写两遍，还挤掉曲线的高度。
+  if (!opts.noX) {
+    const xRow = el('div', 'hp-x');
+    const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
+    const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
+    xRow.appendChild(el('span', '', label));
+    xRow.appendChild(el('span', '', '现在'));
+    plot.appendChild(xRow);
+  } else {
+    plot.classList.add('no-x');
+  }
 
   host.appendChild(plot);
 

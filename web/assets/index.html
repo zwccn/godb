@@ -80,15 +80,24 @@ try {
     <button id="btnMonitor" class="btn btn-ghost" title="监控：水位 / 锁明细 / 慢SQL / 慢事务 / 基准">
       <span class="mon-dot green" id="monDot" aria-hidden="true"></span>监控<span id="monBadge" class="badge hidden">0</span><span id="benchBadge" class="badge bench-badge hidden"></span>
     </button>
-    <button id="btnSettings" class="btn btn-ghost">设置</button>
-    <!-- 模型图：把表和关系摊开成一张图。和监控同级（页面级视图），
-         因为它回答的是 schema 的结构问题，不是运行时指标。
-         名字叫「模型图」而不是「关系图」：模型是**独立的设计**，不跟库走 ——
-         库里有外键它也不画，图上的每条关系都是人画上去的。 -->
-    <button id="btnEr" class="btn btn-ghost" title="模型图：分组、关系与基数（独立模型，不读库里的外键）"
-            aria-label="模型图">
-      <span class="lbl-full">模型图</span><span class="lbl-short">模型</span>
-    </button>
+    <!-- 低频入口收进这一个下拉，顶栏只留「一分钟里会切好几次」的三项
+         （总览 / 工作台 / 监控）。设置是半年改一次，模型图是偶尔画个 ER 图 ——
+         它们和那三项并排时，读的人得花同样的力气才分得出高频低频。
+         「更多」没有做成 ⋯ 一个光图标：导航里带文字才一眼知道点开有东西，
+         而且它就两个字，和原来的「设置」一样宽，没比之前多占地方。
+         菜单开合复用皮肤那个下拉的同一套逻辑（见 app.js 的 openPop）。 -->
+    <div class="more-pick" id="morePick">
+      <button id="btnMore" class="btn btn-ghost" type="button"
+              aria-haspopup="true" aria-expanded="false"
+              aria-label="更多：模型图 / 设置" title="更多：模型图 / 设置">更多</button>
+      <div class="more-menu hidden" id="moreMenu" role="menu" aria-label="更多">
+        <!-- 模型图：把表和关系摊开成一张图。它回答的是 schema 的结构问题，
+             不是运行时指标。名字叫「模型图」而不是「关系图」：模型是**独立的设计**，
+             不跟库走 —— 库里有外键它也不画，每条关系都是人画上去的。 -->
+        <button id="btnEr" class="more-item" type="button" role="menuitem">模型图</button>
+        <button id="btnSettings" class="more-item" type="button" role="menuitem">设置</button>
+      </div>
+    </div>
     <!-- 皮肤切换：一个小圆点（左半当前皮肤底色、右半主色），点开是六套的色点。
          不把六个点直接摊在顶栏：顶栏已经够挤，而换皮肤是低频操作，
          收进一层不占地方，也不用为了看一眼颜色跑进设置页。 -->

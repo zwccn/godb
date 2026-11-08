@@ -127,20 +127,38 @@ function renderSkinMenu() {
   }
 }
 
-// openSkinMenu 不传参数就是「开/关切换」。
-function openSkinMenu(open) {
-  const menu = document.getElementById('skinMenu');
-  const btn = document.getElementById('btnSkin');
+/* 顶栏两个下拉（皮肤 / 更多）共用一套开合：点按钮切、点外面关、Esc 关、
+   aria-expanded 同步，而且**同一时刻只开一个** —— 两套各写一遍最容易出现
+   「开了一个，另一个还挂在那儿」。 */
+const POP_MENUS = [
+  { btn: 'btnSkin', menu: 'skinMenu', render: renderSkinMenu },
+  { btn: 'btnMore', menu: 'moreMenu', render: null },
+];
+function openPop(menuId, open) {
+  const p = POP_MENUS.find(x => x.menu === menuId);
+  if (!p) return;
+  const menu = document.getElementById(p.menu);
+  const btn = document.getElementById(p.btn);
   if (!menu || !btn) return;
   const want = open === undefined ? menu.classList.contains('hidden') : !!open;
-  if (want) renderSkinMenu();
+  if (want) {
+    for (const q of POP_MENUS) if (q.menu !== p.menu) openPop(q.menu, false);
+    if (p.render) p.render();
+  }
   menu.classList.toggle('hidden', !want);
   btn.setAttribute('aria-expanded', String(want));
 }
 
+// openSkinMenu 不传参数就是「开/关切换」（老名字留着，别处还在用）。
+function openSkinMenu(open) { openPop('skinMenu', open); }
+
 document.getElementById('btnSkin').addEventListener('click', ev => {
   ev.stopPropagation();       // 别让下面那条「点外面就关」立刻又把它关上
-  openSkinMenu();
+  openPop('skinMenu');
+});
+document.getElementById('btnMore').addEventListener('click', ev => {
+  ev.stopPropagation();
+  openPop('moreMenu');
 });
 
 // 用事件委托：设置页每次打开都会重建皮肤按钮，逐个绑会绑到已经销毁的节点上
@@ -151,18 +169,25 @@ document.addEventListener('click', ev => {
   const skin = target.closest && target.closest('.skin-item');
   if (skin) {
     applyTheme(skin.dataset.theme, true);
-    openSkinMenu(false);
+    openPop('skinMenu', false);
     return;
   }
+  // 「更多」里的两项就是原来那两个按钮，它们自己的 click 负责跳转，这里只收菜单
+  const mi = target.closest && target.closest('.more-item');
+  if (mi) openPop('moreMenu', false);
   // 点在这套控件之外的任何地方都收起（下拉菜单的通行做法）
-  if (!target.closest || !target.closest('#skinPick')) openSkinMenu(false);
+  if (!target.closest || !target.closest('#skinPick')) openPop('skinMenu', false);
+  if (!target.closest || !target.closest('#morePick')) openPop('moreMenu', false);
 });
 
 document.addEventListener('keydown', ev => {
   if (ev.key !== 'Escape') return;
-  const menu = document.getElementById('skinMenu');
-  if (menu && !menu.classList.contains('hidden')) {
-    openSkinMenu(false);
+  const any = POP_MENUS.some(p => {
+    const m = document.getElementById(p.menu);
+    return m && !m.classList.contains('hidden');
+  });
+  if (any) {
+    for (const p of POP_MENUS) openPop(p.menu, false);
     ev.stopPropagation();
   }
 });
@@ -2573,6 +2598,10 @@ function syncTopNav() {
   if (mon) mon.classList.toggle('on', monOpen);
   if (er) er.classList.toggle('on', erOpen);
   if (set) set.classList.toggle('on', setOpen);
+  // 设置 / 模型图收在「更多」里之后，光让菜单项亮是不够的 —— 菜单关着的时候
+  // 顶栏三个主项全灭，人不知道自己在哪一页。所以「更多」跟着一起亮。
+  const more = document.getElementById('btnMore');
+  if (more) more.classList.toggle('on', erOpen || setOpen);
 }
 
 function toggleMonitor(force) {

@@ -3221,8 +3221,8 @@ class CDP {
       /VACUUM big_demo;/.test(vacSql) && vacClosed,
       `编辑器尾部 ${JSON.stringify(vacSql.slice(-24))} · 面板已关 ${vacClosed}`);
 
-    /* 顶栏「首页」：任何时候一键回编辑器。监控打开时选中态要给到「监控」，
-       点首页之后换回「首页」—— 不然顶栏三个入口看起来永远都是平的，不知道自己在哪。 */
+    /* 顶栏「工作台」：任何时候一键回编辑器。监控打开时选中态要给到「监控」，
+       点工作台之后换回来 —— 不然顶栏几个入口看起来永远都是平的，不知道自己在哪。 */
     await cdp.eval(`toggleMonitor(true)`);
     await sleep(500);
     const navBefore = await cdp.eval(`(() => ({
@@ -3238,19 +3238,67 @@ class CDP {
       open: !document.getElementById('monPanel').classList.contains('hidden'),
       order: [...document.querySelectorAll('.top-actions .btn')].map(b => b.id),
     }))()`);
-    check('顶栏有「控制台」：监控打开时点它回编辑器，选中态跟着换',
+    check('顶栏有「工作台」：监控打开时点它回编辑器，选中态跟着换',
       navBefore.open && !navBefore.home && navBefore.mon
       && !navAfter.open && navAfter.home && !navAfter.mon
       && navAfter.order[0] === 'btnOverview' && navAfter.order[1] === 'btnHome',
       `监控 ${navBefore.open} → 编辑器 ${!navAfter.open} · 顶栏 ${navAfter.order.join('/')}`);
 
-    /* 顶栏顺序 + 皮肤切换：模型图挪到设置后面（低频的结构视图不该夹在两个
-       高频入口中间），皮肤收成最右一个小圆点图标 —— 顶栏已经很挤，
-       而换皮肤是低频操作，摊开六个点不值当。 */
-    const navOrder = await cdp.eval(`[...document.querySelectorAll('.top-actions .btn')].map(b => b.id)`);
-    check('顶栏顺序：总览 / 控制台 / 监控 / 设置 / 模型图（皮肤在最右）',
-      navOrder.join(',') === 'btnOverview,btnHome,btnMonitor,btnSettings,btnEr',
-      navOrder.join(' / '));
+    /* 顶栏只留三项高频入口 + 一个「更多」：设置半年改一次、模型图偶尔画张 ER 图，
+       和「一分钟切好几次」的那三项并排时，读的人得花同样的力气才分得出。
+       皮肤仍然收成最右那个小圆点。 */
+    const navOrder = await cdp.eval(`(() => ({
+      btns: [...document.querySelectorAll('.top-actions .btn')].map(b => b.id),
+      more: [...document.querySelectorAll('#moreMenu .more-item')].map(b => b.id),
+    }))()`);
+    check('顶栏只剩「总览 / 工作台 / 监控」+「更多」；设置与模型图收在更多里',
+      navOrder.btns.join(',') === 'btnOverview,btnHome,btnMonitor,btnMore'
+        && navOrder.more.join(',') === 'btnEr,btnSettings',
+      `顶栏 ${navOrder.btns.join('/')} · 更多 ${navOrder.more.join('/')}`);
+
+    /* 「更多」的行为：点开两项、aria-expanded 同步、点菜单项后自动收起，
+       而且**「更多」要跟着亮** —— 菜单一关，顶栏三个主项全灭的话，
+       人就不知道自己在哪一页了（这是收进下拉最容易丢的东西）。 */
+    await cdp.eval(`document.getElementById('btnMore').click()`);
+    await sleep(250);
+    const moreOpen = await cdp.eval(`(() => {
+      const m = document.getElementById('moreMenu');
+      const b = document.getElementById('btnMore');
+      return {
+        open: !m.classList.contains('hidden'),
+        expanded: b.getAttribute('aria-expanded'),
+        items: [...m.querySelectorAll('.more-item')].map(x => x.textContent.trim()),
+      };
+    })()`);
+    check('「更多」点开是「模型图 / 设置」两项，aria-expanded 同步',
+      moreOpen.open && moreOpen.expanded === 'true'
+        && moreOpen.items.join('/') === '模型图/设置', JSON.stringify(moreOpen));
+
+    await cdp.eval(`document.querySelector('#moreMenu #btnSettings').click()`);
+    await sleep(500);
+    const viaMore = await cdp.eval(`(() => ({
+      setOpen: !document.getElementById('settingsPanel').classList.contains('hidden'),
+      menuClosed: document.getElementById('moreMenu').classList.contains('hidden'),
+      moreOn: document.getElementById('btnMore').classList.contains('on'),
+      itemOn: document.getElementById('btnSettings').classList.contains('on'),
+    }))()`);
+    check('从「更多」进设置：菜单自动收起，「更多」和菜单项都亮着（不丢「我在哪」）',
+      viaMore.setOpen && viaMore.menuClosed && viaMore.moreOn && viaMore.itemOn,
+      JSON.stringify(viaMore));
+
+    await cdp.eval(`document.getElementById('btnSettingsClose').click()`);
+    await sleep(350);
+    check('关掉设置后「更多」不再亮',
+      await cdp.eval(`!document.getElementById('btnMore').classList.contains('on')`));
+
+    // Esc 收起：两个下拉都要管，只关一个的话另一个会挂着挡视线
+    await cdp.eval(`document.getElementById('btnMore').click()`);
+    await sleep(200);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await sleep(250);
+    check('Esc 收起「更多」',
+      await cdp.eval(`document.getElementById('moreMenu').classList.contains('hidden')`));
 
     await cdp.eval(`document.getElementById('btnSkin').click()`);
     const skinUi = await waitFor(cdp, `(() => {

@@ -6212,6 +6212,28 @@ class CDP {
     check('总览：鼠标移开，十字线和读数牌都收起来', !hoverOff.cross && !hoverOff.tip,
       `十字线 ${hoverOff.cross} · 读数牌 ${hoverOff.tip}`);
 
+    /* 总览要跟着皮肤走。早先它是固定深色（「科技感靠深底亮数字」），代价是
+       在总览页换皮肤**整页纹丝不动** —— 顶栏、设置页都变了，看着像功能坏了。 */
+    const skinHome = await cdp.eval(`(async () => {
+      const el = document.getElementById('homePanel');
+      const lum = () => {
+        const c = getComputedStyle(el).backgroundColor;
+        const n = c.slice(c.indexOf('(') + 1, c.indexOf(')')).split(',').map(parseFloat);
+        return n[0] * 0.299 + n[1] * 0.587 + n[2] * 0.114;
+      };
+      const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      const frame = () => new Promise(r => requestAnimationFrame(() => r()));
+      applyTheme('steel', true); await frame();
+      const dark = lum();
+      applyTheme('sky', true); await frame();
+      const light = lum();
+      applyTheme(cur, true); await frame();
+      return { cur, dark: Math.round(dark), light: Math.round(light) };
+    })()`);
+    check('总览跟着皮肤换色（浅色皮肤下是浅底，不再是固定深色）',
+      skinHome.dark < 80 && skinHome.light > 180,
+      `steel 底亮度 ${skinHome.dark} · sky 底亮度 ${skinHome.light} · 已还原到 ${skinHome.cur}`);
+
     check('总览：版本号 / 运行时长 / 时钟都有内容（不是占位符）',
       !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
       && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),

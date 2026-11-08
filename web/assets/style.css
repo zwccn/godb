@@ -2239,25 +2239,32 @@ body.sidebar-collapsed .sidebar {
 .mono { font-family: var(--mono); }
 
 /* ================= 总览（大屏） =================
-   固定深色，自带一套变量（--hm-*），**不读 --bg / --text**。
-   为什么不复用：那套变量会被皮肤覆盖，切到淡蓝皮肤大屏就跟着变浅 ——
-   而这一页的「科技感」完全来自深底 + 亮数字，浅底上只剩一张普通仪表盘。
-   代价是它成为 6 套皮肤之外的例外，这是有意的取舍，不是漏改。 */
+   颜色**跟着皮肤走**：--hm-* 不写死，全部从当前皮肤那批变量推导。
+   早先这里是固定深色（「科技感的来源是深底 + 亮数字，切到浅色皮肤会变成一张
+   普通仪表盘」）—— 但代价是「在总览页换皮肤毫无反应」：顶栏、设置页都变了，
+   这一页纹丝不动，看着就像换皮肤这个功能坏了。取舍反过来：
+   **跟着皮肤走，浅色皮肤下就是浅色大屏**。一致性比「一种固定观感」重要。
+
+   还留了 --hm-* 这层别名（而不是让下面几十条规则直接写 --bg / --text）：
+   大屏的语义是「底 / 卡 / 浮层 / 分隔线」，映射到皮肤变量是一对一的，
+   以后要单独给大屏调色也只改这一处。 */
 .home {
-  --hm-bg: #070a0f;
-  --hm-bg-1: #0c1219;
-  --hm-bg-2: #101821;
-  --hm-line: #1b2431;
-  --hm-grid: rgba(90, 169, 240, .055);
-  --hm-text: #e9eff6;
-  --hm-dim: #7f8c9b;
-  --hm-faint: #4c5867;
-  --hm-accent: #5aa9f0;
-  --hm-ok: #46b95c;
-  --hm-warn: #d9a441;
-  --hm-danger: #f0616d;
-  /* 带宽：蓝绿和灰都被占了，用一个偏冷的紫，在深底上和它们分得开 */
+  --hm-bg: var(--bg);
+  --hm-bg-1: var(--bg-1);
+  --hm-bg-2: var(--bg-2);
+  --hm-line: var(--border);
+  --hm-text: var(--text);
+  --hm-dim: var(--text-2);
+  --hm-faint: var(--text-3);
+  --hm-accent: var(--accent);
+  --hm-ok: var(--ok);
+  --hm-warn: var(--warn);
+  --hm-danger: var(--danger);
+  /* 带宽线：皮肤里没有对应的语义色（蓝/绿/黄/红都被占了，而它需要和它们分开），
+     深色下用偏冷的亮紫；浅色下要压暗一档，见下面那条覆盖。 */
   --hm-alt: #9b8cf0;
+  /* 背景网格：淡到只给「刻度感」，不抢数字。深底撒淡蓝，浅底撒淡墨。 */
+  --hm-grid: rgba(90, 169, 240, .055);
 
   position: fixed;
   top: 52px;
@@ -2271,13 +2278,21 @@ body.sidebar-collapsed .sidebar {
   padding: 20px 24px 18px;
   overflow: auto;
   background-color: var(--hm-bg);
-  /* 极淡网格：56px 一格、透明度 5.5%。不用光晕渐变 —— 深底上的柔光会糊成一片雾，
+  /* 极淡网格：56px 一格。不用光晕渐变 —— 深底上的柔光会糊成一片雾，
      网格给的是「刻度感」，眼睛能估面积又不抢数字。 */
   background-image:
     linear-gradient(var(--hm-grid) 1px, transparent 1px),
     linear-gradient(90deg, var(--hm-grid) 1px, transparent 1px);
   background-size: 56px 56px;
   color: var(--hm-text);
+}
+
+/* 浅色皮肤：亮底深字。两处要单独调：
+   - 带宽的紫要压暗，亮紫落在 #f3f8fd 上几乎看不见；
+   - 网格换成淡墨，淡蓝网格在浅底上会泛成一片脏灰。 */
+html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
+  --hm-alt: #6a5acd;
+  --hm-grid: rgba(40, 70, 110, .055);
 }
 
 /* ---- 顶部状态条 ---- */
@@ -2503,7 +2518,7 @@ body.sidebar-collapsed .sidebar {
   border: 1px solid var(--hm-line);
   border-radius: 6px;
   background: var(--hm-bg-2);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  box-shadow: 0 6px 20px var(--shadow-color);
   font-family: var(--mono);
   font-size: calc(10.5px * var(--fs));
   color: var(--hm-dim);

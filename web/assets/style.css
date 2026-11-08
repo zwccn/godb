@@ -2278,8 +2278,8 @@ body.sidebar-collapsed .sidebar {
   z-index: 29;               /* 低于监控的 30：从总览进监控时，监控盖在上面 */
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px 20px 14px;
+  gap: 10px;
+  padding: 12px 20px 14px;
   overflow: auto;
   background-color: var(--hm-bg);
   /* 极淡网格：56px 一格。不用光晕渐变 —— 深底上的柔光会糊成一片雾，
@@ -2358,26 +2358,42 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   color: var(--hm-dim);
 }
 
-/* ---- 健康分：LOGO 旁边那个环 ----
+/* ---- 健康分：页面正中的那个大环 ----
    80 毫秒扫一眼就知道「现在好不好」，比读三个数字快。环的缺口 = 扣掉的分，
    颜色 = 等级。环背后永远有一层**慢呼吸的光晕**（4.6 秒一趟，见 hsHalo）：
    慢到不抢注意力，但眼睛余光能看出这页是「活的」。
    「注意/危险」才让环本身明暗闪（hsBreath）并跟到 1.6s —— 没事的时候别晃眼睛。
 
+   **位置在页面正中，不在 LOGO 旁边。** 它回答的是「现在能不能走开」，
+   这是整个总览唯一的结论；结论缩在左上角当装饰，读的人得先找到它。
+   放大到 3 倍（38 → 114）才配得上这个位置，代价是顶栏高了一百多像素 ——
+   下面四张图变矮，.home 是 flex 列，它们自己会让位。
+
    颜色只有**三档**，不是四档：正常（优秀/良好）= 皮肤主色，注意 = 琥珀，
    危险 = 红。原先「优秀」用绿色，在芋紫皮肤上成了淡紫底里的一圈森林绿 ——
-   绿色本身没错，错在它不是这套皮肤的亲戚。分数和等级词已经在旁边写着，
+   绿色本身没错，错在它不是这套皮肤的亲戚。分数和等级词已经在上下写着，
    颜色只需要回答「有没有事」，那就让它跟着皮肤走：没事时整块牌子安静，
    出事时整块牌子变色。90 分和 78 分差 12 分，不值得多记一种颜色。 */
+.home-hero {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  /* 下面留一点空：大环贴着 KPI 卡会显得两块挤在一起。
+     只留 8px —— 每省下的一像素都还给下面的走势图。 */
+  padding: 0 16px 8px;
+}
 .home-score {
   --hs-c: var(--hs-tone);
   position: relative;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 2px 10px 2px 4px;
+  gap: 5px;
+  padding: 9px 28px 10px;
   border: 1px solid var(--hm-line);
-  border-radius: 999px;
+  /* 竖着排之后就不再是「胶囊」了：999px 会把圆角拉成跑道形，
+     和里面那个正圆打架。22px 的圆角矩形刚好把环托住。 */
+  border-radius: 22px;
   background: linear-gradient(180deg, var(--hm-bg-2), var(--hm-bg-1));
   user-select: none;
   outline: none;
@@ -2391,9 +2407,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   flex: 0 0 auto;
   /* 环的直径跟着字号缩放：数字是按比例塞进环里的，环不跟着变的话，
      用户把字号调到 1.65 就会看到「100」左右各顶到环壁。
-     31.667 = 38 / 1.2 —— --fs 默认 1.2 下的直径仍是 38px，观感不变。 */
-  width: calc(31.667px * var(--fs));
-  height: calc(31.667px * var(--fs));
+     95 = 31.667 × 3（直径 38 → 114，--fs 默认 1.2 时正好 114px）。 */
+  width: calc(95px * var(--fs));
+  height: calc(95px * var(--fs));
   /* 自己开一个层叠上下文，好让光晕（z-index:-1）停在「胶囊底之上、环之下」。
      不开的话 -1 会跑到 .home-score 外面去；而给 .home-score 开
      （isolation / z-index）会把明细浮层的 z-index:6 一起关进这个上下文里，
@@ -2424,6 +2440,13 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   0%, 100% { transform: scale(.86); opacity: .3; }
   50%      { transform: scale(1.16); opacity: .75; }
 }
+/* 浅色底上「光晕」读不成光：淡紫晕叠在淡紫底上只剩一圈更淡的紫，
+   而且**那层渐变的矩形边界会露出来**（3 倍放大之后尤其明显，看着像环外面
+   套了个方框）。深色底才有的语义，浅色就干脆不给 —— 环本身的明暗已经够表达
+   「活着」，颜色又跟皮肤同源，不需要再加一层雾。 */
+html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-gauge::before {
+  display: none;
+}
 /* 注意 / 危险时并到 1.6s：和 hsBreath 同一个节奏，免得两个频率各闪各的 */
 .home-score[data-grade="warn"] .hs-gauge::before,
 .home-score[data-grade="bad"] .hs-gauge::before { animation-duration: 1.6s; }
@@ -2447,7 +2470,14 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   stroke-linecap: round;
   /* 数字动画一秒一档，环跟着缓一下，否则每 2 秒「啪」地跳一段 */
   transition: stroke-dashoffset .6s cubic-bezier(.3, .8, .3, 1), stroke .3s;
-  filter: drop-shadow(0 0 4px var(--hs-c));
+  /* 霓虹光走 SVG 的 <filter id="hsGlow">（写在 index.html 里），
+     不要在这里加 CSS filter —— 那会把整块 SVG 视口提亮成方框。 */
+}
+/* 浅色底上模糊出来的不是光，是「环外面又套了一个更淡的环」：
+   深紫环糊在淡紫底上，扩散出去的那圈只会显脏。深色的霓虹语义在这里
+   根本不存在，那就不给 —— 环本身的紫色已经够清楚了。 */
+html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-fg {
+  filter: none;
 }
 .hs-val {
   position: absolute;
@@ -2457,26 +2487,23 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   justify-content: center;
   font-family: var(--mono);
   /* 环内净宽 = 直径 × 32.4/44 ≈ 0.74。等宽数字宽约 0.6em，
-     三位数「100」= 1.8em，取 0.26 × 直径 ≈ 0.35 内宽，两边还剩 2px 余量。 */
-  font-size: calc(9.5px * var(--fs));
+     三位数「100」= 1.8em，取 0.26 × 直径 ≈ 0.35 内宽，两边还剩余量。
+     28.5 = 9.5 × 3，跟着环一起放大。 */
+  font-size: calc(28.5px * var(--fs));
   font-weight: 600;
   line-height: 1;
   color: var(--hs-c);
   font-variant-numeric: tabular-nums;
 }
-.hs-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  line-height: 1;
-}
 .hs-cap {
-  font-size: calc(9.5px * var(--fs));
-  letter-spacing: .06em;
+  font-size: calc(11.5px * var(--fs));
+  letter-spacing: .08em;
+  line-height: 1;
   color: var(--hm-faint);
 }
 .hs-grade {
-  font-size: calc(11.5px * var(--fs));
+  font-size: calc(17px * var(--fs));
+  line-height: 1;
   color: var(--hs-c);
 }
 
@@ -2492,13 +2519,15 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 .home-score[data-grade="bad"] .hs-fg { animation: hsBreath 1.6s ease-in-out infinite; }
 .home-score[data-grade="bad"] .hs-val { animation: hsBreath 1.6s ease-in-out infinite; }
 
-/* 悬停/聚焦出明细：分数不解释就是玄学 */
+/* 悬停/聚焦出明细：分数不解释就是玄学。
+   水平居中挂在大仪表下面（left:50% + translateX(-50%)）—— 它比徽章本身宽，
+   靠左对齐会从右边溢出去；而这块牌子本来就在页面正中，居中不会顶到屏幕边。 */
 .hs-tip {
   position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
+  top: calc(100% + 10px);
+  left: 50%;
   z-index: 6;
-  min-width: 236px;
+  min-width: 268px;
   padding: 9px 11px 10px;
   border: 1px solid var(--hm-line);
   border-radius: 8px;
@@ -2509,11 +2538,11 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   color: var(--hm-dim);
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-3px);
+  transform: translate(-50%, -3px);
   transition: opacity .12s, transform .12s;
 }
 .home-score:hover .hs-tip,
-.home-score:focus-visible .hs-tip { opacity: 1; transform: none; }
+.home-score:focus-visible .hs-tip { opacity: 1; transform: translate(-50%, 0); }
 .hs-tip-h {
   display: flex;
   align-items: baseline;
@@ -2591,11 +2620,12 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 5px;
+  gap: 3px;
   /* 原来是 140px —— 和走势图平分高度时，这一排把图压成了一条缝。
-     三个数字是「秒读」，一行大字 + 一行小字就够，96px 够用了。 */
-  min-height: 96px;
-  padding: 12px 16px 11px;
+     三个数字是「秒读」，一行大字 + 一行小字就够。96px 再缩到 84：
+     顶栏现在挂着 114px 的健康环，这一排和走势图都得让一点。 */
+  min-height: 84px;
+  padding: 8px 16px 7px;
   border: 1px solid var(--hm-line);
   border-radius: 10px;
   background: linear-gradient(180deg, var(--hm-bg-2), var(--hm-bg-1));
@@ -2605,7 +2635,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   align-items: baseline;
   gap: 5px;
   font-family: var(--mono);
-  font-size: calc(34px * var(--fs));
+  /* 34 → 29：顶栏挂上 114px 的健康环之后，这一排得给走势图让十来个像素。
+     数字仍是一行大字，秒读不受影响（真靠它读的只有 0 和 0/32）。 */
+  font-size: calc(29px * var(--fs));
   font-weight: 500;
   line-height: 1;
   letter-spacing: -.02em;
@@ -2670,7 +2702,8 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
      和字的中线差着几个像素，四个字会看着「掉下去」。 */
   align-items: center;
   gap: 8px;
-  padding: 8px 14px 5px;
+  /* 顶栏放大之后三行图各矮了三十来像素，卡头这种「一行字」的地方先让 */
+  padding: 6px 14px 3px;
 }
 /* 图标 + 标题是一组：组内 6px，组外还是 8px，标题和副标题不会因此拉远 */
 .hc-lead {
@@ -2819,6 +2852,17 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   color: var(--hm-dim);
 }
 .home-lg { display: inline-flex; align-items: center; gap: 5px; }
+/* 图例现在住在卡头里（见 app.js）。卡头是 flex 行，图例紧贴「最近 5 分钟」的左边，
+   两者中间的空白由 .hc-range 的 margin-left:auto 吸收。
+   左边一条竖线把它和「QPS · 连接」那句副标题分开 —— 否则
+   「请求 QPS · 连接 — QPS 0 — 连接 1」读起来是一整句话。 */
+.hc-head .home-legend {
+  flex-wrap: nowrap;
+  gap: 12px;
+  margin-left: 4px;
+  padding-left: 12px;
+  border-left: 1px solid var(--hm-line);
+}
 .home-lg i { display: block; width: 9px; height: 2px; border-radius: 1px; }
 .home-lg b {
   font-weight: 400;
@@ -4019,12 +4063,18 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   .set-page .set-foot-in .modal-hint { font-size: calc(11px * var(--fs)); }
 }
 
-/* 五组横排：连接 / 安全 / 性能 / 外观 / 数据。窄屏横向滚动，不换行、不折成两排。 */
+/* 五组横排：连接 / 安全 / 性能 / 外观 / 数据。窄屏横向滚动，不换行、不折成两排。
+   左右留白跟正文同一条线：正文是 max-width 860 居中，tab 条如果只留 12px
+   就会贴着面板左边缘 —— 1440 上差 300px，看起来像两套排版拼在一起。
+   分隔线仍然通栏（padding 而不是缩容器），所以用 max() 算这条「对齐线」：
+   窗口宽到装得下 860 时留 (100% - 860)/2 + 20，装不下时退回 12。 */
+.set-page { --set-gut: max(12px, calc((100% - 860px) / 2 + 20px)); }
+.set-page .mon-head { padding-left: var(--set-gut); padding-right: var(--set-gut); }
 .set-tabs {
   flex: 0 0 auto;
   display: flex;
   gap: 2px;
-  padding: 0 12px;
+  padding: 0 var(--set-gut);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
   /* 同 .result-tabs：横向滚动的 tab 条不该有纵向滚动。这里滚动条本来就
@@ -5911,17 +5961,26 @@ html[data-theme="steel"] .ctx-menu {
 .vd-advtext { flex: 1 1 auto; min-width: 0; font-size: calc(11.5px * var(--fs)); color: var(--text-2); }
 
 /* ---------- 基准测试（监控面板第 5 页） ---------- */
-/* 原来是个独立全屏页，自带 .bench-body 负责滚。收进 Tab 后滚动交给 .mon-body，
-   这里只剩两件事：卡片收窄居中（铺满 1600px 的话一行字要横跨半个屏幕才读得完）、
-   卡片头跟内容左右对齐。 */
-[data-page="bench"] .mon-card {
-  width: 100%;
-  max-width: 900px;
-  margin: 0 auto;
-}
+/* 原来是个独立全屏页，自带 .bench-body 负责滚。收进 Tab 后滚动交给 .mon-body。
+   卡片曾经收窄到 900px 居中 —— 理由是「铺满的话一行字要横跨半个屏幕才读得完」。
+   但这两张卡恰好都吃宽度：结果表 5 列、进度条、4 个批次档位，收窄等于把空白留在两边。
+   现在铺满容器，改由「把说明排成两栏」来控行长 —— 行长的问题用列数解决，
+   而不是用两侧留白解决。 */
+[data-page="bench"] .mon-card { width: 100%; }
 [data-page="bench"] .mon-card-head { padding: 9px 18px; }
-[data-page="bench"] .bench-intro { padding: 16px 18px 18px; }
-.bench-note { margin: 0 0 10px; font-size: calc(12.5px * var(--fs)); line-height: 1.7; }
+[data-page="bench"] .bench-intro {
+  padding: 16px 18px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 34px;
+  row-gap: 16px;
+  align-items: start;
+}
+/* 按钮和进度条反着来：越宽越好点、越好瞄，所以跨满两列。
+   row-gap 统一管间距，段落的 margin-bottom 在这里要归零，否则两处相加。 */
+[data-page="bench"] .bench-intro > .bench-actions,
+[data-page="bench"] .bench-intro > .bench-run { grid-column: 1 / -1; }
+.bench-note { margin: 0; font-size: calc(12.5px * var(--fs)); line-height: 1.7; }
 .bench-note code {
   font-family: var(--mono);
   font-size: calc(11.5px * var(--fs));
@@ -5935,7 +5994,8 @@ html[data-theme="steel"] .ctx-menu {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 16px;
+  /* 间距交给 .bench-intro 的 row-gap，这里再加一份就成 32px 的空洞 */
+  margin-top: 0;
 }
 .bench-progress {
   color: var(--text-2);
@@ -5944,8 +6004,11 @@ html[data-theme="steel"] .ctx-menu {
 }
 
 /* 跑起来才出现的进度块。四件事：哪一步、这一步内部到哪、整体几成、花了多久。
-   光有一个百分比不够 —— 一个场景三分钟，百分比本来就不会动。 */
-.bench-run { margin-top: 14px; max-width: 620px; }
+   光有一个百分比不够 —— 一个场景三分钟，百分比本来就不会动。
+   跨满整行，但限个宽：1600px 上那根 4px 的进度条会变成一条分割线，
+   而百分比被推到最右边，和左边的步骤名隔着半个屏幕。820 大约是左栏的宽度，
+   和上面那段说明对齐。 */
+.bench-run { margin-top: 0; max-width: 820px; }
 .bench-run-head {
   display: flex;
   align-items: center;
@@ -6046,11 +6109,13 @@ html[data-theme="steel"] .ctx-menu {
 .bench-batch-list { display: flex; flex-direction: column; gap: 8px; }
 .bench-batch-row {
   display: grid;
-  grid-template-columns: 90px minmax(0, 1fr) 110px;
+  /* 108px：「1000 行/事务」正好放得下。90px 时最后那个「务」会掉到第二行，
+     两列布局下更明显（行高被一条标签撑成两倍）。 */
+  grid-template-columns: 108px minmax(0, 1fr) 110px;
   gap: 12px;
   align-items: center;
 }
-.bb-size { color: var(--text-2); font-size: calc(11.5px * var(--fs)); font-family: var(--mono); }
+.bb-size { color: var(--text-2); font-size: calc(11.5px * var(--fs)); font-family: var(--mono); white-space: nowrap; }
 .bb-track {
   height: 10px;
   background: var(--bg-2);
@@ -6064,6 +6129,24 @@ html[data-theme="steel"] .ctx-menu {
   transition: width .3s ease;
 }
 .bb-val { color: var(--text); font-size: calc(11.5px * var(--fs)); font-family: var(--mono); text-align: right; }
+
+/* 宽屏：4 个批次档位排成两行两列。单列时每根条要拉 1 米长，
+   长度反而不好比（两条之间的差别被拉成"都一样长"）。 */
+@media (min-width: 1241px) {
+  .bench-batch-list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: 8px;
+  }
+}
+/* 卡片铺满之后，两栏各约 450px 以下就该并回一栏 —— 一栏 25 个字读起来是竖条。 */
+@media (max-width: 1240px) {
+  [data-page="bench"] .bench-intro {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 14px;
+  }
+}
 
 @media (max-width: 720px) {
   .bench-table th:nth-child(2), .bench-table td:nth-child(2) { display: none; }

@@ -3603,14 +3603,18 @@ function renderIO(m) {
 
   const tables = tableList;
   const top = tables.slice(0, 3).map(t => `${t.name} ${fmtBytes(t.bytes)}`).join(' · ');
-  box.appendChild(row('数据',
+  // 标签写「数据页」而不是「数据」：同一页下面的「空间」卡里合计是 2.7 MB，
+  // 这里是 1.7 MB，差的正是索引那 1.0 MB。两个都叫「数据」时，第一眼会以为
+  // 其中一个算错了 —— 其实一个只数 .dat，一个含索引。
+  box.appendChild(row('数据页',
     `${tables.length} 表 / ${fmtBytes(io.totalBytes)}`,
     (top || '还没有表')
       + (sp.lobBytes ? ` · 大字段 ${fmtBytes(sp.lobBytes)}` : '')
       // 向量必须单独报：它不写进 .dat，不加这一句「总占用」会漏掉整块，
       // 一张纯向量表在 top 里还会显示成 0 B。
       + (sp.vecBytes ? ` · 向量 ${fmtBytes(sp.vecBytes)}` : ''),
-    '各表页文件（tables/tXXXXXX.dat）的大小；行内超过 2KB 的文本另存进 .lob、'
+    '各表数据页文件（tables/tXXXXXX.dat）的大小，不含索引 —— 索引在上一行单独算。'
+    + '行内超过 2KB 的文本另存进 .lob、'
     + '向量列另存进 .vec，这两块都不在 .dat 里，单独列出来'));
 }
 
@@ -3952,7 +3956,7 @@ function renderSpace() {
   monEls.spaceLegend.innerHTML = '';
   const parts = [
     ['index', '索引', sp.indexBytes || 0],
-    ['data', '数据', sp.dataBytes || 0],
+    ['data', '数据页', sp.dataBytes || 0],
     ['lob', '大字段', sp.lobBytes || 0],
     ['vec', '向量', sp.vecBytes || 0],
     ['wal', 'WAL', sp.walBytes || 0],
@@ -4242,23 +4246,46 @@ function treemapItems() {
   return out;
 }
 
-// 块太多就合并最小的那些：硬画出来大家都只剩几个像素，标签全糊在一起。
-function mergeSmall(items) {
-  if (items.length <= MAP_MAX_CELLS) return { list: items, tail: [] };
-  const head = items.slice(0, MAP_MAX_CELLS - 1);
-  const tail = items.slice(MAP_MAX_CELLS - 1);
-  head.push({
+// 块太小就合并：硬画出来大家都只剩几个像素，标签全糊在一起。
+//
+// 两条判据取更严的那条：
+// 1) 块数超过 MAP_MAX_CELLS —— 布局和 DOM 都受不了；
+// 2) 单块面积放不下标签（54×22 是 placeTreeCell 里显隐标签的阈值）。
+//    320 B 对 2.7 MB 是 1/8000，在整块画布上算出来 0.02px 高 —— 不是「小」，
+//    是**不存在**：看不见、hover 不到、点不到，连「这里有一张表」都不知道。
+// 合进「其它 N 块」之后单击它，右栏会把每一块列出来（showOtherBlocks）。
+function mergeSmall(items, W, H) {
+  const total = items.reduce((a, x) => a + x.value, 0);
+  const scale = (W > 0 && H > 0 && total > 0) ? (W * H) / total : 0;
+  const labelFloor = scale ? (54 * 22) / scale : 0;
+  let keep = items, tail = [];
+  if (items.length > MAP_MAX_CELLS) {
+    keep = items.slice(0, MAP_MAX_CELLS - 1);
+    tail = items.slice(MAP_MAX_CELLS - 1);
+  } else if (labelFloor > 0) {
+    const cut = items.findIndex(it => it.value < labelFloor);
+    if (cut > 0) { keep = items.slice(0, cut); tail = items.slice(cut); }
+  }
+  if (!tail.length) return { list: keep, tail: [] };
+  const otherValue = tail.reduce((a, x) => a + x.value, 0);
+  // 面积**不拔高**。试过给它一个「最小可见面积」，结果是 7 B 的 WAL 画得比
+  // 8 KB 的表还大 —— 图上唯一要读的就是「谁占得多」，为可见性牺牲它等于把图废了。
+  // 小表的入口交给右栏的逐表清单（长度与面积无关），图上就诚实留一条细线。
+  keep = keep.concat([{
     name: `其它 ${tail.length} 块`,
-    value: tail.reduce((a, x) => a + x.value, 0),
+    value: otherValue,
     parts: {}, kind: 'other', table: '', target: null, tail,
-  });
-  return { list: head, tail };
+  }]);
+  return { list: keep, tail };
 }
 
 function treeTip(it) {
   if (it.kind === 'other') {
-    return `其它 ${it.tail.length} 块：${it.tail.slice(0, 6).map(x => x.name).join('、')}`
-      + (it.tail.length > 6 ? ' …' : '');
+    const sum = it.tail.reduce((a, x) => a + x.value, 0);
+    return `其它 ${it.tail.length} 块 · 合计 ${fmtBytes(sum)}`
+      + `\n${it.tail.slice(0, 6).map(x => `${x.name} ${fmtBytes(x.value)}`).join('、')}`
+      + (it.tail.length > 6 ? ' …' : '')
+      + '\n这些块单独画不足一个标签宽，合并了；单击看全部清单';
   }
   if (it.kind === 'wal') return `WAL（预写日志）${fmtBytes(it.value)} · 顺序日志，没有「页」可以下钻`;
   const p = it.parts || {};
@@ -4288,7 +4315,11 @@ function renderTreemap() {
   const W = box.clientWidth, H = box.clientHeight;
   if (W < 40 || H < 40) return;  // 页面还没显示出来（宽高为 0），切回来会重画
   clampTreePan(W, H);
-  const { list } = mergeSmall(items);
+  const k = mapZoom;
+  // 合并判据按**不缩放的**画布算。按 W*k 算的话，滚轮一放大，小块的面积跟着变大、
+  // 不再满足合并条件 —— 块数会在缩放中途变化，DOM 重建、格子闪，缩放也不再是
+  // 「同一张图放大」。稳定的块数比「放大后能看见小表」重要，小表的入口在右栏清单里。
+  const { list } = mergeSmall(items, W, H);
   // 结构（有哪些块、各占多少）没变就复用 DOM：缩放时每帧重建 20 个带监听器的 div，
   // 鼠标底下的 :hover 会一帧一闪，看着像画面在抖。
   const sig = mapGroup + '|' + list.map(it => `${it.name}:${it.value}`).join(',');
@@ -4300,7 +4331,6 @@ function renderTreemap() {
   // 缩放不用 CSS transform，而是在「W×k / H×k 的虚拟画布」上重新排版：
   // 面积比例不变（还是正比于字节），但每个格子是实打实的屏幕像素 ——
   // 文字不会被拉伸，放大后小格子够大了，名字自然就出来了。
-  const k = mapZoom;
   let i = 0;
   for (const c of squarify(list, 0, 0, W * k, H * k)) placeTreeCell(treeCells[i++], c);
   renderZoomHud();
@@ -4643,6 +4673,25 @@ function renderRailDb() {
   side.appendChild(el('div', 'pm-hint',
     '面积正比于字节 —— 一块大不代表行多，只代表它占盘多（索引经常比数据本身还大）。\n'
     + '单击看这张表，双击直接进它的页地图；切「按文件」能把每棵索引单独铺出来。'));
+
+  // 逐表清单：树图按面积分地，一张 320 B 的表在 2.7 MB 的库上只占 1/8000，
+  // 画出来不到 1px —— 看不见、hover 不到、点不中，等于这张表在图上不存在。
+  // 「库里有哪几张表、各占多少」是这张图必须回答的问题，所以另给一份清单，
+  // 长度与面积无关。想深入看小表，从这里点进去就行。
+  if (tables.length > 1) {
+    const rows = tables.slice().sort((a, b) =>
+      ((b.bytes || 0) + (b.indexBytes || 0) + (b.lobBytes || 0) + (b.vecBytes || 0))
+      - ((a.bytes || 0) + (a.indexBytes || 0) + (a.lobBytes || 0) + (a.vecBytes || 0)));
+    side.appendChild(el('div', 'pm-hint', `逐表 ${tables.length} 张（按占用排序，点一行进它的页地图）：`));
+    for (const t of rows) {
+      const total = (t.bytes || 0) + (t.indexBytes || 0) + (t.lobBytes || 0) + (t.vecBytes || 0);
+      const row = el('div', 'pm-row linkable');
+      row.appendChild(el('span', 'pm-val', `${t.name} · ${fmtBytes(total)}`));
+      row.title = '点一下：打开这张表的页地图';
+      row.addEventListener('click', () => enterTable(t.name, 'data', ''));
+      side.appendChild(row);
+    }
+  }
 }
 
 function drawTableCard(side, t) {
@@ -6543,8 +6592,6 @@ function renderHomeCharts(m) {
     // 左轴是「每秒多少条」，右轴是「几个连接」—— 刻度各标各的，不共用一个数
     axisL: v => String(Math.round(v)),
     axisR: v => String(Math.round(v)),
-    // 图不高（一屏要塞四张），y 轴只标两端：三档会和时间轴、曲线挤成一团
-    levels: 2,
   });
 
   homeChart(homeEls.chartIO, r.series, [
@@ -6561,7 +6608,7 @@ function renderHomeCharts(m) {
       label: '磁盘写', color: 'var(--hm-warn)', width: 1.2, minSpan: 64 * 1024,
       get: p => p.diskWrite || 0, fmt: fmtRate,
     },
-  ], { axisL: v => fmtRate(v), levels: 2 });
+  ], { axisL: v => fmtRate(v) });
 
   const p = m.proc || {};
 
@@ -6573,14 +6620,14 @@ function renderHomeCharts(m) {
       label: 'CPU', color: 'var(--hm-warn)', width: 1.4, minSpan: 0.4,
       get: x => x.cpuCore || 0, fmt: v => v.toFixed(2) + ' 核',
     },
-  ], { axisL: v => v.toFixed(1) + ' 核', levels: 2 });
+  ], { axisL: v => v.toFixed(1) + ' 核' });
 
   homeChart(homeEls.chartMem, p.series, [
     {
       label: '内存', color: 'var(--hm-ok)', minSpan: 32 * 1024 * 1024,
       get: x => x.heapBytes || 0, fmt: fmtBytes,
     },
-  ], { axisL: v => fmtBytes(v), levels: 2 });
+  ], { axisL: v => fmtBytes(v) });
 }
 
 // 大屏的折线。配色走 --hm-*，不带悬浮读数 —— 总览是"远看"的页面。
@@ -6683,13 +6730,36 @@ function homeChart(host, pts, lines, opts) {
   if (sideR) row.appendChild(sideR);
   plot.appendChild(row);
 
-  // 刻度：颜色跟这条轴上的线走（双轴时一眼对得上）。levels: 2 只标两端，
-  // 三档在图矮的时候会挤成一坨；重复的文本去掉（量程很小时 hi 和 mid 可能
-  // format 成同一个数）。
+  // x 轴：只标两端（起点多久以前、现在）。中间刻度在这么矮的图里放不下，
+  // 而且曲线是均分采样的，中间刻度也不带更多信息。
+  const xRow = el('div', 'hp-x');
+  {
+    const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
+    const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
+    xRow.appendChild(el('span', '', label));
+    xRow.appendChild(el('span', '', '现在'));
+    plot.appendChild(xRow);
+  }
+  // 先挂上去再量：脱离文档的节点 clientHeight 是 0，刻度会永远只剩两端。
+  // 此时 plot 已经是完整结构（row + x 轴），量到的画布高度就是最终高度。
+  host.appendChild(plot);
+
+
+  // 刻度：颜色跟这条轴上的线走（双轴时一眼对得上）。
+  //
+  // 档数按**画布高度**定，不写死：一屏四张卡里，请求 / 存储 是整行高，只标两端时
+  // 中间空一大片，读不出「这条线是 9 还是 4.5」；而 CPU / 内存 是半行高，三档会挤。
+  // 72px 是量出来的：三个标签各 12px，中间留 18px 空隙就不打架。
+  //
+  // 量的必须是 `.hp-canvas`，不是 host（.hc-body）—— host 里还含底部那行图例，
+  // 用它算会多出二十来像素，画布只剩 48px 的矮卡会被误判成「够高」，三个标签
+  // 挤成一坨。面板还藏着时高度是 0，会退回两端 —— 下一次轮询（2s）重画就正常。
+  const autoLevels = (canvas.clientHeight || 0) >= 72 ? 3 : 2;
+  const levelCount = opts.levels == null ? autoLevels : opts.levels;
   const fillSide = (side, range, fmt, color) => {
     if (!side || !range || typeof fmt !== 'function') return;
     if (color) side.style.color = color;
-    const vs = (opts.levels === 2)
+    const vs = (levelCount === 2)
       ? [range.hi, range.lo]
       : [range.hi, (range.lo + range.hi) / 2, range.lo];
     const seen = new Set();
@@ -6706,19 +6776,6 @@ function homeChart(host, pts, lines, opts) {
   };
   fillSide(sideL, rangeL, opts.axisL, colorOf('l'));
   fillSide(sideR, rangeR, opts.axisR, colorOf('r'));
-
-  // x 轴：只标两端（起点多久以前、现在）。中间刻度在这么矮的图里放不下，
-  // 而且曲线是均分采样的，中间刻度也不带更多信息。
-  const xRow = el('div', 'hp-x');
-  {
-    const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
-    const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
-    xRow.appendChild(el('span', '', label));
-    xRow.appendChild(el('span', '', '现在'));
-    plot.appendChild(xRow);
-  }
-
-  host.appendChild(plot);
 
   /* ---- 悬停读数（十字光标）----
    *
@@ -6844,7 +6901,20 @@ function homeChart(host, pts, lines, opts) {
     item.appendChild(el('b', '', l.fmt(l.get(last) || 0)));
     legend.appendChild(item);
   }
-  host.appendChild(legend);
+  // 图例搬到**卡头右侧**，不再压在卡片底部：底部那一行要 20px，四张卡里有三张
+  // 占整行，一屏就是 60px —— 顶栏挂上 114px 的健康环之后，这 60px 就是画布从
+  // 48 涨到 96 的全部来源。信息一点没少，只是从「图下面」挪到「标题右边」。
+  // 卡头里要先清掉上一次的：它已经不在 host 里了，host.innerHTML 清不到。
+  const head = host.parentElement && host.parentElement.querySelector('.hc-head');
+  if (head) {
+    head.querySelectorAll('.home-legend').forEach(n => n.remove());
+    legend.classList.add('in-head');
+    const rangeEl = head.querySelector('.hc-range');
+    if (rangeEl) head.insertBefore(legend, rangeEl);
+    else head.appendChild(legend);
+  } else {
+    host.appendChild(legend);
+  }
 }
 
 // 左上角的 logo + 字标也回首页。做成 role=button 的 div 是因为里面装着 h1 字标
@@ -10248,6 +10318,25 @@ function erFkCols(t) {
 
 // erColVisible 是卡片上真正画出来的列。索引必须和 erColY 对齐 ——
 // 连线的落点按「第几行」算，两个地方各算一次就会错行。
+const ER_TYPE_ALIAS = {
+  // PG 的内部名 → SQL 标准写法。同一张图上两张卡片一个写 int4、一个写 integer，
+  // 不是因为类型不同，而是两个来源一个给 typname、一个给 format_type。
+  int2: 'smallint', int4: 'integer', int8: 'bigint',
+  bool: 'boolean', float4: 'real', float8: 'double precision',
+  bpchar: 'char', timestamptz: 'timestamp with time zone', timetz: 'time with time zone',
+};
+// 卡片上的类型名只当记号用，写法得统一：库里读回来的是小写内部名，手写的可能是
+// 大写 INTEGER，混在一列里像两个人做的。只统一**显示**，不动模型里存的那个字符串
+// —— 设计器打开还是用户写什么就是什么，改这里不会悄悄改数据。
+function erTypeLabel(type) {
+  const s = String(type || '').trim();
+  if (!s) return '';
+  const m = /^([^(]+?)\s*(\(.*\))?$/.exec(s);
+  const base = (m ? m[1] : s).toLowerCase().replace(/\s+/g, ' ');
+  const args = m && m[2] ? m[2].replace(/\s+/g, '') : '';
+  return (ER_TYPE_ALIAS[base] || base) + args;
+}
+
 function erColVisible(t) {
   if (erDetail === 'name') return [];
   let cols = t.columns;
@@ -11437,7 +11526,7 @@ function erCardEl(t, g) {
     mark.title = c.primaryKey ? '主键' : '';
     row.appendChild(mark);
     row.appendChild(el('span', 'er-col-name', c.name));
-    row.appendChild(el('span', 'er-col-type', c.type));
+    row.appendChild(el('span', 'er-col-type', erTypeLabel(c.type)));
 
     // 连接点：从这一行长出一条关系。默认很淡，鼠标到行上才亮 ——
     // 一直显示会把每张卡片变成一排小按钮，看着像表单。
@@ -11445,7 +11534,7 @@ function erCardEl(t, g) {
     dot.title = '拖到另一张表的字段上，画一条关系';
     row.appendChild(dot);
 
-    row.title = `${c.name} ${c.type}${c.notNull ? ' NOT NULL' : ''}`
+    row.title = `${c.name} ${erTypeLabel(c.type)}${c.notNull ? ' NOT NULL' : ''}`
       + (c.primaryKey ? ' · 主键' : '');
     row.addEventListener('pointerenter', () => erHighlight(t.name, c.name, true));
     row.addEventListener('pointerleave', () => erHighlight(t.name, c.name, false));

@@ -1029,6 +1029,23 @@ class CDP {
         tvUi.legend === 4 && /面积 = 字节/.test(tvUi.note) && tvUi.bodyMode,
       `画布 ${tvUi.canvas.join('×')} · 右栏 ${tvUi.railW}px · 图例 ${tvUi.legend} · ${tvUi.note}`);
 
+    /* 小表的入口不能只靠面积：320 B 对 2.7 MB 是 1/8000，画出来不到 1 个像素，
+       看不见也点不中。右栏那份逐表清单的长度与面积无关，所以「库里有哪几张表」
+       得由它回答 —— 上面那条树图断言只要求「至少一块有名字」，管不到这里。 */
+    const mapList = await cdp.eval(`(() => {
+      const side = document.getElementById('pmSide');
+      const rows = [...side.querySelectorAll('.pm-row.linkable')];
+      return {
+        rows: rows.length,
+        tableN: (typeof spaceData !== 'undefined' && spaceData && spaceData.tables || []).length,
+        allClickable: rows.length > 0 && rows.every(r => /页地图/.test(r.title || '')),
+        sample: rows.slice(0, 3).map(r => r.textContent.trim()),
+      };
+    })()`);
+    check('空间地图：右栏有逐表清单（面积画不出的小表也点得进去）',
+      mapList.rows === mapList.tableN && mapList.allClickable && mapList.rows > 0,
+      `${mapList.rows} 行 / 表 ${mapList.tableN} 张 · ${mapList.sample.join(' | ')}`);
+
     // 右栏左侧的竖向拖宽条：和编辑器和结果区之间那条是同一套做法（转了 90°）。
     // 原来悬停是把整条 7px 涂成淡蓝，看着像「一条色带」，不像「一处能抓的地方」。
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' });
@@ -2287,6 +2304,24 @@ class CDP {
     check('设置页默认停在「连接」，一屏只显示一组',
       setTabs.active === '连接' && setTabs.panes.join() === 'conn', setTabs.active + ' / ' + setTabs.panes.join());
 
+    /* 正文是 max-width 860 居中，tab 条和标题如果只留 12px 就会贴着面板最左边 ——
+       1440 上差 300px，看起来像两套排版拼在一起。四条左边界必须落在同一条线上。 */
+    const setLine = await cdp.eval(`(() => {
+      const padL = e => parseFloat(getComputedStyle(e).paddingLeft) || 0;
+      const body = document.getElementById('settingsBody');
+      return {
+        tab: Math.round(document.querySelector('.set-tab').getBoundingClientRect().left),
+        inner: Math.round(body.getBoundingClientRect().left + padL(body)),
+        head: Math.round(document.querySelector('#settingsPanel .mon-title').getBoundingClientRect().left),
+        foot: Math.round(document.querySelector('.set-foot-in').getBoundingClientRect().left
+          + padL(document.querySelector('.set-foot-in'))),
+      };
+    })()`);
+    check('设置页：分组 Tab / 标题 / 正文 / 底栏在同一条左边界上',
+      Math.abs(setLine.tab - setLine.inner) <= 1 && Math.abs(setLine.head - setLine.inner) <= 1
+        && Math.abs(setLine.foot - setLine.inner) <= 1,
+      `tab ${setLine.tab} · 标题 ${setLine.head} · 正文 ${setLine.inner} · 底栏 ${setLine.foot}`);
+
     /* 远程控制台必须先设密码：后端在 config.Validate 里硬拦，前端在安全页先提示。
        两处一起验 —— 只验前端的话，绕过页面直接 POST 照样能开门。 */
     const secUi = await cdp.eval(`(() => {
@@ -2529,6 +2564,35 @@ class CDP {
         && benchUi.overviewHidden, JSON.stringify(benchUi));
     check('基准页收起「暂停刷新 / 立即刷新」（它不跟每秒水位轮询）',
       benchUi.pauseHidden && benchUi.refreshHidden, JSON.stringify(benchUi));
+
+    // 版式：卡片铺满容器（不再收窄到 900px 居中），两段说明左右并排。
+    // 这一页每块都吃宽度 —— 结果表 5 列、进度条、4 个批次档位 —— 收窄就是把空白留在两边。
+    const benchLayout = await cdp.eval(`(() => {
+      const card = document.querySelector('[data-page="bench"] .bench-card').getBoundingClientRect();
+      const notes = [...document.querySelectorAll('[data-page="bench"] .bench-note')];
+      const run = document.querySelector('[data-page="bench"] .bench-run');
+      const wasHidden = run.classList.contains('hidden');
+      run.classList.remove('hidden');
+      const runW = Math.round(run.getBoundingClientRect().width);
+      if (wasHidden) run.classList.add('hidden');
+      return {
+        card: Math.round(card.width),
+        avail: document.querySelector('.mon-body').clientWidth - 32,
+        notes: notes.map(x => { const r = x.getBoundingClientRect();
+          return { l: Math.round(r.left), t: Math.round(r.top), w: Math.round(r.width) }; }),
+        runW,
+      };
+    })()`);
+    check('基准页宽屏：卡片铺满容器、两段说明左右并排、进度块限宽',
+      benchLayout.card >= benchLayout.avail - 1
+        && benchLayout.notes.length === 2
+        && benchLayout.notes[0].t === benchLayout.notes[1].t
+        && benchLayout.notes[0].l < benchLayout.notes[1].l
+        && benchLayout.notes[0].w > 300
+        && benchLayout.runW > 0 && benchLayout.runW <= 860,
+      `卡片 ${benchLayout.card}/${benchLayout.avail}`
+        + ` · 栏宽 ${benchLayout.notes.map(n => n.w).join(' + ')}`
+        + ` · 进度块 ${benchLayout.runW}px`);
 
     // 接口无任务时返回空 result（冒烟，不发 start 以免真灌整表）
     const benchStatus = await cdp.eval(`fetch('/api/bench/status').then(r => r.json())`);
@@ -6424,6 +6488,22 @@ class CDP {
     check('总览：CPU 那张卡在内存左边',
       cCpu.i === 2 && cMem.i === 3,
       charts.map(c => c.title).join(' → '));
+
+    /* 纵轴档数跟着图高走：整行高的两张（请求 / 存储）标三档，只有两端时中间
+       空一大片，“这条线是 9 还是 4.5” 读不出来；半行高的两张标两端，三档会挤。
+       量的是 `.hp-canvas` 而不是 `.hc-body` —— 后者还含卡头下的边距，
+       用它算会把「画布只有 73px」的卡误判成够高。
+       顺带守住「刻度不重复」—— 量程窄的时候 hi 和 mid 会 format 成同一个数。 */
+    const tickUi = await cdp.eval(`(() => [...document.querySelectorAll('.home-chart')].map(c => ({
+      title: (c.querySelector('.hc-title') || {}).textContent || '',
+      canvasH: Math.round((c.querySelector('.hp-canvas') || c).getBoundingClientRect().height),
+      ys: [...(c.querySelector('.hp-side.l') || c).children].map(s => s.textContent.trim()),
+    })))()`);
+    check('总览：纵轴档数跟着画布高度走（≥72px 标三档），且刻度不重复',
+      tickUi.length === 4
+        && tickUi.every(t => new Set(t.ys).size === t.ys.length)
+        && tickUi.filter(t => t.canvasH >= 72).every(t => t.ys.length >= 3),
+      tickUi.map(t => `${t.title} 画布${t.canvasH}px:${t.ys.join('/')}`).join(' · '));
 
     /* 标题前的图标：四张卡各一个，而且必须是**装饰**（aria-hidden）——
        读屏软件念「请求 QPS 连接」就够了，多念一句「图像」纯属噪音。

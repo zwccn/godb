@@ -218,39 +218,62 @@ try {
     <span class="home-name" id="homeDB">godb</span>
     <span class="home-ver" id="homeVer"></span>
 
-    <!-- 健康分：跟着 LOGO 走的一个环形表。数字是 0~100 的合成分（算法见
-         renderHomeScore），环的颜色是等级（优秀 / 良好 / 注意 / 危险），
-         悬停出明细 —— 只说「96 分」而不说扣在哪，没人会信这个数。 -->
-    <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
-         role="img" aria-label="健康分">
-      <span class="hs-gauge">
-        <svg class="hs-ring" viewBox="0 0 44 44" aria-hidden="true">
-          <!-- 弧线用渐变：尾巴淡、头实，看起来像「走了一圈」而不是一根色带 -->
-          <defs>
-            <linearGradient id="hsGrad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".35"></stop>
-              <stop offset=".65" stop-color="var(--hs-c)" stop-opacity=".85"></stop>
-              <stop offset="1" stop-color="var(--hs-c)"></stop>
-            </linearGradient>
-          </defs>
-          <circle class="hs-bg" cx="22" cy="22" r="18"></circle>
-          <circle class="hs-fg" id="homeScoreArc" cx="22" cy="22" r="18"
-                  stroke-dasharray="113.1" stroke-dashoffset="113.1"></circle>
-        </svg>
-        <b class="hs-val" id="homeScoreVal">—</b>
-      </span>
-      <span class="hs-meta">
-        <span class="hs-cap">健康分</span>
-        <span class="hs-grade" id="homeScoreGrade">采样中</span>
-      </span>
-      <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
-    </div>
-
     <span class="home-state" id="homeState">连接中…</span>
     <span class="spacer"></span>
     <span class="home-uptime" id="homeUptime">已运行 —</span>
     <span class="home-clock" id="homeClock">--:--:--</span>
     <button class="home-more" id="btnHomeToMonitor" type="button" title="进监控：锁明细 / 慢 SQL / 存储 / 空间地图">详细监控 ›</button>
+  </div>
+
+  <!-- 健康分大仪表：**在页面上水平居中**，不跟着 LOGO 走。
+       它回答的是「现在能不能走开」，是整个页面唯一的结论 —— 结论就该摆在正中，
+       而不是缩在左上角当装饰。数字是 0~100 的合成分（算法见 renderHomeScore），
+       环的颜色 = 等级（优秀 / 良好 / 注意 / 危险），悬停出明细
+       —— 只说「96 分」而不说扣在哪，没人会信这个数。
+
+       环 114px（原来 38 的 3 倍），文字包住它：上「健康分」、下「优秀」。
+       为此顶栏会多占一百多像素，下面的四张图跟着变矮 —— .home 是 flex 列，
+       顶栏 flex:0 0 auto、图表区 flex:1，它们自己会让位。 -->
+  <div class="home-hero">
+    <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
+         role="img" aria-label="健康分">
+      <span class="hs-cap">健康分</span>
+      <span class="hs-gauge">
+        <svg class="hs-ring" viewBox="0 0 44 44" aria-hidden="true">
+          <!-- 弧线用渐变：尾巴淡、头实，看起来像「走了一圈」而不是一根色带 -->
+          <defs>
+            <linearGradient id="hsGrad" x1="0" y1="0" x2="1" y2="1">
+              <!-- 尾巴从 .35 提到 .55：38px 的小环上那点淡像个「走向」，
+                   放大到 114px 之后，淡的那四分之一圈看起来像**环缺了一角** ——
+                   100 分本该是完整一圈。留一点轻重差别就够，不要真的淡掉。 -->
+              <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".55"></stop>
+              <stop offset=".65" stop-color="var(--hs-c)" stop-opacity=".9"></stop>
+              <stop offset="1" stop-color="var(--hs-c)"></stop>
+            </linearGradient>
+            <!-- 霓虹光：**必须用 SVG 自己的滤镜**，不能用 CSS 的 filter: drop-shadow。
+                 CSS filter 作用于 SVG 子元素时，Chrome 会整块 SVG 视口（114×114）
+                 一起提亮，环外面套出一个明显的方形亮区 —— 38px 时看不出来，
+                 放大到 3 倍就藏不住了。SVG 滤镜只处理被作用的那个圆。
+                 叠两遍模糊再压回原图 = 中间实、外面散。 -->
+            <filter id="hsGlow" x="-25%" y="-25%" width="150%" height="150%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="1.8" result="b"></feGaussianBlur>
+              <feMerge>
+                <feMergeNode in="b"></feMergeNode>
+                <feMergeNode in="b"></feMergeNode>
+                <feMergeNode in="SourceGraphic"></feMergeNode>
+              </feMerge>
+            </filter>
+          </defs>
+          <circle class="hs-bg" cx="22" cy="22" r="18"></circle>
+          <circle class="hs-fg" id="homeScoreArc" cx="22" cy="22" r="18"
+                  filter="url(#hsGlow)"
+                  stroke-dasharray="113.1" stroke-dashoffset="113.1"></circle>
+        </svg>
+        <b class="hs-val" id="homeScoreVal">—</b>
+      </span>
+      <span class="hs-grade" id="homeScoreGrade">采样中</span>
+      <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
+    </div>
   </div>
 
   <!-- 三个数字：排队 / 等待锁 / 执行中 —— 同一条执行流水线的三个位置，按
@@ -522,6 +545,9 @@ try {
         <div class="mon-card-head">
           基准测试<span class="mon-sub">在临时表上跑 9 个场景，量「每秒多少条」</span>
         </div>
+        <!-- 宽屏三段：左「这是什么」/ 右「数字怎么读」/ 下面整宽的按钮和进度。
+             两栏是给行长留的 —— 铺到 1600px 一行字 70 个字，读一段得横着甩头；
+             而按钮和进度条恰恰相反，越宽越好点、越好瞄。 -->
         <div class="bench-intro">
           <p class="bench-note">
             在 <code>__bench_items</code> 表（<b id="benchScale">100,000</b> 行）上跑 9 个场景，测「每秒多少条」，

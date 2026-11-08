@@ -237,16 +237,24 @@ try {
     <button class="home-more" id="btnHomeToMonitor" type="button" title="进监控：锁明细 / 慢 SQL / 存储 / 空间地图">详细监控 ›</button>
   </div>
 
-  <!-- 健康分大仪表：**在页面上水平居中**，不跟着 LOGO 走。
+  <!-- 健康分大仪表 + 一句话结论：**在页面上水平居中**，不跟着 LOGO 走。
        它回答的是「现在能不能走开」，是整个页面唯一的结论 —— 结论就该摆在正中，
        而不是缩在左上角当装饰。数字是 0~100 的合成分（算法见 renderHomeScore），
        环的颜色 = 等级（优秀 / 良好 / 注意 / 危险），悬停出明细
        —— 只说「96 分」而不说扣在哪，没人会信这个数。
 
+       左右两翼是原来压在页面底部的那条结论（「没事，可以走开」+ 一句话解释）
+       和累计数。搬上来有两个原因：一是只有球的时候，172px 的卡片漂在 1400px
+       的空白中间像个孤岛；二是底部那条要占 46px，搬走后全给下面的走势图。
+
        环 114px（原来 38 的 3 倍），文字包住它：上「健康分」、下「优秀」。
        为此顶栏会多占一百多像素，下面的四张图跟着变矮 —— .home 是 flex 列，
        顶栏 flex:0 0 auto、图表区 flex:1，它们自己会让位。 -->
-  <div class="home-hero">
+  <div class="home-hero" id="homeHero" data-level="green">
+    <div class="hero-side l">
+      <span class="hero-title" id="heroTitle">采样中…</span>
+      <span class="hero-sub" id="heroSub"></span>
+    </div>
     <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
          role="img" aria-label="健康分">
       <span class="hs-cap">健康分</span>
@@ -285,6 +293,9 @@ try {
       </span>
       <span class="hs-grade" id="homeScoreGrade">采样中</span>
       <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
+    </div>
+    <div class="hero-side r">
+      <span class="hero-meta" id="heroMeta"></span>
     </div>
   </div>
 
@@ -355,8 +366,6 @@ try {
       <div class="hc-body" id="homeChartMem"></div>
     </section>
   </div>
-
-  <footer class="home-foot" id="homeFoot"></footer>
 </section>
 
 <section id="monPanel" class="mon hidden" aria-label="监控面板">

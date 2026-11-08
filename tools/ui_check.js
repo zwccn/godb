@@ -6412,7 +6412,8 @@ class CDP {
         water: { exec: (m.water || {}).exec || 0, queue: (m.water || {}).queue || 0,
                  wait: (m.water || {}).wait || 0, level: (m.water || {}).level || 'green' },
         dot: (document.querySelector('#homeDot') || {}).className || '',
-        foot: t('#homeFoot'),
+        // 结论从页面底部那条挪到了健康球左右两翼（球两侧原来空一片）
+        foot: t('#homeHero'),
         plots: document.querySelectorAll('.home-plot svg').length,
         ovOn: document.getElementById('btnOverview').classList.contains('on'),
         homeOn: document.getElementById('btnHome').classList.contains('on'),
@@ -6885,9 +6886,9 @@ class CDP {
       !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
       && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),
       home ? `${home.ver} · ${home.uptime} · ${home.clock}` : '');
-    check('总览：结论条给出了「能不能走开」的判断',
-      !!home && /走开|有点忙|撑不住/.test(home.foot),
-      home ? home.foot.slice(0, 40) : '');
+    check('总览：健康球左右两翼给出了「能不能走开」的判断和累计数',
+      !!home && /走开|有点忙|撑不住/.test(home.foot) && /累计慢 SQL/.test(home.foot),
+      home ? home.foot.slice(0, 60) : '');
 
     // 进监控：总览让位，不是叠在上面
     await cdp.eval(`document.getElementById('btnHomeToMonitor').click()`);

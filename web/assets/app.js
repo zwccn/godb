@@ -3297,12 +3297,19 @@ function attachSparkHover(plot, points, lines, key) {
   // 这张图是刷新后重建的，而上一次悬停就在它上面：原样放回去。
   // 必须等一帧 —— 此刻它还没被 appendChild 进文档，clientWidth 是 0，
   // 直接 place 会算出 0 宽度然后什么也不画（踩过：卡片每次刷新都消失）。
+  //
+  // 但**不能只挂一次 rAF**：主线程一忙（几十个定时器、JSON 解析、基准任务）
+  // 那一帧就可能被推迟到一秒之后，卡片在这段时间里就是空的 —— 表现为「鼠标
+  // 不动，读数牌偶尔闪掉」。所以再挂一个 setTimeout 兜底；place 是幂等的，
+  // 重复画同一个位置没有副作用。
   if (sparkHover && sparkHover.key === key) {
-    requestAnimationFrame(() => {
-      if (sparkHover && sparkHover.key === key && plot.isConnected) {
-        place(sparkHover.xr, sparkHover.yr);
-      }
-    });
+    const restore = () => {
+      if (!plot.isConnected || !sparkHover || sparkHover.key !== key) return;
+      if (!plot.clientWidth) { requestAnimationFrame(restore); return; }
+      place(sparkHover.xr, sparkHover.yr);
+    };
+    requestAnimationFrame(restore);
+    setTimeout(restore, 60);
   }
 }
 
@@ -6276,7 +6283,12 @@ const homeEls = {
   chartIO: document.getElementById('homeChartIO'),
   chartMem: document.getElementById('homeChartMem'),
   chartCPU: document.getElementById('homeChartCPU'),
-  foot: document.getElementById('homeFoot'),
+  // 一句话结论（左）/ 健康球 / 累计数（右）在同一行 —— 原来这三样是
+  // 「球单独一行 + 结论条贴在页面底部」，球两侧空一大片，底部白占 46px。
+  hero: document.getElementById('homeHero'),
+  heroTitle: document.getElementById('heroTitle'),
+  heroSub: document.getElementById('heroSub'),
+  heroMeta: document.getElementById('heroMeta'),
 };
 
 // 三个数字：只有「请求卡在流水线哪一段」这一段。
@@ -6585,16 +6597,18 @@ function renderHome(m) {
   const sub = lvl === 'green'
     ? '没人排队、没人在等锁，这几个数字可以不用管'
     : '点「详细监控」看是谁在挡谁';
-  homeEls.foot.dataset.level = lvl;
-  homeEls.foot.innerHTML = '';
-  homeEls.foot.appendChild(el('span', 'fv', title));
-  homeEls.foot.appendChild(el('span', 'ft', sub));
+  homeEls.hero.dataset.level = lvl;
+  // 只在变了才写：这段每 2 秒跑一次，写同样的字符串也会走一遍文本替换
+  if (homeEls.heroTitle.textContent !== title) homeEls.heroTitle.textContent = title;
+  if (homeEls.heroSub.textContent !== sub) homeEls.heroSub.textContent = sub;
   const slowN = (m.slowSql || []).reduce((s, x) => s + (x.n || 0), 0);
   // 「累计」两个字不能省：这个数是自启动以来的总和，不标的话会被人当成
   // 「现在有 700 条慢 SQL」—— 而左边的结论正说着「没事」。
-  homeEls.foot.appendChild(el('span', 'fm',
-    '累计慢 SQL ' + slowN + ' · 连接 ' + ((m.rates || {}).conns || 0)
-    + ' · Kill ' + ((m.counters || {}).kills || 0)));
+  // 分两行：上行是「自启动以来」，下行是「此刻」——两个时间尺度不该混在一句里，
+  // 也顺手把左两行 / 右一行的不平衡补上。
+  const meta = '累计慢 SQL ' + slowN + '\n连接 ' + ((m.rates || {}).conns || 0)
+    + ' · Kill ' + ((m.counters || {}).kills || 0);
+  if (homeEls.heroMeta.textContent !== meta) homeEls.heroMeta.textContent = meta;
 
   renderHomeCharts(m);
 }

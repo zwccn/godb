@@ -2301,8 +2301,6 @@ body.sidebar-collapsed .sidebar {
   /* 带宽线：皮肤里没有对应的语义色（蓝/绿/黄/红都被占了，而它需要和它们分开），
      深色下用偏冷的亮紫；浅色下要压暗一档，见下面那条覆盖。 */
   --hm-alt: #9b8cf0;
-  /* 背景网格：淡到只给「刻度感」，不抢数字。深底撒淡蓝，浅底撒淡墨。 */
-  --hm-grid: rgba(90, 169, 240, .055);
 
   position: fixed;
   top: 52px;
@@ -2315,13 +2313,12 @@ body.sidebar-collapsed .sidebar {
   gap: 10px;
   padding: 12px 20px 14px;
   overflow: auto;
-  background-color: var(--hm-bg);
-  /* 极淡网格：56px 一格。不用光晕渐变 —— 深底上的柔光会糊成一片雾，
-     网格给的是「刻度感」，眼睛能估面积又不抢数字。 */
-  background-image:
-    linear-gradient(var(--hm-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--hm-grid) 1px, transparent 1px);
-  background-size: 56px 56px;
+  /* 纯色底，没有网格。
+     原来铺的是 56px 一格淡网格（"刻度感"），本意是给面积一个参照 ——
+     实际上卡片已经有边框和底色，底下再压一层格线只让整页显得像草稿纸，
+     而且网格和卡片边框交错时，第一眼分不清哪条线是卡的边。
+     也不用径向柔光：深底上的柔光会糊成一片雾，浅底上又容易显脏。 */
+  background: var(--hm-bg);
   color: var(--hm-text);
 }
 
@@ -2344,7 +2341,6 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   --hm-ok: #0a7a5b;
   --hm-warn: #9a5f08;
   --hm-alt: #b0438c;
-  --hm-grid: rgba(40, 70, 110, .055);
 }
 
 /* 健康环：主色在原色状态下对浅底只有 3.0~4.0:1（薄荷 3.0、天空蓝 3.6、芋紫 4.0），
@@ -2410,11 +2406,39 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
    出事时整块牌子变色。90 分和 78 分差 12 分，不值得多记一种颜色。 */
 .home-hero {
   flex: 0 0 auto;
-  display: flex;
-  justify-content: center;
-  /* 下面留一点空：大环贴着 KPI 卡会显得两块挤在一起。
-     只留 8px —— 每省下的一像素都还给下面的走势图。 */
-  padding: 0 16px 8px;
+  /* 三列：左「一句话结论」/ 中球 / 右「累计数」。
+     原来只有中间那个球，172px 的卡片漂在 1400px 的空白里，看着像个孤岛。
+     把底部那条结论搬上来填两侧，顺带省掉底部 46px —— 全给走势图。
+     下面留 8px：大环贴着 KPI 卡会显得两块挤在一起，每省下的一像素都还给图。 */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 20px;
+  padding: 0 4px 8px;
+}
+.hero-side { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.hero-side.l { align-items: flex-start; }
+.hero-side.r { align-items: flex-end; }
+.hero-title {
+  /* 18px：这是整页唯一的结论，得比正文重一档 —— 15px 时它和 KPI 卡上的
+     说明文字一样大，读的人会先看见「0」而不是「没事，可以走开」。 */
+  font-size: calc(18px * var(--fs));
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--hm-text);
+}
+/* 只有真出事才给颜色：正常时这行就是普通正文色，跟着健康灯变反而吵 */
+.home-hero[data-level="yellow"] .hero-title { color: var(--hm-warn); }
+.home-hero[data-level="red"] .hero-title { color: var(--hm-danger); }
+.hero-sub { font-size: calc(11.5px * var(--fs)); line-height: 1.4; color: var(--hm-dim); }
+.hero-meta {
+  font-family: var(--mono);
+  font-size: calc(11px * var(--fs));
+  line-height: 1.5;
+  color: var(--hm-faint);
+  text-align: right;
+  /* 两行（累计 / 实时）而不是挤成一行：左边结论是两行，右侧一行会显得头重脚轻 */
+  white-space: pre-line;
 }
 .home-score {
   --hs-c: var(--hs-tone);
@@ -2911,40 +2935,6 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-fg {
   font-size: calc(11.5px * var(--fs));
   color: var(--hm-faint);
 }
-
-/* ---- 一句话结论 ---- */
-.home-foot {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  border: 1px solid var(--hm-line);
-  border-radius: 10px;
-  background: var(--hm-bg-1);
-  font-size: calc(12.5px * var(--fs));
-}
-.home-foot .fv {
-  flex: 0 0 auto;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.home-foot .ft {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--hm-dim);
-}
-.home-foot .fm {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: calc(11px * var(--fs));
-  color: var(--hm-faint);
-  white-space: nowrap;
-}
-.home-foot[data-level="warn"] .fv { color: var(--hm-warn); }
-.home-foot[data-level="red"] .fv { color: var(--hm-danger); }
 
 @media (max-width: 1240px) {
   /* 一列四行。这里**不能用 1fr**：容器高度是 flex 分来的（不够四行），

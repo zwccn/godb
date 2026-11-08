@@ -3236,6 +3236,27 @@ function sparkAxisX(points) {
 // 重建后按同一个比例放回去。
 let sparkHover = null; // { key, xr, yr }
 
+// 指针此刻落在哪儿（视口坐标）。为什么要单独记一份：这些图每秒重建一次，
+// pointerleave 有时会派给那个**已经被摘掉**的旧节点 —— 只看事件会两头错：
+// 伪 leave 把读数牌清掉（鼠标没动却闪一下），真离开又漏掉（牌子赖着不走）。
+// 所以让位置来做裁判。capture + passive：谁 stopPropagation 都拦不住它。
+let ptrLast = null;
+addEventListener('pointermove', ev => { ptrLast = { x: ev.clientX, y: ev.clientY }; },
+  { capture: true, passive: true });
+addEventListener('pointerleave', () => { ptrLast = null; }, { capture: true, passive: true });
+
+// 指针还在不在任意一张走势图上。用它代替「plot.isConnected」判断真假 leave：
+// 节点被替换的那一瞬间，指针明明还停在图上，旧节点的 isConnected 却已经是 false。
+function ptrOverSpark() {
+  if (!ptrLast) return false;
+  for (const p of document.querySelectorAll('.spark-plot')) {
+    const r = p.getBoundingClientRect();
+    if (r.width && ptrLast.x >= r.left - 1 && ptrLast.x <= r.right + 1 &&
+        ptrLast.y >= r.top - 1 && ptrLast.y <= r.bottom + 1) return true;
+  }
+  return false;
+}
+
 // 悬浮读数：pointermove 里按 x 反算最近的采样点，直接改 DOM。
 // 为什么不用原生 title —— 那是系统级提示，鼠标停住后要等 0.7~1 秒才弹，
 // 内容也只能是一句固定说明，「这一刻到底是多少」它答不了。
@@ -3294,10 +3315,12 @@ function attachSparkHover(plot, points, lines, key) {
     place(xr, yr);
   });
   const leave = () => {
-    // 旧节点被 innerHTML='' 摘掉时也可能顺手派一个 leave，那不是指针真的走了
-    if (!plot.isConnected) return;
+    // 这张图可能刚被重建、已经摘掉，而浏览器把 leave 派给了它 —— 指针其实还
+    // 停在图上（新节点在同一位置）。位置说还在，就当这次 leave 没发生：
+    // 清掉 sparkHover 会让紧接着的重建不再把牌子画回来（表现是「闪一下」）。
+    if (ptrOverSpark()) return;
     sparkHover = null;
-    hide();
+    if (plot.isConnected) hide();
   };
   plot.addEventListener('pointerleave', leave);
   plot.addEventListener('pointercancel', leave);
@@ -3313,6 +3336,9 @@ function attachSparkHover(plot, points, lines, key) {
   if (sparkHover && sparkHover.key === key) {
     const restore = () => {
       if (!plot.isConnected || !sparkHover || sparkHover.key !== key) return;
+      // 指针其实已经走了，只是那次 leave 没送到我们手上（派给了旧节点）。
+      // 这时再画回来就成了「牌子赖着不走」，所以先按位置复核一遍。
+      if (!ptrOverSpark()) { sparkHover = null; return; }
       if (!plot.clientWidth) { requestAnimationFrame(restore); return; }
       place(sparkHover.xr, sparkHover.yr);
     };
@@ -6243,9 +6269,10 @@ document.getElementById('btnMonitor').addEventListener('click', () => {
   // 直接落到基准页，省得进去再找一个 Tab。
   if (!wasOpen && monOpen && benchRunning) setMonPage('bench');
 });
-// 回首页 = 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
+// 回工作台 = 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
 // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
-function goHome() {
+// （「首页」是总览大屏，见下面的 goHome；这个函数只管工作台那页的按钮。）
+function goWork() {
   // 先问设置页（有未保存改动时它可能拒绝关闭），确认真关了再动别的 ——
   // 原来是先关监控再问，用户选「不关」就会留下「监控关了、设置还开着」的中间态。
   if (!settingsPanel.classList.contains('hidden')) {
@@ -6257,7 +6284,22 @@ function goHome() {
   toggleER(false);
   editor.focus();
 }
-document.getElementById('btnHome').addEventListener('click', goHome);
+document.getElementById('btnHome').addEventListener('click', goWork);
+
+// 点左上角 LOGO / GoDB 字标 = 回**首页**（总览大屏）—— 打开页面落地的那一页。
+// 不能直接调 openHome()：监控和模型图是 fixed 覆盖层，它们盖着的时候 homeOpen
+// 还是 true，openHome 开头的 `if (homeOpen) return` 会把它挡掉，表现就是「点了
+// 没反应、监控还开着」。所以这里统一按「先收掉覆盖层，再确保首页在最前」来写。
+function goHome() {
+  if (!settingsPanel.classList.contains('hidden')) {
+    closeSettings();
+    if (!settingsPanel.classList.contains('hidden')) return; // 用户选了「不关」
+  }
+  if (!homeOpen) { openHome(); return; } // openHome 自己会收监控 / 模型图
+  if (monOpen) toggleMonitor(false);
+  if (erOpen) toggleER(false);
+  syncTopNav();
+}
 document.getElementById('btnOverview').addEventListener('click', openHome);
 document.getElementById('btnHomeToMonitor').addEventListener('click', () => {
   closeHome();
@@ -6996,8 +7038,9 @@ function homeChart(host, pts, lines, opts) {
   }
 }
 
-// 左上角的 logo + 字标也回首页。做成 role=button 的 div 是因为里面装着 h1 字标
-// （button 里放块级元素是非法嵌套），所以键盘那两个键要自己接。
+// 左上角的 logo + 字标回首页（总览大屏，和顶栏第一个「总览」页签同一个去处）。
+// 做成 role=button 的 div 是因为里面装着 h1 字标（button 里放块级元素是非法嵌套），
+// 所以键盘那两个键要自己接。
 const btnBrand = document.getElementById('btnBrand');
 if (btnBrand) {
   btnBrand.addEventListener('click', goHome);

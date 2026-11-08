@@ -890,20 +890,29 @@ class CDP {
 
     // 监控每秒刷新、每秒重建整块卡片。重建后必须把读数原样放回去，
     // 否则鼠标一动不动，卡片也会每秒闪一下（甚至直接消失）。
-    await sleep(1600);
-    const hov2 = await cdp.eval(`(() => {
+    // 重建落在某一秒的边界上，从「新节点建好」到「牌子画回来」之间有一帧窗口
+    // （rAF + 60ms 兜底）。所以这里等条件、不等固定时长 —— 但先要跨过一次重建，
+    // 否则「牌子本来就还在」会被当成通过，这条断言等于没测。
+    await sleep(1200);
+    const hov2 = await waitFor(cdp, `(() => {
       const p = document.querySelector('#monPanel .proc-spark .spark-plot');
-      const c = p.querySelector('.spark-hover');
-      return { op: getComputedStyle(c).opacity, text: c.textContent };
-    })()`);
+      const c = p && p.querySelector('.spark-hover');
+      if (!c) return null;
+      const op = getComputedStyle(c).opacity;
+      return op === '1' && /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/.test(c.textContent)
+        ? { op: op, text: c.textContent } : null;
+    })()`, { label: '重绘后读数卡片', timeout: 4000 });
     check('曲线每秒重绘后读数卡片仍在（鼠标没动也不该闪掉）',
-      hov2.op === '1' && /^\d\d:\d\d:\d\d/.test(hov2.text), `${hov2.op} · ${hov2.text.slice(0, 30)}`);
+      !!hov2, hov2 ? `${hov2.op} · ${hov2.text.slice(0, 30)}` : '4s 内没画回来');
 
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5, button: 'none' });
-    await sleep(140);
-    const sparkGone = await cdp.eval(
-      `getComputedStyle(document.querySelector('#monPanel .proc-spark .spark-hover')).opacity`);
-    check('指针离开曲线后读数卡片收起', String(sparkGone) === '0', String(sparkGone));
+    // 这里也等条件：真离开时 leave 可能派给那个已经被替换掉的旧节点，得靠下一次
+    // 重建按指针位置复核才清掉（最多一个刷新周期）。等不到才算没收起。
+    const sparkGone = await waitFor(cdp, `(() => {
+      const c = document.querySelector('#monPanel .proc-spark .spark-hover');
+      return c && getComputedStyle(c).opacity === '0' ? '0' : null;
+    })()`, { label: '读数卡片收起', timeout: 3000 });
+    check('指针离开曲线后读数卡片收起', sparkGone === '0', String(sparkGone));
 
     // 存储页：四块占比条 + 明细表；点一行才去逐页扫「洞」
     await cdp.eval(`document.querySelector('.mon-nav-tab[data-page="storage"]').click()`);
@@ -2251,8 +2260,9 @@ class CDP {
        它是个 role=button 的 div（里装着 h1，换成 <button> 是非法嵌套），所以
        光标、role、以及 Enter 键都得自己写，也就都得测。
 
-       注意：这条会**关掉设置面板**（回首页的语义就是连设置一起收），而后面几条
-       要量设置页的尺寸。所以进来先把设置收干净、跑完再按原样打开，否则后面那些
+       注意：这条会**关掉设置面板**（回首页的语义就是连设置一起收），落点也从
+       「工作台」变成「总览」。而后面几条要量工作台和设置页的尺寸。所以进来先把
+       设置收干净、跑完再按原样打开并把页面收回工作台，否则后面那些
        getBoundingClientRect 全是 0 —— 这不是回归，是测试自己把状态改了。 */
     const brandHome = await cdp.eval(`(async () => {
       const panel = document.getElementById('monPanel');
@@ -2261,12 +2271,22 @@ class CDP {
       const setWasOpen = !setPanel.classList.contains('hidden');
       if (setWasOpen) { closeSettings(true); await wait(); }
 
+      // 先把状态摆到最不利的位置：工作台（homeOpen=false），再开监控盖上去。
+      // 只有这样才能测到「覆盖层盖着首页」那个坑 —— 那时 openHome() 会因为
+      // homeOpen 还是 true 而早退，监控留在原地，看着像「点了没反应」。
+      document.getElementById('btnHome').click();
+      await wait();
+
       document.getElementById('btnMonitor').click();
       await wait();
       const opened = !panel.classList.contains('hidden');
       document.getElementById('btnBrand').click();
       await wait();
-      const afterClick = { hidden: panel.classList.contains('hidden'), mon: monOpen };
+      const afterClick = {
+        hidden: panel.classList.contains('hidden'), mon: monOpen,
+        home: homeOpen, homeHidden: document.getElementById('homePanel').classList.contains('hidden'),
+        view: document.documentElement.dataset.view,
+      };
 
       document.getElementById('btnMonitor').click();
       await wait();
@@ -2274,21 +2294,35 @@ class CDP {
       b.focus();
       b.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       await wait();
-      const afterKey = { hidden: panel.classList.contains('hidden'), mon: monOpen };
+      const afterKey = {
+        hidden: panel.classList.contains('hidden'), mon: monOpen,
+        home: homeOpen, homeHidden: document.getElementById('homePanel').classList.contains('hidden'),
+        view: document.documentElement.dataset.view,
+      };
 
       const out = {
         opened, afterClick, afterKey, setWasOpen,
         role: b.getAttribute('role'),
         cursor: getComputedStyle(b).cursor,
+        title: b.getAttribute('title'),
       };
+      // 收拾回工作台：后面几条要在工作台那页上量尺寸，不许测试自己把状态改了
+      document.getElementById('btnHome').click();
+      await wait();
       if (setWasOpen) { document.getElementById('btnSettings').click(); await wait(); await wait(); }
       return out;
     })()`);
-    check('点左上角 logo / GoDB 字标回首页（鼠标和 Enter 都行）',
+    check('点左上角 logo / GoDB 字标回首页（总览；鼠标和 Enter 都行）',
       brandHome.opened && brandHome.afterClick.hidden && brandHome.afterClick.mon === false &&
+        brandHome.afterClick.home === true && brandHome.afterClick.homeHidden === false &&
+        brandHome.afterClick.view === 'overview' &&
         brandHome.afterKey.hidden && brandHome.afterKey.mon === false &&
-        brandHome.role === 'button' && brandHome.cursor === 'pointer',
-      `点击 ${brandHome.afterClick.mon === false} · Enter ${brandHome.afterKey.mon === false} · ${brandHome.role}/${brandHome.cursor}`);
+        brandHome.afterKey.home === true && brandHome.afterKey.homeHidden === false &&
+        brandHome.role === 'button' && brandHome.cursor === 'pointer' &&
+        /回到首页/.test(brandHome.title || ''),
+      `点击 → 首页 ${brandHome.afterClick.home}（${brandHome.afterClick.view}）· 监控 ${brandHome.afterClick.mon}`
+        + ` · Enter → 首页 ${brandHome.afterKey.home} · title ${brandHome.title}`);
+
     // 卡片数量与顺序都以 app.js 的 THEME_LIST 为准。原来这里写死「5 个」和五个名字，
     // 加「极光」时它直接红了 —— 但反过来更糟的情况是只改数量不改名字，那就会变成
     // 一条「新皮肤其实没被检查过」的假绿。

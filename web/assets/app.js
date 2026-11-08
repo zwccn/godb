@@ -6313,12 +6313,16 @@ const HOME_KPIS = [
       return w.queueMax ? '上限 ' + w.queueMax : '不限';
     },
     level: m => (((m.water || {}).queue || 0) > 0 ? 'warn' : ''),
+    // 阈值口径和健康分那六项一致：排队 8 条扣光
+    cap: m => (m.water || {}).queueMax || 8,
   },
   {
     id: 'wait', name: '等待锁',
     value: m => ({ n: (m.water || {}).wait || 0 }),
     hint: m => '锁结构 ' + ((m.locks || []).length),
     level: m => (((m.water || {}).wait || 0) > 0 ? 'warn' : ''),
+    // 等锁没有「上限」这个配置，用健康分里的阈值（4 条扣光），两处说法才对得上
+    cap: () => 4,
   },
   {
     id: 'exec', name: '执行中',
@@ -6334,6 +6338,7 @@ const HOME_KPIS = [
       const w = m.water || {};
       return (w.execMax && w.exec >= w.execMax) ? 'warn' : '';
     },
+    cap: m => (m.water || {}).execMax || 32,
   },
 ];
 
@@ -6504,6 +6509,12 @@ function ensureHomeKpis() {
     cell.appendChild(val);
     cell.appendChild(el('div', 'home-kpi-name', k.name));
     cell.appendChild(el('div', 'home-kpi-sub', ''));
+    // 底部一条「离阈值还有多远」的进度条。卡片有 460px 宽却只放一个数字，
+    // 右边一大片白；这条槽把横向空间用起来，而且比「上限 8」那句更直接 ——
+    // 条快满了就该紧张，不用读数字去比。
+    const bar = el('div', 'home-kpi-bar');
+    bar.appendChild(el('i'));
+    cell.appendChild(bar);
     homeEls.kpis.appendChild(cell);
   }
 }
@@ -6589,6 +6600,14 @@ function renderHome(m) {
     const subEl = cell.querySelector('.home-kpi-sub');
     if (subEl.textContent !== sub) subEl.textContent = sub;
     cell.dataset.level = (k.level && k.level(m)) || '';
+    // 进度条 = 当前值 / 阈值。阈值的口径和健康分那六项一致（排队 8、等锁 4），
+    // 这样「条快满了」和「健康分开始掉」是同一件事，不会两套说法。
+    const cap = k.cap ? (k.cap(m) || 0) : 0;
+    const barEl = cell.querySelector('.home-kpi-bar i');
+    if (barEl) {
+      const pct = cap > 0 ? Math.min(100, ((v.n || 0) / cap) * 100) : 0;
+      barEl.style.width = pct + '%';
+    }
   }
 
   renderHomeScore(m);
@@ -6628,7 +6647,7 @@ function renderHomeCharts(m) {
       get: p => p.qps || 0, fmt: v => String(Math.round(v)),
     },
     {
-      label: '连接', color: 'var(--hm-dim)', width: 1.2, minSpan: 2, axis: 'r',
+      label: '连接', color: 'var(--hm-dim)', width: 1.4, minSpan: 2, axis: 'r',
       get: p => p.conns || 0, fmt: v => String(Math.round(v)),
     },
   ], {
@@ -6644,11 +6663,11 @@ function renderHomeCharts(m) {
       get: p => (p.netIn || 0) + (p.netOut || 0), fmt: fmtRate,
     },
     {
-      label: '磁盘读', color: 'var(--hm-ok)', width: 1.2, minSpan: 64 * 1024,
+      label: '磁盘读', color: 'var(--hm-ok)', width: 1.5, minSpan: 64 * 1024,
       get: p => p.diskRead || 0, fmt: fmtRate,
     },
     {
-      label: '磁盘写', color: 'var(--hm-warn)', width: 1.2, minSpan: 64 * 1024,
+      label: '磁盘写', color: 'var(--hm-warn)', width: 1.5, minSpan: 64 * 1024,
       get: p => p.diskWrite || 0, fmt: fmtRate,
     },
   ], { axisL: v => fmtRate(v) });
@@ -6660,7 +6679,7 @@ function renderHomeCharts(m) {
   // 顺序跟 DOM 一致：CPU 在左（「吃满核」比「堆涨了」更常见也更急）。
   homeChart(homeEls.chartCPU, p.series, [
     {
-      label: 'CPU', color: 'var(--hm-warn)', width: 1.4, minSpan: 0.4,
+      label: 'CPU', color: 'var(--hm-warn)', width: 1.8, minSpan: 0.4,
       get: x => x.cpuCore || 0, fmt: v => v.toFixed(2) + ' 核',
     },
   ], { axisL: v => v.toFixed(1) + ' 核' });
@@ -6751,7 +6770,9 @@ function homeChart(host, pts, lines, opts) {
     for (let i = 0; i < pts.length; i++) {
       d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + yOf(l.get(pts[i]) || 0, r).toFixed(1);
     }
-    svg += '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="' + (l.width || 1.6)
+    // 默认 2.0（原 1.6）：浅色底上 1.5px 的曲线远看像铅笔印，
+    // 而这张卡唯一的内容就是那条线。次要线各自用 l.width 压细，层次还在。
+    svg += '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="' + (l.width || 2.0)
       + '" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
   }
   svg += '</svg>';
@@ -6786,6 +6807,13 @@ function homeChart(host, pts, lines, opts) {
   // 先挂上去再量：脱离文档的节点 clientHeight 是 0，刻度会永远只剩两端。
   // 此时 plot 已经是完整结构（row + x 轴），量到的画布高度就是最终高度。
   host.appendChild(plot);
+
+  // 全 0 的图和「坏了」在视觉上没法区分：一条贴着底的平线，没有任何起伏 ——
+  // 尤其存储 I/O 那张，空闲时整块是空的。这不是错，是「真的没动」，那就直说。
+  // 判据取「窗口内每条线都恒为 0」，有任何一个尖峰就不提示（曲线自己会说明）。
+  if (pts.length >= 2 && lines.every(l => pts.every(p => !(l.get(p) || 0)))) {
+    canvas.appendChild(el('div', 'hp-silent', '暂无活动'));
+  }
 
 
   // 刻度：颜色跟这条轴上的线走（双轴时一眼对得上）。

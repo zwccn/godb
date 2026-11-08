@@ -255,44 +255,79 @@ try {
       <span class="hero-title" id="heroTitle">采样中…</span>
       <span class="hero-sub" id="heroSub"></span>
     </div>
-    <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
-         role="img" aria-label="健康分">
-      <span class="hs-cap">健康分</span>
-      <span class="hs-gauge">
-        <svg class="hs-ring" viewBox="0 0 44 44" aria-hidden="true">
-          <!-- 弧线用渐变：尾巴淡、头实，看起来像「走了一圈」而不是一根色带 -->
-          <defs>
-            <linearGradient id="hsGrad" x1="0" y1="0" x2="1" y2="1">
-              <!-- 尾巴从 .35 提到 .55：38px 的小环上那点淡像个「走向」，
-                   放大到 114px 之后，淡的那四分之一圈看起来像**环缺了一角** ——
-                   100 分本该是完整一圈。留一点轻重差别就够，不要真的淡掉。 -->
-              <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".55"></stop>
-              <stop offset=".65" stop-color="var(--hs-c)" stop-opacity=".9"></stop>
-              <stop offset="1" stop-color="var(--hs-c)"></stop>
-            </linearGradient>
-            <!-- 霓虹光：**必须用 SVG 自己的滤镜**，不能用 CSS 的 filter: drop-shadow。
-                 CSS filter 作用于 SVG 子元素时，Chrome 会整块 SVG 视口（114×114）
-                 一起提亮，环外面套出一个明显的方形亮区 —— 38px 时看不出来，
-                 放大到 3 倍就藏不住了。SVG 滤镜只处理被作用的那个圆。
-                 叠两遍模糊再压回原图 = 中间实、外面散。 -->
-            <filter id="hsGlow" x="-25%" y="-25%" width="150%" height="150%">
-              <feGaussianBlur in="SourceGraphic" stdDeviation="1.8" result="b"></feGaussianBlur>
-              <feMerge>
-                <feMergeNode in="b"></feMergeNode>
-                <feMergeNode in="b"></feMergeNode>
-                <feMergeNode in="SourceGraphic"></feMergeNode>
-              </feMerge>
-            </filter>
-          </defs>
-          <circle class="hs-bg" cx="22" cy="22" r="18"></circle>
-          <circle class="hs-fg" id="homeScoreArc" cx="22" cy="22" r="18"
-                  filter="url(#hsGlow)"
-                  stroke-dasharray="113.1" stroke-dashoffset="113.1"></circle>
-        </svg>
-        <b class="hs-val" id="homeScoreVal">—</b>
-      </span>
-      <span class="hs-grade" id="homeScoreGrade">采样中</span>
-      <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
+    <!-- 中列：球 + 两侧的「翼」。
+         翼是**纯装饰**（aria-hidden + pointer-events:none）。它只回答一个问题：
+         球两侧各空 300~400px，什么都不放像没画完，放数据又会和左右两侧的
+         结论 / 累计数抢注意力 —— 所以用**没有信息量的线**去填。
+         形状：七道从球侧收拢、向翼尖散开的曲线，取健康环同一个色（--hs-tone），
+         快到翼尖时渐隐到 0。「硬截断」的一排线看着像胡须，而这个界面里
+         所有发光和线条都该是「散开的」，不是「断掉的」——渐隐靠 CSS mask，
+         比在每条 path 上写渐变省事，也不会和 <use> 的坐标打架。
+
+         为什么不画一个横跨整行的大 SVG：hero 是 1fr auto 1fr 网格，两侧列宽
+         随窗口变，一个 viewBox 拉满会被 preserveAspectRatio 扭成不同的斜度；
+         左右各一个、贴着球定位、尺寸交给 CSS 的 clamp，形状才永远不变形。 -->
+    <div class="hero-mid">
+      <svg class="hero-wing l" viewBox="0 0 250 120" aria-hidden="true" focusable="false">
+        <g id="heroWingPaths" fill="none" stroke="currentColor" stroke-linecap="round">
+          <!-- 七道：中间那条（主脊）最粗最实，往外逐渐变细变淡 ——
+               五道等宽看起来像一排胡须，有了粗细主次才像一片翼。 -->
+          <path d="M250 30 C186 30,120 18,10 2"     stroke-width="1"   opacity=".38"></path>
+          <path d="M250 40 C188 38,126 30,16 16"    stroke-width="1"   opacity=".42"></path>
+          <path d="M250 52 C190 50,130 44,18 34"    stroke-width="1.5" opacity=".6"></path>
+          <path d="M250 60 C190 60,132 56,20 52"    stroke-width="1.8" opacity=".7"></path>
+          <path d="M250 70 C190 70,132 72,22 78"    stroke-width="1.5" opacity=".58"></path>
+          <path d="M250 82 C188 82,126 92,18 104"   stroke-width="1"   opacity=".4"></path>
+          <path d="M250 92 C186 92,120 104,10 118"  stroke-width="1"   opacity=".34"></path>
+        </g>
+      </svg>
+      <!-- 右翼用 <use> 引同一组线，CSS 里 scaleX(-1) 镜像 —— 形状只写一遍，
+           改一处两边同时变，不会出现左右不对称。两翼都排在卡片**前面**：
+           定位元素按 DOM 顺序绘制，右翼如果排在卡片后面，那 12px 的负 margin
+           会压在卡片边上（给 .home-score 加 z-index 又不行 —— 那会把它变成
+           层叠上下文，把里面明细浮层的 z-index:6 一起关进去）。 -->
+      <svg class="hero-wing r" viewBox="0 0 250 120" aria-hidden="true" focusable="false">
+        <use href="#heroWingPaths"></use>
+      </svg>
+      <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
+           role="img" aria-label="健康分">
+        <span class="hs-cap">健康分</span>
+        <span class="hs-gauge">
+          <svg class="hs-ring" viewBox="0 0 44 44" aria-hidden="true">
+            <!-- 弧线用渐变：尾巴淡、头实，看起来像「走了一圈」而不是一根色带 -->
+            <defs>
+              <linearGradient id="hsGrad" x1="0" y1="0" x2="1" y2="1">
+                <!-- 尾巴从 .35 提到 .55：38px 的小环上那点淡像个「走向」，
+                     放大到 114px 之后，淡的那四分之一圈看起来像**环缺了一角** ——
+                     100 分本该是完整一圈。留一点轻重差别就够，不要真的淡掉。 -->
+                <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".55"></stop>
+                <stop offset=".65" stop-color="var(--hs-c)" stop-opacity=".9"></stop>
+                <stop offset="1" stop-color="var(--hs-c)"></stop>
+              </linearGradient>
+              <!-- 霓虹光：**必须用 SVG 自己的滤镜**，不能用 CSS 的 filter: drop-shadow。
+                   CSS filter 作用于 SVG 子元素时，Chrome 会整块 SVG 视口（114×114）
+                   一起提亮，环外面套出一个明显的方形亮区 —— 38px 时看不出来，
+                   放大到 3 倍就藏不住了。SVG 滤镜只处理被作用的那个圆。
+                   叠两遍模糊再压回原图 = 中间实、外面散。 -->
+              <filter id="hsGlow" x="-25%" y="-25%" width="150%" height="150%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="1.8" result="b"></feGaussianBlur>
+                <feMerge>
+                  <feMergeNode in="b"></feMergeNode>
+                  <feMergeNode in="b"></feMergeNode>
+                  <feMergeNode in="SourceGraphic"></feMergeNode>
+                </feMerge>
+              </filter>
+            </defs>
+            <circle class="hs-bg" cx="22" cy="22" r="18"></circle>
+            <circle class="hs-fg" id="homeScoreArc" cx="22" cy="22" r="18"
+                    filter="url(#hsGlow)"
+                    stroke-dasharray="113.1" stroke-dashoffset="113.1"></circle>
+          </svg>
+          <b class="hs-val" id="homeScoreVal">—</b>
+        </span>
+        <span class="hs-grade" id="homeScoreGrade">采样中</span>
+        <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
+      </div>
     </div>
     <div class="hero-side r">
       <span class="hero-meta" id="heroMeta"></span>
@@ -321,8 +356,6 @@ try {
                aria-hidden="true" focusable="false"><path d="M3.6 9h11.6"/><path d="M12.6 5.6 16 9l-3.4 3.4"/><path d="M20.4 15H8.8"/><path d="M11.4 11.6 8 15l3.4 3.4"/></svg>
           <span class="hc-title">请求</span>
         </span>
-        <span class="hc-sub">QPS · 连接</span>
-        <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartRate"></div>
     </section>
@@ -334,8 +367,6 @@ try {
                aria-hidden="true" focusable="false"><rect x="3.4" y="5.4" width="17.2" height="13.2" rx="2.2"/><path d="M3.4 13.6h17.2"/><path d="M6.8 9.5h6.4"/><circle cx="16.9" cy="16.5" r=".95" fill="currentColor" stroke="none"/></svg>
           <span class="hc-title">存储 I/O</span>
         </span>
-        <span class="hc-sub">带宽 · 读 · 写</span>
-        <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartIO"></div>
     </section>
@@ -348,7 +379,6 @@ try {
           <span class="hc-title">CPU</span>
         </span>
         <span class="hc-sub">进程占用</span>
-        <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartCPU"></div>
     </section>
@@ -361,7 +391,6 @@ try {
           <span class="hc-title">内存</span>
         </span>
         <span class="hc-sub">堆内存</span>
-        <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartMem"></div>
     </section>

@@ -6575,6 +6575,47 @@ class CDP {
       icoState.length === 4 && icoBad.length === 0,
       icoState.map(i => (i.has ? i.w + 'px' : '无')).join(' · '));
 
+    /* 健康球两侧的「翼」：纯装饰，回答「这块空地该不该有东西」。
+       守四件事 —— 左右各一片、对读屏和鼠标都隐身（装饰不能拦点击）、
+       排在球**外面**而不是压在球上、以及不撞到两侧的文字。
+       最后一条尤其值得守：翼是绝对定位的，窗口一窄就会爬到结论文字上面。 */
+    const wingUi = await cdp.eval(`(() => {
+      const wl = document.querySelector('.hero-wing.l');
+      const wr = document.querySelector('.hero-wing.r');
+      const card = document.getElementById('homeScore');
+      if (!wl || !wr || !card) return { miss: true };
+      const box = e => e.getBoundingClientRect();
+      const side = document.querySelector('.hero-side.l');
+      const lastTxt = side.lastElementChild || side.firstElementChild;
+      return {
+        n: document.querySelectorAll('.hero-wing').length,
+        paths: wl.querySelectorAll('path').length,
+        reuse: !!wr.querySelector('use'),
+        hidden: wl.getAttribute('aria-hidden') === 'true' && wr.getAttribute('aria-hidden') === 'true',
+        pent: getComputedStyle(wl).pointerEvents,
+        w: Math.round(box(wl).width),
+        lLeft: Math.round(box(wl).left),
+        lRight: Math.round(box(wl).right), rLeft: Math.round(box(wr).left),
+        ballL: Math.round(box(card).left), ballR: Math.round(box(card).right),
+        txtR: Math.round(box(lastTxt).right),
+        // 两片翼都要排在卡片**前面**：定位元素按 DOM 顺序绘制，右翼排在后面
+        // 会把它那 12px 负 margin 画到卡片边上（而给卡片加 z-index 会把
+        // 明细浮层关进新的层叠上下文）
+        lFirst: wl.compareDocumentPosition(card) === Node.DOCUMENT_POSITION_FOLLOWING,
+        rFirst: wr.compareDocumentPosition(card) === Node.DOCUMENT_POSITION_FOLLOWING,
+      };
+    })()`);
+    check('总览：健康球两侧各一片「翼」（读屏与鼠标都穿透，排在球外侧，不撞文字）',
+      !wingUi.miss && wingUi.n === 2 && wingUi.paths === 7 && wingUi.reuse
+      && wingUi.hidden && wingUi.pent === 'none'
+      && wingUi.lRight >= wingUi.ballL - 2 && wingUi.lRight <= wingUi.ballL + 16
+      && wingUi.rLeft <= wingUi.ballR + 2 && wingUi.rLeft >= wingUi.ballR - 16
+      && wingUi.lLeft >= wingUi.txtR
+      && wingUi.lFirst && wingUi.rFirst && wingUi.w >= 100,
+      wingUi.miss ? '找不到翼'
+        : `翼 ${wingUi.w}px ×2 · 贴边 ${wingUi.lRight}/${wingUi.ballL} 与 ${wingUi.rLeft}/${wingUi.ballR}`
+          + ` · 文字到 ${wingUi.txtR} · 穿透 ${wingUi.pent} · 排在球前 ${wingUi.lFirst && wingUi.rFirst}`);
+
     /* 坐标：四张图都要有 y 刻度，请求图左右各一套；刻度里不能出现负数
        （CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */
     const axisIssue = [];

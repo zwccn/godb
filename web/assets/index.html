@@ -217,6 +217,35 @@ try {
     <span class="home-dot green" id="homeDot" aria-hidden="true"></span>
     <span class="home-name" id="homeDB">godb</span>
     <span class="home-ver" id="homeVer"></span>
+
+    <!-- 健康分：跟着 LOGO 走的一个环形表。数字是 0~100 的合成分（算法见
+         renderHomeScore），环的颜色是等级（优秀 / 良好 / 注意 / 危险），
+         悬停出明细 —— 只说「96 分」而不说扣在哪，没人会信这个数。 -->
+    <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
+         role="img" aria-label="健康分">
+      <span class="hs-gauge">
+        <svg class="hs-ring" viewBox="0 0 44 44" aria-hidden="true">
+          <!-- 弧线用渐变：尾巴淡、头实，看起来像「走了一圈」而不是一根色带 -->
+          <defs>
+            <linearGradient id="hsGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".35"></stop>
+              <stop offset=".65" stop-color="var(--hs-c)" stop-opacity=".85"></stop>
+              <stop offset="1" stop-color="var(--hs-c)"></stop>
+            </linearGradient>
+          </defs>
+          <circle class="hs-bg" cx="22" cy="22" r="18"></circle>
+          <circle class="hs-fg" id="homeScoreArc" cx="22" cy="22" r="18"
+                  stroke-dasharray="113.1" stroke-dashoffset="113.1"></circle>
+        </svg>
+        <b class="hs-val" id="homeScoreVal">—</b>
+      </span>
+      <span class="hs-meta">
+        <span class="hs-cap">健康分</span>
+        <span class="hs-grade" id="homeScoreGrade">采样中</span>
+      </span>
+      <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
+    </div>
+
     <span class="home-state" id="homeState">连接中…</span>
     <span class="spacer"></span>
     <span class="home-uptime" id="homeUptime">已运行 —</span>

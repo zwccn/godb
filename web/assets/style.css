@@ -2330,6 +2330,158 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   font-size: calc(12px * var(--fs));
   color: var(--hm-dim);
 }
+
+/* ---- 健康分：LOGO 旁边那个环 ----
+   80 毫秒扫一眼就知道「现在好不好」，比读三个数字快。环的缺口 = 扣掉的分，
+   颜色 = 等级；「优秀/良好」不闪，「注意/危险」才呼吸 —— 没事的时候别晃眼睛。 */
+.home-score {
+  --hs-c: var(--hm-ok);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 10px 2px 4px;
+  border: 1px solid var(--hm-line);
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--hm-bg-2), var(--hm-bg-1));
+  user-select: none;
+  outline: none;
+}
+.home-score:focus-visible { border-color: var(--hs-c); }
+.home-score[data-grade="good"] { --hs-c: var(--hm-accent); }
+.home-score[data-grade="warn"] { --hs-c: var(--hm-warn); }
+.home-score[data-grade="bad"] { --hs-c: var(--hm-danger); }
+
+.hs-gauge {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+}
+.hs-ring {
+  display: block;
+  width: 38px;
+  height: 38px;
+  transform: rotate(-90deg);          /* 让缺口从 12 点开始 */
+}
+.hs-ring circle {
+  fill: none;
+  stroke-width: 3.6;
+}
+.hs-bg { stroke: var(--hm-line); }
+.hs-fg {
+  stroke: url(#hsGrad);
+  stroke-linecap: round;
+  /* 数字动画一秒一档，环跟着缓一下，否则每 2 秒「啪」地跳一段 */
+  transition: stroke-dashoffset .6s cubic-bezier(.3, .8, .3, 1), stroke .3s;
+  filter: drop-shadow(0 0 4px var(--hs-c));
+}
+.hs-val {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  /* 12px 才放得下三位数「100」：13px 时它左右都顶到环上 */
+  font-size: calc(12px * var(--fs));
+  font-weight: 600;
+  line-height: 1;
+  color: var(--hs-c);
+  font-variant-numeric: tabular-nums;
+}
+.hs-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1;
+}
+.hs-cap {
+  font-size: calc(9.5px * var(--fs));
+  letter-spacing: .06em;
+  color: var(--hm-faint);
+}
+.hs-grade {
+  font-size: calc(11.5px * var(--fs));
+  color: var(--hs-c);
+}
+
+/* 真出事的时候才呼吸：连着看一天，一个一直闪的东西比红灯还烦 */
+@keyframes hsBreath {
+  0%, 100% { opacity: .45; }
+  50% { opacity: 1; }
+}
+/* 不健康时整块胶囊外面泛一层同色光 —— 余光能扫到；正常时保持安静 */
+.home-score[data-grade="warn"] { box-shadow: 0 0 14px -4px var(--hs-c); }
+.home-score[data-grade="bad"] { box-shadow: 0 0 18px -3px var(--hs-c); }
+.home-score[data-grade="warn"] .hs-fg,
+.home-score[data-grade="bad"] .hs-fg { animation: hsBreath 1.6s ease-in-out infinite; }
+.home-score[data-grade="bad"] .hs-val { animation: hsBreath 1.6s ease-in-out infinite; }
+
+/* 悬停/聚焦出明细：分数不解释就是玄学 */
+.hs-tip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 6;
+  min-width: 236px;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--hm-line);
+  border-radius: 8px;
+  background: var(--hm-bg-2);
+  box-shadow: 0 12px 30px var(--shadow-color);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--fs));
+  color: var(--hm-dim);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity .12s, transform .12s;
+}
+.home-score:hover .hs-tip,
+.home-score:focus-visible .hs-tip { opacity: 1; transform: none; }
+.hs-tip-h {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--hm-line);
+  color: var(--hm-faint);
+}
+.hs-tip-h b { color: var(--hs-c); font-size: calc(13px * var(--fs)); }
+.hs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.7;
+}
+/* 58px 才放得下「执行占用」四个字；46px 时它会折成两行，把整行撑高 */
+.hs-row .hs-k { flex: 0 0 58px; white-space: nowrap; }
+.hs-row .hs-bar {
+  flex: 1 1 auto;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hm-line);
+  overflow: hidden;
+}
+.hs-row .hs-bar i { display: block; height: 100%; border-radius: 2px; background: var(--hm-ok); }
+.hs-row[data-lv="mid"] .hs-bar i { background: var(--hm-accent); }
+.hs-row[data-lv="low"] .hs-bar i { background: var(--hm-warn); }
+.hs-row b {
+  flex: 0 0 auto;
+  width: 24px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--hm-text);
+  font-variant-numeric: tabular-nums;
+}
+.hs-tip-f {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hm-line);
+  color: var(--hm-faint);
+}
 .home-uptime,
 .home-clock {
   font-family: var(--mono);

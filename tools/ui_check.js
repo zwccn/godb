@@ -6226,6 +6226,79 @@ class CDP {
     check('总览：鼠标移开，十字线和读数牌都收起来', !hoverOff.cross && !hoverOff.tip,
       `十字线 ${hoverOff.cross} · 读数牌 ${hoverOff.tip}`);
 
+    /* 健康分：0~100 的合成分，环的缺口跟着分数走。
+       真实数据永远是满分（库里没事），扣分路径只能**喂构造快照**来测 ——
+       顺便这也验证了算法本身：每一档的阈值是哪来的。 */
+    const hsBad = await cdp.eval(`(() => {
+      homeScoreShown = -1;
+      renderHomeScore({
+        water: { queue: 6, wait: 3, exec: 30, execMax: 32 },
+        layers: { running: { p95Ns: 2.4e8 } },
+        proc: { cpuCore: 12, numCpu: 16, heapBytes: 2.1e9 },
+      });
+      return {
+        val: Number(document.getElementById('homeScoreVal').textContent),
+        grade: document.getElementById('homeScoreGrade').textContent,
+        dg: document.getElementById('homeScore').dataset.grade,
+        dash: Number(document.getElementById('homeScoreArc').style.strokeDashoffset),
+        rows: [...document.querySelectorAll('#homeScoreTip .hs-row .hs-k')].map(e => e.textContent),
+        foot: (document.querySelector('#homeScoreTip .hs-tip-f') || {}).textContent || '',
+      };
+    })()`);
+    // 手算：排队 6/8→25 · 等锁 3/4→25 · p95 240ms→29 · 执行 30/32→65
+    //       · CPU 12/16→17 · 内存 2.1GB→1 ==加权==> 28 分
+    const C = 2 * Math.PI * 18;
+    check('健康分：坏快照算出 28 分「危险」，环的缺口与分数一致',
+      hsBad.val === 28 && hsBad.grade === '危险' && hsBad.dg === 'bad'
+      && Math.abs(hsBad.dash - C * (1 - 28 / 100)) < 1.5
+      && hsBad.rows.join('/') === '排队/等锁/延迟/执行占用/CPU/内存'
+      && /扣分最多：内存/.test(hsBad.foot),
+      `${hsBad.val} 分 ${hsBad.grade} · dash ${hsBad.dash.toFixed(1)}（期望 ${(C * .72).toFixed(1)}）· ${hsBad.foot}`);
+
+    const hsOk = await cdp.eval(`(() => {
+      homeScoreShown = -1;
+      renderHomeScore({
+        water: { queue: 0, wait: 0, exec: 0, execMax: 32 },
+        layers: { running: { p95Ns: 5e5 } },
+        proc: { cpuCore: 0, numCpu: 16, heapBytes: 32e6 },
+      });
+      return {
+        val: Number(document.getElementById('homeScoreVal').textContent),
+        grade: document.getElementById('homeScoreGrade').textContent,
+        dg: document.getElementById('homeScore').dataset.grade,
+        dash: Number(document.getElementById('homeScoreArc').style.strokeDashoffset),
+        foot: (document.querySelector('#homeScoreTip .hs-tip-f') || {}).textContent || '',
+      };
+    })()`);
+    check('健康分：全绿快照是 100 分「优秀」，环整圈（缺口 0）',
+      hsOk.val === 100 && hsOk.grade === '优秀' && hsOk.dg === 'ok'
+      && hsOk.dash === 0 && /可以走开/.test(hsOk.foot),
+      `${hsOk.val} 分 ${hsOk.grade} · dash ${hsOk.dash} · ${hsOk.foot}`);
+
+    // 平滑：坏消息立刻掉，好消息慢慢回 —— 只喂一次好快照不该直接弹回满分
+    const hsSmooth = await cdp.eval(`(() => {
+      homeScoreShown = 40;
+      const keep = homeScoreShown;
+      renderHomeScore({ water: { queue: 0, wait: 0, exec: 0, execMax: 32 },
+        layers: { running: { p95Ns: 5e5 } }, proc: { cpuCore: 0, numCpu: 16, heapBytes: 32e6 } });
+      return { from: keep, after: Number(document.getElementById('homeScoreVal').textContent) };
+    })()`);
+    check('健康分：回分是慢的（一次采样只涨一截，不会横跳）',
+      hsSmooth.after > hsSmooth.from && hsSmooth.after < 100,
+      `${hsSmooth.from} → ${hsSmooth.after}（目标 100）`);
+
+    // 把显示值打回「未初始化」，下一个 2 秒采样会按真实数据重算
+    await cdp.eval(`homeScoreShown = -1`);
+    await sleep(2400);
+    const hsLive = await cdp.eval(`(() => ({
+      val: Number(document.getElementById('homeScoreVal').textContent),
+      rows: document.querySelectorAll('#homeScoreTip .hs-row').length,
+      state: document.getElementById('homeState').classList.contains('hidden'),
+    }))()`);
+    check('健康分：接真实数据后仍是 0~100 的整数，且正常时不写「健康」二字',
+      hsLive.val >= 0 && hsLive.val <= 100 && hsLive.rows === 6 && hsLive.state,
+      `${hsLive.val} 分 · 明细 ${hsLive.rows} 行 · 状态词隐藏 ${hsLive.state}`);
+
     /* 总览要跟着皮肤走。早先它是固定深色（「科技感靠深底亮数字」），代价是
        在总览页换皮肤**整页纹丝不动** —— 顶栏、设置页都变了，看着像功能坏了。 */
     const skinHome = await cdp.eval(`(async () => {

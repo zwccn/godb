@@ -6181,6 +6181,11 @@ const homeEls = {
   db: document.getElementById('homeDB'),
   ver: document.getElementById('homeVer'),
   state: document.getElementById('homeState'),
+  score: document.getElementById('homeScore'),
+  scoreVal: document.getElementById('homeScoreVal'),
+  scoreArc: document.getElementById('homeScoreArc'),
+  scoreGrade: document.getElementById('homeScoreGrade'),
+  scoreTip: document.getElementById('homeScoreTip'),
   uptime: document.getElementById('homeUptime'),
   clock: document.getElementById('homeClock'),
   kpis: document.getElementById('homeKpis'),
@@ -6235,6 +6240,141 @@ const HOME_KPIS = [
     },
   },
 ];
+
+/* ---------------- 健康分 ----------------
+
+   一个 0~100 的数，回答「现在好不好」。下面已经有三个数字（堵在哪）和四张
+   走势（怎么变的），但它们都要**读**；健康分是给「扫一眼」用的 —— 环的缺口
+   和颜色在余光里就能判断，不用去比数字。
+
+   分数是六项加权平均。权重不是平均分的，按「这一项坏了，正在等的人立刻
+   有没有感觉」定：
+
+   | 项 | 权重 | 为什么这么定 |
+   |---|---|---|
+   | 排队 | 30 | 连执行槽位都没拿到，是真的在等 |
+   | 等锁 | 25 | 拿到了槽位却被锁挡住，比排队更接近「卡死」 |
+   | 延迟 | 20 | 没排队也没等锁，但每条语句都慢 —— 慢也是病 |
+   | 执行占用 | 10 | 只是「忙」。满负荷本身不算病，只有贴着上限才扣 |
+   | CPU | 10 | 同上；把核吃满会拖慢一切 |
+   | 内存 | 5 | 堆大不一定难受（Go 自己会 GC），只当提示 |
+
+   几个刻意的选择：
+
+   - **排队 / 等锁数绝对个数**，不用 queue/queueMax：那个上限是 10000，
+     队里躺 3 个请求时比值才 0.03%，可体感已经是「塞住了」。
+   - **延迟用 p95，不用 max**：一条偶发慢查询就能把 max 顶到几秒，分数会
+     毫无理由地砸下去；p95 才代表「大多数人现在的体感」。
+   - **执行 / CPU 给「忙」留了余地**：触顶时这一项还剩 40 分而不是 0 ——
+     并发打满但队列是空的，那是有人干活，不是有病。
+   - **平滑是单向的**：坏消息立刻反映，好消息慢慢涨回来。反过来的话，
+     每 2 秒一次的采样里 p95 一抖，分数就横跳，那种表没人信。
+*/
+const HOME_HEALTH = [
+  {
+    name: '排队', w: 30,
+    // 8 个排队就扣光：再多也只是「全堵住了」，不用区分 8 个还是 80 个
+    score: m => 100 * (1 - Math.min(1, ((m.water || {}).queue || 0) / 8)),
+  },
+  {
+    name: '等锁', w: 25,
+    score: m => 100 * (1 - Math.min(1, ((m.water || {}).wait || 0) / 4)),
+  },
+  {
+    name: '延迟', w: 20,
+    // p95 每差 10 倍扣 30 分：1ms 满分，10ms → 70，100ms → 40，1s → 10
+    score: m => {
+      const ms = (((m.layers || {}).running || {}).p95Ns || 0) / 1e6;
+      return ms <= 1 ? 100 : Math.max(0, 100 - 30 * Math.log10(ms));
+    },
+  },
+  {
+    name: '执行占用', w: 10,
+    score: m => {
+      const w = m.water || {};
+      if (!w.execMax) return 100;                      // 不限并发，没有上限可比
+      const util = Math.min(1, (w.exec || 0) / w.execMax);
+      return util <= .85 ? 100 : 100 - ((util - .85) / .15) * 60;
+    },
+  },
+  {
+    name: 'CPU', w: 10,
+    score: m => {
+      const p = m.proc || {};
+      if (!p.numCpu) return 100;
+      return 100 * (1 - Math.min(1, (p.cpuCore || 0) / p.numCpu / .9));
+    },
+  },
+  {
+    name: '内存', w: 5,
+    // 128 MB 以内满分，之后每翻一倍扣 25 分（2 GB 扣光）
+    score: m => {
+      const mb = ((m.proc || {}).heapBytes || 0) / 1048576;
+      return mb <= 128 ? 100 : Math.max(0, 100 - 25 * Math.log2(mb / 128));
+    },
+  },
+];
+
+// 环的周长：r = 18（写死在 SVG 里）。改半径要同步改这三个地方。
+const HS_CIRC = 2 * Math.PI * 18;
+
+// 平滑后的显示值。-1 = 还没采到第一个点。
+let homeScoreShown = -1;
+
+function homeGrade(v) {
+  if (v >= 90) return { id: 'ok', word: '优秀' };
+  if (v >= 75) return { id: 'good', word: '良好' };
+  if (v >= 55) return { id: 'warn', word: '注意' };
+  return { id: 'bad', word: '危险' };
+}
+
+function renderHomeScore(m) {
+  const els = homeEls;
+  if (!els.score) return;
+  const parts = HOME_HEALTH.map(h => ({
+    name: h.name,
+    w: h.w,
+    v: Math.round(Math.max(0, Math.min(100, h.score(m)))),
+  }));
+  const sumW = parts.reduce((a, b) => a + b.w, 0);
+  const target = parts.reduce((a, b) => a + b.w * b.v, 0) / sumW;
+
+  if (homeScoreShown < 0) homeScoreShown = target;
+  else {
+    // 掉分走 55%（一眼能看到出事了），回分走 18%（别因为一次采样就弹回满分）
+    const k = target < homeScoreShown ? .55 : .18;
+    homeScoreShown += (target - homeScoreShown) * k;
+  }
+  const val = Math.round(homeScoreShown);
+  const g = homeGrade(val);
+
+  if (els.scoreVal.textContent !== String(val)) els.scoreVal.textContent = String(val);
+  if (els.scoreGrade.textContent !== g.word) els.scoreGrade.textContent = g.word;
+  if (els.score.getAttribute('data-grade') !== g.id) {
+    els.score.setAttribute('data-grade', g.id);
+    els.score.setAttribute('aria-label', '健康分 ' + val + '，' + g.word);
+  }
+  els.scoreArc.style.strokeDashoffset = (HS_CIRC * (1 - val / 100)).toFixed(1);
+
+  // 明细：每项一条。分数只是结论，扣在哪才是能动手的地方。
+  // 每 2 秒重建一次（六行 DOM，很轻），省掉「哪些值变了」的比对逻辑。
+  const worst = parts.slice().sort((a, b) => a.v - b.v)[0];
+  let html = '<div class="hs-tip-h">健康分<b>' + val + '</b>' + g.word + '</div>';
+  for (const p of parts) {
+    const lv = p.v >= 90 ? 'ok' : (p.v >= 60 ? 'mid' : 'low');
+    html += '<div class="hs-row" data-lv="' + lv + '">'
+      + '<span class="hs-k">' + p.name + '</span>'
+      + '<span class="hs-bar"><i style="width:' + p.v + '%"></i></span>'
+      + '<b>' + p.v + '</b></div>';
+  }
+  if (worst && worst.v < 100) {
+    html += '<div class="hs-tip-f">扣分最多：' + worst.name + '（' + worst.v
+      + '）· 权重 ' + worst.w + '%</div>';
+  } else {
+    html += '<div class="hs-tip-f">各项满分 · 可以走开</div>';
+  }
+  els.scoreTip.innerHTML = html;
+}
 
 // fmtBytes 返回的是 "156 MB" 这种连单位的一整串。大屏里数字和单位要分开排版
 // （数字大、单位小一号灰一档），所以在最后一个空格处劈开。
@@ -6330,8 +6470,13 @@ function renderHome(m) {
     if (homeEls.uptime.textContent !== up) homeEls.uptime.textContent = up;
   }
   // 顶栏那格只说状态，结论和建议放底部一条 —— 两处都写「运行正常」等于占两次地方。
-  const stateText = lvl === 'red' ? '已触顶' : (lvl === 'yellow' ? '有排队' : '健康');
+  //
+  // 正常时**不写**「健康」：旁边那个健康分已经说了（而且分可能因为延迟低而
+  // 只有 60 分，这时一个「健康」会和环上的「注意」打架）。只有真出事
+  // （有排队 / 已触顶）才冒出来 —— 那正是需要一句话说明原因的时候。
+  const stateText = lvl === 'red' ? '已触顶' : (lvl === 'yellow' ? '有排队' : '');
   if (homeEls.state.textContent !== stateText) homeEls.state.textContent = stateText;
+  homeEls.state.classList.toggle('hidden', !stateText);
 
   for (const k of HOME_KPIS) {
     const cell = homeEls.kpis.querySelector('[data-kpi="' + k.id + '"]');
@@ -6349,6 +6494,8 @@ function renderHome(m) {
     if (subEl.textContent !== sub) subEl.textContent = sub;
     cell.dataset.level = (k.level && k.level(m)) || '';
   }
+
+  renderHomeScore(m);
 
   const title = lvl === 'red' ? '撑不住了' : (lvl === 'yellow' ? '有点忙' : '没事，可以走开');
   const sub = lvl === 'green'

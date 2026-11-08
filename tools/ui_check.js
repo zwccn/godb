@@ -6299,6 +6299,82 @@ class CDP {
       hsLive.val >= 0 && hsLive.val <= 100 && hsLive.rows === 6 && hsLive.state,
       `${hsLive.val} 分 · 明细 ${hsLive.rows} 行 · 状态词隐藏 ${hsLive.state}`);
 
+    /* ---- 六套皮肤下的配色体检 ----
+       只断「皮肤生效了」不够：芋紫下森林绿的环、橄榄黄的 CPU 线在淡紫底上
+       又闷又脏（对比度 2.97:1），薄荷绿下强调色和内存线撞成同一个绿 ——
+       这些肉眼能看出来，但只有量出来才防得住下次改色。
+       量三件事：线对卡片底的对比度、同一张图里各线的色相间隔、环的对比度。 */
+    await cdp.eval(`window.__skinProbe = () => {
+      const rgb = s => {
+        const m = /rgba?\\(([^)]+)\\)/.exec(s);
+        return m ? (n => ({ r: n[0], g: n[1], b: n[2] }))(m[1].split(',').map(parseFloat)) : null;
+      };
+      const lum = c => {
+        const f = v => { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); };
+        return .2126 * f(c.r) + .7152 * f(c.g) + .0722 * f(c.b);
+      };
+      const ratio = (a, b) => {
+        const A = lum(a), B = lum(b);
+        return (Math.max(A, B) + .05) / (Math.min(A, B) + .05);
+      };
+      const hue = c => {
+        const r = c.r / 255, g = c.g / 255, b = c.b / 255;
+        const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+        if (!d) return null;
+        let h;
+        if (mx === r) h = ((g - b) / d) % 6;
+        else if (mx === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        return (h * 60 + 360) % 360;
+      };
+      const cards = [...document.querySelectorAll('.home-chart')];
+      const cardBg = rgb(getComputedStyle(cards[0]).backgroundImage);
+      const series = [];
+      for (const c of cards) {
+        const title = (c.querySelector('.hc-title') || {}).textContent || '';
+        for (const i of c.querySelectorAll('.home-lg i')) {
+          const col = rgb(getComputedStyle(i).backgroundColor);
+          if (!col) continue;
+          series.push({
+            chart: title,
+            name: (i.nextSibling && i.nextSibling.textContent) || '',
+            cr: +ratio(col, cardBg).toFixed(2),
+            hue: hue(col) == null ? null : +hue(col).toFixed(0),
+          });
+        }
+      }
+      const ring = rgb(getComputedStyle(document.getElementById('homeScoreVal')).color);
+      return {
+        theme: document.documentElement.getAttribute('data-theme') || 'dark',
+        cardBg, series,
+        ring: { cr: +ratio(ring, cardBg).toFixed(2), hue: +hue(ring).toFixed(0) },
+      };
+    }`);
+    const skinThemes = ['steel', 'dark', 'aurora', 'sky', 'taro', 'mint'];
+    const skinBack = await cdp.eval(`document.documentElement.getAttribute('data-theme') || 'dark'`);
+    for (const th of skinThemes) {
+      await cdp.eval(`applyTheme('${th}', true)`);
+      await settle(cdp);
+      const p = await cdp.eval(`__skinProbe()`);
+      // 「连接」是右轴上的次要线（中性灰），色相本来就和 QPS 接近，只查对比度不查色相
+      const io = p.series.filter(s => s.chart === '存储 I/O');
+      let minGap = 360;
+      for (let i = 0; i < io.length; i++) {
+        for (let j = i + 1; j < io.length; j++) {
+          const d = Math.abs(io[i].hue - io[j].hue);
+          minGap = Math.min(minGap, Math.min(d, 360 - d));
+        }
+      }
+      const low = p.series.filter(s => s.cr < 3.5);
+      check(`皮肤「${th}」：曲线对卡片底 ≥3.5:1、I/O 三条线色相相隔 ≥45°`,
+        low.length === 0 && minGap >= 45 && p.ring.cr >= 4,
+        `环 ${p.ring.cr}:1 · 最低线 ${Math.min(...p.series.map(s => s.cr))}:1`
+        + ` · I/O 色相最小间隔 ${minGap}°`
+        + (low.length ? ' · 偏淡：' + low.map(s => s.name + ' ' + s.cr).join(' / ') : ''));
+    }
+    await cdp.eval(`applyTheme('${skinBack}', true)`);
+    await settle(cdp);
+
     /* 总览要跟着皮肤走。早先它是固定深色（「科技感靠深底亮数字」），代价是
        在总览页换皮肤**整页纹丝不动** —— 顶栏、设置页都变了，看着像功能坏了。 */
     const skinHome = await cdp.eval(`(async () => {

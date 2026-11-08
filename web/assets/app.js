@@ -2566,8 +2566,8 @@ function syncTopNav() {
   const er = document.getElementById('btnEr');
   const set = document.getElementById('btnSettings');
   const setOpen = !settingsPanel.classList.contains('hidden');
-  // 总览和控制台是「二选一」的两页：总览亮着的时候控制台不亮。
-  // 监控 / 模型图 / 设置是覆盖层，开着时总览和控制台都不亮（它们盖在上面）。
+  // 总览和工作台是「二选一」的两页：总览亮着的时候工作台不亮。
+  // 监控 / 模型图 / 设置是覆盖层，开着时这两页都不亮（它们盖在上面）。
   if (ov) ov.classList.toggle('on', homeOpen && !monOpen && !setOpen && !erOpen);
   if (home) home.classList.toggle('on', !homeOpen && !monOpen && !setOpen && !erOpen);
   if (mon) mon.classList.toggle('on', monOpen);
@@ -13256,8 +13256,10 @@ erStage.addEventListener('contextmenu', ev => {
 erApplyView();
 
 /* 落地页：默认进总览。
-   带 #console 的深链仍然直接进编辑器 —— 那是给「存了书签、打开就想写 SQL」用的，
-   也是前端回归的入口（三百多条断言都假设编辑器在前台）。 */
+   带 #console 的深链仍然直接进工作台 —— 那是给「存了书签、打开就想写 SQL」用的，
+   也是前端回归的入口（四百多条断言都假设编辑器在前台）。
+   **hash 保持 #console 不改**：界面上这一格已经叫「工作台」了，但地址里这个片段
+   是内部标识，改了会让已存的链接和整套回归一起失效；要改名得同时认 #query。 */
 if (location.hash === '#console') {
   closeHome();
 } else {

@@ -272,6 +272,61 @@ try {
          为什么不画一个横跨整行的大 SVG：hero 是 1fr auto 1fr 网格，两侧列宽
          随窗口变，一个 viewBox 拉满会被 preserveAspectRatio 扭成不同的斜度；
          左右各一个、贴着球定位、尺寸交给 CSS 的 clamp，形状才永远不变形。 -->
+    <!-- 星系盘：把球当成核球，两侧羽翼当成盘面的亮缘。
+         四层，全用渐变做柔边（不用 feGaussianBlur —— 大元素加模糊在 Chrome 里
+         会渲染出随机色块，1x 下也能复现）：
+           ① 盘面色：最宽最淡的椭圆，给整个背景一层「那里有东西」的底色；
+           ② 核球辉光：比卡片大一圈，从卡片四周溢出来 —— 这是「盘心」唯一看得见的证据，
+              因为球本身把中间全挡住了；
+           ③ 热核：更小更白，压在卡片后面，只在卡片边上露一条；
+           ④ 尘埃带：一条压暗的扁椭圆，位置略低于盘面中心，把下半部吞掉一块。
+         羽翼在它之上（.hero-mid 的 z-index 更高），所以读起来是「亮缘浮在盘面上」。
+         rotate(-1.7°) 是故意的：完全水平会像一条背景色带，斜一点才像「一个盘」。 -->
+    <svg class="hero-galaxy" viewBox="0 0 1440 187" preserveAspectRatio="none"
+         aria-hidden="true" focusable="false">
+      <defs>
+        <radialGradient id="galDisk" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stop-color="var(--hs-tone)" stop-opacity="calc(.30 * var(--gal-a))"></stop>
+          <stop offset=".55" stop-color="var(--hs-tone)" stop-opacity="calc(.11 * var(--gal-a))"></stop>
+          <stop offset="1" stop-color="var(--hs-tone)" stop-opacity="0"></stop>
+        </radialGradient>
+        <radialGradient id="galBloom" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stop-color="var(--gal-core)" stop-opacity="calc(.92 * var(--gal-a))"></stop>
+          <stop offset=".30" stop-color="var(--hs-tone)" stop-opacity="calc(.50 * var(--gal-a))"></stop>
+          <stop offset=".62" stop-color="var(--hs-tone)" stop-opacity="calc(.17 * var(--gal-a))"></stop>
+          <stop offset=".86" stop-color="var(--hs-tone)" stop-opacity="calc(.04 * var(--gal-a))"></stop>
+          <stop offset="1" stop-color="var(--hs-tone)" stop-opacity="0"></stop>
+        </radialGradient>
+        <radialGradient id="galHot" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stop-color="var(--gal-core)" stop-opacity="calc(.80 * var(--gal-a))"></stop>
+          <stop offset=".34" stop-color="var(--gal-core)" stop-opacity="calc(.50 * var(--gal-a))"></stop>
+          <stop offset=".72" stop-color="var(--gal-core)" stop-opacity="calc(.15 * var(--gal-a))"></stop>
+          <stop offset="1" stop-color="var(--gal-core)" stop-opacity="0"></stop>
+        </radialGradient>
+        <!-- 尘埃带：中心是「压暗色」、边缘透掉 —— 不用模糊也是软边 -->
+        <radialGradient id="galLane" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stop-color="var(--gal-lane)" stop-opacity="0"></stop>
+          <stop offset=".42" stop-color="var(--gal-lane)" stop-opacity="calc(.90 * var(--gal-a))"></stop>
+          <stop offset=".68" stop-color="var(--gal-lane)" stop-opacity="calc(.94 * var(--gal-a))"></stop>
+          <stop offset=".88" stop-color="var(--gal-lane)" stop-opacity="calc(.55 * var(--gal-a))"></stop>
+          <stop offset="1" stop-color="var(--gal-lane)" stop-opacity="0"></stop>
+        </radialGradient>
+      </defs>
+      <g transform="rotate(-1.7 720 93)">
+        <ellipse cx="720" cy="93" rx="660" ry="74" fill="url(#galDisk)"></ellipse>
+        <ellipse cx="720" cy="93" rx="310" ry="116" fill="url(#galBloom)"></ellipse>
+        <ellipse cx="720" cy="93" rx="150" ry="86" fill="url(#galHot)"></ellipse>
+        <ellipse class="gal-lane" cx="720" cy="123" rx="600" ry="20" fill="url(#galLane)"></ellipse>
+        <g fill="var(--gal-core)" opacity="calc(1 * var(--gal-a))">
+          <circle cx="458" cy="63" r="1.5"></circle>
+          <circle cx="522" cy="109" r="1"></circle>
+          <circle cx="602" cy="49" r="1.1"></circle>
+          <circle cx="926" cy="59" r="1.4"></circle>
+          <circle cx="1012" cy="111" r="1"></circle>
+          <circle cx="840" cy="43" r=".9"></circle>
+        </g>
+      </g>
+    </svg>
     <div class="hero-mid">
       <svg class="hero-wing l" viewBox="0 0 250 90" aria-hidden="true" focusable="false">
         <g id="heroWingPaths" fill="currentColor">

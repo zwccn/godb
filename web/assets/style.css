@@ -2405,6 +2405,7 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
    颜色只需要回答「有没有事」，那就让它跟着皮肤走：没事时整块牌子安静，
    出事时整块牌子变色。90 分和 78 分差 12 分，不值得多记一种颜色。 */
 .home-hero {
+  position: relative;
   flex: 0 0 auto;
   /* 三列：左「一句话结论」/ 中球 / 右「累计数」。
      原来只有中间那个球，172px 的卡片漂在 1400px 的空白里，看着像个孤岛。
@@ -2416,7 +2417,44 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   column-gap: 20px;
   padding: 0 4px 8px;
 }
-.hero-side { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* 三层的叠放顺序：星系盘 0 < 两侧文字 1 < 球和翼 2。
+   不这么排的话，绝对定位的星系盘会盖住文字（定位元素按 DOM 顺序绘制）。 */
+.hero-galaxy {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  /* --gal-a 一处总控四个渐变的浓度：1 是按「深色底上刚好」定的，
+     浅色底上整层压到 .2 并且关掉尘埃带（见下） */
+  --gal-a: 1;
+  /* 热核不发纯白 —— 混 32% 皮肤主色，换皮肤时它跟着走，也不会白得像过曝 */
+  --gal-core: color-mix(in srgb, var(--hs-tone) 32%, #fff);
+  /* 尘埃带 = 底色：压在辉光上才「吞掉」一块，只在辉光范围内可见 */
+  --gal-lane: var(--hm-bg);
+  /* 9 秒一次极缓的明暗（0.88 ↔ 1）：和翼的 7 秒、环的 4.6 秒错开，
+     三个频率不成倍数，叠在一起看不出节奏，只觉得「在动」 */
+  animation: galBreath 9s ease-in-out infinite;
+}
+@keyframes galBreath {
+  0%, 100% { opacity: .88; }
+  50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-galaxy { animation: none; opacity: 1; }
+}
+/* 浅色底上「发光」不成立：白核会消失，而「压暗」会变成一块灰影 —— 两条都不成立。
+   所以浅色三套只留一成多的浓度当「一层薄光」，尘埃带直接不画。
+   羽翼本身还在，形状不变，只是没有星系的夜感。 */
+html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-galaxy {
+  --gal-a: .2;
+  --gal-core: var(--hs-tone);
+}
+html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .gal-lane {
+  display: none;
+}
+.hero-side { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .hero-side.l { align-items: flex-start; }
 .hero-side.r { align-items: flex-end; }
 
@@ -2426,6 +2464,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
    贴着球定位（right/left: 100%），球宽随字号变、翼跟着走，不需要知道具体尺寸。 */
 .hero-mid {
   position: relative;
+  /* z-index 2：压在星系盘（0）和两侧文字（1）之上。开层叠上下文不影响里面的
+     明细浮层 —— 浮层要压在下面的 KPI 卡上，而整块 hero-mid 本来就更高。 */
+  z-index: 2;
   display: flex;
   justify-content: center;
 }

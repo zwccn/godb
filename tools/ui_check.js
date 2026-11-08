@@ -6605,6 +6605,33 @@ class CDP {
         rFirst: wr.compareDocumentPosition(card) === Node.DOCUMENT_POSITION_FOLLOWING,
       };
     })()`);
+    /* 星系盘：纯装饰的一层，压在球后面。守四件事 —— 不拦点击、不用滤镜、
+       层级在文字（1）和球翼（2）之下、以及浅色皮肤确实把它压淡了。
+       滤镜那条是有代价换来的：大椭圆 + feGaussianBlur 在 Chrome 里会渲染出
+       随机色块（花屏），1x 下也能复现，所以这层只准用渐变做柔边。 */
+    const galUi = await cdp.eval(`(() => {
+      const g = document.querySelector('.hero-galaxy');
+      if (!g) return { miss: true };
+      const cs = getComputedStyle(g);
+      return {
+        n: document.querySelectorAll('.hero-galaxy').length,
+        hidden: g.getAttribute('aria-hidden') === 'true',
+        pent: cs.pointerEvents,
+        z: cs.zIndex,
+        filters: g.querySelectorAll('filter').length,
+        lane: !!g.querySelector('.gal-lane'),
+        midZ: getComputedStyle(document.querySelector('.hero-mid')).zIndex,
+        sideZ: getComputedStyle(document.querySelector('.hero-side')).zIndex,
+        a: cs.getPropertyValue('--gal-a').trim(),
+      };
+    })()`);
+    check('总览：星系盘铺在球后面（穿透点击、不带滤镜、层级低于文字与翼）',
+      !galUi.miss && galUi.n === 1 && galUi.hidden && galUi.pent === 'none'
+      && galUi.z === '0' && galUi.midZ === '2' && galUi.sideZ === '1'
+      && galUi.filters === 0 && galUi.lane && galUi.a !== '',
+      galUi.miss ? '找不到星系盘'
+        : `层级 ${galUi.z}/${galUi.sideZ}/${galUi.midZ} · 滤镜 ${galUi.filters} 个 · 浓度 ${galUi.a}`);
+
     check('总览：健康球两侧各一片「翼」（读屏与鼠标都穿透，排在球外侧，不撞文字）',
       !wingUi.miss && wingUi.n === 2 && wingUi.paths === 8 && wingUi.reuse
       && wingUi.hidden && wingUi.pent === 'none'

@@ -6110,55 +6110,69 @@ class CDP {
       netUi.hasIn && netUi.hasOut && /B\/s|KB\/s|MB\/s/.test(netUi.legend),
       netUi ? `netIn=${netUi.hasIn} netOut=${netUi.hasOut} · 图例「${netUi.legend}」` : '取不到');
 
-    /* 三张图按**量纲**分：请求（QPS + 连接，双轴）、存储 I/O（带宽 + 读 + 写，
-       全是 B/s）、资源（内存 + CPU，双轴）。同一张图里量纲必须一致，
-       否则归一化画出来的高低没有意义。 */
+    /* 四张图按**量纲**分：请求（QPS + 连接，双轴）、存储 I/O（带宽 + 读 + 写，
+       全是 B/s）、内存、CPU。同一张图里量纲必须一致，否则归一化画出来的高低
+       没有意义。 */
     const charts = await cdp.eval(`(() => {
-      const cards = [...document.querySelectorAll('.home-chart')];
-      return cards.map(c => {
-        const ys = [...c.querySelectorAll('.hp-y')];
+      const wrap = document.querySelector('.home-charts');
+      const wb = wrap.getBoundingClientRect();
+      return [...document.querySelectorAll('.home-chart')].map((c, i) => {
+        const r = c.getBoundingClientRect();
+        const ys = [...c.querySelectorAll('.hp-side')];
         return {
+          i,
           title: (c.querySelector('.hc-title') || {}).textContent || '',
           paths: c.querySelectorAll('svg path').length,
           legend: [...c.querySelectorAll('.home-lg span')].map(s => s.textContent).join('/'),
-          axisL: ys.filter(e => !e.classList.contains('r')).map(e => e.textContent).join('|'),
-          axisR: ys.filter(e => e.classList.contains('r')).map(e => e.textContent).join('|'),
+          // 刻度是**多个 span**，直接读 textContent 会粘成「100」（10 + 0），
+          // 调试时看不出是两档还是一档 —— 逐个取再用 / 连
+          axisL: ys.filter(e => !e.classList.contains('r'))
+            .map(e => [...e.children].map(x => x.textContent).join('/')).join('|'),
+          axisR: ys.filter(e => e.classList.contains('r'))
+            .map(e => [...e.children].map(x => x.textContent).join('/')).join('|'),
+          w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top),
+          wrapW: Math.round(wb.width), wrapH: Math.round(wb.height),
         };
       });
     })()`);
     const chartOf = t => charts.find(c => c.title === t) || {};
-    const halves = await cdp.eval(`(() => [...document.querySelectorAll('.hc-half')].map(h => ({
-      id: h.id,
-      paths: h.querySelectorAll('svg path').length,
-      legend: [...h.querySelectorAll('.home-lg span')].map(s => s.textContent).join('/'),
-      axisL: [...h.querySelectorAll('.hp-y')].map(e => e.textContent).join('|'),
-    })))()`);
-    check('总览：请求图 QPS + 连接（双轴），I/O 图 带宽 + 读 + 写，资源卡拆成内存 / CPU 两张',
-      !!charts.length && chartOf('请求').paths === 2 && /QPS/.test(chartOf('请求').legend)
+    check('总览：请求图 QPS + 连接（双轴），I/O 图 带宽 + 读 + 写，内存和 CPU 各一张',
+      charts.length === 4
+      && chartOf('请求').paths === 2 && /QPS/.test(chartOf('请求').legend)
       && /连接/.test(chartOf('请求').legend)
       && chartOf('存储 I/O').paths === 3
       && /带宽/.test(chartOf('存储 I/O').legend)
       && /磁盘读/.test(chartOf('存储 I/O').legend) && /磁盘写/.test(chartOf('存储 I/O').legend)
-      && halves.length === 2
-      && halves[0].paths === 1 && /内存/.test(halves[0].legend)
-      && halves[1].paths === 1 && /CPU/.test(halves[1].legend),
-      charts.map(c => `${c.title}:${c.paths}条`).join(' · ')
-      + ` · 资源卡 ${halves.map(h => h.id + ':' + h.paths).join('/')}`);
+      && chartOf('内存').paths === 1 && /内存/.test(chartOf('内存').legend)
+      && chartOf('CPU').paths === 1 && /CPU/.test(chartOf('CPU').legend),
+      charts.map(c => `${c.title}:${c.paths}条`).join(' · '));
 
-    /* 坐标：三张图都要有 y 刻度，双轴的两张还要左右各一套；
-       而且刻度里不能出现负数（CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */
+    /* 布局：请求 / 存储 I/O 各占一整行（时间序列越宽越好读），内存 / CPU 各占半行，
+       三行加两条间隙正好等于容器高度 —— 也就是「撑满屏幕、底部没有空白」。 */
+    const cReq = chartOf('请求'), cIO = chartOf('存储 I/O');
+    const cMem = chartOf('内存'), cCpu = chartOf('CPU');
+    const fullW = c => c && Math.abs(c.w - c.wrapW) <= 2;
+    const halfW = c => c && Math.abs(c.w - (c.wrapW - 12) / 2) <= 3;
+    check('总览布局：请求 / 存储各占整行，内存 / CPU 各占半行，三行撑满容器',
+      fullW(cReq) && fullW(cIO) && halfW(cMem) && halfW(cCpu)
+      && cMem.top === cCpu.top
+      && Math.abs(3 * cReq.h + 2 * 12 - cReq.wrapH) <= 3,
+      `容器 ${cReq && cReq.wrapW}×${cReq && cReq.wrapH} · `
+      + charts.map(c => `${c.title} ${c.w}×${c.h}`).join(' · '));
+
+    /* 坐标：四张图都要有 y 刻度，请求图左右各一套；刻度里不能出现负数
+       （CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */
     const axisIssue = [];
     for (const c of charts) {
       if (!c.axisL) axisIssue.push(c.title + ' 没有 y 刻度');
       if (/^-|\|\-|\s-/.test(c.axisL + '|' + c.axisR)) axisIssue.push(c.title + ' 刻度含负数：' + c.axisL + ' / ' + c.axisR);
     }
     if (!chartOf('请求').axisR) axisIssue.push('请求图缺右轴');
-    // 资源卡拆成两张小图后不再有右轴，但每一半都必须有自己的 y 刻度
-    for (const h of halves) if (!h.axisL) axisIssue.push(h.id + ' 没有 y 刻度');
-    check('总览：每张图都有 y 刻度，请求图左右各一套，且没有负数刻度',
-      axisIssue.length === 0 && !!chartOf('请求').axisL,
+    check('总览：四张图都有 y 刻度，请求图左右各一套，且没有负数刻度',
+      axisIssue.length === 0,
       axisIssue.length ? axisIssue.join(' · ')
-        : `请求 ${chartOf('请求').axisL} / ${chartOf('请求').axisR} · 内存 ${halves[0] && halves[0].axisL} · CPU ${halves[1] && halves[1].axisL}`);
+        : charts.map(c => `${c.title} ${c.axisL}${c.axisR ? ' / ' + c.axisR : ''}`).join(' · '));
+
     /* 悬停读数：图例只报「最新值」，想知道二十秒前那一下多少得靠鼠标。
        要的是十字光标 + 那一刻各条线的数值，而且竖线要**吸附到采样点**上
        —— 线画在鼠标位置、数值却取最近的点，点数稀时一眼就看出对不上。 */

@@ -6168,7 +6168,7 @@ document.getElementById('btnHomeToMonitor').addEventListener('click', () => {
 
 /* ---------------- 总览（大屏） ----------------
    数据库大部分时间是安稳的，这一页只回答一个问题：现在能不能走开。
-   所以只有四层 —— 状态条、六个数字、两条走势、一句话结论。证据（锁明细、
+   所以只有四层 —— 状态条、三个数字、四张走势、一句话结论。证据（锁明细、
    慢 SQL、页地图、逐表空间）全在监控里，点右下角过去。
 
    数据复用 pollMonitor 那一路：全局 2 秒一次 /api/monitor，这里只负责画。
@@ -6370,10 +6370,11 @@ function renderHome(m) {
 
 function renderHomeCharts(m) {
   const r = m.rates || {};
-  // 三张图按量纲分：
+  // 四张图按量纲分：
   //   请求 —— QPS（次/秒，左轴）+ 连接（个，右轴）
   //   I/O  —— 带宽 + 磁盘读 + 磁盘写，全是字节/秒，共用一根轴
-  //   资源 —— 内存（字节，左轴）+ CPU（核，右轴）
+  //   内存 —— 堆字节
+  //   CPU  —— 核数
   // 每张图里的线都必须能量纲一致，或者明确分左右轴；三条不同单位的线塞进
   // 一张图各自归一化，画出来的高低就没有意义了（以前就是这样）。
   homeChart(homeEls.chartRate, r.series, [
@@ -6389,6 +6390,8 @@ function renderHomeCharts(m) {
     // 左轴是「每秒多少条」，右轴是「几个连接」—— 刻度各标各的，不共用一个数
     axisL: v => String(Math.round(v)),
     axisR: v => String(Math.round(v)),
+    // 图不高（一屏要塞四张），y 轴只标两端：三档会和时间轴、曲线挤成一团
+    levels: 2,
   });
 
   homeChart(homeEls.chartIO, r.series, [
@@ -6405,7 +6408,7 @@ function renderHomeCharts(m) {
       label: '磁盘写', color: 'var(--hm-warn)', width: 1.2, minSpan: 64 * 1024,
       get: p => p.diskWrite || 0, fmt: fmtRate,
     },
-  ], { axisL: v => fmtRate(v) });
+  ], { axisL: v => fmtRate(v), levels: 2 });
 
   const p = m.proc || {};
   homeChart(homeEls.chartMem, p.series, [
@@ -6413,10 +6416,10 @@ function renderHomeCharts(m) {
       label: '内存', color: 'var(--hm-ok)', minSpan: 32 * 1024 * 1024,
       get: x => x.heapBytes || 0, fmt: fmtBytes,
     },
-  ], { axisL: v => fmtBytes(v), levels: 2, noX: true });
+  ], { axisL: v => fmtBytes(v), levels: 2 });
 
-  // CPU 单独一张。内存（字节）和 CPU（核）没有「一起看形状」的关系，
-  // 双轴画在一个框里，两条线的交叉会让人以为有含义 —— 其实只是两套刻度。
+  // CPU 单独一张卡（内存 / CPU 之间没有「一起看形状」的关系，双轴画在一个框里
+  // 两条线的交叉会被读成有因果）。两张卡各占半行，高度和内存一致。
   homeChart(homeEls.chartCPU, p.series, [
     {
       label: 'CPU', color: 'var(--hm-warn)', width: 1.4, minSpan: 0.4,
@@ -6509,49 +6512,55 @@ function homeChart(host, pts, lines, opts) {
   svg += '</svg>';
 
   host.innerHTML = '';
-  const plot = el('div', 'home-plot');
-  plot.innerHTML = svg;
+  // 结构：[左栏刻度] [画布] [右栏刻度]，时间轴在最下面（缩进到画布宽度）。
+  //
+  // 刻度**放在画布外面**而不是叠在曲线上：一屏要塞四张图，每张只有七八十像素高，
+  // 叠上去的话底下那个「0」正好压在曲线和「-21s」上，调间距怎么调都糊。
+  // 分栏之后文字和曲线永不相交，底档也自然和画布下沿对齐。
+  const plot = el('div', 'home-plot' + (rangeR ? ' dual' : ''));
+  const row = el('div', 'hp-row');
+  const sideL = el('div', 'hp-side l');
+  const canvas = el('div', 'hp-canvas');
+  canvas.innerHTML = svg;
+  row.appendChild(sideL);
+  row.appendChild(canvas);
+  const sideR = rangeR ? el('div', 'hp-side r') : null;
+  if (sideR) row.appendChild(sideR);
+  plot.appendChild(row);
 
-  // y 轴刻度：各标各的，颜色跟这条轴上的线走（双轴时一眼能对上）
-  const axisTag = (cls, range, fmt, color) => {
-    if (!range || typeof fmt !== 'function') return;
-    const box = el('div', 'hp-y ' + cls);
-    if (color) box.style.color = color;
-    // 三档（上 / 中 / 下）：只有两端的话，中间那段就完全靠猜。重复的文本去掉
-    // （量程很小时 hi 和 mid 可能format 成同一个数）。
-    const seen = new Set();
-    // 小图（上下叠的两张）只标两端：三档在 60px 里会和曲线挤在一起
+  // 刻度：颜色跟这条轴上的线走（双轴时一眼对得上）。levels: 2 只标两端，
+  // 三档在图矮的时候会挤成一坨；重复的文本去掉（量程很小时 hi 和 mid 可能
+  // format 成同一个数）。
+  const fillSide = (side, range, fmt, color) => {
+    if (!side || !range || typeof fmt !== 'function') return;
+    if (color) side.style.color = color;
     const vs = (opts.levels === 2)
       ? [range.hi, range.lo]
       : [range.hi, (range.lo + range.hi) / 2, range.lo];
+    const seen = new Set();
     for (const v of vs) {
       const text = fmt(v);
       if (seen.has(text)) continue;
       seen.add(text);
-      box.appendChild(el('span', '', text));
+      side.appendChild(el('span', '', text));
     }
-    plot.appendChild(box);
   };
   const colorOf = axis => {
     const l = lines.find(z => axisOf(z) === axis);
     return l ? l.color : '';
   };
-  axisTag('l', rangeL, opts.axisL, colorOf('l'));
-  if (rangeR) axisTag('r', rangeR, opts.axisR, colorOf('r'));
+  fillSide(sideL, rangeL, opts.axisL, colorOf('l'));
+  fillSide(sideR, rangeR, opts.axisR, colorOf('r'));
 
-  // x 轴：只标两端（起点多久以前、现在）。中间刻度在小卡片里放不下，
+  // x 轴：只标两端（起点多久以前、现在）。中间刻度在这么矮的图里放不下，
   // 而且曲线是均分采样的，中间刻度也不带更多信息。
-  // 时间轴只在整张卡的最后一张图上标：资源卡上下两张共用同一条时间轴，
-  // 两张都标就是同一句话写两遍，还挤掉曲线的高度。
-  if (!opts.noX) {
-    const xRow = el('div', 'hp-x');
+  const xRow = el('div', 'hp-x');
+  {
     const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
     const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
     xRow.appendChild(el('span', '', label));
     xRow.appendChild(el('span', '', '现在'));
     plot.appendChild(xRow);
-  } else {
-    plot.classList.add('no-x');
   }
 
   host.appendChild(plot);
@@ -6568,7 +6577,7 @@ function homeChart(host, pts, lines, opts) {
    * 所有位置都按 svg 的实际渲染尺寸现算（图是 preserveAspectRatio=none 拉伸的，
    * 逻辑坐标 600×120 和像素不是一回事），所以卡片变宽、窗口缩放都不用重建。
    */
-  const svgEl = plot.querySelector('svg');
+  const svgEl = canvas.querySelector('svg');
   const cross = el('div', 'hp-cross');
   const vline = el('i', 'hp-v');
   const hline = el('i', 'hp-h');
@@ -6581,8 +6590,8 @@ function homeChart(host, pts, lines, opts) {
     return d;
   });
   const tip = el('div', 'hp-tip');
-  plot.appendChild(cross);
-  plot.appendChild(tip);
+  canvas.appendChild(cross);
+  canvas.appendChild(tip);
 
   // 悬停状态挂在 host 上：renderHome 每 2 秒重画一遍图，宿主节点是静态的，
   // 状态只有存在它身上才能跨重画活着 —— 否则鼠标不动，读数牌每两秒闪掉一下。
@@ -6590,7 +6599,7 @@ function homeChart(host, pts, lines, opts) {
 
   const place = (ratio, yFrac) => {
     const sr = svgEl.getBoundingClientRect();
-    const pr = plot.getBoundingClientRect();
+    const pr = canvas.getBoundingClientRect();
     if (!sr.width || !sr.height || !pr.width) return;
     hp.on = true;
     // 存的是**鼠标**的相对位置（不是采样点的），重画后十字线还在鼠标底下
@@ -6657,7 +6666,7 @@ function homeChart(host, pts, lines, opts) {
     tip.classList.remove('on');
   };
 
-  plot.addEventListener('pointermove', ev => {
+  canvas.addEventListener('pointermove', ev => {
     const sr = svgEl.getBoundingClientRect();
     if (!sr.width) return;
     place(
@@ -6665,7 +6674,7 @@ function homeChart(host, pts, lines, opts) {
       Math.max(0, Math.min(1, (ev.clientY - sr.top) / sr.height)),
     );
   });
-  plot.addEventListener('pointerleave', clearHp);
+  canvas.addEventListener('pointerleave', clearHp);
   // 重画之后把上一次的悬停位置接回来（见 hp 的注释）
   if (hp.on) place(hp.ratio, hp.yFrac);
 

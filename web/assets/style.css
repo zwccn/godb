@@ -2274,8 +2274,8 @@ body.sidebar-collapsed .sidebar {
   z-index: 29;               /* 低于监控的 30：从总览进监控时，监控盖在上面 */
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px 24px 18px;
+  gap: 12px;
+  padding: 14px 20px 14px;
   overflow: auto;
   background-color: var(--hm-bg);
   /* 极淡网格：56px 一格。不用光晕渐变 —— 深底上的柔光会糊成一片雾，
@@ -2365,9 +2365,11 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 8px;
-  min-height: 140px;
-  padding: 18px 18px 16px;
+  gap: 5px;
+  /* 原来是 140px —— 和走势图平分高度时，这一排把图压成了一条缝。
+     三个数字是「秒读」，一行大字 + 一行小字就够，96px 够用了。 */
+  min-height: 96px;
+  padding: 12px 16px 11px;
   border: 1px solid var(--hm-line);
   border-radius: 10px;
   background: linear-gradient(180deg, var(--hm-bg-2), var(--hm-bg-1));
@@ -2377,7 +2379,7 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   align-items: baseline;
   gap: 5px;
   font-family: var(--mono);
-  font-size: calc(40px * var(--fs));
+  font-size: calc(34px * var(--fs));
   font-weight: 500;
   line-height: 1;
   letter-spacing: -.02em;
@@ -2410,19 +2412,21 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 /* ---- 两条走势 ---- */
 .home-charts {
   flex: 1 1 auto;
-  min-height: 190px;
-  /* 不给上限的话，1920×1080 上会吃掉 700px，一条 QPS 拉成心电图；
-     给太小又会让卡片里空着。460 是「图占满卡片且不算离谱」的折中，
-     高度超出的部分留给页面底部（foot 贴底，空白在中间）。 */
-  max-height: 620px;
+  min-height: 330px;      /* 再矮就别硬塞了，让整页滚 */
   display: grid;
-  /* 三张卡按量纲分：请求 / 存储 I/O / 资源。三列并排，窄屏在下面的媒体查询里降列。
-     行高必须由容器决定（minmax(0,1fr)）——用 auto 的话，资源卡里「上下两张小图」
-     会按内容各撑 200 多像素，把三张卡一起顶高。 */
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: minmax(0, 1fr);
+  /* 两列三行：请求、存储 I/O 各占整整一行（见下面那段 :nth-child），
+     内存和 CPU 各占半行。行高由容器决定（1fr）—— 以前用 auto 时，
+     卡片会被内容顶高，四张图一起往上冒。
+     用 grid-auto-rows 而不是 grid-template-rows：窄屏降到一列时是四行，
+     隐式行也要按同样规则分配，省一套模板。 */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
   gap: 12px;
 }
+/* 前两张（请求 / 存储 I/O）横跨整行：时间序列图越宽越好读，
+   三列并排时每张只有 400 多像素，峰值和抖动全挤在一起。
+   后两张（内存 / CPU）各占半行 —— 它们的变化慢，不需要那么宽。 */
+.home-chart:nth-child(-n+2) { grid-column: 1 / -1; }
 .home-chart {
   min-width: 0;
   min-height: 0;
@@ -2438,7 +2442,7 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 11px 14px 8px;
+  padding: 8px 14px 5px;
 }
 .hc-title {
   font-size: calc(12.5px * var(--fs));
@@ -2459,46 +2463,62 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 0 14px 12px;
+  gap: 5px;
+  padding: 0 14px 9px;
 }
 .home-plot {
   flex: 1 1 auto;
   min-height: 0;
-  position: relative;
   display: flex;
   flex-direction: column;
+  /* 刻度栏宽度：左边要放得下「1.2 MB/s」，右边只放数字。
+     时间轴用同一组变量缩进，才能和画布左右对齐。 */
+  --hp-gut-l: 58px;
+  --hp-gut-r: 0px;
 }
-.home-plot svg { display: block; width: 100%; flex: 1 1 auto; min-height: 0; }
+.home-plot.dual { --hp-gut-r: 34px; }
 
-/* 坐标刻度：HTML 绝对定位叠在图上，不放进 SVG —— 图是 preserveAspectRatio="none"
-   横向拉满卡片的，SVG 里的 <text> 会跟着被拉扁。 */
-.hp-y {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 14px;                 /* 给 x 轴那行让位 */
+.hp-row {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 6px;
+}
+/* y 轴刻度：画布外的窄栏，上下两端对齐画布（space-between）。
+   不和曲线抢位置，也不和时间标签抢位置。 */
+.hp-side {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  padding: 1px 0;
   font-family: var(--mono);
   font-size: calc(9.5px * var(--fs));
   line-height: 1;
-  opacity: .75;
-  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
 }
-.hp-y span { text-shadow: 0 0 4px var(--hm-bg); }   /* 压在曲线上也读得清 */
-/* 没有 x 轴的那张（资源卡的上半），刻度铺到最底 */
-.home-plot.no-x .hp-y { bottom: 0; }
+.hp-side.l { width: var(--hp-gut-l); text-align: right; }
+.hp-side.r { width: var(--hp-gut-r); text-align: left; }
+
+.hp-canvas {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  cursor: crosshair;
+}
+.hp-canvas svg { display: block; width: 100%; flex: 1 1 auto; min-height: 0; }
+
+
 
 /* ---- 悬停读数：十字光标 + 线上的点 + 读数牌 ----
    图只有一百多像素高，图例只报最新值；把鼠标放上去才看得到「二十秒前那一下多少」。
    层级：十字线压在曲线上面、刻度字下面；读数牌最上。 */
-.home-plot { cursor: crosshair; }
 .hp-cross { position: absolute; inset: 0; z-index: 1; opacity: 0; transition: opacity .1s; }
 .hp-cross.on { opacity: 1; }
-.hp-y { z-index: 2; }
 .hp-v, .hp-h { position: absolute; display: block; }
 .hp-v { width: 0; border-left: 1px dashed var(--hm-faint); }
 .hp-h { height: 0; border-top: 1px dashed var(--hm-faint); opacity: .7; }
@@ -2533,33 +2553,14 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 .hp-tip-row span { flex: 1 1 auto; }
 .hp-tip-row b { color: var(--hm-text); font-weight: 600; }
 .hp-tip-row i { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 2px; }
-.hp-y.r { text-align: right; }
-/* 资源卡里上下叠两张小图（内存 / CPU）：各自一根轴，互不干扰。
-   塞进一张双轴图的话，两条线的交叉会被误读成「有因果关系」——
-   其实只是两套刻度画在同一个框里。 */
-.hc-split {
-  display: grid;
-  /* 必须 minmax(0,1fr)：裸 1fr 的最小尺寸是 auto，卡片里的图会把两半撑到
-     各自 200 多像素，三张卡就跟着一起变高。 */
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px;
-  min-height: 0;
-}
-/* 两半之间一条淡线：不加的话，上面那张的「0 B」和下面那张的「0.3 核」会贴在一起，
-   看着像同一套刻度 */
-.hc-half + .hc-half { border-top: 1px solid var(--hm-line); padding-top: 8px; }
-.hc-half {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.hc-half .home-legend { font-size: calc(10px * var(--fs)); }
-
 .hp-x {
   flex: 0 0 auto;
   display: flex;
   justify-content: space-between;
-  margin-top: 2px;
+  margin-top: 3px;
+  /* 和画布左右对齐：让开两边的刻度栏 */
+  padding-left: calc(var(--hp-gut-l) + 6px);
+  padding-right: calc(var(--hp-gut-r) + 6px);
   font-family: var(--mono);
   font-size: calc(9.5px * var(--fs));
   line-height: 1;
@@ -2625,8 +2626,11 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 .home-foot[data-level="red"] .fv { color: var(--hm-danger); }
 
 @media (max-width: 1240px) {
-  .home-charts { grid-template-columns: 1fr; }
-  .home-chart { min-height: 150px; }
+  /* 一列四行。这里**不能用 1fr**：容器高度是 flex 分来的（不够四行），
+     1fr 会被压成 89px 一条；写死下限又会让网格溢出容器、压到下面的结论条上。
+     所以改成「按内容高」+ 固定行高，让整页滚动 —— 窄屏本来就是滚动的。
+     行高下限放在 grid 上而不是卡片上：行高由 grid 决定，卡片的 min-height 会被压掉。 */
+  .home-charts { flex: 0 0 auto; grid-template-columns: 1fr; grid-auto-rows: 168px; }
 }
 @media (max-width: 820px) {
   .home { padding: 14px; gap: 10px; }

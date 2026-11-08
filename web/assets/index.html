@@ -208,11 +208,10 @@ try {
 <!-- 总览：打开控制台先看到的一页。
      定位不是「监控的缩小版」，是**体检报告** —— 只回答「现在能不能走开」，
      证据（锁明细 / 慢 SQL / 页地图）全在监控里，点右下角过去。
-     所以它只有四层：状态条、六个数字、两条走势、一句话结论，一屏不滚。
+     所以它只有四层：状态条、三个数字、四张走势、一句话结论，一屏不滚。
 
-     配色写死在 .home 自己的变量里（--hm-*），不读 --bg / --text：
-     这一页固定深色，切皮肤不该影响它。浅底上做不出「科技感」，而且
-     大屏往往是挂着看的，深色不刺眼。 -->
+     配色跟着皮肤走（--hm-* 由 --bg / --text 那批变量推导），浅色皮肤下就是
+     浅色大屏 —— 早先写死深色，结果在这一页换皮肤整页纹丝不动，像功能坏了。 -->
 <section id="homePanel" class="home" aria-label="总览">
   <div class="home-top">
     <span class="home-dot green" id="homeDot" aria-hidden="true"></span>
@@ -225,14 +224,19 @@ try {
     <button class="home-more" id="btnHomeToMonitor" type="button" title="进监控：锁明细 / 慢 SQL / 存储 / 空间地图">详细监控 ›</button>
   </div>
 
-  <!-- 六个数字：左三是「请求卡在哪」（执行 / 排队 / 等锁，同一条流水线的三个位置），
-       中间 QPS 是业务量的锚，右二是资源（内存 / 带宽）。
-       卡片 DOM 只建一次，之后每 2 秒只改文本 —— 重建会让六格一起闪。 -->
+  <!-- 三个数字：排队 / 等待锁 / 执行中 —— 同一条执行流水线的三个位置，按
+       一个请求的行走路线排。QPS / 内存 / 带宽不在这儿：下面的走势里本来就有，
+       同一份数据在屏幕上下各说一遍只会把「现在堵在哪」稀释掉。
+       卡片 DOM 只建一次，之后每 2 秒只改文本 —— 重建会让三格一起闪。 -->
   <div class="home-kpis" id="homeKpis"></div>
 
   <div class="home-charts">
-    <!-- 三张卡按「量纲」分，不按重要性：同一张图里的线必须共用一根轴（或者明确
-         左右双轴），否则归一化画出来的高低是在撒谎。 -->
+    <!-- 四张卡，按「读图的形状」排，不是按四宫格：
+         - 请求 / 存储 I/O 各占**一整行**：这两张看的是随时间起伏，宽一点才看得出
+           细节（三列并排时每张只有 400 多像素宽，却吃掉半屏高，宽高比对时间轴最不划算）。
+         - 内存 / CPU 各占**半行**：它们的形状变化慢，宽高各半正好。
+         - 四张卡都撑满剩余高度（容器 flex:1 + grid 1fr 行），页面不再留白。
+         量纲仍然是分的：一张图里的线必须共用一根轴（或明确左右双轴）。 -->
     <section class="home-chart">
       <div class="hc-head">
         <span class="hc-title">请求</span>
@@ -251,16 +255,19 @@ try {
     </section>
     <section class="home-chart">
       <div class="hc-head">
-        <span class="hc-title">资源</span>
-        <span class="hc-sub">内存 · CPU</span>
+        <span class="hc-title">内存</span>
+        <span class="hc-sub">堆内存</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
-      <!-- 内存和 CPU 拆成上下两张小图：它们没有「一起看形状」的关系，
-           硬塞进一张双轴图，两条线的交叉会让人以为有含义（其实只是刻度不同）。 -->
-      <div class="hc-body hc-split">
-        <div class="hc-half" id="homeChartMem"></div>
-        <div class="hc-half" id="homeChartCPU"></div>
+      <div class="hc-body" id="homeChartMem"></div>
+    </section>
+    <section class="home-chart">
+      <div class="hc-head">
+        <span class="hc-title">CPU</span>
+        <span class="hc-sub">进程占用</span>
+        <span class="hc-range">最近 5 分钟</span>
       </div>
+      <div class="hc-body" id="homeChartCPU"></div>
     </section>
   </div>
 

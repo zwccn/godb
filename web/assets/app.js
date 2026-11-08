@@ -6895,6 +6895,10 @@ function currentDBName() {
 // 手打库名要眼睛看着键盘一个个敲，几乎不可能顺手完成，这是 GitHub 删仓库那套。
 //
 //   confirmDanger({ title, desc, items:[{name, meta}], word, okText }) -> Promise<boolean>
+// 确认框里那段 .trash 说明的**出厂原文**（含 <code>）。「删表」会把这段替成空白，
+// 下一次「清库」得能恢复回去 —— 直接 remove('hidden') 只会露出一个空 div。
+const CF_NOTE_HTML = (document.getElementById('cfNote') || {}).innerHTML || '';
+
 function confirmDanger(opt) {
   const modal = document.getElementById('confirmModal');
   const input = document.getElementById('cfInput');
@@ -6905,6 +6909,18 @@ function confirmDanger(opt) {
   document.getElementById('cfDesc').textContent = opt.desc || '';
   document.getElementById('cfWord').textContent = opt.word;
   okBtn.textContent = opt.okText || '确认';
+  // 「请输入库名」和 .trash 那段说明只有清库才适用：删一张表既不用输库名，
+  // 也不走整库备份。所以两处都可配 —— 默认保持原来的措辞，别的调用不用改。
+  document.getElementById('cfLabel').textContent = opt.label || '请输入库名';
+  const noteEl = document.getElementById('cfNote');
+  if (opt.note === undefined) {
+    // 恢复原文（含 <code>）：上一次可能是「删表」，把这段替成空白了
+    if (noteEl.innerHTML !== CF_NOTE_HTML) noteEl.innerHTML = CF_NOTE_HTML;
+    noteEl.classList.remove('hidden');
+  } else {
+    noteEl.textContent = opt.note;
+    noteEl.classList.toggle('hidden', !opt.note);
+  }
 
   const list = document.getElementById('cfList');
   list.innerHTML = '';
@@ -8623,13 +8639,35 @@ async function copyTableStructure(t) {
   await runDdl(sql, `已复制表结构到 ${name}`);
 }
 
+// 删表 / 清空数据：和其它危险动作一样走**应用内**确认框，而且要手输表名。
+// 原来这两个用的是原生 confirm()：样式和别处不一致（系统弹窗）、在无头浏览器里
+// 还会把页面卡住（CDP 不处理就永远不返回），也没法断言。
 async function truncateTable(t) {
-  if (!confirm(`确定清空表 ${t.name} 的所有数据吗？\n\n表结构会保留，操作不可撤销（${t.rows} 行）。`)) return;
+  const rows = typeof t.rows === 'number' ? `（${t.rows} 行）` : '';
+  const ok = await confirmDanger({
+    title: '清空表数据',
+    desc: `「${t.name}」里的数据会被全部删除${rows}，表结构保留。这个操作不可撤销。`,
+    items: [{ name: t.name, meta: typeof t.rows === 'number' ? t.rows + ' 行' : '' }],
+    label: '请输入表名',
+    note: '',
+    word: t.name,
+    okText: '清空',
+  });
+  if (!ok) return;
   await runDdl(`TRUNCATE TABLE ${qi(t.name)};`, `已清空 ${t.name}`);
 }
 
 async function dropTable(t) {
-  if (!confirm(`确定删除表 ${t.name} 吗？\n\n表结构和数据都会被删除，不可撤销。`)) return;
+  const ok = await confirmDanger({
+    title: '删除表',
+    desc: `「${t.name}」的表结构和全部数据都会被删除，不可撤销。`,
+    items: [{ name: t.name, meta: typeof t.rows === 'number' ? t.rows + ' 行' : '' }],
+    label: '请输入表名',
+    note: '',
+    word: t.name,
+    okText: '删除表',
+  });
+  if (!ok) return;
   await runDdl(`DROP TABLE ${qi(t.name)};`, `已删除 ${t.name}`);
 }
 

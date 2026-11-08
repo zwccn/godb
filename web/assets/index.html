@@ -859,10 +859,13 @@ try {
     <div class="modal-body cf-body">
       <div id="cfDesc" class="cf-desc"></div>
       <div id="cfList" class="cf-list hidden"></div>
-      <div class="cf-label">请输入库名 <b id="cfWord" class="cf-word"></b> 以继续</div>
+      <!-- 「请输入库名」和下面那段 .trash 说明是**清库**专用的：
+           删一张表不需要输库名，也不走整库备份。两处都可配（见 confirmDanger）。 -->
+      <div class="cf-label"><span id="cfLabel">请输入库名</span>
+        <b id="cfWord" class="cf-word"></b> 以继续</div>
       <input id="cfInput" class="cf-input" type="text" spellcheck="false"
              autocomplete="off" autocapitalize="off" autocorrect="off">
-      <div class="cf-note">
+      <div id="cfNote" class="cf-note">
         删除前会把表结构 + 数据备份到数据目录的 <code>.trash</code>，
         误删可在停服后用 <code>godb.exe -restore-trash latest</code> 找回。
       </div>

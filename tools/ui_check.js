@@ -3591,6 +3591,93 @@ class CDP {
       rows: document.querySelectorAll('table.grid tbody tr').length,
       range: (document.querySelector('.grid-range') || {}).textContent || '',
     })`);
+    /* 危险动作：删表 / 清空数据走**应用内**确认框（要手输表名），不是原生 confirm()。
+       原生弹窗在无头浏览器里会把页面挂住（CDP 不 handle 就永远不返回），也断言不了。
+       这里只打开再取消 —— 真要删掉 big_demo，后面几十条断言全废。 */
+    const danger = await cdp.eval(`(() => {
+      const modal = document.getElementById('confirmModal');
+      modal.classList.add('hidden');
+      tableMenuItems({ name: 'big_demo', rows: 50000 }).find(x => x.label === '删除表').run();
+      const shown = !modal.classList.contains('hidden');
+      const word = document.getElementById('cfWord').textContent;
+      const label = document.getElementById('cfLabel').textContent;
+      const noteHidden = document.getElementById('cfNote').classList.contains('hidden');
+      const inp = document.getElementById('cfInput');
+      const ok0 = document.getElementById('cfOk').disabled;
+      inp.value = 'big';                              // 输一半
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      const okHalf = document.getElementById('cfOk').disabled;
+      inp.value = word;                               // 输全
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      const okFull = document.getElementById('cfOk').disabled;
+      document.getElementById('cfCancel').click();
+      return { shown, word, label, noteHidden, ok0, okHalf, okFull,
+               closed: modal.classList.contains('hidden') };
+    })()`);
+    const stillThere = await cdp.eval(`fetch('/api/schema').then(r => r.json())
+      .then(d => (d.tables || []).some(t => t.name === 'big_demo'))`);
+    check('危险动作：删表弹应用内确认（要输表名、输错禁用），取消后表还在',
+      danger.shown && danger.word === 'big_demo' && danger.label === '请输入表名'
+      && danger.noteHidden && danger.ok0 === true && danger.okHalf === true
+      && danger.okFull === false && danger.closed && stillThere === true,
+      `标题词 ${danger.word} · ${danger.label} · 禁用 ${danger.ok0}/${danger.okHalf}/${danger.okFull}`
+      + ` · 取消后表在 ${stillThere}`);
+
+    /* 网络断了：api() 会抛，结果区给错误卡，按钮必须复位。
+       以前这条路径没有任何覆盖 —— 断网时卡在「停止」是最难查的那种。 */
+    const netDown = await cdp.eval(`(async () => {
+      const orig = window.fetch;
+      window.fetch = () => Promise.reject(new TypeError('Failed to fetch'));
+      cm.setValue('SELECT 1 AS x');
+      document.getElementById('btnRun').click();
+      await new Promise(r => setTimeout(r, 500));
+      const out = {
+        body: (document.querySelector('.error-body') || {}).textContent || '',
+        running: document.getElementById('btnRun').classList.contains('is-running'),
+        busy: busy,
+        label: document.getElementById('btnRunText').textContent,
+      };
+      window.fetch = orig;
+      return out;
+    })()`);
+    check('网络断开：结果区报错、执行按钮复位（不会卡在「停止」）',
+      /Failed to fetch/.test(netDown.body) && !netDown.running && !netDown.busy && netDown.label === '执行',
+      `${JSON.stringify(netDown.body.slice(0, 30))} · running=${netDown.running} busy=${netDown.busy} label=${netDown.label}`);
+
+    /* 列宽：拖右边缘变宽，双击复原。拖的是 .col-grip（pointerdown/move/up 三条）。 */
+    await runSqlX('SELECT id, salary FROM employees ORDER BY id LIMIT 5');
+    await waitFor(cdp, `!!document.querySelector('table.grid thead th .col-grip')`, { label: '列宽拖手' });
+    const colDrag = await cdp.eval(`(() => {
+      const grip = document.querySelector('table.grid thead th .col-grip');
+      const th = grip.closest('th');
+      const w0 = th.getBoundingClientRect().width;
+      const x = grip.getBoundingClientRect().left + 2;
+      const ev = (type, cx) => new PointerEvent(type, { clientX: cx, bubbles: true, pointerId: 7 });
+      grip.dispatchEvent(ev('pointerdown', x));
+      grip.dispatchEvent(ev('pointermove', x + 80));
+      grip.dispatchEvent(ev('pointerup', x + 80));
+      const w1 = th.getBoundingClientRect().width;
+      const kept = th.style.minWidth;
+      grip.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      return { w0: Math.round(w0), w1: Math.round(w1), kept, after: th.style.minWidth };
+    })()`);
+    check('结果表：拖列右边缘能加宽，双击复原',
+      colDrag.w1 > colDrag.w0 + 40 && /px$/.test(colDrag.kept) && colDrag.after === '',
+      `${colDrag.w0} → ${colDrag.w1}px（${colDrag.kept}）→ 双击后 ${JSON.stringify(colDrag.after)}`);
+
+    /* 可访问名：顶栏 / 编辑器工具栏 / 侧栏头上那些纯图标按钮，屏幕阅读器和
+       「悬停才知道是什么」都靠它。以前只有零散几处有过断言。 */
+    const noName = await cdp.eval(`(() => {
+      const bad = [];
+      for (const b of document.querySelectorAll('.topbar button, .editor-bar button, .sidebar-head button')) {
+        const name = (b.getAttribute('aria-label') || b.title || b.textContent || '').trim();
+        if (!name) bad.push(b.id || b.className || b.outerHTML.slice(0, 30));
+      }
+      return bad;
+    })()`);
+    check('顶栏 / 工具栏 / 侧栏的按钮都有可访问名（aria-label 或 title 或文本）',
+      noName.length === 0, noName.join(' · ') || '全部有名字');
+
     check('表树右键「插入表名」只插不跑、「打开表」跑 SELECT * LIMIT 100',
       treeIns.inserted === 'big_demo' && treeIns.ran === null
       && treeOpen.sql === 'SELECT * FROM big_demo LIMIT 100;'
@@ -6145,6 +6232,51 @@ class CDP {
     await sleep(200);
     check('关系图：Esc 关闭',
       await cdp.eval(`document.getElementById('erPanel').classList.contains('hidden')`));
+
+    /* ---- 数据库切换（端到端）----
+       只有 Go 的 TestDBsSwitchSetsCookie 测过 cookie，页面这一侧（下拉 → 切 →
+       重新拉表结构 → 切回来）从来没走过。切库等于「所有 SQL 换了个地方跑」，
+       错了就是查错了库。这里建一个临时库走一遍，最后切回来并把它删掉。 */
+    const dbBefore = await cdp.eval(`(() => ({
+      name: (document.getElementById('dbBadge') || {}).textContent.trim() || 'godb',
+      tables: document.querySelectorAll('#schemaTree .table-node').length,
+    }))()`);
+    const dbTmp = await cdp.eval(`(async () => {
+      await api('/api/dbs', { action: 'drop', name: 'uitmp' });   // 上次跑挂了留下的
+      const r = await api('/api/dbs', { action: 'create', name: 'uitmp' });
+      if (r.error) return { err: r.error };
+      await loadDBs();
+      const sel = document.getElementById('dbSelect');
+      const has = [...sel.options].some(o => o.value === 'uitmp');
+      sel.value = 'uitmp';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(res => setTimeout(res, 1500));
+      return {
+        has,
+        badge: (document.getElementById('dbBadge') || {}).textContent.trim(),
+        sel: sel.value,
+        tables: document.querySelectorAll('#schemaTree .table-node').length,
+        empty: (document.querySelector('#schemaTree .empty-hint') || {}).textContent || '',
+      };
+    })()`);
+    const dbBack = await cdp.eval(`(async () => {
+      await switchDB(${JSON.stringify(dbBefore.name)});
+      const r = await api('/api/dbs', { action: 'drop', name: 'uitmp' });
+      await loadDBs();
+      return {
+        dropErr: r.error || '',
+        badge: (document.getElementById('dbBadge') || {}).textContent.trim(),
+        tables: document.querySelectorAll('#schemaTree .table-node').length,
+        opts: [...document.getElementById('dbSelect').options].map(o => o.value),
+      };
+    })()`);
+    check('数据库切换：下拉切到新库 → 表结构清空 → 切回来 → 临时库删掉',
+      !dbTmp.err && dbTmp.has && dbTmp.badge === 'uitmp' && dbTmp.sel === 'uitmp'
+      && dbTmp.tables === 0 && /暂无表/.test(dbTmp.empty)
+      && !dbBack.dropErr && dbBack.badge === dbBefore.name
+      && dbBack.tables === dbBefore.tables && dbBack.opts.indexOf('uitmp') < 0,
+      `${dbBefore.name}(${dbBefore.tables} 表) → uitmp(${dbTmp.tables} 表)`
+      + ` → ${dbBack.badge}(${dbBack.tables} 表) · 下拉 ${dbBack.opts.join('/')}`);
 
     /* ---------------- 总览（大屏） ----------------
        这一段放最后：它会导航到**不带 #console** 的地址（模拟「打开控制台第一眼」），

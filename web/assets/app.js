@@ -6203,8 +6203,9 @@ const homeEls = {
 
 // 三个数字：只有「请求卡在流水线哪一段」这一段。
 //
-// 原来还有 QPS / 内存 / 带宽三格，但**下面两条走势里本来就有**
-// （第一条 QPS + 连接 + 带宽，第二条 内存 + CPU）—— 同一份数据在屏幕上下各说一遍，
+// 原来还有 QPS / 内存 / 带宽三格，但**下面的走势里本来就有**
+// （请求图 QPS + 连接、存储 I/O 图 带宽 + 读 + 写、还有 CPU 和内存各一张）——
+// 同一份数据在屏幕上下各说一遍，
 // 上面那一排反而把「现在堵在哪」这个唯一要秒读的东西稀释了。
 // 走势回答「趋势」，这三格回答「此刻」，分工清楚。
 //
@@ -6563,21 +6564,23 @@ function renderHomeCharts(m) {
   ], { axisL: v => fmtRate(v), levels: 2 });
 
   const p = m.proc || {};
-  homeChart(homeEls.chartMem, p.series, [
-    {
-      label: '内存', color: 'var(--hm-ok)', minSpan: 32 * 1024 * 1024,
-      get: x => x.heapBytes || 0, fmt: fmtBytes,
-    },
-  ], { axisL: v => fmtBytes(v), levels: 2 });
 
   // CPU 单独一张卡（内存 / CPU 之间没有「一起看形状」的关系，双轴画在一个框里
-  // 两条线的交叉会被读成有因果）。两张卡各占半行，高度和内存一致。
+  // 两条线的交叉会被读成有因果）。两张卡各占半行，高度一致。
+  // 顺序跟 DOM 一致：CPU 在左（「吃满核」比「堆涨了」更常见也更急）。
   homeChart(homeEls.chartCPU, p.series, [
     {
       label: 'CPU', color: 'var(--hm-warn)', width: 1.4, minSpan: 0.4,
       get: x => x.cpuCore || 0, fmt: v => v.toFixed(2) + ' 核',
     },
   ], { axisL: v => v.toFixed(1) + ' 核', levels: 2 });
+
+  homeChart(homeEls.chartMem, p.series, [
+    {
+      label: '内存', color: 'var(--hm-ok)', minSpan: 32 * 1024 * 1024,
+      get: x => x.heapBytes || 0, fmt: fmtBytes,
+    },
+  ], { axisL: v => fmtBytes(v), levels: 2 });
 }
 
 // 大屏的折线。配色走 --hm-*，不带悬浮读数 —— 总览是"远看"的页面。

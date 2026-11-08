@@ -2260,6 +2260,10 @@ body.sidebar-collapsed .sidebar {
   --hm-ok: var(--ok);
   --hm-warn: var(--warn);
   --hm-danger: var(--danger);
+  /* 健康分「正常档」的颜色。这里取 --accent（皮肤主色）而不是 --hm-accent：
+     浅色皮肤那一段为了避开曲线撞色，会把 --hm-accent 改成固定蓝，而健康环
+     要的是「这套皮肤自己的颜色」，不是图表分类色。 */
+  --hs-tone: var(--accent);
   /* 带宽线：皮肤里没有对应的语义色（蓝/绿/黄/红都被占了，而它需要和它们分开），
      深色下用偏冷的亮紫；浅色下要压暗一档，见下面那条覆盖。 */
   --hm-alt: #9b8cf0;
@@ -2309,6 +2313,15 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   --hm-grid: rgba(40, 70, 110, .055);
 }
 
+/* 健康环：主色在原色状态下对浅底只有 3.0~4.0:1（薄荷 3.0、天空蓝 3.6、芋紫 4.0），
+   压在淡底上「看得见但不清楚」。往正文色里掺 32% 压深一档 —— 色相不动，只掉明度，
+   换皮肤不用单独配。（深色皮肤的主色本来就亮到 6~11:1，不用动。） */
+@supports (color: color-mix(in srgb, red, blue)) {
+  html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
+    --hs-tone: color-mix(in srgb, var(--accent) 68%, var(--hm-text));
+  }
+}
+
 /* ---- 顶部状态条 ---- */
 .home-top {
   flex: 0 0 auto;
@@ -2347,9 +2360,17 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 
 /* ---- 健康分：LOGO 旁边那个环 ----
    80 毫秒扫一眼就知道「现在好不好」，比读三个数字快。环的缺口 = 扣掉的分，
-   颜色 = 等级；「优秀/良好」不闪，「注意/危险」才呼吸 —— 没事的时候别晃眼睛。 */
+   颜色 = 等级。环背后永远有一层**慢呼吸的光晕**（4.6 秒一趟，见 hsHalo）：
+   慢到不抢注意力，但眼睛余光能看出这页是「活的」。
+   「注意/危险」才让环本身明暗闪（hsBreath）并跟到 1.6s —— 没事的时候别晃眼睛。
+
+   颜色只有**三档**，不是四档：正常（优秀/良好）= 皮肤主色，注意 = 琥珀，
+   危险 = 红。原先「优秀」用绿色，在芋紫皮肤上成了淡紫底里的一圈森林绿 ——
+   绿色本身没错，错在它不是这套皮肤的亲戚。分数和等级词已经在旁边写着，
+   颜色只需要回答「有没有事」，那就让它跟着皮肤走：没事时整块牌子安静，
+   出事时整块牌子变色。90 分和 78 分差 12 分，不值得多记一种颜色。 */
 .home-score {
-  --hs-c: var(--hm-ok);
+  --hs-c: var(--hs-tone);
   position: relative;
   display: flex;
   align-items: center;
@@ -2362,20 +2383,58 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   outline: none;
 }
 .home-score:focus-visible { border-color: var(--hs-c); }
-.home-score[data-grade="good"] { --hs-c: var(--hm-accent); }
 .home-score[data-grade="warn"] { --hs-c: var(--hm-warn); }
 .home-score[data-grade="bad"] { --hs-c: var(--hm-danger); }
 
 .hs-gauge {
   position: relative;
   flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
+  /* 环的直径跟着字号缩放：数字是按比例塞进环里的，环不跟着变的话，
+     用户把字号调到 1.65 就会看到「100」左右各顶到环壁。
+     31.667 = 38 / 1.2 —— --fs 默认 1.2 下的直径仍是 38px，观感不变。 */
+  width: calc(31.667px * var(--fs));
+  height: calc(31.667px * var(--fs));
+  /* 自己开一个层叠上下文，好让光晕（z-index:-1）停在「胶囊底之上、环之下」。
+     不开的话 -1 会跑到 .home-score 外面去；而给 .home-score 开
+     （isolation / z-index）会把明细浮层的 z-index:6 一起关进这个上下文里，
+     浮层就压不住下面的卡片了。 */
+  isolation: isolate;
+}
+/* 呼吸光晕：环背后一圈柔光，4.6 秒一次「吸气—呼气」。
+   只用 transform + opacity（合成层，不重绘）；box-shadow / filter 每帧都要重画，
+   一块挂一整天的屏不值得为它烧这个钱。
+   形状是**环带**不是实心圆：中间 52% 透空，免得数字底下糊一层色（数字本身就是环色）。 */
+.hs-gauge::before {
+  content: "";
+  position: absolute;
+  /* 比环大一圈：光晕整圈落在环**外面**（环描边外边 ≈ 环半径的 90%），
+     这样它是一层「围在环外的雾」，而不是把环洞填满的实心圆。 */
+  inset: -16%;
+  z-index: -1;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(closest-side,
+    transparent 50%,
+    color-mix(in srgb, var(--hs-c) 24%, transparent) 68%,
+    transparent 100%);
+  animation: hsHalo 4.6s ease-in-out infinite;
+}
+@keyframes hsHalo {
+  /* 不只是缩放：小的时候更淡、大的时候更亮，才像「吸了一口气」而不是在原地抖 */
+  0%, 100% { transform: scale(.86); opacity: .3; }
+  50%      { transform: scale(1.16); opacity: .75; }
+}
+/* 注意 / 危险时并到 1.6s：和 hsBreath 同一个节奏，免得两个频率各闪各的 */
+.home-score[data-grade="warn"] .hs-gauge::before,
+.home-score[data-grade="bad"] .hs-gauge::before { animation-duration: 1.6s; }
+/* 系统开了「减少动态效果」：光晕留下不动，别晃 */
+@media (prefers-reduced-motion: reduce) {
+  .hs-gauge::before { animation: none; opacity: .5; transform: none; }
 }
 .hs-ring {
   display: block;
-  width: 38px;
-  height: 38px;
+  width: 100%;
+  height: 100%;
   transform: rotate(-90deg);          /* 让缺口从 12 点开始 */
 }
 .hs-ring circle {
@@ -2397,8 +2456,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   align-items: center;
   justify-content: center;
   font-family: var(--mono);
-  /* 12px 才放得下三位数「100」：13px 时它左右都顶到环上 */
-  font-size: calc(12px * var(--fs));
+  /* 环内净宽 = 直径 × 32.4/44 ≈ 0.74。等宽数字宽约 0.6em，
+     三位数「100」= 1.8em，取 0.26 × 直径 ≈ 0.35 内宽，两边还剩 2px 余量。 */
+  font-size: calc(9.5px * var(--fs));
   font-weight: 600;
   line-height: 1;
   color: var(--hs-c);
@@ -2479,9 +2539,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   background: var(--hm-line);
   overflow: hidden;
 }
-.hs-row .hs-bar i { display: block; height: 100%; border-radius: 2px; background: var(--hm-ok); }
-.hs-row[data-lv="mid"] .hs-bar i { background: var(--hm-accent); }
-.hs-row[data-lv="low"] .hs-bar i { background: var(--hm-warn); }
+.hs-row .hs-bar i { display: block; height: 100%; border-radius: 2px; background: var(--hs-tone); }
+.hs-row[data-lv="mid"] .hs-bar i { background: var(--hm-warn); }
+.hs-row[data-lv="low"] .hs-bar i { background: var(--hm-danger); }
 .hs-row b {
   flex: 0 0 auto;
   width: 24px;
@@ -2581,7 +2641,7 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   min-height: 330px;      /* 再矮就别硬塞了，让整页滚 */
   display: grid;
   /* 两列三行：请求、存储 I/O 各占整整一行（见下面那段 :nth-child），
-     内存和 CPU 各占半行。行高由容器决定（1fr）—— 以前用 auto 时，
+     CPU 和内存各占半行。行高由容器决定（1fr）—— 以前用 auto 时，
      卡片会被内容顶高，四张图一起往上冒。
      用 grid-auto-rows 而不是 grid-template-rows：窄屏降到一列时是四行，
      隐式行也要按同样规则分配，省一套模板。 */
@@ -2591,7 +2651,7 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 }
 /* 前两张（请求 / 存储 I/O）横跨整行：时间序列图越宽越好读，
    三列并排时每张只有 400 多像素，峰值和抖动全挤在一起。
-   后两张（内存 / CPU）各占半行 —— 它们的变化慢，不需要那么宽。 */
+   后两张（CPU / 内存）各占半行 —— 它们的变化慢，不需要那么宽。 */
 .home-chart:nth-child(-n+2) { grid-column: 1 / -1; }
 .home-chart {
   min-width: 0;
@@ -2606,9 +2666,26 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 .hc-head {
   flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
+  /* 有图标之后不能再用 baseline 对齐：SVG 的基线是它的底边，
+     和字的中线差着几个像素，四个字会看着「掉下去」。 */
+  align-items: center;
   gap: 8px;
   padding: 8px 14px 5px;
+}
+/* 图标 + 标题是一组：组内 6px，组外还是 8px，标题和副标题不会因此拉远 */
+.hc-lead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+/* 图标比标题淡一档：它是个记号，不是内容 —— 抢在「CPU」前面反而更花。
+   尺寸跟字号走（14px @ --fs 1.2），和标题 15px 视觉上等高。 */
+.hc-ico {
+  flex: 0 0 auto;
+  width: calc(11.7px * var(--fs));
+  height: calc(11.7px * var(--fs));
+  color: var(--hm-dim);
 }
 .hc-title {
   font-size: calc(12.5px * var(--fs));

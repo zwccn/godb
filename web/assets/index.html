@@ -263,12 +263,18 @@ try {
     <!-- 四张卡，按「读图的形状」排，不是按四宫格：
          - 请求 / 存储 I/O 各占**一整行**：这两张看的是随时间起伏，宽一点才看得出
            细节（三列并排时每张只有 400 多像素宽，却吃掉半屏高，宽高比对时间轴最不划算）。
-         - 内存 / CPU 各占**半行**：它们的形状变化慢，宽高各半正好。
+         - CPU / 内存 各占**半行**：它们的形状变化慢，宽高各半正好。CPU 放前面 ——
+           「吃满核」比「堆涨了 20 MB」更常见也更急，别让人先看到不痛的那个。
          - 四张卡都撑满剩余高度（容器 flex:1 + grid 1fr 行），页面不再留白。
          量纲仍然是分的：一张图里的线必须共用一根轴（或明确左右双轴）。 -->
     <section class="home-chart">
       <div class="hc-head">
-        <span class="hc-title">请求</span>
+        <span class="hc-lead">
+          <svg class="hc-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false"><path d="M3.6 9h11.6"/><path d="M12.6 5.6 16 9l-3.4 3.4"/><path d="M20.4 15H8.8"/><path d="M11.4 11.6 8 15l3.4 3.4"/></svg>
+          <span class="hc-title">请求</span>
+        </span>
         <span class="hc-sub">QPS · 连接</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
@@ -276,7 +282,12 @@ try {
     </section>
     <section class="home-chart">
       <div class="hc-head">
-        <span class="hc-title">存储 I/O</span>
+        <span class="hc-lead">
+          <svg class="hc-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false"><rect x="3.4" y="5.4" width="17.2" height="13.2" rx="2.2"/><path d="M3.4 13.6h17.2"/><path d="M6.8 9.5h6.4"/><circle cx="16.9" cy="16.5" r=".95" fill="currentColor" stroke="none"/></svg>
+          <span class="hc-title">存储 I/O</span>
+        </span>
         <span class="hc-sub">带宽 · 读 · 写</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
@@ -284,19 +295,29 @@ try {
     </section>
     <section class="home-chart">
       <div class="hc-head">
-        <span class="hc-title">内存</span>
-        <span class="hc-sub">堆内存</span>
-        <span class="hc-range">最近 5 分钟</span>
-      </div>
-      <div class="hc-body" id="homeChartMem"></div>
-    </section>
-    <section class="home-chart">
-      <div class="hc-head">
-        <span class="hc-title">CPU</span>
+        <span class="hc-lead">
+          <svg class="hc-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false"><rect x="6.3" y="6.3" width="11.4" height="11.4" rx="1.8"/><rect x="10.1" y="10.1" width="3.8" height="3.8" rx=".7"/><path d="M9.6 3.4v2.9M14.4 3.4v2.9M9.6 17.7v2.9M14.4 17.7v2.9M3.4 9.6h2.9M3.4 14.4h2.9M17.7 9.6h2.9M17.7 14.4h2.9"/></svg>
+          <span class="hc-title">CPU</span>
+        </span>
         <span class="hc-sub">进程占用</span>
         <span class="hc-range">最近 5 分钟</span>
       </div>
       <div class="hc-body" id="homeChartCPU"></div>
+    </section>
+    <section class="home-chart">
+      <div class="hc-head">
+        <span class="hc-lead">
+          <svg class="hc-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false"><rect x="3" y="7.2" width="18" height="9" rx="1.6"/><path d="M6.6 16.2v3.2M10.2 16.2v3.2M13.8 16.2v3.2M17.4 16.2v3.2"/><path d="M7 11.6h10"/></svg>
+          <span class="hc-title">内存</span>
+        </span>
+        <span class="hc-sub">堆内存</span>
+        <span class="hc-range">最近 5 分钟</span>
+      </div>
+      <div class="hc-body" id="homeChartMem"></div>
     </section>
   </div>
 

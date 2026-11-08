@@ -6379,7 +6379,9 @@ class CDP {
         return {
           i,
           title: (c.querySelector('.hc-title') || {}).textContent || '',
-          paths: c.querySelectorAll('svg path').length,
+          // 只数图区里的 path：卡片头上那个小图标也是 svg，一起数会多出两三条
+          paths: c.querySelectorAll('.hc-body svg path').length,
+          ico: !!c.querySelector('.hc-head .hc-ico'),
           legend: [...c.querySelectorAll('.home-lg span')].map(s => s.textContent).join('/'),
           // 刻度是**多个 span**，直接读 textContent 会粘成「100」（10 + 0），
           // 调试时看不出是两档还是一档 —— 逐个取再用 / 连
@@ -6416,6 +6418,33 @@ class CDP {
       && Math.abs(3 * cReq.h + 2 * 12 - cReq.wrapH) <= 3,
       `容器 ${cReq && cReq.wrapW}×${cReq && cReq.wrapH} · `
       + charts.map(c => `${c.title} ${c.w}×${c.h}`).join(' · '));
+
+    // 第三行左 CPU、右内存：「核吃满了」比「堆涨了 20 MB」更常见也更急，
+    // 别让人先看到不痛的那个。改顺序不用改代码，但得有人守着它别再被换回去。
+    check('总览：CPU 那张卡在内存左边',
+      cCpu.i === 2 && cMem.i === 3,
+      charts.map(c => c.title).join(' → '));
+
+    /* 标题前的图标：四张卡各一个，而且必须是**装饰**（aria-hidden）——
+       读屏软件念「请求 QPS 连接」就够了，多念一句「图像」纯属噪音。
+       形状不做断言（换个图标不该让测试红），只断「有、且不发声、且跟着字号走」。 */
+    const icoState = await cdp.eval(`(() => {
+      const heads = [...document.querySelectorAll('.home-chart .hc-head')];
+      return heads.map(h => {
+        const svg = h.querySelector('.hc-ico');
+        const r = svg && svg.getBoundingClientRect();
+        return {
+          has: !!svg,
+          hidden: svg ? svg.getAttribute('aria-hidden') === 'true' : false,
+          w: r ? Math.round(r.width) : 0,
+          beforeTitle: svg ? (svg.parentNode.querySelector('.hc-title') !== null) : false,
+        };
+      });
+    })()`);
+    const icoBad = icoState.filter(i => !i.has || !i.hidden || !i.beforeTitle || i.w < 8);
+    check('总览：四张卡标题前都有图标，且对读屏软件隐身',
+      icoState.length === 4 && icoBad.length === 0,
+      icoState.map(i => (i.has ? i.w + 'px' : '无')).join(' · '));
 
     /* 坐标：四张图都要有 y 刻度，请求图左右各一套；刻度里不能出现负数
        （CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */
@@ -6556,6 +6585,43 @@ class CDP {
       hsLive.val >= 0 && hsLive.val <= 100 && hsLive.rows === 6 && hsLive.state,
       `${hsLive.val} 分 · 明细 ${hsLive.rows} 行 · 状态词隐藏 ${hsLive.state}`);
 
+    /* 呼吸光晕：环背后那层柔光。断三件事 —— 它在跑、慢、而且只碰 transform/opacity。
+       最后一条是防「改起来更顺手」的：用 box-shadow / filter 做，每帧都要重绘；
+       这块地方挂着就是一天，合成层和重绘的区别在笔记本风扇上听得见。 */
+    const hsHalo = await cdp.eval(`(() => {
+      const cs = getComputedStyle(document.querySelector('.hs-gauge'), '::before');
+      return { name: cs.animationName, dur: parseFloat(cs.animationDuration),
+               inset: cs.inset, bg: cs.backgroundImage.slice(0, 24) };
+    })()`);
+    check('健康分：环背后有呼吸光晕，且是慢的（≥4s 一个来回）',
+      hsHalo.name === 'hsHalo' && hsHalo.dur >= 4 && /radial-gradient/.test(hsHalo.bg),
+      `${hsHalo.name} ${hsHalo.dur}s · inset ${hsHalo.inset}`);
+    {
+      // 关键帧里只该出现 transform / opacity。抓 @keyframes 原文来查，比盯计算值可靠：
+      // 计算值只看得到「此刻」，看不到动画中途会不会去动 box-shadow。
+      const kf = fs.readFileSync(__dirname + '/../web/assets/style.css', 'utf8');
+      const body = (/@keyframes hsHalo\s*\{([\s\S]*?)\n\}/.exec(kf) || [])[1] || '';
+      const props = [...body.matchAll(/([a-z-]+)\s*:/g)].map(m => m[1]);
+      const bad = props.filter(p => p !== 'transform' && p !== 'opacity');
+      check('健康分：光晕只动 transform/opacity（不每帧重绘）',
+        props.length > 0 && bad.length === 0,
+        bad.length ? '出现了：' + bad.join(' / ') : props.join(' / '));
+    }
+    /* 系统开了「减少动态效果」就不该再呼吸。CDP 能模拟这个媒体特性，
+       否则这条只能靠肉眼看（而开发机多半没开这个开关）。 */
+    await cdp.send('Emulation.setEmulatedMedia',
+      { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await settle(cdp);
+    const hsStill = await cdp.eval(`(() => {
+      const cs = getComputedStyle(document.querySelector('.hs-gauge'), '::before');
+      return { name: cs.animationName, op: cs.opacity };
+    })()`);
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+    await settle(cdp);
+    check('健康分：系统要求减少动效时光晕停下，但光还在',
+      hsStill.name === 'none' && Number(hsStill.op) > 0,
+      `animation ${hsStill.name} · opacity ${hsStill.op}`);
+
     /* ---- 六套皮肤下的配色体检 ----
        只断「皮肤生效了」不够：芋紫下森林绿的环、橄榄黄的 CPU 线在淡紫底上
        又闷又脏（对比度 2.97:1），薄荷绿下强调色和内存线撞成同一个绿 ——
@@ -6563,8 +6629,19 @@ class CDP {
        量三件事：线对卡片底的对比度、同一张图里各线的色相间隔、环的对比度。 */
     await cdp.eval(`window.__skinProbe = () => {
       const rgb = s => {
-        const m = /rgba?\\(([^)]+)\\)/.exec(s);
-        return m ? (n => ({ r: n[0], g: n[1], b: n[2] }))(m[1].split(',').map(parseFloat)) : null;
+        let m = /rgba?\\(([^)]+)\\)/.exec(s);
+        if (m) {
+          const n = m[1].split(/[,\\s\\/]+/).map(parseFloat);
+          return { r: n[0], g: n[1], b: n[2] };
+        }
+        // 颜色由 color-mix 算出来时，Chrome 序列化成 color(srgb 0.379 0.284 0.651)，
+        // 分量是 0~1 的浮点 —— 只认 rgba() 的话这里会拿到 null，后面直接炸。
+        m = /color\\(srgb\\s+([^)]+)\\)/.exec(s);
+        if (m) {
+          const n = m[1].split(/[\\s\\/]+/).map(parseFloat);
+          return { r: n[0] * 255, g: n[1] * 255, b: n[2] * 255 };
+        }
+        return null;
       };
       const lum = c => {
         const f = v => { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); };
@@ -6601,10 +6678,19 @@ class CDP {
         }
       }
       const ring = rgb(getComputedStyle(document.getElementById('homeScoreVal')).color);
+      // 主色交给浏览器算（别在这里假设是哪个变量）：环该不该跟它同族，得先拿到它
+      const sw = document.createElement('span');
+      sw.style.color = 'var(--accent)';
+      document.querySelector('.home').appendChild(sw);
+      const accent = rgb(getComputedStyle(sw).color);
+      sw.remove();
       return {
         theme: document.documentElement.getAttribute('data-theme') || 'dark',
         cardBg, series,
-        ring: { cr: +ratio(ring, cardBg).toFixed(2), hue: +hue(ring).toFixed(0) },
+        grade: document.getElementById('homeScore').dataset.grade,
+        ring: { cr: +ratio(ring, cardBg).toFixed(2),
+                hue: hue(ring) == null ? null : +hue(ring).toFixed(0),
+                accentHue: accent && hue(accent) != null ? +hue(accent).toFixed(0) : null },
       };
     }`);
     const skinThemes = ['steel', 'dark', 'aurora', 'sky', 'taro', 'mint'];
@@ -6628,6 +6714,19 @@ class CDP {
         `环 ${p.ring.cr}:1 · 最低线 ${Math.min(...p.series.map(s => s.cr))}:1`
         + ` · I/O 色相最小间隔 ${minGap}°`
         + (low.length ? ' · 偏淡：' + low.map(s => s.name + ' ' + s.cr).join(' / ') : ''));
+
+      /* 「优秀」的环必须是这套皮肤自己的颜色。
+         曾经用固定绿：芋紫皮肤下就是淡紫底里的一圈森林绿 —— 对比度合格、
+         色相完全不属于这个界面。所以除了对比度，还要量色相差：正常档
+         （优秀/良好）跟主色相差不得超过 30°，注意/危险 才允许换色相（琥珀/红）。 */
+      const dh = p.ring.hue == null || p.ring.accentHue == null ? 0
+        : Math.abs(p.ring.hue - p.ring.accentHue);
+      const hueGap = Math.min(dh, 360 - dh);
+      const quiet = p.grade === 'ok' || p.grade === 'good';
+      check(`皮肤「${th}」：健康环用这套皮肤自己的颜色（正常档与主色相差 ≤30°）`,
+        !quiet || hueGap <= 30,
+        `环 ${p.ring.hue}° · 主色 ${p.ring.accentHue}° · 差 ${hueGap}°`
+        + ` · 等级 ${p.grade}${quiet ? '' : '（已换色相，跳过）'}`);
     }
     await cdp.eval(`applyTheme('${skinBack}', true)`);
     await settle(cdp);

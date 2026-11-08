@@ -6606,7 +6606,7 @@ class CDP {
       };
     })()`);
     check('总览：健康球两侧各一片「翼」（读屏与鼠标都穿透，排在球外侧，不撞文字）',
-      !wingUi.miss && wingUi.n === 2 && wingUi.paths === 7 && wingUi.reuse
+      !wingUi.miss && wingUi.n === 2 && wingUi.paths === 8 && wingUi.reuse
       && wingUi.hidden && wingUi.pent === 'none'
       && wingUi.lRight >= wingUi.ballL - 2 && wingUi.lRight <= wingUi.ballL + 16
       && wingUi.rLeft <= wingUi.ballR + 2 && wingUi.rLeft >= wingUi.ballR - 16

@@ -2431,8 +2431,8 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 }
 .hero-wing {
   /* 浅色皮肤整体压一档（见下面那条），深色保持 1。
-     乘在动画里而不是改 path 的 opacity —— 线有七道、各自透明度不同，
-     一处总控比逐条调省事，也不会漏掉某一道。 */
+     乘在动画里而不是改每片羽毛的 opacity —— 六片各有自己的淡淡浓淡，
+     一处总控比逐片调省事，也不会漏掉某一片。 */
   --wing-a: 1;
   position: absolute;
   top: 50%;
@@ -2442,11 +2442,8 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   transform: translateY(-50%);
   color: var(--hs-tone);
   pointer-events: none;
-  /* 翼尖渐隐：一层 mask 管全部线，比每条 path 各写一份渐变省事，
-     加一根线也不用改颜色。右翼整体 scaleX(-1)，mask 跟着翻，不用写第二份。
-     68% 才收到全透明：再早（56% 试过）翼就缩成一小截，两侧还是空。 */
-  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 68%);
-  mask-image: linear-gradient(to right, transparent 0, #000 68%);
+  /* 不再需要 mask 渐隐：羽片本身是收尖的填充形状，翼尖是「羽毛尖」而不是
+     被切断的电线。右翼整体 scaleX(-1)，形状跟着翻，不用写第二份。 */
   animation: wingBreath 7s ease-in-out infinite;
 }
 /* 负 margin 让线从卡片底下钻出来，而不是悬在卡片边上 */
@@ -2455,16 +2452,16 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 /* 颜色跟着健康等级走：正常时是皮肤主色（和环同一个色），出事才转琥珀/红 */
 .home-hero[data-level="yellow"] .hero-wing { color: var(--hm-warn); }
 .home-hero[data-level="red"] .hero-wing { color: var(--hm-danger); }
-/* 幅度只敢给这一点：7 秒里 0.76 → 1。它是背景，动了就说明「活着」，
+/* 幅度只敢给这一点：7 秒里 0.86 → 1。它是背景，动了只说明「活着」，
    再大就会让人盯着看 —— 而这块屏幕上该被盯着的是中间那个数。 */
 @keyframes wingBreath {
-  0%, 100% { opacity: calc(.76 * var(--wing-a)); }
+  0%, 100% { opacity: calc(.86 * var(--wing-a)); }
   50%      { opacity: calc(1 * var(--wing-a)); }
 }
-/* 浅色底上同样的主色对比度高得多，线条会显得又黑又密 → 整体压到 .68。
+/* 浅色底上同样的主色对比度高得多，羽片会显得又黑又重 → 整体压到 .78。
    深色底本来就靠「比底色亮一点」成立，压了就没了。 */
 html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-wing {
-  --wing-a: .68;
+  --wing-a: .78;
 }
 @media (prefers-reduced-motion: reduce) {
   .hero-wing { animation: none; opacity: calc(1 * var(--wing-a)); }

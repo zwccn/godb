@@ -256,29 +256,39 @@ try {
       <span class="hero-sub" id="heroSub"></span>
     </div>
     <!-- 中列：球 + 两侧的「翼」。
-         翼是**纯装饰**（aria-hidden + pointer-events:none）。它只回答一个问题：
+         翼是**纯装饰**（aria-hidden + pointer-events:none）。它回答一个问题：
          球两侧各空 300~400px，什么都不放像没画完，放数据又会和左右两侧的
-         结论 / 累计数抢注意力 —— 所以用**没有信息量的线**去填。
-         形状：七道从球侧收拢、向翼尖散开的曲线，取健康环同一个色（--hs-tone），
-         快到翼尖时渐隐到 0。「硬截断」的一排线看着像胡须，而这个界面里
-         所有发光和线条都该是「散开的」，不是「断掉的」——渐隐靠 CSS mask，
-         比在每条 path 上写渐变省事，也不会和 <use> 的坐标打架。
+         结论 / 累计数抢注意力 —— 所以用**没有信息量的形状**去填。
+
+         形状是「一对把球托起来的飞翼」：八片羽毛从球侧伸出去、一路向上扬，
+         根部挨得很紧（像一整片翼），越靠翼尖越薄越淡、每片短一截 ——
+         远看是「托举」，近看是羽片。颜色取健康环同一个色（--hs-tone），
+         出琥珀/红时一起变。
+
+         羽毛为什么是**填充形状**而不是描边：描边从头到尾一样粗，看着像电线，
+         怎么调参数都不像羽毛。这里每片是一条二次曲线中轴，按 (1-t)^0.75 的
+         半宽往两边偏、末端收到 0，围成一个根部粗、翼尖尖的闭合片。
 
          为什么不画一个横跨整行的大 SVG：hero 是 1fr auto 1fr 网格，两侧列宽
          随窗口变，一个 viewBox 拉满会被 preserveAspectRatio 扭成不同的斜度；
          左右各一个、贴着球定位、尺寸交给 CSS 的 clamp，形状才永远不变形。 -->
     <div class="hero-mid">
-      <svg class="hero-wing l" viewBox="0 0 250 120" aria-hidden="true" focusable="false">
-        <g id="heroWingPaths" fill="none" stroke="currentColor" stroke-linecap="round">
-          <!-- 七道：中间那条（主脊）最粗最实，往外逐渐变细变淡 ——
-               五道等宽看起来像一排胡须，有了粗细主次才像一片翼。 -->
-          <path d="M250 30 C186 30,120 18,10 2"     stroke-width="1"   opacity=".38"></path>
-          <path d="M250 40 C188 38,126 30,16 16"    stroke-width="1"   opacity=".42"></path>
-          <path d="M250 52 C190 50,130 44,18 34"    stroke-width="1.5" opacity=".6"></path>
-          <path d="M250 60 C190 60,132 56,20 52"    stroke-width="1.8" opacity=".7"></path>
-          <path d="M250 70 C190 70,132 72,22 78"    stroke-width="1.5" opacity=".58"></path>
-          <path d="M250 82 C188 82,126 92,18 104"   stroke-width="1"   opacity=".4"></path>
-          <path d="M250 92 C186 92,120 104,10 118"  stroke-width="1"   opacity=".34"></path>
+      <svg class="hero-wing l" viewBox="0 0 250 90" aria-hidden="true" focusable="false">
+        <g id="heroWingPaths" fill="currentColor">
+          <!-- 八片羽毛：最上面那片是「前缘」，最粗最实，整片翼的轮廓靠它定。
+               根部间距 5.4、片宽 5.0 —— 差一点点，紧到像一整片翼；越往下越短、
+               越淡（每片 -0.075），翼尖才散成羽毛。数量少了（试过 5~6 片）
+               空隙就露出来，看着像耙子。
+               数字是脚本算完取整的（中轴二次曲线 + 垂直偏移收尖），
+               改形状请重算，不要手调坐标 —— 单片 22 个点，手调对不齐。 -->
+          <path d="M250 42L225 39L200 37L175 34L150 31L126 28L101 25L77 21L53 17L30 13L6 8L6 8L29 13L53 18L77 23L101 27L125 31L150 35L175 38L199 41L224 44L250 46Z" opacity="0.90"></path>
+          <path d="M250 47L227 45L204 43L181 40L158 37L135 34L113 31L91 27L69 23L47 19L25 15L25 15L47 20L68 24L90 29L113 33L135 37L158 40L180 44L203 47L226 49L250 52Z" opacity="0.83"></path>
+          <path d="M250 53L229 51L208 48L187 46L167 43L146 40L126 37L105 33L85 29L66 25L46 21L46 21L65 26L85 31L105 35L125 39L146 43L166 46L187 49L208 52L229 55L250 57Z" opacity="0.75"></path>
+          <path d="M250 58L231 56L212 54L194 52L175 49L157 46L139 43L121 39L103 36L85 32L67 28L67 28L85 32L102 37L120 41L138 45L157 48L175 52L193 55L212 57L231 60L250 62Z" opacity="0.68"></path>
+          <path d="M250 64L234 62L217 60L201 58L184 55L168 52L152 49L136 46L120 42L104 38L89 34L89 34L104 39L120 43L136 47L152 51L168 54L184 57L200 60L217 63L233 65L250 67Z" opacity="0.60"></path>
+          <path d="M250 70L236 68L222 66L207 63L193 61L179 58L165 55L152 52L138 48L124 45L111 41L111 41L124 45L138 49L151 53L165 56L179 60L193 63L207 66L221 68L235 70L250 72Z" opacity="0.53"></path>
+          <path d="M250 75L238 73L226 71L214 69L202 67L191 64L179 61L168 58L156 55L145 51L133 47L133 47L145 52L156 55L167 59L179 62L190 66L202 68L214 71L226 73L238 76L250 78Z" opacity="0.45"></path>
+          <path d="M250 81L240 79L231 77L221 75L212 73L202 70L193 67L184 64L174 61L165 58L156 54L156 54L165 58L174 62L183 65L193 68L202 71L211 74L221 77L230 79L240 81L250 83Z" opacity="0.38"></path>
         </g>
       </svg>
       <!-- 右翼用 <use> 引同一组线，CSS 里 scaleX(-1) 镜像 —— 形状只写一遍，
@@ -286,7 +296,7 @@ try {
            定位元素按 DOM 顺序绘制，右翼如果排在卡片后面，那 12px 的负 margin
            会压在卡片边上（给 .home-score 加 z-index 又不行 —— 那会把它变成
            层叠上下文，把里面明细浮层的 z-index:6 一起关进去）。 -->
-      <svg class="hero-wing r" viewBox="0 0 250 120" aria-hidden="true" focusable="false">
+      <svg class="hero-wing r" viewBox="0 0 250 90" aria-hidden="true" focusable="false">
         <use href="#heroWingPaths"></use>
       </svg>
       <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"

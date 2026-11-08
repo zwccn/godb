@@ -1226,6 +1226,11 @@ const hiddenResults = new Set();
 function renderResults(data, keepTab) {
   if (!data) return;
   hiddenResults.clear();
+  // 换了结果集（重新执行 / 切库）：排序、翻页、列宽都从头来过。
+  // 同一个 data 对象再进来是**内部重画**（点表头、翻页、改每页行数），那时要保住视图。
+  // 不区分的话：上一条结果按第 1 列降序、停在第 2 页，新查询打开就是那个样子 ——
+  // 数据整个换了，排序键和页码却还是上一句的。
+  if (data !== lastData) pageState.clear();
   lastData = data;
   // 服务端在没有行时**不返回 rows 字段**（json omitempty），不是返回空数组。
   // 以前只有 rows.length > 0 的结果才会被画成表格，所以没人踩到；0 行的 SELECT

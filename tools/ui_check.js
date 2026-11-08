@@ -438,6 +438,109 @@ class CDP {
         && zeroTab.foot === '共 0 行' && !zeroTab.err,
       `${zeroTab.labels.join('|')} / 表头 ${zeroTab.ths.length} / 「${zeroTab.empty}」/ ${zeroTab.foot}`);
 
+    /* 0.1e2) 结果表格的日常操作：排序 / 翻页 / 导出 / Ctrl+Enter。
+       这一片以前一条都没测：表格能画出来就算过，「点表头会不会把顺序搞乱」
+       「翻页会不会串行」「导出的 CSV 有没有转义」全靠人肉点。 */
+    await runSqlX('SELECT id FROM employees ORDER BY id DESC LIMIT 6');
+    await waitFor(cdp, `document.querySelectorAll('table.grid tbody tr').length > 2`, { label: '排序用结果' });
+    const sortUi = await cdp.eval(`(() => {
+      const col = () => [...document.querySelectorAll('table.grid tbody tr td:first-child')]
+        .map(td => Number(td.textContent));
+      const clickTh = () => document.querySelector('table.grid thead th').click();
+      const ind = () => {
+        const e = document.querySelector('table.grid thead th .sort-ind');
+        return e ? e.textContent : '';
+      };
+      const before = col();
+      clickTh();
+      const asc = col(), ind1 = ind();
+      clickTh();
+      const desc = col(), ind2 = ind();
+      const ascOk = asc.every((v, i) => i === 0 || asc[i - 1] <= v);
+      const descOk = desc.every((v, i) => i === 0 || desc[i - 1] >= v);
+      return { before, asc, desc, ind1, ind2, ascOk, descOk,
+               distinct: new Set(asc).size === asc.length };
+    })()`);
+    check('结果表：点表头升序、再点降序，表头有 ▲/▼（不重复发查询）',
+      sortUi.ascOk && sortUi.descOk && sortUi.distinct
+      && sortUi.ind1 === '▲' && sortUi.ind2 === '▼'
+      && sortUi.asc.join() === sortUi.desc.slice().reverse().join(),
+      `原序 ${sortUi.before.join(',')} → 升序 ${sortUi.asc.join(',')} ${sortUi.ind1} → 降序 ${sortUi.desc.join(',')} ${sortUi.ind2}`);
+
+    /* 翻页：结果表自己分页（每页 100），数据全在内存里，翻页不重发查询。
+       big_demo 是这段开头为了空间地图现造的 5 万行，拿前 150 行刚好两页。 */
+    await runSqlX('SELECT id, v FROM big_demo ORDER BY id LIMIT 150');
+    await waitFor(cdp, `!!document.querySelector('.grid-range')`, { label: '结果分页条' });
+    // 分页条上有两个 .grid-range：一个报「第 A–B 行 / 共 N 行」，一个报「k/N 页」
+    const pagerRead = `(() => {
+      const rs = [...document.querySelectorAll('.grid-range')].map(e => e.textContent.trim());
+      return {
+        rows: rs[0] || '', pages: rs.length > 1 ? rs[rs.length - 1] : '',
+        first: (document.querySelector('table.grid tbody tr td') || {}).textContent || '',
+        n: document.querySelectorAll('table.grid tbody tr').length,
+      };
+    })()`;
+    const pager1 = await cdp.eval(pagerRead);
+    const prevOff = await cdp.eval(`document.querySelector('.pg-btn').disabled`);
+    await cdp.eval(`{ const b = [...document.querySelectorAll('.pg-btn')]; b[b.length - 1].click(); }`);
+    const pager2 = await cdp.eval(pagerRead);
+    await cdp.eval(`document.querySelector('.pg-btn').click()`);
+    const pager3 = await cdp.eval(pagerRead);
+    check('结果表：每页 100 行、翻页换内容、首页「上一页」禁用、能翻回来',
+      pager1.rows === '第 1–100 行 / 共 150 行' && pager1.n === 100 && pager1.first === '1'
+      && pager1.pages === '1/2 页' && prevOff === true
+      && pager2.rows === '第 101–150 行 / 共 150 行' && pager2.n === 50 && pager2.first === '101'
+      && pager2.pages === '2/2 页'
+      && pager3.rows === '第 1–100 行 / 共 150 行' && pager3.first === '1',
+      `${pager1.rows}(${pager1.pages}, 首 ${pager1.first}) → ${pager2.rows}(${pager2.pages}, 首 ${pager2.first}) → 翻回 ${pager3.rows}`);
+
+    /* 导出：CSV 要带 BOM、逗号要引号包住、CRLF 换行；JSON 要能直接 parse。
+       不真下载 —— 把 downloadText 摘掉换成收集器，验证**内容**。 */
+    await runSqlX(`SELECT 1 AS a, 'x,y' AS b`);
+    await waitFor(cdp, `document.querySelectorAll('.result-actions button').length >= 2`, { label: '导出按钮' });
+    const exports_ = await cdp.eval(`(() => {
+      const got = [];
+      const orig = window.downloadText;
+      window.downloadText = (name, text, mime) => got.push({ name, text, mime });
+      for (const b of document.querySelectorAll('.result-actions button')) b.click();
+      window.downloadText = orig;
+      return got;
+    })()`);
+    const csv = exports_.find(x => /\.csv$/.test(x.name)) || {};
+    const json = exports_.find(x => /\.json$/.test(x.name)) || {};
+    let jsonOk = false;
+    try {
+      const j = JSON.parse(json.text);
+      jsonOk = Array.isArray(j) && j.length === 1 && j[0].a === 1 && j[0].b === 'x,y';
+    } catch (e) { jsonOk = false; }
+    check('结果表：导出 CSV 带 BOM / 逗号加引号 / CRLF，JSON 能直接 parse',
+      !!csv.text && csv.text.charCodeAt(0) === 0xFEFF
+      && csv.text.replace(/^\uFEFF/, '') === 'a,b\r\n1,"x,y"'
+      && /text\/csv/.test(csv.mime || '') && jsonOk,
+      `CSV ${JSON.stringify((csv.text || '').slice(0, 32))} · JSON ${jsonOk ? 'ok' : JSON.stringify((json.text || '').slice(0, 40))}`);
+
+    /* Ctrl+Enter：CodeMirror 的 extraKeys 里绑的，和 F5 / 按钮同一个 run()。
+       这条走的是真键盘事件 —— 只测按钮等于没测快捷键。 */
+    await cdp.eval(`cm.setValue('SELECT 4242 AS ce'); cm.focus();`);
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown', key: 'Enter', code: 'Enter', modifiers: 2,
+      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+    });
+    await cdp.send('Input.dispatchKeyEvent', {
+      type: 'keyUp', key: 'Enter', code: 'Enter', modifiers: 2,
+      windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+    });
+    await waitIdle(cdp);
+    const ctrlEnter = await cdp.eval(`({
+      sql: cm.getValue(),
+      cells: [...document.querySelectorAll('table.grid tbody td')].map(td => td.textContent.trim()),
+      last: lastSubmittedSQL,
+    })`);
+    check('Ctrl+Enter 直接执行（不插换行、结果进表格）',
+      ctrlEnter.last === 'SELECT 4242 AS ce' && ctrlEnter.cells[0] === '4242'
+      && ctrlEnter.sql === 'SELECT 4242 AS ce',
+      `提交 ${JSON.stringify(ctrlEnter.last)} · 首格 ${ctrlEnter.cells[0]} · 编辑器 ${JSON.stringify(ctrlEnter.sql)}`);
+
     // 0.1f) 执行中：结果区顶边一条走动条 + aria-busy。
     //      直接调 setRunning 而不是发一条慢查询 —— 慢查询在这个数据规模下不可靠地
     //      慢（同一句 57ms～568ms 都见过），断言会变成随机红绿。这里要钉的是
@@ -3472,6 +3575,28 @@ class CDP {
     check('表树右键「插入 SELECT」：插到光标处但不执行',
       insSel.has && /SELECT \* FROM big_demo/.test(insSel.text || '') && insSel.ran === null,
       JSON.stringify((insSel.text || '').slice(0, 40)));
+
+    /* 表树右键另外两件高频的：「插入表名」只插名字，「打开表」直接跑一条 LIMIT 100。
+       这两个以前完全没测 —— 后者还会改编辑器内容并重新查询，坏了没人发现。 */
+    const treeIns = await cdp.eval(`(() => {
+      cm.setValue(''); cm.setCursor({ line: 0, ch: 0 });
+      lastSubmittedSQL = null;
+      tableMenuItems({ name: 'big_demo' }).find(x => x.label === '插入表名').run();
+      return { inserted: cm.getValue(), ran: lastSubmittedSQL };
+    })()`);
+    await cdp.eval(`tableMenuItems({ name: 'big_demo' }).find(x => x.label === '打开表').run()`);
+    await waitIdle(cdp);
+    const treeOpen = await cdp.eval(`({
+      sql: cm.getValue(),
+      rows: document.querySelectorAll('table.grid tbody tr').length,
+      range: (document.querySelector('.grid-range') || {}).textContent || '',
+    })`);
+    check('表树右键「插入表名」只插不跑、「打开表」跑 SELECT * LIMIT 100',
+      treeIns.inserted === 'big_demo' && treeIns.ran === null
+      && treeOpen.sql === 'SELECT * FROM big_demo LIMIT 100;'
+      && treeOpen.rows === 100 && /第 1–100 行/.test(treeOpen.range),
+      `插入 ${JSON.stringify(treeIns.inserted)} · 打开 ${JSON.stringify(treeOpen.sql)}`
+      + ` · ${treeOpen.rows} 行 / ${treeOpen.range}`);
 
     // 大结果集提示：表格只画当前页，但数据是全量进来的
     await cdp.eval(`cm.setValue('SELECT * FROM big_demo LIMIT 3000')`);

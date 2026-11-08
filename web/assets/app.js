@@ -2602,6 +2602,14 @@ function syncTopNav() {
   // 顶栏三个主项全灭，人不知道自己在哪一页。所以「更多」跟着一起亮。
   const more = document.getElementById('btnMore');
   if (more) more.classList.toggle('on', erOpen || setOpen);
+
+  // 顶栏左上角那两件（☰ 侧栏开关、库 ▾ 管理）只属于工作台 —— 只有那一页
+  // 有侧栏，也只有那一页「当前库」是个真上下文。其它页左上角只留品牌。
+  // 状态挂在 <html> 上，CSS 一条规则收放，不用逐个元素去 hide。
+  const view = monOpen ? 'monitor' : setOpen ? 'settings' : erOpen ? 'model'
+    : (homeOpen ? 'overview' : 'work');
+  const root = document.documentElement;
+  if (root.dataset.view !== view) root.dataset.view = view;
 }
 
 function toggleMonitor(force) {

@@ -4722,6 +4722,17 @@ table.dgrid input[type="checkbox"] { cursor: pointer; accent-color: var(--accent
 
 /* ---------------- 数据库选择 ---------------- */
 
+/* 左上角的「导航」—— ☰（侧栏开关）和「库 ▾ 管理」—— 只属于工作台：
+   只有那一页有侧栏，也只有那一页「当前库」是个真上下文。
+   其它页（总览 / 监控 / 设置 / 模型图）左上角只留品牌，别的都收起来。
+   品牌本身一个像素都不动：图标、字标、间距都没碰，只是前面少了 ☰，
+   它自然贴到左边缘 —— 那正好是「只剩一个锚点」该有的样子。
+   视图状态挂在 <html data-view>（由 syncTopNav 维护），这里纯 CSS 收放。 */
+html:not([data-view="work"]) .topbar > #btnSidebar,
+html:not([data-view="work"]) .topbar > .db-pick {
+  display: none;
+}
+
 .db-pick {
   display: flex;
   align-items: center;

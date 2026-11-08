@@ -2128,6 +2128,39 @@ class CDP {
     await cdp.eval(`document.getElementById('btnDBDone').click()`);
     await sleep(200);
 
+;
+
+    /* 左上角的「导航」（☰ 侧栏开关、库 ▾ 管理）只在工作台出现：只有那一页有侧栏，
+       也只有那一页「当前库」是个真上下文。品牌（图标 + GoDB）在任何一页都在。 */
+    const navProbe = () => cdp.eval(`(() => {
+      const d = id => { const el = document.getElementById(id); return el ? getComputedStyle(el).display : '-'; };
+      const pick = document.querySelector('.db-pick');
+      const brand = document.getElementById('btnBrand').getBoundingClientRect();
+      return {
+        view: document.documentElement.dataset.view,
+        side: d('btnSidebar'),
+        db: pick ? getComputedStyle(pick).display : '-',
+        brand: d('btnBrand'),
+        brandW: Math.round(brand.width),
+        word: (document.querySelector('.wordmark') || {}).textContent || '',
+        logo: !!document.querySelector('.brand .logo svg'),
+      };
+    })()`);
+    await cdp.eval(`document.getElementById('btnOverview').click()`);
+    await sleep(400);
+    const navHome = await navProbe();
+    await cdp.eval(`document.getElementById('btnHome').click()`);
+    await sleep(400);
+    const navWork = await navProbe();
+    check('总览：左上角只留品牌（☰ 与库选择收起，品牌本身不变）',
+      navHome.view === 'overview' && navHome.side === 'none' && navHome.db === 'none'
+      && navHome.brand !== 'none' && navHome.word === 'GoDB' && navHome.logo && navHome.brandW > 0,
+      `view=${navHome.view} · ☰ ${navHome.side} · 库 ${navHome.db} · 品牌 ${navHome.word} ${navHome.brandW}px`);
+    check('工作台：☰ 与库选择回来，品牌宽度一字未变',
+      navWork.view === 'work' && navWork.side !== 'none' && navWork.db !== 'none'
+      && navWork.word === 'GoDB' && navWork.logo && navWork.brandW === navHome.brandW,
+      `view=${navWork.view} · ☰ ${navWork.side} · 库 ${navWork.db} · 品牌宽 ${navWork.brandW}/${navHome.brandW}`);
+
     // 2) 设置面板
     await cdp.eval(`openSettings()`);
     await sleep(900);
@@ -2191,9 +2224,7 @@ class CDP {
     check('空闲状态不占顶栏（药丸隐藏，靠圆点表达）', setUi.idlePillHidden,
       setUi.idlePillHidden ? '药丸已隐藏' : '药丸仍显示');
     check('监控圆点够大且有 hover 文字', setUi.dotSize >= 10 && setUi.dotTip.length > 0,
-      setUi.dotSize + 'px / ' + setUi.dotTip);
-
-    // 字标：GoDB，「DB」用主色 —— 顶栏里唯一一处有颜色的文字，不许再叠渐变/阴影
+      setUi.dotSize + 'px / ' + setUi.dotTip)    // 字标：GoDB，「DB」用主色 —— 顶栏里唯一一处有颜色的文字，不许再叠渐变/阴影
     const brand = await cdp.eval(`(() => {
       const w = document.querySelector('.wordmark');
       const span = w && w.querySelector('span');

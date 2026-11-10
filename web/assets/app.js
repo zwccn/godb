@@ -6938,11 +6938,21 @@ function homeChart(host, pts, lines, opts) {
 
   // x 轴：只标两端（起点多久以前、现在）。中间刻度在这么矮的图里放不下，
   // 而且曲线是均分采样的，中间刻度也不带更多信息。
+  //
+  // 左端一律**按分钟**说：窗口本来就一分钟上下，写「-53s」既难读又像报错
+  // （负号 + 秒数，看着像某个指标变成了负数）。不足一分钟也写「1 分钟前」——
+  // 这张图没有中间刻度，差十几秒读不出来，也没人需要读出来。
   const xRow = el('div', 'hp-x');
   {
     const span = Math.max(0, (pts[pts.length - 1].atMs || 0) - (pts[0].atMs || 0));
-    const label = span >= 60000 ? '-' + Math.round(span / 60000) + 'm' : '-' + Math.max(1, Math.round(span / 1000)) + 's';
-    xRow.appendChild(el('span', '', label));
+    const mins = Math.max(1, Math.round(span / 60000));
+    xRow.appendChild(el('span', '', mins + ' 分钟前'));
+    // 补一格中点：三个标签一摆，这根轴才像「坐标」而不是「开始 / 结束」两个注脚。
+    // 中点是**实际中点**，半点就写「1.5 分钟前」—— 四舍五入成 1 或 2 都会指错位置。
+    if (mins >= 2) {
+      const half = mins / 2;
+      xRow.appendChild(el('span', '', (Number.isInteger(half) ? half : half.toFixed(1)) + ' 分钟前'));
+    }
     xRow.appendChild(el('span', '', '现在'));
     plot.appendChild(xRow);
   }
@@ -7050,7 +7060,7 @@ function homeChart(host, pts, lines, opts) {
     cross.classList.add('on');
 
     const lastAt = pts[pts.length - 1].atMs || 0;
-    const off = Math.max(0, Math.round((lastAt - (p.atMs || 0)) / 1000));
+    const offMs = Math.max(0, lastAt - (p.atMs || 0));
 
     lines.forEach((l, i) => {
       const r = axisOf(l) === 'r' ? (rangeR || rangeL) : rangeL;
@@ -7062,7 +7072,9 @@ function homeChart(host, pts, lines, opts) {
     });
 
     tip.innerHTML = '';
-    tip.appendChild(el('div', 'hp-tip-h', off === 0 ? '现在' : '-' + off + 's'));
+    // 读数牌上的时间也用「N 秒前 / N 分钟前」：和 x 轴同一套说法，
+    // 但这里保留秒级 —— 牌子就是拿来看「那一下到底多少」的，需要精确。
+    tip.appendChild(el('div', 'hp-tip-h', offMs < 1000 ? '现在' : fmtAgo(offMs)));
     for (const l of lines) {
       const row = el('div', 'hp-tip-row');
       const sw = el('i');

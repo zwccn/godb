@@ -6789,6 +6789,21 @@ class CDP {
       axisIssue.length ? axisIssue.join(' · ')
         : charts.map(c => `${c.title} ${c.axisL}${c.axisR ? ' / ' + c.axisR : ''}`).join(' · '));
 
+    /* x 轴的两端：左「N 分钟前」、右「现在」。
+       原来左端是「-53s」—— 负号加秒数，读起来像某个指标变成了负数；而窗口本来
+       就一分钟上下，按分钟说才顺（不足一分钟也写「1 分钟前」，这图没有中间刻度，
+       差十几秒读不出来）。 */
+    const xAxisUi = await cdp.eval(`(() => {
+      return [...document.querySelectorAll('.home-plot .hp-x')].map(r =>
+        [...r.querySelectorAll('span')].map(s => s.textContent.trim()));
+    })()`);
+    check('总览：四张图的 x 轴按分钟说（左「N 分钟前」、右「现在」，没有负秒）',
+      xAxisUi.length === 4 && xAxisUi.every(a => (a.length === 2 || a.length === 3)
+        && /^[1-9]\d* 分钟前$/.test(a[0]) && a[a.length - 1] === '现在'
+        // 中间那格是实际中点，半点允许一位小数（1.5 分钟前）
+        && (a.length === 2 || /^[1-9]\d*(\.\d)? 分钟前$/.test(a[1]))),
+      xAxisUi.map(a => a.join(' → ')).join('  |  '));
+
     /* 悬停读数：图例只报「最新值」，想知道二十秒前那一下多少得靠鼠标。
        要的是十字光标 + 那一刻各条线的数值，而且竖线要**吸附到采样点**上
        —— 线画在鼠标位置、数值却取最近的点，点数稀时一眼就看出对不上。 */
@@ -6825,7 +6840,7 @@ class CDP {
     const snapErr = pitch ? Math.abs(hoverUi.vx - Math.round(hoverUi.vx / pitch) * pitch) : 999;
     check('总览：鼠标移上去出十字光标 + 读数牌，报那一刻的数值（不是最新值）',
       !!hoverUi && hoverUi.cross && hoverUi.tipOn
-      && /^(现在|-\d+s)$/.test(hoverUi.head)
+      && /^(现在|\d+ 秒前|\d+ 分钟前)$/.test(hoverUi.head)
       && hoverUi.rows.length === 2 && hoverUi.dots === 2
       && /QPS/.test(hoverUi.rows.join('')) && /连接/.test(hoverUi.rows.join(''))
       && hoverUi.tipIn && snapErr < 1.5,

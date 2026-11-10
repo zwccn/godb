@@ -2490,27 +2490,43 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
    「掉了多少」的线索。 */
 .hs-hist {
   display: block;
-  width: calc(125px * var(--fs));       /* 150 @ --fs 1.2 */
-  height: calc(16.667px * var(--fs));   /* 20 */
+  /* 190×34：这块要「看得出是一张图」。150×26 在 1400px 的页面正中就是一条细线，
+     存在感还不如它上面那行小字。宽高一起放大，线的粗细不必再靠加粗去争。 */
+  width: calc(158.333px * var(--fs));   /* 190 @ --fs 1.2 */
+  height: calc(28.333px * var(--fs));   /* 34 */
   /* 离上面那行字远一点：贴着读会被当成「优秀」的下划线 */
   margin-top: 9px;
+  /* 给曲线一块极淡的「画布」：只有一根线的时候，它和页面里那些卡片边框、
+     图表基线是同一种东西，读不成「图」。一层 55% 的卡片色当底 + 5px 圆角，
+     这块立刻变成「仪表上的一小块屏幕」，分量又远不到一张卡。
+     浅色皮肤下这层几乎看不出来，靠线本身的对比度也够。 */
+  background: color-mix(in srgb, var(--hm-bg-2) 35%, transparent);
+  border-radius: 5px;
   color: var(--hs-c);
   /* 末端点的描边会超出 viewBox 几个像素，不许裁 */
   overflow: visible;
   transition: opacity .25s;
+}
+/* 浅色底上同一层蓝会显得重一倍（深蓝压淡底），压到 26% */
+html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-hist-area {
+  opacity: .62;
 }
 /* 不足两个点时藏起来，但**仍然占位** —— 否则每次重进总览，整块徽章会先矮一截
    再长高，下面的走势图跟着跳一下。 */
 .hs-hist[data-empty="1"] { opacity: 0; }
 .hs-hist-line {
   fill: none;
-  stroke: currentColor;
-  stroke-width: 1.4;
+  /* 横向渐变（左淡右实），不是纯色：平线也能读出「往右在积累」 */
+  stroke: url(#hsHistStroke);
+  /* 2.2px：非缩放描边在 34px 高的图里，1.4 看着像一根辅助线 */
+  stroke-width: 2.2;
   stroke-linejoin: round;
   stroke-linecap: round;
-  /* 显示宽度跟着 --fs 缩放，viewBox 是 150：不加这个，字号一调线宽就变 */
+  /* 显示宽度跟着 --fs 缩放，viewBox 是 190：不加这个，字号一调线宽就变 */
   vector-effect: non-scaling-stroke;
 }
+/* 面积：渐变已经在 SVG 里，这里只保证它不被描边带出硬边 */
+.hs-hist-area { fill: url(#hsHistFill); }
 .hs-hist-ref {
   stroke: var(--hm-line);
   stroke-width: 1;

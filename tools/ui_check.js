@@ -6710,8 +6710,8 @@ class CDP {
     })()`);
     check('总览：健康球是小仪表（环 53.333×--fs ≈ 64px，羽翼和星系盘都已撤掉）',
       !gaugeUi.miss && Math.abs(gaugeUi.d - gaugeUi.want) <= 1.5
-      // 环 + 一行等级词 + 20px 曲线 + 间距：2.2 倍环直径是「还没长回海报」的上界
-      && gaugeUi.heroH <= Math.round(gaugeUi.want * 2.2)
+      // 环 + 一行等级词 + 34px 曲线 + 间距：2.5 倍环直径是「还没长回海报」的上界
+      && gaugeUi.heroH <= Math.round(gaugeUi.want * 2.5)
       && gaugeUi.wing === 0 && gaugeUi.galaxy === 0
       && gaugeUi.midZ === '2' && gaugeUi.sideZ === '1' && gaugeUi.off <= 1,
       gaugeUi.miss ? '找不到健康球'
@@ -6739,7 +6739,7 @@ class CDP {
         n: n,
         d: line.getAttribute('d') || '',
         w: Math.round(r.width), h: Math.round(r.height),
-        wantW: Math.round(125 * fs), wantH: Math.round(16.667 * fs),
+        wantW: Math.round(158.333 * fs), wantH: Math.round(28.333 * fs),
         empty: svg.dataset.empty,
         tip: document.getElementById('homeScoreTip').textContent || '',
         span: n >= 2 ? Math.round((hsHist[n - 1].atMs - hsHist[0].atMs) / 1000) : 0,

@@ -312,12 +312,36 @@ try {
              一条 90 分的虚线当「优秀线」参照。
              preserveAspectRatio=none + non-scaling-stroke：宽度跟着字号缩放时
              线宽不变形。 -->
-        <svg class="hs-hist" id="homeScoreHist" viewBox="0 0 150 20"
+        <svg class="hs-hist" id="homeScoreHist" viewBox="0 0 190 34"
              preserveAspectRatio="none" data-empty="1" aria-hidden="true" focusable="false">
-          <!-- 分数映射到 2~18：90 分那条落在 y≈4.6（JS 会按量程重设） -->
-          <line class="hs-hist-ref" id="hsHistRef" x1="0" y1="4.6" x2="150" y2="4.6"></line>
+          <defs>
+            <!-- 线本身用横向渐变：左边是「五分钟前」（淡），右边是「现在」（实）。
+               这一手是给「平线」用的 —— 分数一整天满分时，曲线就是一条水平线，
+               有了浓淡它才读成「正在积累的轨迹」而不是一段分隔线。 -->
+            <!-- userSpaceOnUse 是必须的：默认的 objectBoundingBox 按 path 的包围盒算，
+                 而「全平」的历史包围盒高度是 0 —— 渐变会退化成不可见，整条线直接消失。
+                 满分时那条线正是最容易「平」的时候。 -->
+            <linearGradient id="hsHistStroke" gradientUnits="userSpaceOnUse"
+                            x1="0" y1="0" x2="190" y2="0">
+              <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".45"></stop>
+              <stop offset=".5" stop-color="var(--hs-c)" stop-opacity=".9"></stop>
+              <stop offset="1" stop-color="var(--hs-c)"></stop>
+            </linearGradient>
+            <!-- 线下面一层几乎看不见的填充（.09 → 0）。它不是为了好看：
+                 只有一根线时，图的中段是全空的，读起来像「上面一条线、下面
+                 一条基线」；补上这块体积，整块才是一个「区域」。 -->
+            <linearGradient id="hsHistFill" gradientUnits="userSpaceOnUse"
+                            x1="0" y1="4" x2="0" y2="31">
+              <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".42"></stop>
+              <stop offset="1" stop-color="var(--hs-c)" stop-opacity="0"></stop>
+            </linearGradient>
+          </defs>
+          <path class="hs-hist-area" id="hsHistArea" d=""></path>
+          <!-- 90 分参考线（位置由 JS 按量程重设；落在框外时隐藏） -->
+          <line class="hs-hist-ref" id="hsHistRef" x1="0" y1="8" x2="190" y2="8"></line>
           <path class="hs-hist-line" id="hsHistLine" d=""></path>
-          <circle class="hs-hist-dot" id="hsHistDot" r="1.9" cx="0" cy="18"></circle>
+          <!-- 末端一个点标「现在」：曲线在动的时候，眼睛先看到的是它 -->
+          <circle class="hs-hist-dot" id="hsHistDot" r="2.6" cx="0" cy="31"></circle>
         </svg>
         <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
       </div>

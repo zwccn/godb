@@ -6330,6 +6330,8 @@ const homeEls = {
   scoreHist: document.getElementById('homeScoreHist'),
   histLine: document.getElementById('hsHistLine'),
   histDot: document.getElementById('hsHistDot'),
+  histArea: document.getElementById('hsHistArea'),
+
   histRef: document.getElementById('hsHistRef'),
   uptime: document.getElementById('homeUptime'),
   clock: document.getElementById('homeClock'),
@@ -6492,11 +6494,12 @@ function drawHsHist() {
   if (n < 2) { els.scoreHist.dataset.empty = '1'; return; }
   els.scoreHist.dataset.empty = '0';
 
-  const W = 150, TOP = 2, BOT = 18;
+  const W = 190, TOP = 4, BOT = 31;
   // 横轴按**点数**等分，不按时间：按时间铺的话，刚打开总览那十几秒只有几个点，
   // 全挤在右边一条缝里，看着像「没画出来」。等点数攒到 150，两者是一回事。
   // 代价是窗口长度是浮动的，所以明细里的说法用**实际跨度**，不硬写 5 分钟。
-  const x = i => (i / (n - 1)) * W;
+  // 右边留 2px：末端点画在最后一列像素上，会挂在圆角外面
+  const x = i => (i / (n - 1)) * (W - 2);
 
   // 纵轴只画**这段数据**真正用到的区间：上界固定 100，下界取「最低分再往下两分、
   // 向下取整到 5」，并且不低于 94。为什么不是固定 0~100：健康分绝大多数时候
@@ -6510,10 +6513,13 @@ function drawHsHist() {
   for (let i = 0; i < n; i++) {
     d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(hsHist[i].v).toFixed(1);
   }
-  // 只画线，不做面积填充：26px 高的图上，任何一块填充都比线本身重 ——
-  // 试过填到基线（一块板子）和只填 8px（一条硬底边的色带），都不如一根线干净。
   els.histLine.setAttribute('d', d);
-  els.histDot.setAttribute('cx', W.toFixed(1));
+  // 填充薄到「只是有体积」：.09 起、到底归零。太厚会变成压在底下的一块蒙版
+  // （.2 就脏了），完全没有又只剩一根线、图的中段全空。
+  if (els.histArea) {
+    els.histArea.setAttribute('d', d + 'L' + (W - 2) + ' ' + BOT + 'L0 ' + BOT + 'Z');
+  }
+  els.histDot.setAttribute('cx', (W - 2).toFixed(1));
   els.histDot.setAttribute('cy', y(hsHist[n - 1].v).toFixed(1));
   // 90 分的参考虚线只在「90 落在当前量程里」时才画：满分时量程是 94~100，
   // 这条线在框外，硬画会跑到图外面去。

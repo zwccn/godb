@@ -6518,7 +6518,7 @@ class CDP {
         water: { exec: (m.water || {}).exec || 0, queue: (m.water || {}).queue || 0,
                  wait: (m.water || {}).wait || 0, level: (m.water || {}).level || 'green' },
         dot: (document.querySelector('#homeDot') || {}).className || '',
-        // 结论从页面底部那条挪到了健康球左右两翼（球两侧原来空一片）
+        // 结论从页面底部那条挪到了健康球两侧（球两侧原来空一片）
         foot: t('#homeHero'),
         plots: document.querySelectorAll('.home-plot svg').length,
         ovOn: document.getElementById('btnOverview').classList.contains('on'),
@@ -6681,73 +6681,42 @@ class CDP {
       icoState.length === 4 && icoBad.length === 0,
       icoState.map(i => (i.has ? i.w + 'px' : '无')).join(' · '));
 
-    /* 健康球两侧的「翼」：纯装饰，回答「这块空地该不该有东西」。
-       守四件事 —— 左右各一片、对读屏和鼠标都隐身（装饰不能拦点击）、
-       排在球**外面**而不是压在球上、以及不撞到两侧的文字。
-       最后一条尤其值得守：翼是绝对定位的，窗口一窄就会爬到结论文字上面。 */
-    const wingUi = await cdp.eval(`(() => {
-      const wl = document.querySelector('.hero-wing.l');
-      const wr = document.querySelector('.hero-wing.r');
+    /* 健康球回归「小仪表」：环 64px（--fs 默认 1.2 时），卡片里只有三段：
+       「健康分」/ 环 / 等级。曾经放大到 114px 并配了一对羽翼和一片星系盘 ——
+       太占地方也太吵。这条既守住尺寸，也守住「装饰确实撤干净了」：
+       直径按 --fs 折算（测试中途点过 A+，字号不一定是 1.2），
+       所以比的是 53.333 × --fs，不是写死 64。 */
+    const gaugeUi = await cdp.eval(`(() => {
       const card = document.getElementById('homeScore');
-      if (!wl || !wr || !card) return { miss: true };
+      const gauge = card && card.querySelector('.hs-gauge');
+      const hero = document.getElementById('homeHero');
+      if (!card || !gauge || !hero) return { miss: true };
       const box = e => e.getBoundingClientRect();
-      const side = document.querySelector('.hero-side.l');
-      const lastTxt = side.lastElementChild || side.firstElementChild;
+      const fs = parseFloat(getComputedStyle(document.documentElement)
+        .getPropertyValue('--fs')) || 1.2;
       return {
-        n: document.querySelectorAll('.hero-wing').length,
-        paths: wl.querySelectorAll('path').length,
-        reuse: !!wr.querySelector('use'),
-        hidden: wl.getAttribute('aria-hidden') === 'true' && wr.getAttribute('aria-hidden') === 'true',
-        pent: getComputedStyle(wl).pointerEvents,
-        w: Math.round(box(wl).width),
-        lLeft: Math.round(box(wl).left),
-        lRight: Math.round(box(wl).right), rLeft: Math.round(box(wr).left),
-        ballL: Math.round(box(card).left), ballR: Math.round(box(card).right),
-        txtR: Math.round(box(lastTxt).right),
-        // 两片翼都要排在卡片**前面**：定位元素按 DOM 顺序绘制，右翼排在后面
-        // 会把它那 12px 负 margin 画到卡片边上（而给卡片加 z-index 会把
-        // 明细浮层关进新的层叠上下文）
-        lFirst: wl.compareDocumentPosition(card) === Node.DOCUMENT_POSITION_FOLLOWING,
-        rFirst: wr.compareDocumentPosition(card) === Node.DOCUMENT_POSITION_FOLLOWING,
-      };
-    })()`);
-    /* 星系盘：纯装饰的一层，压在球后面。守四件事 —— 不拦点击、不用滤镜、
-       层级在文字（1）和球翼（2）之下、以及浅色皮肤确实把它压淡了。
-       滤镜那条是有代价换来的：大椭圆 + feGaussianBlur 在 Chrome 里会渲染出
-       随机色块（花屏），1x 下也能复现，所以这层只准用渐变做柔边。 */
-    const galUi = await cdp.eval(`(() => {
-      const g = document.querySelector('.hero-galaxy');
-      if (!g) return { miss: true };
-      const cs = getComputedStyle(g);
-      return {
-        n: document.querySelectorAll('.hero-galaxy').length,
-        hidden: g.getAttribute('aria-hidden') === 'true',
-        pent: cs.pointerEvents,
-        z: cs.zIndex,
-        filters: g.querySelectorAll('filter').length,
-        lane: !!g.querySelector('.gal-lane'),
+        d: box(gauge).width,
+        want: 53.333 * fs,
+        heroH: Math.round(box(hero).height),
+        cardH: Math.round(box(card).height),
+        wing: document.querySelectorAll('.hero-wing').length,
+        galaxy: document.querySelectorAll('.hero-galaxy').length,
         midZ: getComputedStyle(document.querySelector('.hero-mid')).zIndex,
         sideZ: getComputedStyle(document.querySelector('.hero-side')).zIndex,
-        a: cs.getPropertyValue('--gal-a').trim(),
+        // 球要在卡片正中（左右 padding 对称，偏差 ≤1px）
+        off: Math.abs((box(gauge).left + box(gauge).right) / 2
+          - (box(card).left + box(card).right) / 2),
       };
     })()`);
-    check('总览：星系盘铺在球后面（穿透点击、不带滤镜、层级低于文字与翼）',
-      !galUi.miss && galUi.n === 1 && galUi.hidden && galUi.pent === 'none'
-      && galUi.z === '0' && galUi.midZ === '2' && galUi.sideZ === '1'
-      && galUi.filters === 0 && galUi.lane && galUi.a !== '',
-      galUi.miss ? '找不到星系盘'
-        : `层级 ${galUi.z}/${galUi.sideZ}/${galUi.midZ} · 滤镜 ${galUi.filters} 个 · 浓度 ${galUi.a}`);
-
-    check('总览：健康球两侧各一片「翼」（读屏与鼠标都穿透，排在球外侧，不撞文字）',
-      !wingUi.miss && wingUi.n === 2 && wingUi.paths === 8 && wingUi.reuse
-      && wingUi.hidden && wingUi.pent === 'none'
-      && wingUi.lRight >= wingUi.ballL - 2 && wingUi.lRight <= wingUi.ballL + 16
-      && wingUi.rLeft <= wingUi.ballR + 2 && wingUi.rLeft >= wingUi.ballR - 16
-      && wingUi.lLeft >= wingUi.txtR
-      && wingUi.lFirst && wingUi.rFirst && wingUi.w >= 100,
-      wingUi.miss ? '找不到翼'
-        : `翼 ${wingUi.w}px ×2 · 贴边 ${wingUi.lRight}/${wingUi.ballL} 与 ${wingUi.rLeft}/${wingUi.ballR}`
-          + ` · 文字到 ${wingUi.txtR} · 穿透 ${wingUi.pent} · 排在球前 ${wingUi.lFirst && wingUi.rFirst}`);
+    check('总览：健康球是小仪表（环 53.333×--fs ≈ 64px，羽翼和星系盘都已撤掉）',
+      !gaugeUi.miss && Math.abs(gaugeUi.d - gaugeUi.want) <= 1.5
+      && gaugeUi.heroH <= Math.round(gaugeUi.want * 2)
+      && gaugeUi.wing === 0 && gaugeUi.galaxy === 0
+      && gaugeUi.midZ === '2' && gaugeUi.sideZ === '1' && gaugeUi.off <= 1,
+      gaugeUi.miss ? '找不到健康球'
+        : `环 ${Math.round(gaugeUi.d)}px（期望 ${Math.round(gaugeUi.want)}）`
+          + ` · hero ${gaugeUi.heroH}px · 卡片 ${gaugeUi.cardH}px`
+          + ` · 翼 ${gaugeUi.wing} / 星系 ${gaugeUi.galaxy} · 居中偏差 ${gaugeUi.off.toFixed(1)}px`);
 
     /* 坐标：四张图都要有 y 刻度，请求图左右各一套；刻度里不能出现负数
        （CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */
@@ -7060,7 +7029,7 @@ class CDP {
       !!home && /^v\d+\.\d+\.\d+/.test(home.ver)
       && /分钟|小时|天/.test(home.uptime) && /^\d{2}:\d{2}:\d{2}$/.test(home.clock),
       home ? `${home.ver} · ${home.uptime} · ${home.clock}` : '');
-    check('总览：健康球左右两翼给出了「能不能走开」的判断和累计数',
+    check('总览：健康球两侧给出了「能不能走开」的判断和累计数',
       !!home && /走开|有点忙|撑不住/.test(home.foot) && /累计慢 SQL/.test(home.foot),
       home ? home.foot.slice(0, 60) : '');
 

@@ -245,142 +245,42 @@ try {
     <button class="home-more" id="btnHomeToMonitor" type="button" title="进监控：锁明细 / 慢 SQL / 存储 / 空间地图">详细监控 ›</button>
   </div>
 
-  <!-- 健康分大仪表 + 一句话结论：**在页面上水平居中**，不跟着 LOGO 走。
+  <!-- 健康分小仪表 + 一句话结论：**在页面上水平居中**，不跟着 LOGO 走。
        它回答的是「现在能不能走开」，是整个页面唯一的结论 —— 结论就该摆在正中，
        而不是缩在左上角当装饰。数字是 0~100 的合成分（算法见 renderHomeScore），
        环的颜色 = 等级（优秀 / 良好 / 注意 / 危险），悬停出明细
        —— 只说「96 分」而不说扣在哪，没人会信这个数。
 
-       左右两翼是原来压在页面底部的那条结论（「没事，可以走开」+ 一句话解释）
-       和累计数。搬上来有两个原因：一是只有球的时候，172px 的卡片漂在 1400px
-       的空白中间像个孤岛；二是底部那条要占 46px，搬走后全给下面的走势图。
+       左右两侧是原来压在页面底部的那条结论（「没事，可以走开」+ 一句话解释）
+       和累计数。搬上来有两个原因：一是只有球的时候，卡片漂在 1400px 的空白
+       中间像个孤岛；二是底部那条要占 46px，搬走后全给下面的走势图。
 
-       环 114px（原来 38 的 3 倍），文字包住它：上「健康分」、下「优秀」。
-       为此顶栏会多占一百多像素，下面的四张图跟着变矮 —— .home 是 flex 列，
-       顶栏 flex:0 0 auto、图表区 flex:1，它们自己会让位。 -->
+       环 64px（95 → 53.333，--fs 默认 1.2 时正好 64px）。中间试过 114px 的
+       大环，配一对羽翼和一片星系盘 —— 太占地方也太吵：一块每天扫几眼的仪表
+       不需要海报。现在只占一行（约 92px 高），其余高度全给四张走势图。
+       精致靠的是比例，不是尺寸：环更细、数字更小、卡片更薄。 -->
   <div class="home-hero" id="homeHero" data-level="green">
     <div class="hero-side l">
       <span class="hero-title" id="heroTitle">采样中…</span>
       <span class="hero-sub" id="heroSub"></span>
     </div>
-    <!-- 中列：球 + 两侧的「翼」。
-         翼是**纯装饰**（aria-hidden + pointer-events:none）。它回答一个问题：
-         球两侧各空 300~400px，什么都不放像没画完，放数据又会和左右两侧的
-         结论 / 累计数抢注意力 —— 所以用**没有信息量的形状**去填。
-
-         形状是「一对把球托起来的飞翼」：八片羽毛从球侧伸出去、一路向上扬，
-         根部挨得很紧（像一整片翼），越靠翼尖越薄越淡、每片短一截 ——
-         远看是「托举」，近看是羽片。颜色取健康环同一个色（--hs-tone），
-         出琥珀/红时一起变。
-
-         羽毛为什么是**填充形状**而不是描边：描边从头到尾一样粗，看着像电线，
-         怎么调参数都不像羽毛。这里每片是一条二次曲线中轴，按 (1-t)^0.75 的
-         半宽往两边偏、末端收到 0，围成一个根部粗、翼尖尖的闭合片。
-
-         为什么不画一个横跨整行的大 SVG：hero 是 1fr auto 1fr 网格，两侧列宽
-         随窗口变，一个 viewBox 拉满会被 preserveAspectRatio 扭成不同的斜度；
-         左右各一个、贴着球定位、尺寸交给 CSS 的 clamp，形状才永远不变形。 -->
-    <!-- 星系盘：把球当成核球，两侧羽翼当成盘面的亮缘。
-         四层，全用渐变做柔边（不用 feGaussianBlur —— 大元素加模糊在 Chrome 里
-         会渲染出随机色块，1x 下也能复现）：
-           ① 盘面色：最宽最淡的椭圆，给整个背景一层「那里有东西」的底色；
-           ② 核球辉光：比卡片大一圈，从卡片四周溢出来 —— 这是「盘心」唯一看得见的证据，
-              因为球本身把中间全挡住了；
-           ③ 热核：更小更白，压在卡片后面，只在卡片边上露一条；
-           ④ 尘埃带：一条压暗的扁椭圆，位置略低于盘面中心，把下半部吞掉一块。
-         羽翼在它之上（.hero-mid 的 z-index 更高），所以读起来是「亮缘浮在盘面上」。
-         rotate(-1.7°) 是故意的：完全水平会像一条背景色带，斜一点才像「一个盘」。 -->
-    <svg class="hero-galaxy" viewBox="0 0 1440 187" preserveAspectRatio="none"
-         aria-hidden="true" focusable="false">
-      <defs>
-        <radialGradient id="galDisk" cx="50%" cy="50%" r="50%">
-          <stop offset="0" stop-color="var(--hs-tone)" stop-opacity="calc(.30 * var(--gal-a))"></stop>
-          <stop offset=".55" stop-color="var(--hs-tone)" stop-opacity="calc(.11 * var(--gal-a))"></stop>
-          <stop offset="1" stop-color="var(--hs-tone)" stop-opacity="0"></stop>
-        </radialGradient>
-        <radialGradient id="galBloom" cx="50%" cy="50%" r="50%">
-          <stop offset="0" stop-color="var(--gal-core)" stop-opacity="calc(.92 * var(--gal-a))"></stop>
-          <stop offset=".30" stop-color="var(--hs-tone)" stop-opacity="calc(.50 * var(--gal-a))"></stop>
-          <stop offset=".62" stop-color="var(--hs-tone)" stop-opacity="calc(.17 * var(--gal-a))"></stop>
-          <stop offset=".86" stop-color="var(--hs-tone)" stop-opacity="calc(.04 * var(--gal-a))"></stop>
-          <stop offset="1" stop-color="var(--hs-tone)" stop-opacity="0"></stop>
-        </radialGradient>
-        <radialGradient id="galHot" cx="50%" cy="50%" r="50%">
-          <stop offset="0" stop-color="var(--gal-core)" stop-opacity="calc(.80 * var(--gal-a))"></stop>
-          <stop offset=".34" stop-color="var(--gal-core)" stop-opacity="calc(.50 * var(--gal-a))"></stop>
-          <stop offset=".72" stop-color="var(--gal-core)" stop-opacity="calc(.15 * var(--gal-a))"></stop>
-          <stop offset="1" stop-color="var(--gal-core)" stop-opacity="0"></stop>
-        </radialGradient>
-        <!-- 尘埃带：中心是「压暗色」、边缘透掉 —— 不用模糊也是软边 -->
-        <radialGradient id="galLane" cx="50%" cy="50%" r="50%">
-          <stop offset="0" stop-color="var(--gal-lane)" stop-opacity="0"></stop>
-          <stop offset=".42" stop-color="var(--gal-lane)" stop-opacity="calc(.90 * var(--gal-a))"></stop>
-          <stop offset=".68" stop-color="var(--gal-lane)" stop-opacity="calc(.94 * var(--gal-a))"></stop>
-          <stop offset=".88" stop-color="var(--gal-lane)" stop-opacity="calc(.55 * var(--gal-a))"></stop>
-          <stop offset="1" stop-color="var(--gal-lane)" stop-opacity="0"></stop>
-        </radialGradient>
-      </defs>
-      <g transform="rotate(-1.7 720 93)">
-        <ellipse cx="720" cy="93" rx="660" ry="74" fill="url(#galDisk)"></ellipse>
-        <ellipse cx="720" cy="93" rx="310" ry="116" fill="url(#galBloom)"></ellipse>
-        <ellipse cx="720" cy="93" rx="150" ry="86" fill="url(#galHot)"></ellipse>
-        <ellipse class="gal-lane" cx="720" cy="123" rx="600" ry="20" fill="url(#galLane)"></ellipse>
-        <g fill="var(--gal-core)" opacity="calc(1 * var(--gal-a))">
-          <circle cx="458" cy="63" r="1.5"></circle>
-          <circle cx="522" cy="109" r="1"></circle>
-          <circle cx="602" cy="49" r="1.1"></circle>
-          <circle cx="926" cy="59" r="1.4"></circle>
-          <circle cx="1012" cy="111" r="1"></circle>
-          <circle cx="840" cy="43" r=".9"></circle>
-        </g>
-      </g>
-    </svg>
     <div class="hero-mid">
-      <svg class="hero-wing l" viewBox="0 0 250 90" aria-hidden="true" focusable="false">
-        <g id="heroWingPaths" fill="currentColor">
-          <!-- 八片羽毛：最上面那片是「前缘」，最粗最实，整片翼的轮廓靠它定。
-               根部间距 5.4、片宽 5.0 —— 差一点点，紧到像一整片翼；越往下越短、
-               越淡（每片 -0.075），翼尖才散成羽毛。数量少了（试过 5~6 片）
-               空隙就露出来，看着像耙子。
-               数字是脚本算完取整的（中轴二次曲线 + 垂直偏移收尖），
-               改形状请重算，不要手调坐标 —— 单片 22 个点，手调对不齐。 -->
-          <path d="M250 42L225 39L200 37L175 34L150 31L126 28L101 25L77 21L53 17L30 13L6 8L6 8L29 13L53 18L77 23L101 27L125 31L150 35L175 38L199 41L224 44L250 46Z" opacity="0.90"></path>
-          <path d="M250 47L227 45L204 43L181 40L158 37L135 34L113 31L91 27L69 23L47 19L25 15L25 15L47 20L68 24L90 29L113 33L135 37L158 40L180 44L203 47L226 49L250 52Z" opacity="0.83"></path>
-          <path d="M250 53L229 51L208 48L187 46L167 43L146 40L126 37L105 33L85 29L66 25L46 21L46 21L65 26L85 31L105 35L125 39L146 43L166 46L187 49L208 52L229 55L250 57Z" opacity="0.75"></path>
-          <path d="M250 58L231 56L212 54L194 52L175 49L157 46L139 43L121 39L103 36L85 32L67 28L67 28L85 32L102 37L120 41L138 45L157 48L175 52L193 55L212 57L231 60L250 62Z" opacity="0.68"></path>
-          <path d="M250 64L234 62L217 60L201 58L184 55L168 52L152 49L136 46L120 42L104 38L89 34L89 34L104 39L120 43L136 47L152 51L168 54L184 57L200 60L217 63L233 65L250 67Z" opacity="0.60"></path>
-          <path d="M250 70L236 68L222 66L207 63L193 61L179 58L165 55L152 52L138 48L124 45L111 41L111 41L124 45L138 49L151 53L165 56L179 60L193 63L207 66L221 68L235 70L250 72Z" opacity="0.53"></path>
-          <path d="M250 75L238 73L226 71L214 69L202 67L191 64L179 61L168 58L156 55L145 51L133 47L133 47L145 52L156 55L167 59L179 62L190 66L202 68L214 71L226 73L238 76L250 78Z" opacity="0.45"></path>
-          <path d="M250 81L240 79L231 77L221 75L212 73L202 70L193 67L184 64L174 61L165 58L156 54L156 54L165 58L174 62L183 65L193 68L202 71L211 74L221 77L230 79L240 81L250 83Z" opacity="0.38"></path>
-        </g>
-      </svg>
-      <!-- 右翼用 <use> 引同一组线，CSS 里 scaleX(-1) 镜像 —— 形状只写一遍，
-           改一处两边同时变，不会出现左右不对称。两翼都排在卡片**前面**：
-           定位元素按 DOM 顺序绘制，右翼如果排在卡片后面，那 12px 的负 margin
-           会压在卡片边上（给 .home-score 加 z-index 又不行 —— 那会把它变成
-           层叠上下文，把里面明细浮层的 z-index:6 一起关进去）。 -->
-      <svg class="hero-wing r" viewBox="0 0 250 90" aria-hidden="true" focusable="false">
-        <use href="#heroWingPaths"></use>
-      </svg>
       <div class="home-score" id="homeScore" data-grade="ok" tabindex="0"
            role="img" aria-label="健康分">
-        <span class="hs-cap">健康分</span>
         <span class="hs-gauge">
           <svg class="hs-ring" viewBox="0 0 44 44" aria-hidden="true">
             <!-- 弧线用渐变：尾巴淡、头实，看起来像「走了一圈」而不是一根色带 -->
             <defs>
               <linearGradient id="hsGrad" x1="0" y1="0" x2="1" y2="1">
-                <!-- 尾巴从 .35 提到 .55：38px 的小环上那点淡像个「走向」，
-                     放大到 114px 之后，淡的那四分之一圈看起来像**环缺了一角** ——
-                     100 分本该是完整一圈。留一点轻重差别就够，不要真的淡掉。 -->
+                <!-- 尾巴别调太淡：.35 时那四分之一圈看着像**环缺了一角**，
+                     100 分本该是完整一圈。留一点轻重差别就够。 -->
                 <stop offset="0" stop-color="var(--hs-c)" stop-opacity=".55"></stop>
                 <stop offset=".65" stop-color="var(--hs-c)" stop-opacity=".9"></stop>
                 <stop offset="1" stop-color="var(--hs-c)"></stop>
               </linearGradient>
               <!-- 霓虹光：**必须用 SVG 自己的滤镜**，不能用 CSS 的 filter: drop-shadow。
-                   CSS filter 作用于 SVG 子元素时，Chrome 会整块 SVG 视口（114×114）
-                   一起提亮，环外面套出一个明显的方形亮区 —— 38px 时看不出来，
-                   放大到 3 倍就藏不住了。SVG 滤镜只处理被作用的那个圆。
+                   CSS filter 作用于 SVG 子元素时，Chrome 会把整块 SVG 视口一起提亮，
+                   环外面套出一个方形亮区（视口越大越明显）。SVG 滤镜只处理那个圆。
                    叠两遍模糊再压回原图 = 中间实、外面散。 -->
               <filter id="hsGlow" x="-25%" y="-25%" width="150%" height="150%">
                 <feGaussianBlur in="SourceGraphic" stdDeviation="1.8" result="b"></feGaussianBlur>
@@ -398,7 +298,14 @@ try {
           </svg>
           <b class="hs-val" id="homeScoreVal">—</b>
         </span>
-        <span class="hs-grade" id="homeScoreGrade">采样中</span>
+        <!-- 环下面一行：「健康分 · 优秀」。
+             不放在环右侧：横排时卡片居中、环就偏左了，而这块东西的锚点是
+             **环的圆心**（要正对页面中线）。上下叠、环居中，中心才落得准。
+             两个词挤一行，卡片就不会被拉成 118px 高的竖条。 -->
+        <span class="hs-line">
+          <span class="hs-cap">健康分</span>
+          <span class="hs-grade" id="homeScoreGrade">采样中</span>
+        </span>
         <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
       </div>
     </div>

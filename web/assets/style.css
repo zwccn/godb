@@ -2388,7 +2388,7 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   color: var(--hm-dim);
 }
 
-/* ---- 健康分：页面正中的那个大环 ----
+/* ---- 健康分：页面正中的小仪表 ----
    80 毫秒扫一眼就知道「现在好不好」，比读三个数字快。环的缺口 = 扣掉的分，
    颜色 = 等级。环背后永远有一层**慢呼吸的光晕**（4.6 秒一趟，见 hsHalo）：
    慢到不抢注意力，但眼睛余光能看出这页是「活的」。
@@ -2396,8 +2396,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 
    **位置在页面正中，不在 LOGO 旁边。** 它回答的是「现在能不能走开」，
    这是整个总览唯一的结论；结论缩在左上角当装饰，读的人得先找到它。
-   放大到 3 倍（38 → 114）才配得上这个位置，代价是顶栏高了一百多像素 ——
-   下面四张图变矮，.home 是 flex 列，它们自己会让位。
+   但尺寸只要 64px：中途试过 114px（3 倍）配一对羽翼和一片星系盘，太吵、也太
+   占地方 —— 一块仪表不该比它下面那四张走势图还抢眼。精致靠比例不靠体量：
+   更细的环、更小的字、更薄的卡片。
 
    颜色只有**三档**，不是四档：正常（优秀/良好）= 皮肤主色，注意 = 琥珀，
    危险 = 红。原先「优秀」用绿色，在芋紫皮肤上成了淡紫底里的一圈森林绿 ——
@@ -2407,110 +2408,38 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
 .home-hero {
   position: relative;
   flex: 0 0 auto;
-  /* 三列：左「一句话结论」/ 中球 / 右「累计数」。
-     原来只有中间那个球，172px 的卡片漂在 1400px 的空白里，看着像个孤岛。
+  /* 三列：左「一句话结论」/ 中仪表 / 右「累计数」。
+     只有中间那个球时，卡片漂在 1400px 的空白里像个孤岛；
      把底部那条结论搬上来填两侧，顺带省掉底部 46px —— 全给走势图。
-     下面留 8px：大环贴着 KPI 卡会显得两块挤在一起，每省下的一像素都还给图。 */
+     球缩到 64 之后两侧文字会贴得近一点（gap 20 → 16），不然中间像隔着一条河。
+     下面留 6px：仪表贴着 KPI 卡会显得两块挤在一起，每省下的一像素都还给图。 */
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  column-gap: 20px;
-  padding: 0 4px 8px;
+  column-gap: 16px;
+  padding: 0 4px 6px;
 }
-/* 三层的叠放顺序：星系盘 0 < 两侧文字 1 < 球和翼 2。
-   不这么排的话，绝对定位的星系盘会盖住文字（定位元素按 DOM 顺序绘制）。 */
-.hero-galaxy {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 0;
-  pointer-events: none;
-  /* --gal-a 一处总控四个渐变的浓度：1 是按「深色底上刚好」定的，
-     浅色底上整层压到 .2 并且关掉尘埃带（见下） */
-  --gal-a: 1;
-  /* 热核不发纯白 —— 混 32% 皮肤主色，换皮肤时它跟着走，也不会白得像过曝 */
-  --gal-core: color-mix(in srgb, var(--hs-tone) 32%, #fff);
-  /* 尘埃带 = 底色：压在辉光上才「吞掉」一块，只在辉光范围内可见 */
-  --gal-lane: var(--hm-bg);
-  /* 9 秒一次极缓的明暗（0.88 ↔ 1）：和翼的 7 秒、环的 4.6 秒错开，
-     三个频率不成倍数，叠在一起看不出节奏，只觉得「在动」 */
-  animation: galBreath 9s ease-in-out infinite;
-}
-@keyframes galBreath {
-  0%, 100% { opacity: .88; }
-  50%      { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .hero-galaxy { animation: none; opacity: 1; }
-}
-/* 浅色底上「发光」不成立：白核会消失，而「压暗」会变成一块灰影 —— 两条都不成立。
-   所以浅色三套只留一成多的浓度当「一层薄光」，尘埃带直接不画。
-   羽翼本身还在，形状不变，只是没有星系的夜感。 */
-html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-galaxy {
-  --gal-a: .2;
-  --gal-core: var(--hs-tone);
-}
-html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .gal-lane {
-  display: none;
-}
+/* 中间那一列：只放仪表。
+   曾经在球两侧挂过一对「羽翼」、球背后铺过一片「星系盘」—— 那是把总览当海报做。
+   一块每天扫几眼的仪表不需要这些：装饰一多，眼睛先看翅膀、不看分数。
+   删掉之后 hero 从 187px 收到约 92px，四张走势图各高出 20 多像素，比装饰有用。
+
+   z-index 2 仍然留着：两侧文字 1，将来谁在 hero 里加背景层，球都要压在上面。
+   开层叠上下文不影响里面的明细浮层 —— 浮层要压在下面的 KPI 卡上，
+   而整块 hero-mid 本来就更高。 */
 .hero-side { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .hero-side.l { align-items: flex-start; }
 .hero-side.r { align-items: flex-end; }
-
-/* ---- 球两侧的「翼」----
-   纯装饰（见 index.html 里那段说明）：球两侧各留 300~400px，什么都不放像没画完，
-   放数据又会和左右两侧的结论 / 累计数抢注意力，所以用没有信息量的线填。
-   贴着球定位（right/left: 100%），球宽随字号变、翼跟着走，不需要知道具体尺寸。 */
 .hero-mid {
   position: relative;
-  /* z-index 2：压在星系盘（0）和两侧文字（1）之上。开层叠上下文不影响里面的
-     明细浮层 —— 浮层要压在下面的 KPI 卡上，而整块 hero-mid 本来就更高。 */
   z-index: 2;
   display: flex;
   justify-content: center;
 }
-.hero-wing {
-  /* 浅色皮肤整体压一档（见下面那条），深色保持 1。
-     乘在动画里而不是改每片羽毛的 opacity —— 六片各有自己的淡淡浓淡，
-     一处总控比逐片调省事，也不会漏掉某一片。 */
-  --wing-a: 1;
-  position: absolute;
-  top: 50%;
-  /* 18vw：窗口越宽翼越长（空地本来也越大），上下限挡住过短/过长两种极端 */
-  width: clamp(150px, 18vw, 270px);
-  height: calc(100% - 8px);
-  transform: translateY(-50%);
-  color: var(--hs-tone);
-  pointer-events: none;
-  /* 不再需要 mask 渐隐：羽片本身是收尖的填充形状，翼尖是「羽毛尖」而不是
-     被切断的电线。右翼整体 scaleX(-1)，形状跟着翻，不用写第二份。 */
-  animation: wingBreath 7s ease-in-out infinite;
-}
-/* 负 margin 让线从卡片底下钻出来，而不是悬在卡片边上 */
-.hero-wing.l { right: 100%; margin-right: -12px; }
-.hero-wing.r { left: 100%; margin-left: -12px; transform: translateY(-50%) scaleX(-1); }
-/* 颜色跟着健康等级走：正常时是皮肤主色（和环同一个色），出事才转琥珀/红 */
-.home-hero[data-level="yellow"] .hero-wing { color: var(--hm-warn); }
-.home-hero[data-level="red"] .hero-wing { color: var(--hm-danger); }
-/* 幅度只敢给这一点：7 秒里 0.86 → 1。它是背景，动了只说明「活着」，
-   再大就会让人盯着看 —— 而这块屏幕上该被盯着的是中间那个数。 */
-@keyframes wingBreath {
-  0%, 100% { opacity: calc(.86 * var(--wing-a)); }
-  50%      { opacity: calc(1 * var(--wing-a)); }
-}
-/* 浅色底上同样的主色对比度高得多，羽片会显得又黑又重 → 整体压到 .78。
-   深色底本来就靠「比底色亮一点」成立，压了就没了。 */
-html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-wing {
-  --wing-a: .78;
-}
-@media (prefers-reduced-motion: reduce) {
-  .hero-wing { animation: none; opacity: calc(1 * var(--wing-a)); }
-}
 .hero-title {
-  /* 18px：这是整页唯一的结论，得比正文重一档 —— 15px 时它和 KPI 卡上的
-     说明文字一样大，读的人会先看见「0」而不是「没事，可以走开」。 */
-  font-size: calc(18px * var(--fs));
+  /* 16px：这是整页唯一的结论，得比正文重一档。原来给到 18px，那是配 114px
+     大环的 —— 球缩到 64 之后，18px 的字比环还抢眼，整组反而头重脚轻。 */
+  font-size: calc(13.333px * var(--fs));
   font-weight: 600;
   line-height: 1.2;
   color: var(--hm-text);
@@ -2532,19 +2461,29 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-wing
   --hs-c: var(--hs-tone);
   position: relative;
   display: flex;
+  /* 竖排：环在上、一行小字在下。**环必须水平居中** —— 它正对页面中线，
+     是整页唯一的锚点；横排（环在左、字在右）会让环偏左三十来像素。 */
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: 9px 28px 10px;
-  border: 1px solid var(--hm-line);
-  /* 竖着排之后就不再是「胶囊」了：999px 会把圆角拉成跑道形，
-     和里面那个正圆打架。22px 的圆角矩形刚好把环托住。 */
-  border-radius: 22px;
-  background: linear-gradient(180deg, var(--hm-bg-2), var(--hm-bg-1));
+  gap: 6px;
+  /* 不再给底板：上下左右都是卡片的时候，中间这块裸露反而更像「结论」。
+     留一点内边距当点击/悬停的热区。 */
+  padding: 2px 10px;
+  border: 0;
+  background: none;
   user-select: none;
   outline: none;
 }
-.home-score:focus-visible { border-color: var(--hs-c); }
+/* 环下面那一行：「健康分」小字 + 等级词，基线对齐。
+   line-height 1 让它们与环的间距完全由 gap 决定，不再被行高撑着。
+   等级词要压住小标签：同样粗细时「健康分」那三个字更密，反而更显眼。 */
+.hs-line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  line-height: 1;
+}
+.home-score:focus-visible { outline: 2px solid var(--hs-c); outline-offset: 3px; border-radius: 12px; }
 .home-score[data-grade="warn"] { --hs-c: var(--hm-warn); }
 .home-score[data-grade="bad"] { --hs-c: var(--hm-danger); }
 
@@ -2553,9 +2492,10 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-wing
   flex: 0 0 auto;
   /* 环的直径跟着字号缩放：数字是按比例塞进环里的，环不跟着变的话，
      用户把字号调到 1.65 就会看到「100」左右各顶到环壁。
-     95 = 31.667 × 3（直径 38 → 114，--fs 默认 1.2 时正好 114px）。 */
-  width: calc(95px * var(--fs));
-  height: calc(95px * var(--fs));
+     53.333 = 64 / 1.2（--fs 默认 1.2 下直径 64px）。
+     原来放大过 3 倍（95 / 114px），回头看太占地方，收回来。 */
+  width: calc(53.333px * var(--fs));
+  height: calc(53.333px * var(--fs));
   /* 自己开一个层叠上下文，好让光晕（z-index:-1）停在「胶囊底之上、环之下」。
      不开的话 -1 会跑到 .home-score 外面去；而给 .home-score 开
      （isolation / z-index）会把明细浮层的 z-index:6 一起关进这个上下文里，
@@ -2587,9 +2527,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hero-wing
   50%      { transform: scale(1.16); opacity: .75; }
 }
 /* 浅色底上「光晕」读不成光：淡紫晕叠在淡紫底上只剩一圈更淡的紫，
-   而且**那层渐变的矩形边界会露出来**（3 倍放大之后尤其明显，看着像环外面
-   套了个方框）。深色底才有的语义，浅色就干脆不给 —— 环本身的明暗已经够表达
-   「活着」，颜色又跟皮肤同源，不需要再加一层雾。 */
+   而且**那层渐变的矩形边界会露出来**（环越大越明显，看着像环外面套了个方框）。
+   深色底才有的语义，浅色就干脆不给 —— 环本身的明暗已经够表达「活着」，
+   颜色又跟皮肤同源，不需要再加一层雾。 */
 html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-gauge::before {
   display: none;
 }
@@ -2608,7 +2548,9 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-gauge:
 }
 .hs-ring circle {
   fill: none;
-  stroke-width: 3.6;
+  /* 3.0 / 44 视口 = 直径的 6.8%：64px 上描边约 4.4px。
+     3.6 是 114px 大环时代的手感，小环上同比例会显得笨重（环壁比数字还抢眼）。 */
+  stroke-width: 3;
 }
 .hs-bg { stroke: var(--hm-line); }
 .hs-fg {
@@ -2632,23 +2574,24 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-fg {
   align-items: center;
   justify-content: center;
   font-family: var(--mono);
-  /* 环内净宽 = 直径 × 32.4/44 ≈ 0.74。等宽数字宽约 0.6em，
-     三位数「100」= 1.8em，取 0.26 × 直径 ≈ 0.35 内宽，两边还剩余量。
-     28.5 = 9.5 × 3，跟着环一起放大。 */
-  font-size: calc(28.5px * var(--fs));
+  /* 环内净宽 = 直径 × 32.4/44 ≈ 0.74（64px 时约 47px）。等宽数字宽约 0.6em，
+     三位数「100」= 1.8em → 15px 占 27px，两边各留 10px；
+     再大就会顶到环壁（16px 时「100」已经贴着描边了）。 */
+  font-size: calc(12.5px * var(--fs));
   font-weight: 600;
   line-height: 1;
   color: var(--hs-c);
   font-variant-numeric: tabular-nums;
 }
 .hs-cap {
-  font-size: calc(11.5px * var(--fs));
-  letter-spacing: .08em;
+  font-size: calc(10px * var(--fs));
+  letter-spacing: .06em;
   line-height: 1;
   color: var(--hm-faint);
 }
 .hs-grade {
-  font-size: calc(17px * var(--fs));
+  font-size: calc(14px * var(--fs));
+  font-weight: 600;
   line-height: 1;
   color: var(--hs-c);
 }
@@ -2658,9 +2601,10 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-fg {
   0%, 100% { opacity: .45; }
   50% { opacity: 1; }
 }
-/* 不健康时整块胶囊外面泛一层同色光 —— 余光能扫到；正常时保持安静 */
-.home-score[data-grade="warn"] { box-shadow: 0 0 14px -4px var(--hs-c); }
-.home-score[data-grade="bad"] { box-shadow: 0 0 18px -3px var(--hs-c); }
+/* 不健康时让等级词自己亮一档 —— 没有底板了，box-shadow 会在透明区域
+   压出一块方形暗影；用文字色的光更干净。 */
+.home-score[data-grade="warn"] .hs-grade,
+.home-score[data-grade="bad"] .hs-grade { text-shadow: 0 0 10px var(--hs-c); }
 .home-score[data-grade="warn"] .hs-fg,
 .home-score[data-grade="bad"] .hs-fg { animation: hsBreath 1.6s ease-in-out infinite; }
 .home-score[data-grade="bad"] .hs-val { animation: hsBreath 1.6s ease-in-out infinite; }
@@ -3074,11 +3018,6 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-fg {
      所以改成「按内容高」+ 固定行高，让整页滚动 —— 窄屏本来就是滚动的。
      行高下限放在 grid 上而不是卡片上：行高由 grid 决定，卡片的 min-height 会被压掉。 */
   .home-charts { flex: 0 0 auto; grid-template-columns: 1fr; grid-auto-rows: 168px; }
-}
-/* 再窄就没有「空地」可填了：两侧加起来不到 300px，翼会被压到结论文字上。
-   这一档本来就靠左对齐读，缺了翼不显得空，反而干净。 */
-@media (max-width: 1120px) {
-  .hero-wing { display: none; }
 }
 @media (max-width: 820px) {
   .home { padding: 14px; gap: 10px; }

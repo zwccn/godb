@@ -6327,6 +6327,10 @@ const homeEls = {
   scoreArc: document.getElementById('homeScoreArc'),
   scoreGrade: document.getElementById('homeScoreGrade'),
   scoreTip: document.getElementById('homeScoreTip'),
+  scoreHist: document.getElementById('homeScoreHist'),
+  histLine: document.getElementById('hsHistLine'),
+  histDot: document.getElementById('hsHistDot'),
+  histRef: document.getElementById('hsHistRef'),
   uptime: document.getElementById('homeUptime'),
   clock: document.getElementById('homeClock'),
   kpis: document.getElementById('homeKpis'),
@@ -6470,6 +6474,61 @@ const HOME_HEALTH = [
 // 环的周长：r = 18（写死在 SVG 里）。改半径要同步改这三个地方。
 const HS_CIRC = 2 * Math.PI * 18;
 
+// 健康分历史：只有总览打开时才有采样（pollMonitor 每 2 秒一次快照 → renderHome），
+// 所以这是一条「有洞」的流。两次之间断了 8 秒（切走面板、暂停轮询、标签页休眠）
+// 就整条清空重来 —— 把两段不相接的数据接成一条连续曲线，比不画更骗人。
+const HS_HIST_MAX = 150;          // 150 × 2s ≈ 5 分钟
+const HS_HIST_GAP = 8000;
+let hsHist = [];                  // [{ atMs, v }]，v 是**平滑后**的显示值
+
+// 把历史画成一条 150×26 的折线：纵轴固定 0~100（换算到 2~24 的绘图区）。
+// 不随窗口自适应：90 → 95 的抖动会被放大成过山车，那不是「趋势」。
+// 横轴按**时间**铺 —— 刚打开时只有几个点，它们就该挤在右端慢慢往左长，
+// 而不是几个点铺满整条（那会让「刚刚开始采集」看起来像「已经跑满 5 分钟」）。
+function drawHsHist() {
+  const els = homeEls;
+  if (!els.scoreHist) return;
+  const n = hsHist.length;
+  if (n < 2) { els.scoreHist.dataset.empty = '1'; return; }
+  els.scoreHist.dataset.empty = '0';
+
+  const W = 150, TOP = 2, BOT = 18;
+  // 横轴按**点数**等分，不按时间：按时间铺的话，刚打开总览那十几秒只有几个点，
+  // 全挤在右边一条缝里，看着像「没画出来」。等点数攒到 150，两者是一回事。
+  // 代价是窗口长度是浮动的，所以明细里的说法用**实际跨度**，不硬写 5 分钟。
+  const x = i => (i / (n - 1)) * W;
+
+  // 纵轴只画**这段数据**真正用到的区间：上界固定 100，下界取「最低分再往下两分、
+  // 向下取整到 5」，并且不低于 94。为什么不是固定 0~100：健康分绝大多数时候
+  // 都在 85 以上，固定量程会把所有变化压成一条贴顶的直线 —— 那条线一点信息量
+  // 都没有。为什么下界要兜到 94：满分时若把量程压到 99~100，一个采样抖动就能
+  // 画成过山车。宁可如实画成一条直线，也别放大噪声。
+  const lo = Math.min(94, Math.floor((hsHist.reduce((a, p) => Math.min(a, p.v), 100) - 2) / 5) * 5);
+  const y = v => BOT - ((Math.max(lo, Math.min(100, v)) - lo) / (100 - lo)) * (BOT - TOP);
+
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    d += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(hsHist[i].v).toFixed(1);
+  }
+  // 只画线，不做面积填充：26px 高的图上，任何一块填充都比线本身重 ——
+  // 试过填到基线（一块板子）和只填 8px（一条硬底边的色带），都不如一根线干净。
+  els.histLine.setAttribute('d', d);
+  els.histDot.setAttribute('cx', W.toFixed(1));
+  els.histDot.setAttribute('cy', y(hsHist[n - 1].v).toFixed(1));
+  // 90 分的参考虚线只在「90 落在当前量程里」时才画：满分时量程是 94~100，
+  // 这条线在框外，硬画会跑到图外面去。
+  if (els.histRef) {
+    if (lo < 90) {
+      const y90 = y(90).toFixed(1);
+      els.histRef.setAttribute('y1', y90);
+      els.histRef.setAttribute('y2', y90);
+      els.histRef.style.display = '';
+    } else {
+      els.histRef.style.display = 'none';
+    }
+  }
+}
+
 // 平滑后的显示值。-1 = 还没采到第一个点。
 let homeScoreShown = -1;
 
@@ -6502,16 +6561,42 @@ function renderHomeScore(m) {
 
   if (els.scoreVal.textContent !== String(val)) els.scoreVal.textContent = String(val);
   if (els.scoreGrade.textContent !== g.word) els.scoreGrade.textContent = g.word;
-  if (els.score.getAttribute('data-grade') !== g.id) {
-    els.score.setAttribute('data-grade', g.id);
-    els.score.setAttribute('aria-label', '健康分 ' + val + '，' + g.word);
-  }
+  if (els.score.getAttribute('data-grade') !== g.id) els.score.setAttribute('data-grade', g.id);
   els.scoreArc.style.strokeDashoffset = (HS_CIRC * (1 - val / 100)).toFixed(1);
+
+  // 历史：断档就整条重来（切走总览那几分钟没有采样，接上去是假连续）
+  const atMs = Date.now();
+  const prev = hsHist[hsHist.length - 1];
+  if (prev && atMs - prev.atMs > HS_HIST_GAP) hsHist = [];
+  // 400ms 内的第二次采样（openHome 会立刻拉一次，和 2 秒那趟可能撞在一起）
+  // 覆盖上一个点而不是再追加一个：两个点挤在同一列像素上，会画出一段竖线，
+  // 「覆盖时长」也会显示成一个假的 0 秒。
+  if (prev && hsHist.length && atMs - prev.atMs < 400) {
+    hsHist[hsHist.length - 1] = { atMs: atMs, v: val };
+  } else {
+    hsHist.push({ atMs: atMs, v: val });
+  }
+  if (hsHist.length > HS_HIST_MAX) hsHist.splice(0, hsHist.length - HS_HIST_MAX);
+  drawHsHist();
+  const minV = hsHist.reduce((a, p) => Math.min(a, p.v), val);
+  // 这条曲线实际覆盖多久，就写多久：刚打开总览时只有十几秒的数据，
+  // 硬写「近 5 分钟」是骗人（窗口是浮动的，见 drawHsHist 的注释）。
+  const spanS = hsHist.length >= 2
+    ? Math.max(1, Math.round((hsHist[hsHist.length - 1].atMs - hsHist[0].atMs) / 1000))
+    : 0;
+  const spanTxt = spanS >= 90 ? Math.round(spanS / 60) + ' 分钟' : spanS + ' 秒';
+  // 读屏念分数的时候顺手带上这段窗口的最低值 —— 曲线对看不见的人等于不存在
+  els.score.setAttribute('aria-label', '健康分 ' + val + '，' + g.word
+    + (spanS ? '，最近 ' + spanTxt + '最低 ' + minV : ''));
 
   // 明细：每项一条。分数只是结论，扣在哪才是能动手的地方。
   // 每 2 秒重建一次（六行 DOM，很轻），省掉「哪些值变了」的比对逻辑。
   const worst = parts.slice().sort((a, b) => a.v - b.v)[0];
-  let html = '<div class="hs-tip-h">健康分<b>' + val + '</b>' + g.word + '</div>';
+  let html = '<div class="hs-tip-h">健康分<b>' + val + '</b>' + g.word;
+  if (spanS >= 5) {
+    html += '<span class="hs-tip-hmin">最近 ' + spanTxt + '最低 ' + minV + '</span>';
+  }
+  html += '</div>';
   for (const p of parts) {
     const lv = p.v >= 90 ? 'ok' : (p.v >= 60 ? 'mid' : 'low');
     html += '<div class="hs-row" data-lv="' + lv + '">'

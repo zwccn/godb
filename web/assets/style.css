@@ -2483,6 +2483,47 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
   gap: 7px;
   line-height: 1;
 }
+/* ---- 近 5 分钟的分数走势 ----
+   环下面那条 150×26 的小图。这块徽章一共三段：环（此刻）、等级词、历史（刚才）。
+   没有坐标轴、没有网格，只有一条同色的线和一枚末端点 —— 这个尺寸上任何刻度
+   都比曲线本身更抢眼。一条 90 分的虚线当参照：分数贴着 100 时，它是唯一能读出
+   「掉了多少」的线索。 */
+.hs-hist {
+  display: block;
+  width: calc(125px * var(--fs));       /* 150 @ --fs 1.2 */
+  height: calc(16.667px * var(--fs));   /* 20 */
+  /* 离上面那行字远一点：贴着读会被当成「优秀」的下划线 */
+  margin-top: 9px;
+  color: var(--hs-c);
+  /* 末端点的描边会超出 viewBox 几个像素，不许裁 */
+  overflow: visible;
+  transition: opacity .25s;
+}
+/* 不足两个点时藏起来，但**仍然占位** —— 否则每次重进总览，整块徽章会先矮一截
+   再长高，下面的走势图跟着跳一下。 */
+.hs-hist[data-empty="1"] { opacity: 0; }
+.hs-hist-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  /* 显示宽度跟着 --fs 缩放，viewBox 是 150：不加这个，字号一调线宽就变 */
+  vector-effect: non-scaling-stroke;
+}
+.hs-hist-ref {
+  stroke: var(--hm-line);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.hs-hist-dot {
+  fill: currentColor;
+  /* 用底色描一圈，末端点从线上「浮」起来，而不是糊成一个色块 */
+  stroke: var(--hm-bg);
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
 .home-score:focus-visible { outline: 2px solid var(--hs-c); outline-offset: 3px; border-radius: 12px; }
 .home-score[data-grade="warn"] { --hs-c: var(--hm-warn); }
 .home-score[data-grade="bad"] { --hs-c: var(--hm-danger); }
@@ -2643,6 +2684,12 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .hs-fg {
   color: var(--hm-faint);
 }
 .hs-tip-h b { color: var(--hs-c); font-size: calc(13px * var(--fs)); }
+/* 头部右端的小注：紧跟等级词，字号再压一档，只当补充说明 */
+.hs-tip-hmin {
+  margin-left: auto;
+  color: var(--hm-faint);
+  font-size: calc(9.5px * var(--fs));
+}
 .hs-row {
   display: flex;
   align-items: center;

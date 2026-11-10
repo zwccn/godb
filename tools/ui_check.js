@@ -6710,13 +6710,71 @@ class CDP {
     })()`);
     check('总览：健康球是小仪表（环 53.333×--fs ≈ 64px，羽翼和星系盘都已撤掉）',
       !gaugeUi.miss && Math.abs(gaugeUi.d - gaugeUi.want) <= 1.5
-      && gaugeUi.heroH <= Math.round(gaugeUi.want * 2)
+      // 环 + 一行等级词 + 20px 曲线 + 间距：2.2 倍环直径是「还没长回海报」的上界
+      && gaugeUi.heroH <= Math.round(gaugeUi.want * 2.2)
       && gaugeUi.wing === 0 && gaugeUi.galaxy === 0
       && gaugeUi.midZ === '2' && gaugeUi.sideZ === '1' && gaugeUi.off <= 1,
       gaugeUi.miss ? '找不到健康球'
         : `环 ${Math.round(gaugeUi.d)}px（期望 ${Math.round(gaugeUi.want)}）`
           + ` · hero ${gaugeUi.heroH}px · 卡片 ${gaugeUi.cardH}px`
           + ` · 翼 ${gaugeUi.wing} / 星系 ${gaugeUi.galaxy} · 居中偏差 ${gaugeUi.off.toFixed(1)}px`);
+    /* 健康分的历史曲线：这块唯一的「时间维度」。
+       守四件事 —— 尺寸跟着字号走、线真的画出来了（d 里不能有 NaN）、
+       悬停明细给出**实际**覆盖时长和最低分、以及断档会整条清空。
+       最后一条最容易漏：切走总览那几分钟没有采样，两段不相接的数据接成一条
+       连续曲线是骗人 —— 而这个 bug 只有「离开再回来」才看得见。 */
+    // 刚打开总览时只有一两个点，曲线还没成形（data-empty=1）。等攒到两点再量 ——
+    // 2 秒一拍，正常两拍就到，最多等 6 秒。
+    await waitFor(cdp, `typeof hsHist !== 'undefined' && hsHist.length >= 2`,
+      { label: '健康分历史攒到两点', timeout: 6000 });
+    const histUi = await cdp.eval(`(() => {
+      const svg = document.getElementById('homeScoreHist');
+      const line = document.getElementById('hsHistLine');
+      if (!svg || !line) return { miss: true };
+      const r = svg.getBoundingClientRect();
+      const fs = parseFloat(getComputedStyle(document.documentElement)
+        .getPropertyValue('--fs')) || 1.2;
+      const n = hsHist.length;
+      return {
+        n: n,
+        d: line.getAttribute('d') || '',
+        w: Math.round(r.width), h: Math.round(r.height),
+        wantW: Math.round(125 * fs), wantH: Math.round(16.667 * fs),
+        empty: svg.dataset.empty,
+        tip: document.getElementById('homeScoreTip').textContent || '',
+        span: n >= 2 ? Math.round((hsHist[n - 1].atMs - hsHist[0].atMs) / 1000) : 0,
+      };
+    })()`);
+    check('健康分曲线：画在环下方，尺寸跟字号走，线是真画出来的（无 NaN）',
+      !histUi.miss && histUi.n >= 2 && histUi.empty === '0'
+        && /^M[0-9.]+ [0-9.]+/.test(histUi.d) && histUi.d.indexOf('NaN') < 0
+        && Math.abs(histUi.w - histUi.wantW) <= 3
+        && Math.abs(histUi.h - histUi.wantH) <= 3,
+      histUi.miss ? '找不到曲线'
+        : `${histUi.n} 点 · ${histUi.w}×${histUi.h}（期望 ${histUi.wantW}×${histUi.wantH}）`);
+    check('健康分曲线：悬停明细写出实际覆盖时长与最低分（不硬写「近 5 分钟」）',
+      !histUi.miss && (histUi.span < 5 || /最近 .*最低/.test(histUi.tip)),
+      histUi.miss ? '' : `跨度 ${histUi.span}s · ${(histUi.tip || '').slice(0, 40)}`);
+
+    /* 断档清空：塞两个一分钟前的点，等下一次轮询（2 秒）走一遍 renderHomeScore，
+       它们必须被丢掉。等条件而不是睡固定时长 —— 轮询本身有抖动。 */
+    await cdp.eval(`document.getElementById('btnOverview').click()`);
+    await sleep(400);
+    const histReset = await cdp.eval(`(async () => {
+      hsHist = [{ atMs: Date.now() - 60000, v: 40 }, { atMs: Date.now() - 58000, v: 41 }];
+      drawHsHist();
+      const before = hsHist.length;
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+        if (hsHist.length && hsHist[0].v !== 40) break;
+      }
+      const vals = hsHist.map(p => p.v);
+      return { before: before, after: hsHist.length, kept: vals.indexOf(40) >= 0 };
+    })()`);
+    check('健康分曲线：断档（切走总览 / 暂停轮询）整条清空，不画假连续',
+      histReset.before === 2 && histReset.after >= 1 && histReset.kept === false,
+      `插入 2 点 → 轮询后 ${histReset.after} 点 · 旧点还在 ${histReset.kept}`);
 
     /* 坐标：四张图都要有 y 刻度，请求图左右各一套；刻度里不能出现负数
        （CPU 的 minSpan 撑开曾经造出「-0.2 核」）。 */

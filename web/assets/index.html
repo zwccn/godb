@@ -306,6 +306,19 @@ try {
           <span class="hs-cap">健康分</span>
           <span class="hs-grade" id="homeScoreGrade">采样中</span>
         </span>
+        <!-- 近 5 分钟的分数走势。单点分数答不了「是在往回爬，还是正在掉」——
+             而那正是「能不能走开」的时间维度。横着铺开也让这块不再孤零零。
+             纵轴固定 0~100（自适应会把 90→95 的噪声画成过山车），
+             一条 90 分的虚线当「优秀线」参照。
+             preserveAspectRatio=none + non-scaling-stroke：宽度跟着字号缩放时
+             线宽不变形。 -->
+        <svg class="hs-hist" id="homeScoreHist" viewBox="0 0 150 20"
+             preserveAspectRatio="none" data-empty="1" aria-hidden="true" focusable="false">
+          <!-- 分数映射到 2~18：90 分那条落在 y≈4.6（JS 会按量程重设） -->
+          <line class="hs-hist-ref" id="hsHistRef" x1="0" y1="4.6" x2="150" y2="4.6"></line>
+          <path class="hs-hist-line" id="hsHistLine" d=""></path>
+          <circle class="hs-hist-dot" id="hsHistDot" r="1.9" cx="0" cy="18"></circle>
+        </svg>
         <div class="hs-tip" id="homeScoreTip" role="tooltip"></div>
       </div>
     </div>

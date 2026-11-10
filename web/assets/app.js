@@ -10213,18 +10213,33 @@ function fmtRows(n) {
   return String(n);
 }
 
+// 基线能不能直接对比：同一规模 + 每个场景的处理行数一致，缺一不可。
+//
+// 以前只按场景名找上一次的值就硬算百分比，于是拿「scale 100 万」的老结果跟「10 万」
+// 的新结果比，还赶上聚合从「20 次查询」改成「2000 万行扫描」，屏幕上出现
+// ▲86219526% 这种数字 —— 不是变快了，是两个数根本不在量一个东西。宁可写「不比」，
+// 也不能给个看着像性能暴涨的假数。
+function benchBaseline(res) {
+  const h = benchHistory;
+  if (!h || !Array.isArray(h.scenarios) || !h.scenarios.length) return { map: null, why: '' };
+  if (res && res.scale && h.scale && res.scale !== h.scale) {
+    return { map: null, why: `上次是 ${fmtRows(h.scale)} 行规模、本次 ${fmtRows(res.scale)} 行，规模不同不比` };
+  }
+  const map = new Map();
+  for (const s of h.scenarios) map.set(s.name, s);
+  return { map, why: '' };
+}
+
 function renderBenchResult(res) {
   benchEls.result.classList.remove('hidden');
 
-  // 对比上次：按场景名找上次的同名值，算涨跌
-  const prev = new Map();
-  if (benchHistory && Array.isArray(benchHistory.scenarios)) {
-    for (const s of benchHistory.scenarios) prev.set(s.name, s.perSec);
-  }
+  const base = benchBaseline(res);
   if (res.error) {
     benchEls.cmp.textContent = res.error;
   } else if (benchHistory && benchHistory.startedAt) {
-    benchEls.cmp.textContent = `上次 ${benchHistory.startedAt}（v${benchHistory.version || '?'}）`;
+    const scale = benchHistory.scale ? ` · ${fmtRows(benchHistory.scale)} 行规模` : '';
+    benchEls.cmp.textContent = `上次 ${benchHistory.startedAt}（v${benchHistory.version || '?'}${scale}）`
+      + (base.why ? ` · ${base.why}` : '');
   } else {
     benchEls.cmp.textContent = '还没有历史记录 —— 这是第一次跑';
   }
@@ -10238,14 +10253,19 @@ function renderBenchResult(res) {
     tr.appendChild(el('td', 'num strong', s.error ? '—' : fmtPerSec(s.perSec)));
     // 对比列
     let cmpTd;
-    if (s.error || !prev.has(s.name)) {
+    const last = base.map ? base.map.get(s.name) : null;
+    if (s.error || !last || !last.perSec) {
       cmpTd = el('td', 'dim', '—');
+      if (last) cmpTd.title = '上次这个场景没跑出数';
+    } else if (s.rows && last.rows && s.rows !== last.rows) {
+      // 同名不同活：行数对不上就说明工作量变了（规模、次数、口径任一处改动都会这样）
+      cmpTd = el('td', 'dim', '—');
+      cmpTd.title = `上次处理 ${fmtRows(last.rows)} 行、本次 ${fmtRows(s.rows)} 行 —— 工作量和上次不一样，不比`;
     } else {
-      const last = prev.get(s.name);
-      const delta = last > 0 ? ((s.perSec - last) / last) * 100 : 0;
+      const delta = ((s.perSec - last.perSec) / last.perSec) * 100;
       const txt = (delta >= 0 ? '▲ ' : '▼ ') + Math.abs(delta).toFixed(0) + '%';
       cmpTd = el('td', delta >= 0 ? 'up' : 'down', txt);
-      cmpTd.title = `上次 ${fmtPerSec(last)}`;
+      cmpTd.title = `上次 ${fmtPerSec(last.perSec)}`;
     }
     tr.appendChild(cmpTd);
     benchEls.rows.appendChild(tr);

@@ -316,6 +316,12 @@ func (s *Server) runBench(st *benchState) {
 	if !st.cancelled() {
 		st.mu.Lock()
 		res := st.result
+		// finished 必须在写盘之前置上。原来只在 defer 里置，于是磁盘上永远写着
+		// "finished": false —— 而「这份基线是不是完整跑完的」正是下次决定要不要
+		// 拿它对比的依据，写反了等于每份历史都不可信。
+		if res != nil {
+			res.Finished = true
+		}
 		st.mu.Unlock()
 		if res != nil {
 			res.Version = syscat.GodbVersion

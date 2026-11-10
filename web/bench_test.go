@@ -90,6 +90,20 @@ func TestBenchScenariosRun(t *testing.T) {
 			t.Fatalf("基准表 %s 应已删除，但仍存在", tb.Name)
 		}
 	}
+
+	// 落盘的那份基线必须标着「跑完了」。前端拿 scale 和各场景行数判断可比性，
+	// finished 则是「这份记录完整」的凭据 —— 原来它在写盘之后才被 defer 置 true，
+	// 于是磁盘上永远是 false：数据是对的，标记是错的。
+	hist := s.loadBenchHistory()
+	if hist == nil {
+		t.Fatal("跑完后应落盘一份历史")
+	}
+	if !hist.Finished {
+		t.Fatal("历史应标记 finished=true（写盘之前就要置上，不能等 defer）")
+	}
+	if hist.Scale != scale() || len(hist.Scenarios) != len(st.result.Scenarios) {
+		t.Fatalf("历史与本次结果对不上：scale=%d 场景=%d", hist.Scale, len(hist.Scenarios))
+	}
 }
 
 func TestBenchHistoryRoundTrip(t *testing.T) {

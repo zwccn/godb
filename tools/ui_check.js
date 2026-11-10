@@ -2802,6 +2802,46 @@ class CDP {
         && /15,078 fsync \/ 20,001 提交/.test(tableUi.last),
       JSON.stringify(tableUi));
 
+    // 「本次 vs 上次」只在同一规模、同一工作量下才给百分比。
+    // 出事那次是拿 scale 100 万的老结果跟 10 万的新结果硬比，还赶上聚合换了口径
+    // （以前报「20 次查询」，现在报「扫了 2000 万行」），屏幕上出现 ▲86219526% ——
+    // 一个看着像性能暴涨、其实什么都没说明的数字。
+    const cmpGuard = await cdp.eval(`(() => {
+      const keep = benchHistory;
+      const out = {};
+      benchHistory = { startedAt: '2026-11-03 22:12:48', version: '0.4.0', scale: 1000000, finished: true,
+        scenarios: [{ name: '聚合', rows: 20, perSec: 4.454 }, { name: '点查（主键）', rows: 5000, perSec: 31130 }] };
+      renderBenchResult({ scale: 100000,
+        scenarios: [{ name: '聚合', rows: 2000000, perSec: 3891954 }, { name: '点查（主键）', rows: 5000, perSec: 29215 }] });
+      out.diffScale = {
+        head: document.getElementById('benchCmp').textContent.trim(),
+        cells: [...document.querySelectorAll('#benchRows tr')].map(tr => tr.children[4].textContent.trim()),
+      };
+
+      benchHistory = { startedAt: '2026-11-09 22:32:10', version: '0.4.0', scale: 100000, finished: true,
+        scenarios: [{ name: '聚合', rows: 20, perSec: 4.454 }, { name: '点查（主键）', rows: 5000, perSec: 31130 }] };
+      renderBenchResult({ scale: 100000,
+        scenarios: [{ name: '聚合', rows: 2000000, perSec: 3891954 }, { name: '点查（主键）', rows: 5000, perSec: 29215 }] });
+      const trs = [...document.querySelectorAll('#benchRows tr')];
+      out.sameScale = {
+        head: document.getElementById('benchCmp').textContent.trim(),
+        agg: trs[0].children[4].textContent.trim(), aggTip: trs[0].children[4].title,
+        pq: trs[1].children[4].textContent.trim(),
+      };
+      benchHistory = keep;
+      renderBenchResult({ scenarios: [] });
+      return out;
+    })()`);
+    check('对比上次：规模对不上（上次 100 万行 / 本次 10 万行）整列不出百分比，头部说明原因',
+      /规模不同不比/.test(cmpGuard.diffScale.head)
+        && cmpGuard.diffScale.cells.length === 2
+        && cmpGuard.diffScale.cells.every(c => c === '—'),
+      JSON.stringify(cmpGuard.diffScale));
+    check('对比上次：同规模但工作量变了（聚合 20 行 → 200 万行）只写「—」，工作量没变的点查照常给百分比',
+      cmpGuard.sameScale.agg === '—' && /上次处理 20 行/.test(cmpGuard.sameScale.aggTip)
+        && /▼ 6%/.test(cmpGuard.sameScale.pq),
+      JSON.stringify(cmpGuard.sameScale));
+
     // 存成功就把弹窗收掉，结果交给 toast —— 用户改完就想接着干活，不该再点一次 ×
     await cdp.eval(`openSettings()`);
     await waitFor(cdp, `!!document.getElementById('setPoolPages')`, { label: '设置表单渲染' });

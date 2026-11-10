@@ -6271,7 +6271,7 @@ document.getElementById('btnMonitor').addEventListener('click', () => {
 });
 // 回工作台 = 回到编辑器：监控面板和设置弹窗一起收，焦点还给编辑器。
 // 设置里有没保存的改动时交给 closeSettings 自己拦（它会弹确认），别抢焦点。
-// （「首页」是总览大屏，见下面的 goHome；这个函数只管工作台那页的按钮。）
+// （「首页」是总览大屏，见下面的 goOverview；这个函数只管工作台那页的按钮。）
 function goWork() {
   // 先问设置页（有未保存改动时它可能拒绝关闭），确认真关了再动别的 ——
   // 原来是先关监控再问，用户选「不关」就会留下「监控关了、设置还开着」的中间态。
@@ -6286,11 +6286,12 @@ function goWork() {
 }
 document.getElementById('btnHome').addEventListener('click', goWork);
 
-// 点左上角 LOGO / GoDB 字标 = 回**首页**（总览大屏）—— 打开页面落地的那一页。
+// 回**首页**（总览大屏）：顶栏「总览」和左上角 LOGO / GoDB 字标共用这一个动作。
 // 不能直接调 openHome()：监控和模型图是 fixed 覆盖层，它们盖着的时候 homeOpen
 // 还是 true，openHome 开头的 `if (homeOpen) return` 会把它挡掉，表现就是「点了
-// 没反应、监控还开着」。所以这里统一按「先收掉覆盖层，再确保首页在最前」来写。
-function goHome() {
+// 没反应、监控还开着」——「总览」按钮有时点不动就是这个原因（从总览点进监控，
+// homeOpen 仍是 true）。所以这里统一按「先收掉覆盖层，再确保首页在最前」来写。
+function goOverview() {
   if (!settingsPanel.classList.contains('hidden')) {
     closeSettings();
     if (!settingsPanel.classList.contains('hidden')) return; // 用户选了「不关」
@@ -6300,7 +6301,7 @@ function goHome() {
   if (erOpen) toggleER(false);
   syncTopNav();
 }
-document.getElementById('btnOverview').addEventListener('click', openHome);
+document.getElementById('btnOverview').addEventListener('click', goOverview);
 document.getElementById('btnHomeToMonitor').addEventListener('click', () => {
   closeHome();
   toggleMonitor(true);
@@ -7038,16 +7039,16 @@ function homeChart(host, pts, lines, opts) {
   }
 }
 
-// 左上角的 logo + 字标回首页（总览大屏，和顶栏第一个「总览」页签同一个去处）。
+// 左上角的 logo + 字标回首页（总览大屏，和顶栏「总览」同一个动作 goOverview）。
 // 做成 role=button 的 div 是因为里面装着 h1 字标（button 里放块级元素是非法嵌套），
 // 所以键盘那两个键要自己接。
 const btnBrand = document.getElementById('btnBrand');
 if (btnBrand) {
-  btnBrand.addEventListener('click', goHome);
+  btnBrand.addEventListener('click', goOverview);
   btnBrand.addEventListener('keydown', ev => {
     if (ev.key !== 'Enter' && ev.key !== ' ') return;
     ev.preventDefault(); // 空格默认会滚页面
-    goHome();
+    goOverview();
   });
 }
 document.getElementById('btnMonClose').addEventListener('click', () => toggleMonitor(false));

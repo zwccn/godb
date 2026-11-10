@@ -2322,6 +2322,47 @@ class CDP {
         /回到首页/.test(brandHome.title || ''),
       `点击 → 首页 ${brandHome.afterClick.home}（${brandHome.afterClick.view}）· 监控 ${brandHome.afterClick.mon}`
         + ` · Enter → 首页 ${brandHome.afterKey.home} · title ${brandHome.title}`);
+    // 顶栏「总览」必须在**任何**状态下都点得动。从总览点进监控时 homeOpen 还是
+    // true，早先这里直接挂 openHome()，它开头就是 if (homeOpen) return —— 那一下
+    // 会被早退掉，监控还盖在上面，看着就是「首页按钮点不动」。
+    //
+    // 这条会顺手关/开设置面板（和上面品牌那条同一个理由：后面几条要量设置页），
+    // 所以进来先把它收干净、跑完按原样打开。
+    const ovBtn = await cdp.eval(`(async () => {
+      const wait = () => new Promise(r => setTimeout(r, 350));
+      const mon = document.getElementById('monPanel');
+      const homePanel = document.getElementById('homePanel');
+      const setPanel = document.getElementById('settingsPanel');
+      const setWasOpen = !setPanel.classList.contains('hidden');
+      if (setWasOpen) { closeSettings(true); await wait(); }
+      document.getElementById('btnHome').click();      // 先落到工作台（homeOpen=false）
+      await wait();
+      document.getElementById('btnOverview').click();  // 从总览点进监控
+      await wait();
+      const atHome = { home: homeOpen, mon: monOpen };
+      document.getElementById('btnMonitor').click();
+      await wait();
+      const atMon = { home: homeOpen, mon: monOpen, hidden: mon.classList.contains('hidden') };
+      document.getElementById('btnOverview').click();  // 关键一下：必须真回总览
+      await wait();
+      const back = {
+        home: homeOpen, mon: monOpen, hidden: mon.classList.contains('hidden'),
+        homeHidden: homePanel.classList.contains('hidden'),
+        view: document.documentElement.dataset.view,
+      };
+      document.getElementById('btnHome').click();      // 收拾回工作台，别影响后面几条
+      await wait();
+      if (setWasOpen) { document.getElementById('btnSettings').click(); await wait(); await wait(); }
+      return { atHome, atMon, back, setWasOpen };
+    })()`);
+    check('顶栏「总览」在监控盖着时也点得动（不被 if (homeOpen) return 早退）',
+      ovBtn.atHome.home === true && ovBtn.atHome.mon === false &&
+        ovBtn.atMon.mon === true && ovBtn.atMon.hidden === false &&
+        ovBtn.back.home === true && ovBtn.back.mon === false &&
+        ovBtn.back.hidden === true && ovBtn.back.homeHidden === false &&
+        ovBtn.back.view === 'overview',
+      `监控里 mon=${ovBtn.atMon.mon} → 点总览后 mon=${ovBtn.back.mon}`
+        + ` · 总览隐藏 ${ovBtn.back.homeHidden} · view ${ovBtn.back.view}`);
 
     // 卡片数量与顺序都以 app.js 的 THEME_LIST 为准。原来这里写死「5 个」和五个名字，
     // 加「极光」时它直接红了 —— 但反过来更糟的情况是只改数量不改名字，那就会变成

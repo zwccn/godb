@@ -6792,6 +6792,25 @@ class CDP {
         && Math.abs(histUi.h - histUi.wantH) <= 3,
       histUi.miss ? '找不到曲线'
         : `${histUi.n} 点 · ${histUi.w}×${histUi.h}（期望 ${histUi.wantW}×${histUi.wantH}）`);
+    /* 只有一次采样时也要立刻亮：原来少于两点整块 opacity:0，而第二个点要等
+       下一个 2 秒轮询 —— 页面刚打开那块空两秒多，看着像「这里坏了」。
+       一个点没有走势可画，就画一小段从右往左的短线 + 末端点。 */
+    const onePt = await cdp.eval(`(() => {
+      hsHist = [{ atMs: Date.now(), v: 88 }];
+      drawHsHist();
+      const svg = document.getElementById('homeScoreHist');
+      const line = document.getElementById('hsHistLine');
+      return {
+        empty: svg.dataset.empty,
+        op: getComputedStyle(svg).opacity,
+        d: line.getAttribute('d') || '',
+        cy: document.getElementById('hsHistDot').getAttribute('cy'),
+      };
+    })()`);
+    check('健康分曲线：只有一次采样时也立刻亮（小段短线 + 末端点，不等第二个点）',
+      onePt.empty === '0' && onePt.op === '1'
+        && /^M[\d.]+ [\d.]+L[\d.]+ [\d.]+$/.test(onePt.d) && onePt.d.indexOf('NaN') < 0,
+      `empty=${onePt.empty} · op=${onePt.op} · d=${onePt.d}`);
     check('健康分曲线：悬停明细写出实际覆盖时长与最低分（不硬写「近 5 分钟」）',
       !histUi.miss && (histUi.span < 5 || /最近 .*最低/.test(histUi.tip)),
       histUi.miss ? '' : `跨度 ${histUi.span}s · ${(histUi.tip || '').slice(0, 40)}`);

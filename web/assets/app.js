@@ -6491,17 +6491,15 @@ function drawHsHist() {
   const els = homeEls;
   if (!els.scoreHist) return;
   const n = hsHist.length;
-  if (n < 2) { els.scoreHist.dataset.empty = '1'; return; }
-  els.scoreHist.dataset.empty = '0';
+  if (!n) { els.scoreHist.dataset.empty = '1'; return; }
 
   const W = 190, TOP = 6, BOT = 29;
   // 横轴按**点数**等分，不按时间：按时间铺的话，刚打开总览那十几秒只有几个点，
   // 全挤在右边一条缝里，看着像「没画出来」。等点数攒到 150，两者是一回事。
   // 代价是窗口长度是浮动的，所以明细里的说法用**实际跨度**，不硬写 5 分钟。
-  // 左边从 0 起、右边留 6px（给末端点）：这块是 12px 圆角的长条，线贴到右边缘
-  // 会被圆角切掉，点也会挂到圆角外面。
+  // 左边从 0 起、右边留 5px（给末端点）：这块是圆角长条，线贴到右边缘会被圆角
+  // 切掉，点也会挂到圆角外面。
   const PADR = 5;
-  const x = i => (i / (n - 1)) * (W - PADR);
 
   // 纵轴只画**这段数据**真正用到的区间：上界固定 100，下界取「最低分再往下两分、
   // 向下取整到 5」，并且不低于 94。为什么不是固定 0~100：健康分绝大多数时候
@@ -6510,6 +6508,25 @@ function drawHsHist() {
   // 画成过山车。宁可如实画成一条直线，也别放大噪声。
   const lo = Math.min(94, Math.floor((hsHist.reduce((a, p) => Math.min(a, p.v), 100) - 2) / 5) * 5);
   const y = v => BOT - ((Math.max(lo, Math.min(100, v)) - lo) / (100 - lo)) * (BOT - TOP);
+
+  // 只有一次采样也要先亮出来：原来少于两点整块 opacity:0，而第二次采样要等
+  // 下一个 2 秒轮询 —— 页面刚打开那块要空两秒多，看着像「这里坏了」。
+  // 一个点没有「走势」可言，所以画一小段从右往左的短线 + 末端点，
+  // 读起来是「刚开始，还没攒出形状」。
+  els.scoreHist.dataset.empty = '0';
+  if (n === 1) {
+    const cy = y(hsHist[0].v).toFixed(1);
+    const cx = (W - PADR).toFixed(1);
+    els.histLine.setAttribute('d',
+      'M' + (W - PADR - 12) + ' ' + cy + 'L' + cx + ' ' + cy);
+    if (els.histArea) els.histArea.setAttribute('d', '');
+    els.histDot.setAttribute('cx', cx);
+    els.histDot.setAttribute('cy', cy);
+    if (els.histRef) els.histRef.style.display = 'none';
+    return;
+  }
+
+  const x = i => (i / (n - 1)) * (W - PADR);
 
   let d = '';
   for (let i = 0; i < n; i++) {

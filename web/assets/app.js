@@ -6494,12 +6494,14 @@ function drawHsHist() {
   if (n < 2) { els.scoreHist.dataset.empty = '1'; return; }
   els.scoreHist.dataset.empty = '0';
 
-  const W = 190, TOP = 4, BOT = 31;
+  const W = 190, TOP = 6, BOT = 29;
   // 横轴按**点数**等分，不按时间：按时间铺的话，刚打开总览那十几秒只有几个点，
   // 全挤在右边一条缝里，看着像「没画出来」。等点数攒到 150，两者是一回事。
   // 代价是窗口长度是浮动的，所以明细里的说法用**实际跨度**，不硬写 5 分钟。
-  // 右边留 2px：末端点画在最后一列像素上，会挂在圆角外面
-  const x = i => (i / (n - 1)) * (W - 2);
+  // 左边从 0 起、右边留 6px（给末端点）：这块是 12px 圆角的长条，线贴到右边缘
+  // 会被圆角切掉，点也会挂到圆角外面。
+  const PADR = 5;
+  const x = i => (i / (n - 1)) * (W - PADR);
 
   // 纵轴只画**这段数据**真正用到的区间：上界固定 100，下界取「最低分再往下两分、
   // 向下取整到 5」，并且不低于 94。为什么不是固定 0~100：健康分绝大多数时候
@@ -6517,9 +6519,13 @@ function drawHsHist() {
   // 填充薄到「只是有体积」：.09 起、到底归零。太厚会变成压在底下的一块蒙版
   // （.2 就脏了），完全没有又只剩一根线、图的中段全空。
   if (els.histArea) {
-    els.histArea.setAttribute('d', d + 'L' + (W - 2) + ' ' + BOT + 'L0 ' + BOT + 'Z');
+    // 面积铺到两头（0 与 W），由 .hs-hist 的 clip-path 裁成圆角。
+    // 右上角先水平延到 W 再往下 —— 否则面积是「上边窄、下边宽」的梯形，
+    // 圆角一裁就成了两个斜切角（踩过）。
+    els.histArea.setAttribute('d',
+      d + 'L' + W + ' ' + y(hsHist[n - 1].v).toFixed(1) + 'L' + W + ' ' + BOT + 'L0 ' + BOT + 'Z');
   }
-  els.histDot.setAttribute('cx', (W - 2).toFixed(1));
+  els.histDot.setAttribute('cx', (W - PADR).toFixed(1));
   els.histDot.setAttribute('cy', y(hsHist[n - 1].v).toFixed(1));
   // 90 分的参考虚线只在「90 落在当前量程里」时才画：满分时量程是 94~100，
   // 这条线在框外，硬画会跑到图外面去。

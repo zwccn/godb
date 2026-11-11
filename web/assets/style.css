@@ -2501,7 +2501,14 @@ html:is([data-theme="sky"], [data-theme="taro"], [data-theme="mint"]) .home {
      这块立刻变成「仪表上的一小块屏幕」，分量又远不到一张卡。
      浅色皮肤下这层几乎看不出来，靠线本身的对比度也够。 */
   background: color-mix(in srgb, var(--hm-bg-2) 35%, transparent);
-  border-radius: 5px;
+  /* 12px 圆角 + clip-path：**光有 border-radius 不够** —— 它只裁元素的背景，
+     SVG 里画出来的面积和曲线照样是直角，看图就是一个方盒子。
+     clip-path 才连内容一起裁，边角才是圆的。 */
+  border-radius: 10px;
+  clip-path: inset(0 round 10px);
+  /* 一圈 1px 的内描边：把这块从「一块暗色矩形」变成「一个仪表窗」。
+     inset 阴影画在内侧，和 clip 出来的圆角同形，不会被裁掉一半。 */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hm-line) 70%, transparent);
   color: var(--hs-c);
   /* 末端点的描边会超出 viewBox 几个像素，不许裁 */
   overflow: visible;

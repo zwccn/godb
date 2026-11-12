@@ -796,7 +796,7 @@ func (e *Engine) defaultValueOf(col *catalog.Column) (types.Value, error) {
 	if err != nil {
 		return types.Null, err
 	}
-	return types.Cast(v, col.Type())
+	return types.CastStrict(v, col.Type())
 }
 
 func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
@@ -891,7 +891,7 @@ func (e *Engine) execInsert(tx *storage.Tx, s *sql.Insert) (*Result, error) {
 			if err != nil {
 				return nil, err
 			}
-			cv, err := types.Cast(v, col.Type())
+			cv, err := types.CastStrict(v, col.Type())
 			if err != nil {
 				return nil, fmt.Errorf("column %q: %w", col.Name, err)
 			}
@@ -1238,7 +1238,7 @@ func (e *Engine) buildConflictUpdate(tx *storage.Tx, t *catalog.Table,
 		if err != nil {
 			return nil, false, err
 		}
-		cv, err := types.Cast(v, t.Columns[idx].Type())
+		cv, err := types.CastStrict(v, t.Columns[idx].Type())
 		if err != nil {
 			return nil, false, fmt.Errorf("column %q: %w", a.Col, err)
 		}
@@ -1595,7 +1595,7 @@ func (e *Engine) execUpdate(tx *storage.Tx, s *sql.Update) (*Result, error) {
 			if err != nil {
 				return nil, err
 			}
-			cv, err := types.Cast(v, st.col.Type())
+			cv, err := types.CastStrict(v, st.col.Type())
 			if err != nil {
 				return nil, fmt.Errorf("column %q: %w", st.col.Name, err)
 			}

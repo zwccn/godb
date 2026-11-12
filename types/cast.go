@@ -20,7 +20,23 @@ func hasPrefixFold(s, prefix string) bool {
 }
 
 // Cast 把值显式/隐式转换为目标类型。NULL 始终保持 NULL。
-func Cast(v Value, t Type) (Value, error) {
+//
+// 这是**宽松**版本：只做类型规整，不按目标列的宽度/精度拦值。读路径（解码、
+// 索引键、常量折叠）必须用它 —— 历史数据里可能已经存了越界值，解码时报错
+// 等于把整行弄丢（tablepages 一旦 Cast 失败就把该列换成 NULL）。
+func Cast(v Value, t Type) (Value, error) { return castValue(v, t, false) }
+
+// CastStrict 是写入路径用的强校验版本：在类型规整之外，再按**列声明的宽度**
+// 检查整数范围（int2 / int4），以及 numeric(precision, scale) 的精度。
+//
+// 为什么必须有这一层：以前 int2 列能存 40000、int4 列能存 3000000000，插入
+// 成功、提交成功，网页控制台也正常显示（它按内存值格式化，不看 OID）——
+// 但 PG 客户端按 OID 21/23 解码，二进制格式直接报 22003，文本格式拿到超界
+// 字符串。结果就是「写得进、读不出」的毒行，而且报错发生在几个月后的某次
+// 查询里，完全指不到根因。
+func CastStrict(v Value, t Type) (Value, error) { return castValue(v, t, true) }
+
+func castValue(v Value, t Type, strict bool) (Value, error) {
 	if v.K == KNull {
 		return Null, nil
 	}
@@ -55,7 +71,7 @@ func Cast(v Value, t Type) (Value, error) {
 	}
 	// NUMERIC / DECIMAL：精确十进制（KDecimal）
 	if hasPrefixFold(t.Name, "numeric") || hasPrefixFold(t.Name, "decimal") {
-		return castDecimal(v, t)
+		return castDecimal(v, t, strict)
 	}
 	// 已落盘的向量只有存储层知道内容，这里能给出正确结果的只有内联字面量。
 	// 显式拒绝比输出 `[vector:12]` 更安全：那会让一段错误文本被写进 text 列。
@@ -87,34 +103,37 @@ func Cast(v Value, t Type) (Value, error) {
 		}
 		return Null, fmt.Errorf("cannot cast type %s to %s", v.K, t.String())
 	case KInt:
+		// 各种输入先折成一个 int64，最后统一交给 castInt —— 由它按目标类型的
+		// 宽度检查范围。原来每个分支直接 return Int(x)，范围检查就漏了。
+		var n int64
 		switch v.K {
 		case KInt:
-			return v, nil
+			n = v.I
 		case KFloat:
-			return Int(int64(math.Round(v.Float()))), nil
+			n = int64(math.Round(v.Float()))
 		case KDecimal:
 			f, err := strconv.ParseFloat(v.S, 64)
 			if err != nil {
 				return Null, err
 			}
-			return Int(int64(math.Round(f))), nil
+			n = int64(math.Round(f))
 		case KBool:
 			if v.Bool() {
-				return Int(1), nil
+				n = 1
 			}
-			return Int(0), nil
 		case KText:
 			s := strings.TrimSpace(v.S)
 			i, err := strconv.ParseInt(s, 10, 64)
-			if err == nil {
-				return Int(i), nil
+			if err != nil {
+				f, ferr := strconv.ParseFloat(s, 64)
+				if ferr != nil {
+					return Null, fmt.Errorf("invalid input syntax for type integer: %q", v.S)
+				}
+				i = int64(math.Round(f))
 			}
-			f, ferr := strconv.ParseFloat(s, 64)
-			if ferr != nil {
-				return Null, fmt.Errorf("invalid input syntax for type integer: %q", v.S)
-			}
-			return Int(int64(math.Round(f))), nil
+			n = i
 		}
+		return castInt(t, n, strict)
 	case KFloat:
 		switch v.K {
 		case KFloat:
@@ -204,9 +223,71 @@ func ParseTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unrecognized time format")
 }
 
+// castInt 把 int64 放进目标整数类型，strict 时按**列声明的宽度**检查范围
+// （int2 32767 / int4 2147483647 / int8 无额外限制）。
+//
+// 范围要按声明类型算，不能按 int64 算：int4 + int4 的结果在 Go 里是 int64，
+// 2147483648 完全装得下 —— 但 PG 里它已经溢出，客户端按 4 字节解码只会拿到
+// 错值。宁可在这里报 22003。
+func castInt(t Type, n int64, strict bool) (Value, error) {
+	if strict {
+		lo, hi := intBounds(t)
+		if n < lo || n > hi {
+			return Null, fmt.Errorf("value %d is out of range for type %s", n, t.String())
+		}
+	}
+	return Int(n), nil
+}
+
+// intBounds 按类型名给出整数范围。认不出的名字按 int8 放行 —— 宁可漏报，
+// 也不要把自定义类型/别名误伤。
+func intBounds(t Type) (int64, int64) {
+	switch strings.ToLower(t.Name) {
+	case "smallint", "int2", "smallserial", "serial2":
+		return math.MinInt16, math.MaxInt16
+	case "bigint", "int8", "bigserial", "serial8":
+		return math.MinInt64, math.MaxInt64
+	case "integer", "int", "int4", "serial", "serial4", "":
+		return math.MinInt32, math.MaxInt32
+	}
+	return math.MinInt64, math.MaxInt64
+}
+
 // castDecimal 转成精确十进制。int 直接格式化，float 用最短往返再规范，
 // 文本按 numeric 解析。t.Scale > 0 时才按标度四舍五入。
-func castDecimal(v Value, t Type) (Value, error) {
+//
+// strict 时再做一遍 numeric(p,s) 的整数位数检查 —— 定标只管小数位，
+// 不管「这位数放不放得下」：numeric(5,2) 存 1234.5 以前是能进表的。
+func castDecimal(v Value, t Type, strict bool) (Value, error) {
+	out, err := castDecimalValue(v, t)
+	if err != nil || !strict || out.K == KNull {
+		return out, err
+	}
+	if err := checkDecimalPrecision(out, t); err != nil {
+		return Null, err
+	}
+	return out, nil
+}
+
+// checkDecimalPrecision 校验 numeric(p,s)：定标后的值必须落在 |v| < 10^(p-s)。
+// p <= 0 表示只写了 numeric（不限精度），直接放行。
+func checkDecimalPrecision(v Value, t Type) error {
+	if t.Prec <= 0 {
+		return nil
+	}
+	digits := t.Prec - t.Scale
+	if digits < 0 {
+		digits = 0
+	}
+	abs := new(big.Rat).Abs(DecimalRat(v.S))
+	limit := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil))
+	if abs.Cmp(limit) >= 0 {
+		return fmt.Errorf("value %s is out of range for type numeric(%d,%d)", v.S, t.Prec, t.Scale)
+	}
+	return nil
+}
+
+func castDecimalValue(v Value, t Type) (Value, error) {
 	scale := t.Scale
 	if scale < 0 {
 		scale = 0

@@ -520,31 +520,34 @@ func (e *binEval) Eval(row types.Row) (types.Value, error) {
 		switch e.op {
 		case "+":
 			sum := a + b
-			// 溢出会回绕成错的数字，而且不报错 —— 比崩溃更难查。按 PG 报 22003。
+			// 两层检查缺一不可：先看 int64 有没有回绕（回绕会给出错数字且不报错），
+			// 再看结果放不放得进**声明类型**（int4 + int4 在 PG 里仍是 int4，
+			// 2147483648 必须报 22003，而不是悄悄变成 int8）。见 intWithinType。
 			if (b > 0 && sum < a) || (b < 0 && sum > a) {
 				return types.Null, errIntOutOfRange(e.t)
 			}
-			return types.Int(sum), nil
+			return intWithinType(e.t, sum)
 		case "-":
 			diff := a - b
 			if (b < 0 && diff < a) || (b > 0 && diff > a) {
 				return types.Null, errIntOutOfRange(e.t)
 			}
-			return types.Int(diff), nil
+			return intWithinType(e.t, diff)
 		case "*":
 			if a != 0 && b != 0 {
 				prod := a * b
 				if prod/b != a || (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
 					return types.Null, errIntOutOfRange(e.t)
 				}
-				return types.Int(prod), nil
+				return intWithinType(e.t, prod)
 			}
 			return types.Int(0), nil
 		case "/":
 			if b == 0 {
 				return types.Null, fmt.Errorf("division by zero")
 			}
-			return types.Int(a / b), nil
+			// -2147483648 / -1 = 2147483648，int64 装得下但 int4 溢出
+			return intWithinType(e.t, a/b)
 		case "%":
 			if b == 0 {
 				return types.Null, fmt.Errorf("division by zero")
@@ -814,7 +817,9 @@ func (e *castEval) Eval(row types.Row) (types.Value, error) {
 	if v.K == types.KTime && e.t.Kind == types.KText && strings.EqualFold(e.x.Type().Name, "date") {
 		return types.Text(v.Time().Format("2006-01-02")), nil
 	}
-	return types.Cast(v, e.t)
+	// 显式 CAST 用严格版：cast(3000000000 as int) 在 PG 里报 22003，
+	// 这里也不该悄悄给出一个越界的 integer。
+	return types.CastStrict(v, e.t)
 }
 
 // isNumericTypeName 判断列类型名是不是 numeric/decimal（含带精度后缀的写法）。
@@ -1492,6 +1497,28 @@ func errIntOutOfRange(t types.Type) error {
 		return fmt.Errorf("bigint out of range")
 	}
 	return fmt.Errorf("integer out of range")
+}
+
+// intWithinType 把 int64 结果装回**声明的整数类型**，放不下就报 22003。
+//
+// 为什么不能只看 int64：Go 的 int64 能装 2147483648，于是 int4 + int4 的溢出
+// 一直没人管，结果列被声明成 integer（OID 23），值却是 2147483648 ——
+// psql 走文本格式能看到，任何按 4 字节解码的客户端（Npgsql/JDBC）拿到的是
+// 错值或直接报错。PG 在计算时就报 22003，这里对齐它。
+func intWithinType(t types.Type, v int64) (types.Value, error) {
+	switch strings.ToLower(t.Name) {
+	case "smallint", "int2", "smallserial", "serial2":
+		if v < math.MinInt16 || v > math.MaxInt16 {
+			return types.Null, errIntOutOfRange(t)
+		}
+	case "bigint", "int8", "bigserial", "serial8":
+		// int64 本身；回绕已经在上游挡住
+	default:
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return types.Null, errIntOutOfRange(t)
+		}
+	}
+	return types.Int(v), nil
 }
 
 // isDecimalVal 判断值是否是精确十进制。

@@ -189,6 +189,48 @@ UPDATE 同样拦截）；`go test ./...` 全绿，前端 `ui_check` 425/425。
 
 ---
 
+### 0.8 三处静默语义偏差（2026-11-12）
+
+都是「不报错、但结果和 PG 不一样」的类型 —— 比崩溃更难发现。
+
+| # | 现象 | 现在 | PG |
+|---|---|---|---|
+| 1 | `substr('abcdef', 0, 3)` | `'abc'` | `'ab'` |
+| 2 | `1::numeric / 3` | `0.3333333333`（10 位） | `0.33333333333333333333`（20 位） |
+| 3 | `0.1 + 0.2 = 0.3` | `false` | `true` |
+
+**1. substr 的位置语义。** PG 的位置是 1-based，而且 `start < 1` 时**缺失的那几格
+仍然占长度**：`substr('abcdef', 0, 3)` 只给 `'ab'`，`substr('abcdef', -1, 3)` 只给
+`'a'`。原实现把起点 clamp 到 1、长度却原样保留，于是从 0 开始会多截一个字符。
+现在按「半开区间 `[start, start+count)`」算，两端各自 clamp；负长度按 PG 报
+`negative substring length not allowed`。
+
+**2. numeric 除法的精度。** 循环小数原来只留 10 位（注释写「够 NUMERIC 用」），
+PG 的 numeric 除法至少 16 位、实测 20 位。做同比/环比、或者把商再乘回去时，
+10 位的误差会被放大。带精度的列（`numeric(6,3)`）仍然按声明标度落盘，不受影响。
+
+**3. 小数字面量的类型。** PG 的分法：普通小数（`1.5`）是 **numeric**，带指数的
+（`1e3`）才是 **double precision**。原来两者都按 float64 解析，所以
+`0.1 + 0.2` 是 `0.30000000000000004`、等值比较为 false —— 金额/比率类计算静默带误差。
+现在 `numberLiteral` 按上面两条分别产出 `Decimal` / `Float`。
+
+**代价（要说清）**：小数参与的表达式比 float 慢。实测 5 万行：
+
+| 查询 | 改前（float） | 改后（numeric） |
+|---|---|---|
+| `where id > 25000`（整数比较） | 24.7 ms | 24.7 ms（不受影响） |
+| `where id > 25000.5` | — | 30.6 ms |
+| `where id * 1.5 > 25000` | — | 114.8 ms |
+
+这是 PG 也有的代价（numeric 天生比 float8 慢），换来的是「不会静默算错」。
+若以后要提速，方向是给 `AddDecimal/MulDecimal` 加 int64 尾数的快速路径
+（`DecimalMantissaFast` 已经在别处做了同样的事），而不是退回 float。
+
+**回归**：`db/string_semantics_test.go`、`db/numeric_div_test.go`（两条）；
+`go test ./...` 全绿，`ui_check` 425/425。
+
+---
+
 ## 一、优先级总览
 
 > 以下为 **2026-10-27 21:25 构建**的首轮结论，保留作为对照；

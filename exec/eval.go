@@ -1184,13 +1184,14 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 		if err != nil {
 			return types.Null, err
 		}
-		from := int(start) - 1
-		if from < 0 {
-			from = 0
-		}
-		if from >= len(r) {
-			return types.Text(""), nil
-		}
+		// PG 的位置是 1-based，而且 **start < 1 时「缺失的那几格仍然占长度」**：
+		//   substr('abcdef', 0, 3) = 'ab'   （不是 'abc'）
+		//   substr('abcdef', -1, 3) = 'a'
+		// 原来的实现把起点 clamp 到 1 却保留完整长度，于是从 0 开始会多截一个字符，
+		// 字符串截取差一位不会报错，只会在某天发现「名字少了一个字」。
+		// 端点一律按「半开区间 [start, start+count)」算，越界各自 clamp。
+		from := start
+		to := int64(len(r)) + 1
 		if len(vals) >= 3 {
 			if vals[2].IsNull() {
 				return types.Null, nil
@@ -1199,16 +1200,24 @@ func (e *funcEval) Eval(row types.Row) (types.Value, error) {
 			if err != nil {
 				return types.Null, err
 			}
-			to := from + int(n)
-			if to > len(r) {
-				to = len(r)
+			if n < 0 {
+				return types.Null, fmt.Errorf("negative substring length not allowed")
 			}
-			if to < from {
-				return types.Text(""), nil
+			to = from + n
+			if to < from { // int64 回绕：n 大到把 to 顶过去了，按「到结尾」处理
+				to = int64(len(r)) + 1
 			}
-			return types.Text(string(r[from:to])), nil
 		}
-		return types.Text(string(r[from:])), nil
+		if from < 1 {
+			from = 1
+		}
+		if to > int64(len(r))+1 {
+			to = int64(len(r)) + 1
+		}
+		if to <= from {
+			return types.Text(""), nil
+		}
+		return types.Text(string(r[from-1 : to-1])), nil
 	case "regexp_matches":
 		// 标量位置调用：只返回第一个匹配的捕获组（数组文本形式），
 		// 外面通常紧跟一个下标 (regexp_matches(...))[1]。

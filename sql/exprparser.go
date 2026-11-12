@@ -676,12 +676,21 @@ func (p *parser) parseCase() (Expr, error) {
 
 func numberLiteral(t Token) (Expr, error) {
 	text := t.Text
-	if strings.ContainsAny(text, ".eE") {
+	// 带指数的字面量是 double precision，**普通小数是 numeric** —— 这是 PG 的
+	// 分法（select pg_typeof(1e3) = double precision，pg_typeof(1.5) = numeric）。
+	// 以前两者都按 float 解析，于是 0.1 + 0.2 = 0.30000000000000004、
+	// 0.1 + 0.2 = 0.3 为 false；金额/比率类计算全带着浮点误差，而且不报错。
+	if strings.ContainsAny(text, "eE") {
 		f, err := strconv.ParseFloat(text, 64)
 		if err != nil {
 			return nil, &Error{Msg: "invalid number literal " + text, Line: t.Line, Col: t.Col}
 		}
 		return &Literal{Val: types.Float(f)}, nil
+	}
+	if strings.ContainsRune(text, '.') {
+		if d, err := types.ParseDecimal(text); err == nil {
+			return &Literal{Val: types.Decimal(d)}, nil
+		}
 	}
 	i, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {

@@ -129,8 +129,10 @@ func decimalScale(r *big.Rat) int {
 		}
 		return s
 	}
-	// 循环小数：保留 10 位（够 NUMERIC 用）
-	return 10
+	// 循环小数：保留 20 位。PG 的 numeric 除法至少给 16 位（实测 1::numeric/3
+	// 是 0.33333333333333333333），10 位在报表里会显得「被截断」——
+	// 金额类算到分不够，做同比/环比时误差会被放大。
+	return 20
 }
 
 // Decimal 构造规范十进制值（非法输入回 0）。

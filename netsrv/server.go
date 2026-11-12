@@ -282,6 +282,9 @@ func (m *Manager) rebindPG(addr string) error {
 		Addr:     addr,
 		Logf:     m.logf,
 		QueryLog: m.queryLog,
+		// 连接上限是「并发数 + 排队上限」的推导值，用函数取：改这两个数字
+		// 不需要重建 listener，但上限必须当场跟着变（和 AuthRequired 同理）。
+		MaxConns: func() int { return m.cfg.Get().Performance.MaxConns() },
 		// 认证开关走配置，改完立即生效（不需要重建 listener）
 		AuthRequired: func() bool { return m.cfg.Get().Auth.RequirePassword },
 		TLSCert:      m.tlsCert,

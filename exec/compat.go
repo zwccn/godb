@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -435,7 +436,10 @@ func settingValue(name string) string {
 	case "application_name", "session_authorization":
 		return syscat.OwnerName
 	case "max_connections":
-		return "100"
+		// 必须和 pg_settings 同源。以前这里也写死 "100"，于是
+		// `show max_connections` 和 `select setting from pg_settings`
+		// 报两个不同的数 —— 客户端信哪个都可能错。
+		return strconv.Itoa(syscat.MaxConns())
 	case "block_size", "wal_block_size":
 		return "8192"
 	case "segment_size":

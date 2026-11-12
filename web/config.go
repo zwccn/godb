@@ -13,6 +13,7 @@ import (
 	"godb/hrtime"
 	"godb/netsrv"
 	"godb/storage"
+	"godb/syscat"
 )
 
 // authView 是给前端看的认证状态：只有「有没有密码」，没有密码本身，
@@ -53,6 +54,11 @@ type runtimeView struct {
 	DataBytes  int64          `json:"dataBytes"`
 	WALBytes   int64          `json:"walBytes"`
 	WALSyncs   int64          `json:"walSyncs"`
+
+	// MaxConns 是推导出来的连接上限（并发 + 排队），只读。
+	// 它不是一个配置项 —— 前端只拿来显示，让人知道「排队上限」
+	// 在这台机器上到底有多少个槽真的能用。
+	MaxConns int `json:"maxConns"`
 }
 
 type configResp struct {
@@ -193,6 +199,9 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	hrtime.SetEnabled(saved.Performance.HighResTimerOn())
 	s.DB.Store.SetCheckpointPolicy(toPolicy(saved.Storage))
 	s.DB.SetMaxConcurrent(saved.Performance.MaxConcurrent, saved.Performance.MaxQueued, 0)
+	// pg_settings 的 max_connections 跟着变：它是「并发 + 排队」的推导值，
+	// 改完配置不重建 listener 也要立刻生效（客户端可能马上就来读）。
+	syscat.SetMaxConns(saved.Performance.MaxConns())
 	s.DB.SetTimeouts(db.TimeoutStatus{
 		SlowSQLSec:    saved.Timeouts.SlowSQLSec,
 		SlowTxIdleSec: saved.Timeouts.SlowTxIdleSec,
@@ -231,6 +240,7 @@ func (s *Server) configView(r *http.Request) configResp {
 		PGEnabled: st.PGEnabled,
 		ClientIP:  clientIP(r),
 		CanEdit:   isLocalRequest(r),
+		MaxConns:  c.Performance.MaxConns(),
 	}
 
 	cp := s.DB.Store.CheckpointStatsNow()

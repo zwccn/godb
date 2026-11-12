@@ -1382,8 +1382,18 @@ Windows 是不共享写的 `CreateFile`）。进程退出——包括被 `taskki
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `performance.maxConcurrent` | `32` | 同时执行 SQL 的 goroutine 上限（0 = 不限）。超出的排队等，不占内存 |
-| `performance.maxQueued` | `256` | 排队上限，超过**快速失败**（SQLSTATE `53300`） |
+| `performance.maxQueued` | `10000` | 排队上限，超过**快速失败**（SQLSTATE `53300`）。出厂给 1 万是为了**削峰**，不是防排队 |
 | `timeouts.queueWaitSec` | `0`（不限） | 排队最长等待（秒），超时**快速失败**（SQLSTATE `55P03`）。面板上改，不用重启 |
+
+**连接上限不是一个配置项，是推导值**：`max_connections = maxConcurrent + maxQueued`
+（出厂 32 + 10000 = 10032）。为什么不给独立开关 —— 一个 TCP 连接在同一时刻最多占一个
+执行槽位（`pgwire` 的循环是「读一条、执行一条」，客户端 pipeline 连发也只能串行），所以第
+「并发 + 排队 + 1」个连接必然既拿不到槽、又排不进队，连上来只会立刻被拒。单独配就会出现
+「排队一万、连接一百」这种配法，那一万里的绝大部分永远用不到。超限时回
+`FATAL 53300 sorry, too many clients already`，让客户端退避重试。
+
+`SHOW max_connections` 和 `pg_settings` 报的是同一个值（都由 `syscat.MaxConns()` 提供）。
+0（任一参数为 0 = 不限）时不限制连接数。
 
 **信号量按事务持有**（不是按单条 SQL）：`BEGIN` 获取，`COMMIT/ROLLBACK` 释放。
 这是防止「锁×信号量交叉死锁」的必要设计——持有表锁 ⊆ 持有信号量。
@@ -2441,8 +2451,9 @@ godb 没有行级锁（`FOR UPDATE`），事务内"先 SELECT 再 UPDATE 同一�
 | 参数 | 作用 | 超限行为 | 默认值 |
 |---|---|---|---|
 | `maxConcurrent` | 同时执行 SQL 的 goroutine 数（限内存） | 排队等 | 32 |
-| `maxQueued` | 排队上限（限堆积） | 快速失败 | 256 |
+| `maxQueued` | 排队上限（限堆积） | 快速失败 | 10000 |
 | `queueWaitSec` | 排队超时（限延迟） | 快速失败 | 0（不限） |
+| `max_connections` | 连接数上限 = 上面两个之和（**推导值，不可单独配**） | 拒绝连接，`FATAL 53300` | 10032 |
 
 **信号量按事务持有**（不是按单条 SQL）：`BEGIN` 获取，`COMMIT/ROLLBACK` 释放。
 这是防止「锁×信号量交叉死锁」的必要设计——持有表锁 ⊆ 持有信号量。

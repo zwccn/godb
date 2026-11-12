@@ -14,6 +14,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"godb/db"
@@ -51,6 +52,17 @@ type Server struct {
 	// QueryLog 非 nil 时，把客户端发来的每条 SQL 追加写进去，
 	// 用来排查“某个客户端发了我没实现的语句”这类问题。
 	QueryLog io.Writer
+
+	// MaxConns 返回同时保持的连接数上限（nil 或返回 0 表示不限）。
+	//
+	// 用函数而不是值：它是「最大并发数 + 排队上限」的推导值（见
+	// config.Performance.MaxConns），改那两个数字不需要重建 listener，
+	// 但这里必须立刻跟着变 —— 和 AuthRequired 是同一个理由。
+	MaxConns func() int
+
+	// conns 是当前连接数。只在 accept 和连接结束时加减，用 atomic 就够，
+	// 不值得为它引一把锁。
+	conns atomic.Int32
 
 	// AuthRequired 返回当前是否要求密码认证。nil 或返回 false 表示 trust
 	// （不校验密码）。用函数而不是布尔值，是为了让设置页改完立即生效，
@@ -108,8 +120,58 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		go s.handle(nc)
+		// 先占坑再判断，避免「两个连接同时判断都通过」的竞态。
+		// 上限是「并发数 + 排队上限」的推导值：再多一个也只会被 53300 拒掉，
+		// 不如在这里就拒 —— 省一个 goroutine 和两块 16KB 缓冲。
+		n := s.conns.Add(1)
+		if max := s.maxConns(); max > 0 && int(n) > max {
+			s.conns.Add(-1)
+			// 必须异步：拒一条连接要等对端读到 EOF（最多 2 秒），
+			// 在 accept 循环里同步做会把所有人都堵住。
+			go s.rejectTooMany(nc, max)
+			continue
+		}
+		go func() {
+			defer s.conns.Add(-1)
+			s.handle(nc)
+		}()
 	}
+}
+
+// maxConns 读当前上限（nil 或 0 = 不限）。
+func (s *Server) maxConns() int {
+	if s.MaxConns == nil {
+		return 0
+	}
+	return s.MaxConns()
+}
+
+// rejectTooMany 在连接数超限时回一条 FATAL 53300 再关闭。
+//
+// 为什么不是直接断开：psql / JDBC 收到 53300 会读成「服务端忙」，按自己的
+// 重试策略退避；直接断开只会显示「服务器意外关闭连接」，看起来像服务崩了。
+// 这时还没走 startup，所以不补 ReadyForQuery —— PG 在同样情况下也只发
+// 一条 FATAL 就关。
+func (s *Server) rejectTooMany(nc net.Conn, max int) {
+	defer nc.Close()
+	_ = nc.SetDeadline(time.Now().Add(2 * time.Second))
+	_, _ = nc.Write(encodeErrorNoPos("FATAL", "53300", "sorry, too many clients already"))
+
+	// 写完先半关闭写端，再把对端已经发来的数据读掉，最后才 Close。
+	//
+	// 少了这一步，客户端拿到的是 RST 而不是这条 FATAL：它已经发过 startup
+	// 包（还躺在内核接收缓冲里没被读），close 一关，内核对「有未读数据的
+	// 连接」发 RST，客户端那边显示的是 connection reset by peer ——
+	// 等于白拒，还让人以为服务崩了。实测就是这么回事。
+	//
+	// CloseWrite 只发 FIN 不收摊，对端读到 EOF 会自己关；io.Copy 读到 EOF
+	// 或 deadline 为止，所以这里有上限（2 秒），不会一直挂着。
+	if cw, ok := nc.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+	_, _ = io.Copy(io.Discard, nc)
+
+	s.logf("连接数已达上限 %d，拒绝新连接（来自 %s）", max, nc.RemoteAddr())
 }
 
 func (s *Server) logf(format string, args ...interface{}) {

@@ -135,6 +135,9 @@ func main() {
 	d := dbs.Default()
 	d.Store.SetCheckpointPolicy(storagePolicy(conf.Storage))
 	d.SetMaxConcurrent(conf.Performance.MaxConcurrent, conf.Performance.MaxQueued, 0)
+	// pg_settings 里的 max_connections 报真实值（并发 + 排队）。以前那里写死
+	// "100"、服务端却完全不限，客户端会按错的数配连接池。
+	syscat.SetMaxConns(conf.Performance.MaxConns())
 	d.SetTimeouts(db.TimeoutStatus{
 		SlowSQLSec:    conf.Timeouts.SlowSQLSec,
 		SlowTxIdleSec: conf.Timeouts.SlowTxIdleSec,

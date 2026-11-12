@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"godb/catalog"
 	"godb/types"
@@ -776,6 +777,26 @@ func IsSystem(schema, name string) bool {
 }
 
 // Source 提供生成行数据所需的上下文。
+// maxConns 是对外声称的 max_connections（0 = 不限）。
+//
+// 由配置在启动和热切换时写进来，pg_settings 直接回报它。以前这里是硬编码的
+// "100" —— 客户端（psql 的 psqlrc、JDBC 连接池、Navicat）读到 100 会按 100
+// 配池子，而服务端其实完全不限，实测能连 150+。声明的参数和真实行为对不上，
+// 属于最不该有的那类问题：它不报错，只是让人按错的数去规划。
+//
+// 真值由 config.Performance.MaxConns() 推导 = 最大并发数 + 排队上限，
+// 见那里的注释（为什么不给一个独立配置项）。
+var maxConns atomic.Int32
+
+// SetMaxConns 设置 max_connections 的对外值（0 = 不限）。启动与设置页保存时调用。
+func SetMaxConns(n int) { maxConns.Store(int32(n)) }
+
+// MaxConns 返回当前对外声称的 max_connections（0 = 不限）。
+//
+// pg_settings 和 `SHOW max_connections` 都读它 —— 两条路径必须同源，
+// 否则会出现同一个参数报两个数（以前就是这样：表里 10032、SHOW 里 100）。
+func MaxConns() int { return int(maxConns.Load()) }
+
 type Source struct {
 	Cat   *catalog.Catalog
 	Count func(table string) int

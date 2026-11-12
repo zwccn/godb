@@ -3,6 +3,7 @@ package syscat
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -989,7 +990,10 @@ func settingRows(def *catalog.Table) []types.Row {
 		{"extra_float_digits", "1"}, {"integer_datetimes", "on"},
 		{"IntervalStyle", "postgres"}, {"lc_collate", "C"}, {"lc_ctype", "C"},
 		{"lc_monetary", "C"}, {"lc_numeric", "C"}, {"lc_time", "C"},
-		{"max_connections", "100"}, {"max_index_keys", "32"},
+		// max_connections 报**真实值**（并发 + 排队，见 Performance.MaxConns）。
+		// 以前写死 "100"，而服务端根本不限 —— 客户端按 100 配连接池，
+		// 实际上能连多少它并不知道。0 表示不限，和本库其它配置的约定一致。
+		{"max_connections", strconv.Itoa(MaxConns())}, {"max_index_keys", "32"},
 		// Navicat 打开「设计表」时会问 block_size（用来算表和列的存储），
 		// 少了它客户端会拿不到块大小，做不了容量估算。
 		{"block_size", "8192"}, {"segment_size", "131072"},

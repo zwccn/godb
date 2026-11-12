@@ -115,6 +115,29 @@ func (p Performance) HighResTimerOn() bool {
 	return p.HighResTimer == nil || *p.HighResTimer
 }
 
+// MaxConns 是**推导值**，不是配置项：同时可建立的 TCP 连接数上限，
+// 等于最大并发数 + 排队上限。
+//
+// 为什么它必须是推导出来的，而不是让用户单独填一个数字：
+// 一个连接在同一时刻最多占用一个执行槽位（pgwire 的 c.loop 是「读一条、
+// 执行一条」，客户端用 pipeline 连发也只能排队串行，实测两条慢查询耗时
+// 是单条的 1.7 倍）。所以第 (并发数 + 排队上限 + 1) 个连接，连上来必然
+// 既拿不到执行槽、又排不进队 —— 它只会立刻被 53300 拒掉，不如在 accept
+// 之后就拒，省一个 goroutine 和两块 16KB 缓冲。
+//
+// 反过来，如果连接上限让用户单独填，就会出现「排队 10000、连接只有 100」
+// 这种配法 —— 那 10000 里的一大截永远用不到，是一条死配置（以前正是如此：
+// max_connections 对外报 100，而服务端其实完全不限）。
+//
+// 任何一个为 0（不限）就整体返回 0（不限）：既然允许无限排队，
+// 就不该在连接层先卡住。
+func (p Performance) MaxConns() int {
+	if p.MaxConcurrent <= 0 || p.MaxQueued <= 0 {
+		return 0
+	}
+	return p.MaxConcurrent + p.MaxQueued
+}
+
 // Bool 返回 v 的指针，给「可选布尔」字段用。
 func Bool(v bool) *bool { return &v }
 

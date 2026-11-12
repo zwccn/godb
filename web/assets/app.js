@@ -7812,7 +7812,18 @@ function renderPerfPane(box, d, rt) {
   box.appendChild(setRow('排队上限', numInput('setPerfMaxQueued', pf.maxQueued ?? 10000, 0, 100000)));
   box.appendChild(el('div', 'set-hint',
     '同时执行 SQL 的上限（0 = 不限），超出的排队；排队超过上限快速失败（SQLSTATE 53300）。' +
-    '这一层是削峰用的，出厂 1 万；真正防雪崩的是排队超时（在「监控」面板设）。'));
+    '这一层是削峰用的；真正防雪崩的是排队超时（在「监控」面板设）。'));
+  // 连接上限是**推导值**，不给输入框：它等于并发数 + 排队上限。
+  // 为什么不让人单独填：一个连接同一时刻只执行一条 SQL（客户端 pipeline 连发
+  // 也只能串行），所以第 (并发 + 排队 + 1) 个连接必然既拿不到执行槽、又排不进队，
+  // 连上来只会立刻被 53300 拒掉。单独给一个数就必然出现「排队 1 万、连接只有 100」
+  // 这种配法 —— 那 1 万里的一大截永远用不到。
+  const connMax = (rt && rt.maxConns != null) ? rt.maxConns
+    : ((pf.maxConcurrent ?? 32) > 0 && (pf.maxQueued ?? 10000) > 0
+      ? (pf.maxConcurrent ?? 32) + (pf.maxQueued ?? 10000) : 0);
+  box.appendChild(el('div', 'set-hint',
+    '连接上限 = 并发数 + 排队上限 = ' + (connMax > 0 ? connMax : '不限')
+    + '（自动推导，不用单独设）。再多连一个也排不上队，连上来就会被拒（53300 too many clients）。'));
 
   box.appendChild(el('div', 'set-sec', '计时'));
   box.appendChild(setRow('高精度计时（TSC）', checkInput('setHighRes', pf.highResTimer !== false)));

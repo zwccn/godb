@@ -319,6 +319,25 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 浏览器关标签页、前端 AbortController 取消、网络断开时，请求的 ctx 会被取消。
+	// 把它接成**会话级取消**：存储层的游标每 1024 行问一次 interrupt，长查询才会
+	// 真的停下来并把表锁还回去 —— 否则它会一直跑到自然结束，而表级 2PL 意味着
+	// 这期间整张表的读写全堵着（客户端能做的只有等）。
+	//
+	// 取消只针对「这一次执行」：Exec 开头会 ClearCancel，不会把会话变成永久废人。
+	// goroutine 在本 handler 返回时通过 stop 退出，不会泄漏。
+	if done := r.Context().Done(); done != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-done:
+				sess.Cancel()
+			case <-stop:
+			}
+		}()
+	}
+
 	start := hrtime.Now()
 	results, err := d.Exec(sess, req.SQL)
 	resp := queryResp{
@@ -349,6 +368,11 @@ func classifyError(err error, stmt int) *apiError {
 		e.RolledBack = true
 	case errors.As(err, &de):
 		e.Kind = "deadlock"
+		e.RolledBack = true
+	case errors.Is(err, db.ErrCanceled):
+		// 客户端主动取消（关页面 / 点停止 / 面板 Kill）：不是 SQL 写错了，
+		// 前端别把它渲染成「语法错误」那种样式。
+		e.Kind = "canceled"
 		e.RolledBack = true
 	}
 	if errors.As(err, &pe) {

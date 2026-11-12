@@ -468,8 +468,12 @@ func (d *DB) acquireExec(sess *txn.Session) (release func(), err error) {
 	}
 }
 
-// ErrCanceled 表示操作被用户取消（面板 Kill）。
-var ErrCanceled = errors.New("canceling statement due to user request")
+// ErrCanceled 表示操作被用户取消（面板 Kill / HTTP 请求被取消）。
+//
+// 直接复用 txn 的那个值：执行中被打断的中断来自 slot 层的 interrupt（txn.ErrCanceled），
+// 排队阶段被打断的来自这里。两处各定义一个 errors.New 长得一样、Is 却不成立的错误，
+// 上层（web 的错误分类、测试）就永远判不出来。
+var ErrCanceled = txn.ErrCanceled
 
 // Session 取出（或创建）一个会话。
 func (d *DB) Session(id string) *txn.Session {
